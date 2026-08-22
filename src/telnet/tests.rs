@@ -4159,7 +4159,7 @@ fn test_other_help_lines_fit_petscii() {
 /// be one.
 #[test]
 fn test_manual_describes_weather_as_worldwide() {
-    let manual = include_str!("../../web/index.html").replace("\r\n", "\n");
+    let manual = include_str!("../../usermanual.html").replace("\r\n", "\n");
     assert!(
         !manual.to_lowercase().contains("zip code"),
         "the manual still describes weather by US zip code; it takes a city \

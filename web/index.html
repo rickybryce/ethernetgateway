@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ethernet Gateway v0.9.4 &mdash; User Manual</title>
-    <meta name="description" content="Complete user manual for Ethernet Gateway — a telnet/SSH gateway server with XMODEM file transfer, AI chat, web browser, weather, Hayes modem emulation on two independent serial ports, and per-port telnet-serial console bridges.">
+    <title>Ethernet Gateway v0.9.4</title>
+    <meta name="description" content="Ethernet Gateway — a telnet/SSH gateway server that bridges vintage hardware to modern networks: XMODEM/YMODEM/ZMODEM/Kermit/Punter file transfer, a CP/M emulator, Hayes modem emulation on two serial ports, AI chat, a text-mode web browser and weather. Downloads for Linux, macOS and Windows.">
     <style>
         :root {
             --green: #33ff33;
@@ -574,13 +574,13 @@
                 <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
             </div>
             <h1>Ethernet Gateway</h1>
-            <p class="hdr-tagline">User Manual</p>
+            <p class="hdr-tagline">Bridging vintage hardware to modern networks</p>
             <div class="hdr-version">v0.9.4</div>
             <div class="hdr-badges">
                 <span class="hdr-badge">Telnet</span>
                 <span class="hdr-badge">SSH</span>
                 <span class="hdr-badge">XMODEM</span>
-                <span class="hdr-badge">Console Mode</span>
+                <span class="hdr-badge">CP/M</span>
                 <span class="hdr-badge">Commodore 64</span>
                 <span class="hdr-badge">ANSI</span>
             </div>
@@ -590,1832 +590,132 @@
         <!-- NAV                                               -->
         <!-- ══════════════════════════════════════════════════ -->
         <nav class="site-nav">
-            <a href="#overview">Overview</a>
-            <a href="#getting-started">Setup</a>
-            <a href="#terminals">Terminals</a>
-            <a href="#main-menu">Menus</a>
-            <a href="#file-transfer">XMODEM</a>
-            <a href="kermit.html">Kermit</a>
-            <a href="#gateways">Gateways</a>
-            <a href="#ai-chat">AI Chat</a>
-            <a href="#web-browser">Browser</a>
-            <a href="#configuration">Config</a>
-            <a href="#serial-modem">Modem</a>
-            <a href="#gui-console">GUI</a>
-            <a href="#security">Security</a>
-            <a href="#troubleshooting">Help</a>
+            <a href="#about">About</a>
+            <a href="#download">Download</a>
+            <a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">User Manual</a>
+            <a href="#author">Author</a>
             <a href="#references">References</a>
         </nav>
 
         <div class="body-content">
 
             <!-- ══════════════════════════════════════════════ -->
-            <!-- OVERVIEW                                      -->
+            <!-- SCREENSHOT                                    -->
             <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="overview">
-                <div class="section-title">Overview</div>
+            <div class="section" id="screenshot">
+                <div style="text-align: center;">
+                    <img src="screenshot.png" alt="Ethernet Gateway GUI console" style="max-width: 100%; height: auto; border: 1px solid var(--cyan); box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);">
+                </div>
+                <p class="intro" style="margin-top: 10px;">The desktop console &mdash; every setting is also reachable over telnet and from a browser.</p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- ABOUT                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="about">
+                <div class="section-title">About</div>
                 <p>
                     <strong>Ethernet Gateway is a lightweight bridge that connects serial devices and legacy systems to modern TCP/IP networks.</strong>
                 </p>
                 <p>
-                    Ethernet Gateway is a standalone, retro-themed server written in Rust
-                    that bridges vintage and modern computing. It provides telnet and
-                    SSH access to a full-featured gateway with XMODEM, XMODEM-1K, YMODEM,
-                    ZMODEM, Kermit, and Punter file transfer, SSH and telnet proxying, an AI chat
-                    client, a text-mode web browser, weather reports, and Hayes-compatible
-                    serial modem emulation on <strong>two physically independent serial
-                    ports</strong> (each port also flips to a telnet-serial console bridge
-                    on demand).
+                    It is a standalone, retro-themed server written in Rust. It offers telnet
+                    and SSH access to a full-featured gateway with XMODEM, XMODEM-1K, YMODEM,
+                    ZMODEM, Kermit and Punter file transfer, SSH and telnet proxying, a CP/M
+                    emulator that runs real <code>.COM</code> software and boots real disk
+                    images, an AI chat client, a text-mode web browser, weather reports, and
+                    Hayes-compatible modem emulation on <strong>two physically independent
+                    serial ports</strong> &mdash; each of which also flips to a telnet-serial
+                    console bridge or an always-on Kermit server on demand.
                 </p>
                 <p class="dim-text">
                     Designed to work with hardware as old as the Commodore 64 and CP/M
                     machines while remaining fully functional on modern ANSI terminals,
-                    Ethernet Gateway adapts its display automatically to the capabilities
-                    of each connected client.
+                    Ethernet Gateway adapts its display automatically to the capabilities of
+                    each connected client &mdash; PETSCII at 40 columns, ANSI in colour, or
+                    plain ASCII.
                 </p>
 
-                <div class="cat">Highlights</div>
                 <div class="compat-grid">
                     <div class="compat-card">
                         <h3>Connect &amp; Bridge</h3>
                         <ul>
                             <li>Telnet and encrypted <strong>SSH</strong> access, plus SSH/telnet proxying to remote servers</li>
-                            <li>Two independent serial ports &mdash; each a Hayes AT modem, a telnet-serial console bridge, <em>or</em> an always-on Kermit server</li>
-                            <li>Hayes-compatible modem emulator with <code>ATDT</code> TCP dial-out and a phone book</li>
-                            <li><strong>Peer-to-peer</strong> &mdash; dial another serial port directly and pipe two devices end to end, like calling a friend's modem</li>
-                            <li>Auto-adapts to <strong>PETSCII</strong> (Commodore 64), ANSI, and ASCII terminals</li>
-                            <li>Built-in text-mode web browser, AI chat, and weather</li>
+                            <li>Two independent serial ports &mdash; each a Hayes AT modem, a console bridge, <em>or</em> a Kermit server</li>
+                            <li><code>ATDT</code> TCP dial-out with a phone book, and <strong>peer-to-peer</strong> dialling between two devices</li>
+                            <li>Auto-adapts to <strong>PETSCII</strong>, ANSI and ASCII terminals</li>
                         </ul>
                     </div>
                     <div class="compat-card">
-                        <h3>Transfer Files</h3>
+                        <h3>Transfer &amp; Run</h3>
                         <ul>
                             <li>XMODEM / XMODEM-1K / YMODEM / ZMODEM / Kermit / Punter C1</li>
-                            <li><strong>Gateway Shell</strong> &mdash; a CP/M-inspired <code>A&gt;</code> prompt (DIR, TYPE, COPY, MOVE, ERA, MKDIR&hellip;) that manages the transfer directory as drive A:, over telnet or SSH</li>
-                            <li><strong>CP/M emulator</strong> &mdash; runs real CP/M&nbsp;2.2 <code>.COM</code> software (PIP, STAT, ED, ASM, DDT, WordStar&hellip;) on an emulated Z80 or 8080, with our own <strong>EGT8080</strong> and <strong>EGT80</strong> terminals included. On by default and bounded three ways &mdash; see the <a href="cpmreference.html">CP/M Reference</a></li>
-                            <li><strong>CP/M disk images</strong> &mdash; mount a <code>.dsk</code> on any drive, or <strong>boot</strong> one and let its own operating system take the whole machine (CP/M&nbsp;3, Altair DOS, Disk Extended BASIC)</li>
-                            <li><strong>CP/M printer</strong> &mdash; capture what CP/M software sends to <code>LST:</code> as an <strong>OpenDocument</strong> or text file, from either the emulator or a booted disk</li>
-                            <li>Binary-transparent bridging for clean, reliable transfers</li>
+                            <li><strong>Gateway Shell</strong> &mdash; a CP/M-inspired <code>A&gt;</code> file manager over the transfer directory</li>
+                            <li><strong>CP/M emulator</strong> &mdash; real CP/M 2.2 software on an emulated Z80 or 8080, plus mounting and <strong>booting</strong> <code>.dsk</code> images</li>
+                            <li><strong>CP/M printer</strong> &mdash; capture <code>LST:</code> output as OpenDocument or text</li>
                         </ul>
                     </div>
                     <div class="compat-card">
                         <h3>Scale &amp; Manage</h3>
                         <ul>
-                            <li><strong>Master/Slave mode</strong> &mdash; cascade gateway servers: a slave extends its serial ports to a master over SSH, so files land centrally</li>
-                            <li>Configure from the terminal, the web UI, or a desktop GUI console with live logs</li>
+                            <li><strong>Master/Slave mode</strong> &mdash; a slave extends its serial ports to a master over SSH</li>
+                            <li>Configure from the terminal, a browser, or the desktop console with live logs</li>
                             <li>Optional authentication with per-IP lockout; Ed25519 SSH host key</li>
-                            <li><strong>Port test</strong> &mdash; connects to each bound listener and marks any that something local is blocking</li>
-                            <li>Optional log file with size-based rotation, so a long-running gateway cannot fill a disk</li>
-                            <li>Runs on hardware from the Commodore 64 and CP/M to modern Linux, macOS, and Windows</li>
+                            <li>Runs on Linux, macOS and Windows, down to a Raspberry Pi</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- DOWNLOAD                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="download">
+                <div class="section-title">Download</div>
+                <p class="intro">Version 0.9.4 &mdash; pre-built, signed binaries. Every archive also carries the README, the licence and both CP/M terminals.</p>
+
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3>Linux</h3>
+                        <ul>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-x86_64-unknown-linux-gnu.tar.gz"><strong>x86-64</strong> &mdash; tar.gz</a></li>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-aarch64-unknown-linux-gnu.tar.gz"><strong>ARM64</strong> (Raspberry&nbsp;Pi&nbsp;4+) &mdash; tar.gz</a></li>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/latest/download/Ethernet_Gateway-x86_64.AppImage"><strong>AppImage</strong>, x86-64 &mdash; download and run</a></li>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/latest/download/Ethernet_Gateway-aarch64.AppImage"><strong>AppImage</strong>, ARM64</a></li>
+                        </ul>
+                    </div>
+                    <div class="compat-card">
+                        <h3>macOS</h3>
+                        <ul>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-aarch64-apple-darwin.tar.gz"><strong>Apple Silicon</strong> &mdash; tar.gz</a></li>
+                            <li>Unsigned by Apple, so the first launch is <em>right-click &rarr; Open</em>, or clear the quarantine flag with <code>xattr -d com.apple.quarantine</code>.</li>
+                        </ul>
+                    </div>
+                    <div class="compat-card">
+                        <h3>Windows</h3>
+                        <ul>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-x86_64-pc-windows-msvc.zip"><strong>x86-64</strong> &mdash; zip</a></li>
+                            <li>Unpack anywhere and run <code>ethernetgateway.exe</code>; it creates its data folder beside itself on first launch.</li>
                         </ul>
                     </div>
                 </div>
 
                 <p>
-                    <strong style="color: var(--amber);">Download:</strong>
-                    Pre-built binaries are available on the
-                    <a href="https://github.com/rickybryce/ethernetgateway/releases/">GitHub Releases</a> page.
-                </p>
-
-                <div class="cat">Features</div>
-                <table class="feature-table">
-                    <tr>
-                        <td class="key-col">[F]</td>
-                        <td class="name-col">File Transfer</td>
-                        <td class="desc-col">Upload, download, and delete files via XMODEM, XMODEM-1K, YMODEM, ZMODEM (batch), Kermit (server + client), or Punter C1 (Commodore). Includes the Gateway Shell, a CP/M-inspired <code>A&gt;</code> file manager (DIR, TYPE, COPY, MOVE, ERA, &hellip;) over the transfer directory.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[S]</td>
-                        <td class="name-col">SSH Gateway</td>
-                        <td class="desc-col">Proxy connections to remote SSH servers with host key verification.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[T]</td>
-                        <td class="name-col">Telnet Gateway</td>
-                        <td class="desc-col">Proxy connections to remote telnet servers.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[G]</td>
-                        <td class="name-col">Serial Gateway</td>
-                        <td class="desc-col">Bridge a telnet/SSH session directly to one of the two serial ports (Port A or Port B), whichever you pick from the A/B picker. Available when at least one port is in console mode. Press <strong>ESC</strong> twice to leave.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[A]</td>
-                        <td class="name-col">AI Chat</td>
-                        <td class="desc-col">Conversational AI powered by Groq (llama-3.3-70b-versatile). Free API key.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[B]</td>
-                        <td class="name-col">Simple Browser</td>
-                        <td class="desc-col">Text-mode web browser supporting HTTP, HTTPS, and Gopher with forms and bookmarks.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[W]</td>
-                        <td class="name-col">Weather</td>
-                        <td class="desc-col">Current conditions and 3-day forecast for any city or postal code worldwide, via Open-Meteo.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[C]</td>
-                        <td class="name-col">Configuration</td>
-                        <td class="desc-col">Full server configuration from the terminal. Changes are saved immediately.</td>
-                    </tr>
-                </table>
-
-                <div class="callout callout-info">
-                    <strong>Additional Features:</strong>
-                    GUI configuration console with live log output, Hayes AT-compatible
-                    serial modem emulation, optional authentication with per-IP lockout,
-                    Ed25519 SSH server, and POSIX signal handling for graceful shutdown.
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- GETTING STARTED                               -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="getting-started">
-                <div class="section-title">Getting Started</div>
-
-                <div class="cat">Build from Source</div>
-                <div class="instructions">
-                    <h3>Prerequisites</h3>
-                    <p>A C toolchain and a few system libraries are required to build from source. On Debian/Ubuntu:</p>
-                    <pre><code>sudo apt install -y build-essential pkg-config cmake curl libudev-dev</code></pre>
-                    <p style="margin-top: 8px;">See the README for Fedora, Arch, macOS, and Windows instructions.</p>
-
-                    <h3>Compiling</h3>
-                    <ol>
-                        <li>Install Rust: <a href="https://rustup.rs">rustup.rs</a></li>
-                        <li>Clone the repository</li>
-                        <li>Build a release binary: <code>cargo build --release</code></li>
-                        <li>The binary is at <code>target/release/ethernetgateway</code></li>
-                    </ol>
-                    <p style="margin-top: 8px;">An AppImage is also available for x86_64 Linux systems.</p>
-                </div>
-
-                <div class="cat">First Run</div>
-                <p class="dim-text">
-                    When launched for the first time, Ethernet Gateway creates a single
-                    <code>ethernetgateway-data</code> folder in the directory it was launched
-                    from, and puts the configuration file, the log and the transfer directory
-                    inside it. The <code>Data directory:</code> line names that folder as a
-                    full path &mdash; deliberately, since every other message names it
-                    relatively and two copies started from different directories could not
-                    otherwise be told apart.
-                </p>
-                <pre><code><span class="prompt-char">$</span> ./ethernetgateway
-<span class="output-text">Ethernet Gateway v0.9.4
-Author: Ricky Bryce
-
-Data directory: /home/you/ethernetgateway-data
-Logging to ethernetgateway-data/ethernetgateway.log &mdash; v0.9.4 (rotate at 1024 KB, keep 5 old, max 6144 KB on disk)
-Config: telnet=true, port=2323, security=false, transfer_dir=ethernetgateway-data/transfer</span></code></pre>
-
-                <div class="callout callout-tip">
-                    <strong>Tip:</strong> The GUI console window opens by default. Closing
-                    it asks what you meant &mdash; <em>Stop the Server and Quit</em> ends the
-                    gateway, <em>Leave It Running</em> keeps every service up with no window
-                    on screen. The <em>Quit</em> button in the window header opens the same
-                    dialog. Set <code>enable_console = false</code> for headless operation.
-                </div>
-
-                <div class="cat">The Setup Wizard</div>
-                <p class="dim-text">
-                    On a fresh install the GUI window opens into a short setup wizard rather
-                    than the configuration editor. It walks through the decisions a new
-                    gateway needs &mdash; a login, which servers to start, where transferred
-                    files go, and whether this machine is standalone or part of a
-                    master/slave pair &mdash; and finishes by telling you how to connect and
-                    which ports to open. Nothing is written until the last screen, and
-                    <em>Skip setup &mdash; use defaults</em> on the first screen leaves every
-                    default in place.
-                </p>
-                <table class="data-table">
-                    <tr><th>Screen</th><th>What it asks</th></tr>
-                    <tr><td>1. Username and password</td><td>Typed twice and checked; a checkbox reveals what you type. Warns that the password is stored in cleartext in <code>egateway.conf</code>. Used by telnet, SSH, and the web UI alike.</td></tr>
-                    <tr><td>2. Telnet server</td><td>On/off and port (default <code>2323</code>), with the cleartext warning.</td></tr>
-                    <tr><td>3. SSH server</td><td>On/off and port (default <code>2222</code>). Uses the same login, and always authenticates.</td></tr>
-                    <tr><td>4. Access control</td><td>Require login, disable IP safety, and block connections from the router &mdash; each explained in plain language, with the router's real address read from this machine's routing table.</td></tr>
-                    <tr><td>5. Web configuration server</td><td>On/off and port (default <code>8080</code>), plus the URL you'll use.</td></tr>
-                    <tr><td>6. Transfer directory</td><td>Typed or picked with a folder browser. Holds the CP/M drives and the Gateway Shell's drive A:.</td></tr>
-                    <tr><td>7. CP/M emulator</td><td>Whether to enable it, and whether to give it a virtual modem to dial out with. EGT8080.COM and EGT80.COM are placed on drive A: for you. It also offers, ticked to begin with, to download the <strong>sample CP/M disks</strong> once you finish &mdash; it says how many, how many megabytes and which repositories before you decide, and leaves anything already in the images folder alone.</td></tr>
-                    <tr><td>8. Gateway role</td><td>Standalone, Master, or Slave. Master arms relay acceptance and, if you left SSH off, explains that slave links ride the master's SSH port &mdash; with a button to enable it, and a warning if you decline. Slave adds a screen for the master's host, port, and credentials.</td></tr>
-                    <tr><td>9. Review and finish</td><td>A summary, the exact <code>telnet</code> / <code>ssh</code> / <code>http://</code> commands for what you chose, and the inbound TCP ports to allow on your firewall &mdash; then <em>Save and Restart Server</em>.</td></tr>
-                </table>
-                <p class="dim-text">
-                    <em>Next</em> validates as it goes: it refuses mismatched or empty
-                    passwords, a port that isn't a number from 1 to 65535, and a port another
-                    listener already claims &mdash; including the standalone Kermit server it
-                    never asks about. The review screen also warns (without blocking) about
-                    both listeners left off, IP safety off with no login required, or a port
-                    below 1024 that will need root. Serial ports are deliberately not part of
-                    the wizard &mdash; configure Port A / Port B afterwards in the GUI or over
-                    telnet.
-                </p>
-                <div class="callout callout-tip">
-                    <strong>Re-running it:</strong> the wizard is tracked by a single config
-                    key, <code>setup_wizard_completed</code>, and appears only while that is
-                    <code>false</code>. Open it again any time from the GUI's
-                    <em>Server &mdash; More&#8230;</em> window &rarr;
-                    <em>Run setup wizard&#8230;</em>; it pre-fills from your current settings
-                    except the password, which is never echoed back. It is a desktop-GUI
-                    feature only &mdash; the telnet menu and web UI already expose every
-                    setting it touches. An existing config file with no such key is treated
-                    as already configured, so upgrading never lands you in the wizard.
-                </div>
-
-                <div class="cat">Connecting</div>
-                <div class="instructions">
-                    <h3>Telnet (default port 2323)</h3>
-                    <ol>
-                        <li>Ensure telnet is installed on your system</li>
-                        <li>Connect: <code>telnet localhost 2323</code></li>
-                        <li>Press backspace when prompted (terminal auto-detection)</li>
-                        <li>Answer the color prompt (Y/N)</li>
-                    </ol>
-                </div>
-                <div class="instructions">
-                    <h3>SSH (default port 2222, disabled by default)</h3>
-                    <ol>
-                        <li>Enable SSH in the configuration</li>
-                        <li>Connect: <code>ssh -p 2222 admin@localhost</code></li>
-                        <li>Enter the login password (default: <code>changeme</code> — the same one telnet and the web UI use)</li>
-                    </ol>
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- TERMINAL TYPES                                -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="terminals">
-                <div class="section-title">Terminal Types</div>
-                <p class="intro">Terminal type is auto-detected by examining the byte sent when the user presses backspace.</p>
-
-                <div class="compat-grid">
-                    <div class="compat-card">
-                        <h3>PETSCII</h3>
-                        <p>Commodore 64/128. 40 columns, 25 rows. Backspace = 0x14. Escape: <strong>&larr;</strong> or <strong>_</strong> key. Automatic case-swapping for the PETSCII charset.</p>
-                    </div>
-                    <div class="compat-card">
-                        <h3>ANSI</h3>
-                        <p>Modern terminals. 80 columns, 24 rows. Backspace = 0x08 or 0x7F. Full ANSI color and formatting. Escape: <strong>Esc</strong> key.</p>
-                    </div>
-                    <div class="compat-card">
-                        <h3>ASCII</h3>
-                        <p>Generic terminals. 80 columns, 24 rows. Any other backspace byte. No color output. Escape: <strong>Esc</strong> key.</p>
-                    </div>
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>Color:</strong> After terminal detection, you are asked whether
-                    your terminal supports color. No default is assumed &mdash; you must
-                    answer Y or N. All menus and text fit within the 40-column limit for
-                    PETSCII terminals.
-                </div>
-
-                <div class="callout">
-                    <strong>How detection works on the wire:</strong> terminal type is also
-                    learned from telnet option negotiation (the <code>TTYPE</code> option),
-                    and the gateway negotiates echo, suppress-go-ahead, and window size at
-                    connect. For a detailed guide to the whole negotiation process &mdash;
-                    the IAC commands, the WILL/WONT/DO/DONT verbs, and every option's purpose
-                    &mdash; see the
-                    <a href="telnetreference.html"><strong>Telnet Negotiation Reference</strong></a>.
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- MAIN MENU                                     -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="main-menu">
-                <div class="section-title">Main Menu</div>
-                <p class="intro">After terminal detection and optional authentication, the main menu is displayed.</p>
-
-                <div class="menu-block">
-                    <div class="sep">========================================</div>
-                    <div>&nbsp;&nbsp;<span class="title">ETHERNET GATEWAY</span></div>
-                    <div class="sep">========================================</div>
-                    <br>
-                    <div>&nbsp;&nbsp;<span class="key">A</span>&nbsp;&nbsp;<span class="label">AI Chat</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">B</span>&nbsp;&nbsp;<span class="label">Simple Browser</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">C</span>&nbsp;&nbsp;<span class="label">Configuration</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">F</span>&nbsp;&nbsp;<span class="label">File Transfer</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">G</span>&nbsp;&nbsp;<span class="label">Serial Gateway</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">R</span>&nbsp;&nbsp;<span class="label">Troubleshooting</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">S</span>&nbsp;&nbsp;<span class="label">SSH Gateway</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">T</span>&nbsp;&nbsp;<span class="label">Telnet Gateway</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">W</span>&nbsp;&nbsp;<span class="label">Weather</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">X</span>&nbsp;&nbsp;<span class="label">Exit</span></div>
-                    <br>
-                    <div>&nbsp;&nbsp;<span class="menu-dim">[H] Help</span></div>
-                </div>
-
-                <p class="dim-text">
-                    Press the highlighted letter to select a feature. Press <strong>H</strong>
-                    at any menu for context-sensitive help. Press <strong>Esc</strong> (or
-                    <strong>&larr;</strong> on PETSCII) to return to the main menu from any
-                    submenu.
-                </p>
-
-                <div class="instructions">
-                    <h3>Help Screen</h3>
-                    <ul>
-                        <li><strong>A</strong> &mdash; AI Chat: ask questions to an AI</li>
-                        <li><strong>B</strong> &mdash; Browser: browse the web</li>
-                        <li><strong>C</strong> &mdash; Configuration: server settings and other options</li>
-                        <li><strong>F</strong> &mdash; File Transfer: upload/download files using XMODEM, XMODEM-1K, YMODEM, ZMODEM, Kermit, or Punter</li>
-                        <li><strong>G</strong> &mdash; Serial Gateway: pick Port A or Port B (whichever is in console mode) and bridge to its wire</li>
-                        <li><strong>R</strong> &mdash; Troubleshooting: diagnose terminal input issues</li>
-                        <li><strong>S</strong> &mdash; SSH Gateway: connect to a remote server via SSH</li>
-                        <li><strong>T</strong> &mdash; Telnet Gateway: connect to a remote server via telnet</li>
-                        <li><strong>W</strong> &mdash; Weather: by city or postal code, worldwide</li>
-                        <li><strong>X</strong> &mdash; Exit: disconnect from server</li>
-                    </ul>
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- FILE TRANSFER                                 -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="file-transfer">
-                <div class="section-title">File Transfer</div>
-                <p class="intro">Upload, download, and manage files on the server using XMODEM, XMODEM-1K, YMODEM, ZMODEM, Kermit, or Punter. The gateway supports the full Forsberg ZMODEM spec including batch sends/receives + ZSKIP, a spec-complete Kermit implementation with send/receive and server mode, and single-file Punter C1 (&ldquo;New Punter&rdquo;) for Commodore 64/128 terminals like CCGMS, Novaterm, and StrikeTerm.</p>
-
-                <div class="menu-block">
-                    <div class="sep">========================================</div>
-                    <div>&nbsp;&nbsp;<span class="title">FILE TRANSFER</span></div>
-                    <div class="sep">========================================</div>
-                    <br>
-                    <div>&nbsp;&nbsp;Dir: <span class="val">transfer/</span></div>
-                    <br>
-                    <div>&nbsp;&nbsp;<span class="key">U</span>&nbsp;&nbsp;<span class="label">Upload a file</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">D</span>&nbsp;&nbsp;<span class="label">Download a file</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">X</span>&nbsp;&nbsp;<span class="label">Delete a file</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">C</span>&nbsp;&nbsp;<span class="label">Change directory</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">K</span>&nbsp;&nbsp;<span class="label">Kermit server mode</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">I</span>&nbsp;&nbsp;<span class="label">IAC escaping [<span style="color:var(--green)">ON</span>]</span></div>
-                    <br>
-                    <div>&nbsp;&nbsp;<span class="menu-dim">[R] Refresh &nbsp; [Q] Back &nbsp; [H] Help</span></div>
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>Kermit reference:</strong>
-                    Kermit's command surface is documented separately on the
-                    <a href="kermit.html"><strong>Kermit Reference page</strong></a> &mdash;
-                    server-mode operation, the full G-subcommand table, capability
-                    negotiation, RESEND, locking shifts, and configuration keys.
-                </div>
-
-                <div class="cat">Uploading a File</div>
-                <div class="instructions">
-                    <h3>Steps</h3>
-                    <ol>
-                        <li>Press <strong>U</strong> to begin an upload</li>
-                        <li>Enter the filename when prompted (max 64 characters; letters, digits, dots, hyphens, underscores; cannot start with a dot; cannot contain <code>..</code>)</li>
-                        <li>If the file already exists, confirm overwrite with <strong>Y</strong></li>
-                        <li>On the <strong>SELECT UPLOAD PROTOCOL</strong> screen press
-                            <strong>X</strong> (XMODEM/YMODEM, block size + CRC mode + YMODEM block-0 header auto-detected),
-                            <strong>Z</strong> (ZMODEM),
-                            <strong>K</strong> (Kermit, any flavor &mdash; see the <a href="kermit.html">Kermit Reference</a>), or
-                            <strong>P</strong> (Punter C1)</li>
-                        <li>The server waits up to 45 seconds for your terminal to begin sending &mdash; tunable per protocol via <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM), <code>zmodem_negotiation_timeout</code> (ZMODEM), <code>kermit_negotiation_timeout</code> (Kermit, default 300 s), or <code>punter_negotiation_timeout</code> (Punter, default 45 s)</li>
-                        <li>In your terminal client, start the matching send &mdash; e.g. ExtraPutty's <em>File Transfer &rsaquo; Zmodem &rsaquo; Send</em>, SyncTerm's <em>Ctrl-PgUp</em>, any XMODEM/YMODEM &ldquo;Send File&rdquo; dialog, or for Kermit a client like <code>kermit -s file</code> (C-Kermit) / Kermit-95</li>
-                        <li>For a ZMODEM batch, the first file is saved under the name you entered; any additional files the sender transmits are saved under the sender's own filename (after path-safety validation &mdash; colliding names are auto-skipped via ZSKIP). Kermit batches use the same per-file save-as behavior</li>
-                    </ol>
-                </div>
-
-                <div class="cat">Downloading a File</div>
-                <div class="instructions">
-                    <h3>Steps</h3>
-                    <ol>
-                        <li>Press <strong>D</strong> to begin a download</li>
-                        <li>A paginated list of files is displayed &mdash; enter the file number</li>
-                        <li>On the <strong>SELECT PROTOCOL</strong> screen press
-                            <strong>X</strong> (XMODEM, 128-byte blocks),
-                            <strong>1</strong> (XMODEM-1K, 1024-byte blocks with SOH fallback),
-                            <strong>Y</strong> (YMODEM, filename + size header),
-                            <strong>Z</strong> (ZMODEM, auto-starts in most modern terminals),
-                            <strong>K</strong> (Kermit, any flavor &mdash; see <a href="kermit.html">Kermit Reference</a>),
-                            or <strong>P</strong> (Punter C1; the outbound file type &mdash; PRG, SEQ, or USR &mdash; is auto-detected from the filename extension)</li>
-                        <li>Start the matching receive in your terminal and choose where to save the file locally</li>
-                        <li>The file is transmitted and the server reports bytes / blocks / elapsed time on completion</li>
-                    </ol>
-                </div>
-
-                <div class="cat">Directory Navigation</div>
-                <p class="dim-text">
-                    Press <strong>C</strong> to change directories. Subdirectories within the
-                    configured transfer directory are listed. Enter <code>..</code> to go up
-                    one level. All paths are canonicalized to prevent symlink escapes.
-                </p>
-
-                <div class="cat">XMODEM Protocol Details</div>
-                <table class="data-table">
-                    <tr><th>Parameter</th><th>Value</th></tr>
-                    <tr><td>Block size</td><td>128 bytes</td></tr>
-                    <tr><td>Error detection</td><td>CRC-16 (preferred) with checksum fallback</td></tr>
-                    <tr><td>CRC polynomial</td><td>CCITT 0x1021</td></tr>
-                    <tr><td>Maximum file size</td><td>8 MB</td></tr>
-                    <tr><td>Negotiation timeout</td><td>45 seconds (configurable, 1&ndash;300s)</td></tr>
-                    <tr><td>Block timeout</td><td>20 seconds (configurable, 1&ndash;120s)</td></tr>
-                    <tr><td>Max retries per block</td><td>10 (configurable, 1&ndash;100)</td></tr>
-                    <tr><td>Padding byte</td><td>0x1A (SUB), stripped on receive</td></tr>
-                </table>
-
-                <div class="callout callout-info">
-                    <strong>XMODEM reference:</strong>
-                    For a step-by-step account of how negotiation works and how data moves
-                    on the wire &mdash; CRC-16 vs. checksum, 128-byte / 1K / YMODEM framing,
-                    and the full handshake for both uploads and downloads &mdash; see the
-                    <a href="xmodemreference.html"><strong>XMODEM Protocol Reference page</strong></a>.
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>YMODEM reference:</strong>
-                    For YMODEM's additions &mdash; the block-0 filename/size/mtime/mode
-                    header, batch transfers and the end-of-batch block, and exact size-based
-                    truncation, with step-by-step upload and download handshakes &mdash; see the
-                    <a href="ymodemreference.html"><strong>YMODEM Protocol Reference page</strong></a>.
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>ZMODEM reference:</strong>
-                    For ZMODEM's streaming design &mdash; ZDLE escaping, hex/binary headers,
-                    CRC-16/CRC-32, the ZRQINIT/ZRINIT/ZFILE/ZDATA/ZEOF/ZFIN handshake,
-                    autostart, and position-based resume &mdash; see the
-                    <a href="zmodemreference.html"><strong>ZMODEM Protocol Reference page</strong></a>.
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>Kermit transfer reference:</strong>
-                    For Kermit's packet format, the Send-Init parameter handshake, and the
-                    F/A/D/Z/B transfer sequence step by step (uploads and downloads), see the
-                    <a href="kermitreference.html"><strong>Kermit Transfer Reference page</strong></a> &mdash;
-                    or the comprehensive <a href="kermit.html"><strong>Kermit Protocol Reference</strong></a>
-                    for server mode and full configuration.
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>Punter reference:</strong>
-                    For Punter C1's two-phase design &mdash; the 7-byte block header, the dual
-                    additive + cyclic checksums, the size-of-next-block field, the
-                    GOO/BAD/ACK/S-B/SYN handshake, the type-block-then-data-blocks flow, and
-                    the end-off, with step-by-step upload and download handshakes &mdash; see the
-                    <a href="punterreference.html"><strong>Punter C1 Protocol Reference page</strong></a>.
-                </div>
-
-                <div class="cat">IAC Escaping</div>
-                <p class="dim-text">
-                    Telnet reserves byte 0xFF as the IAC command marker, so a literal
-                    0xFF in file data must be doubled (<code>IAC IAC</code>) and collapsed
-                    back on receipt. File transfers are otherwise 8-bit transparent &mdash;
-                    CR (0x0D) and every other byte pass through literally. (We do
-                    <em>not</em> apply NVT CR-NUL stuffing: that's a text-mode rule and it
-                    corrupts binary transfers through telnet&harr;serial bridges like tcpser
-                    that don't un-stuff it.) Real telnet clients (PuTTY / ExtraPuTTY, Tera
-                    Term, C-Kermit) negotiate the protocol and need IAC escaping; raw retro
-                    clients (CCGMS and StrikeTerm on a Commodore, IMP8 on CP/M, AltairDuino firmware) blast raw bytes
-                    and don't. The default follows that: escaping turns on only if the
-                    client actually negotiated telnet, off otherwise. If a transfer fails
-                    repeatedly with bad-block / CRC errors, press <strong>I</strong> in the
-                    File Transfer menu to flip it and retry.
-                </p>
-                <div class="callout callout-tip">
-                    <strong>Quick check:</strong> if you see consistent block-CRC
-                    failures in one direction, the two sides disagree on escaping.
-                    Toggle <strong>I</strong> and retry.
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- GATEWAYS                                      -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="gateways">
-                <div class="section-title">SSH &amp; Telnet Gateways</div>
-
-                <div class="cat">SSH Gateway</div>
-                <p class="dim-text">
-                    Connect to remote SSH servers through Ethernet Gateway. Press
-                    <strong>S</strong> from the main menu.
-                </p>
-                <div class="callout callout-info">
-                    <strong>SSH reference:</strong>
-                    For the full picture of both SSH roles &mdash; the inbound server, the
-                    three key files, trust-on-first-use host-key verification, the
-                    password-vs-gateway-key auth modes, ANSI stripping and the
-                    window-title sequence every terminal type loses &mdash; see the
-                    <a href="sshreference.html"><strong>SSH Reference page</strong></a>.
-                </div>
-                <div class="instructions">
-                    <h3>Connecting</h3>
-                    <ol>
-                        <li>At the first prompt, press <strong>K</strong> to view the gateway's public key (see <em>Public-Key Authentication</em> below), or any other key to continue</li>
-                        <li>Enter the remote server hostname or IP address</li>
-                        <li>Enter the port (default: 22)</li>
-                        <li>Enter your username for the remote server</li>
-                        <li>If the host key is unknown, confirm the SHA-256 fingerprint; if it has changed, review the warning carefully before accepting</li>
-                        <li>The gateway authenticates with the <strong>single configured method</strong> (config key <code>ssh_gateway_auth</code>): in <code>password</code> mode (default) it prompts you for the remote password; in <code>key</code> mode it uses the gateway's own client key. There is <strong>no fallback</strong> between the two &mdash; the remote sees exactly one auth attempt</li>
-                        <li>Once authenticated, you have a full interactive shell on the remote server</li>
-                        <li>Press <strong>Esc</strong> twice <em>quickly</em> to disconnect and return to the main menu (a single Esc goes to the remote)</li>
-                    </ol>
-                </div>
-
-                <div class="instructions">
-                    <h3>Public-Key Authentication (gateway-key mode)</h3>
-                    <ol>
-                        <li>Set <code>ssh_gateway_auth = key</code> in config &mdash; this is what enables key-based dial-out (the default is <code>password</code>)</li>
-                        <li>On first outbound dial, the gateway auto-generates an Ed25519 client keypair and stores it as <code>ethernet_gateway_ssh_key</code> (0o600 on Unix)</li>
-                        <li>From the SSH Gateway menu, press <strong>K</strong> &mdash; the public key is displayed in OpenSSH <code>ssh-ed25519 AAAA&hellip;</code> format</li>
-                        <li>Copy that single line into the remote server's <code>~/.ssh/authorized_keys</code></li>
-                        <li>Dials to that host then authenticate with the key and skip the password prompt entirely (in <code>key</code> mode the gateway never falls back to a password)</li>
-                    </ol>
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>Host Key Verification:</strong> Known remote-server host keys
-                    are stored in <code>gateway_hosts</code> (in the gateway's working
-                    directory, 0o600 on Unix). This is independent of any OpenSSH
-                    <code>~/.ssh/known_hosts</code> you may have. Trust decisions
-                    (first-time accept, key update, key rejection) are written to the
-                    server log for auditability.
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>Three SSH key files exist, do not confuse them:</strong>
-                    <ul style="margin: 0.5em 0;">
-                        <li><code>ethernet_ssh_host_key</code> &mdash; this gateway's <em>own</em> SSH server host key (used when clients connect <em>to</em> us over SSH)</li>
-                        <li><code>ethernet_gateway_ssh_key</code> &mdash; this gateway's outgoing client keypair (used when we dial <em>out</em> to remote SSH servers)</li>
-                        <li><code>gateway_hosts</code> &mdash; trusted remote-server fingerprints (analogous to OpenSSH's <code>known_hosts</code>)</li>
-                    </ul>
-                </div>
-
-                <p class="dim-text">
-                    Per-IP lockout is shared with the telnet server: after 3 failed
-                    authentication attempts in 5 minutes, the source IP is blocked for
-                    5 minutes across both protocols.
-                </p>
-
-                <p class="dim-text">
-                    ANSI escape sequences from the remote server are automatically
-                    stripped when connected from a PETSCII or ASCII terminal, ensuring
-                    readable output on vintage hardware. The PTY is sized 40&times;25 for
-                    PETSCII and 80&times;24 for ANSI/ASCII.
-                </p>
-
-                <div class="cat">Telnet Gateway</div>
-                <p class="dim-text">
-                    Connect to remote telnet servers through Ethernet Gateway. Press
-                    <strong>T</strong> from the main menu.
-                </p>
-                <div class="instructions">
-                    <h3>Connecting</h3>
-                    <ol>
-                        <li>At the mode prompt, press <strong>T</strong> to toggle between <em>Telnet protocol</em> and <em>Raw TCP</em> mode (see <em>Protocol Modes</em> below), or any other key to continue</li>
-                        <li>Enter the remote host and port (default 23)</li>
-                        <li>Session bytes are proxied between your terminal and the remote</li>
-                        <li>Press <strong>Esc</strong> twice <em>quickly</em> to disconnect (a single Esc goes to the remote)</li>
-                    </ol>
-                </div>
-
-                <div class="instructions">
-                    <h3>Protocol Modes</h3>
-                    <ul>
-                        <li><strong>Telnet protocol (default)</strong> &mdash; the gateway parses IAC framing, unescapes <code>IAC IAC</code> to literal 0xFF data, accepts peer-initiated <code>WILL ECHO</code> cooperatively, and refuses other options with <code>DONT</code>/<code>WONT</code>. Works with any RFC-compliant telnet server.</li>
-                        <li><strong>Cooperative</strong> (<code>telnet_gateway_negotiate = true</code>) &mdash; adds proactive offers of <code>WILL TTYPE</code>, <code>WILL NAWS</code>, and <code>DO ECHO</code> at connect, plus mid-session NAWS forwarding when you resize. Makes modern BBSes (Synchronet, Mystic) render at your actual window size.</li>
-                        <li><strong>Raw TCP</strong> (<code>telnet_gateway_raw = true</code>; toggled with <strong>T</strong> and persisted to <code>egateway.conf</code>) &mdash; disables the telnet IAC layer entirely. Use this when dialing destinations that aren't really telnet: some MUDs, hand-rolled BBS software, or custom services on port 23. Bytes to your local client are still IAC-escaped so a stray 0xFF doesn't confuse your telnet client.</li>
-                        <li><strong>Terminal size</strong> (<code>gateway_term_width</code> / <code>gateway_term_height</code>, both <code>0</code> = auto) &mdash; what the gateway reports to the remote, as the SSH PTY size and as telnet NAWS. Auto uses your client's NAWS, else 40&times;25 for PETSCII and 80&times;24 for ANSI/ASCII. Pin it when a client can't report its real size: a C64 running CCGMS in ASCII mode sends <code>0x08</code> for backspace, so it's detected as ANSI and would be told 80 columns for a 40-column screen &mdash; which misplaces line wrap, backspace and tab completion past the real margin.</li>
-                    </ul>
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>RFC compliance:</strong> In telnet-protocol mode the gateway
-                    uses the full RFC 1143 six-state Q-method for option negotiation and
-                    caps subnegotiation bodies at 8 KiB to prevent malicious remotes from
-                    exhausting memory. It never stalls waiting for a reply, so silent or
-                    partially-compliant remotes still work.
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- MASTER / SLAVE                                -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="master-slave">
-                <div class="section-title">Master/Slave Serial Extender</div>
-                <p>
-                    An optional mode lets a <strong>slave</strong> gateway extend
-                    its serial ports to a <strong>master</strong> gateway over the
-                    master's SSH port. A serial-attached device then reaches the
-                    master's menu, file transfer, and dial-out as if it were
-                    attached to the master &mdash; and <strong>files always land on
-                    the master</strong>. It is entirely inert by default
-                    (<code>gateway_role = standalone</code>); a standalone gateway
-                    behaves exactly as before.
-                </p>
-                <div class="cat">Master</div>
-                <p>
-                    Enable the SSH server, set <code>gateway_role = master</code>,
-                    and turn on <code>master_accept_relays</code>. Relay
-                    connections share the existing SSH port (2222) alongside normal
-                    SSH logins &mdash; no per-slave configuration. (Accepting
-                    relays is never implied by enabling SSH; if you arm
-                    master + accept-relays but leave SSH off, startup warns.)
-                </p>
-                <div class="cat">Slave</div>
-                <p>
-                    Set <code>gateway_role = slave</code>, point
-                    <code>slave_master_host</code> / <code>slave_master_port</code>
-                    at the master, and enter
-                    <code>slave_master_username</code> /
-                    <code>slave_master_password</code> &mdash; which must match the
-                    master's unified username/password. The slave pins the master's
-                    SSH host key on first contact (TOFU, in <code>gateway_hosts</code>)
-                    and refuses a changed key. All of this is editable from
-                    <strong>Configuration &rarr; S Server &rarr; M Master/Slave</strong>,
-                    the web config <em>Master/Slave</em> card, and the GUI Server
-                    &ldquo;More&hellip;&rdquo; popup.
-                </p>
-                <ul>
-                    <li><strong>Modem-mode port</strong> &mdash; the slave runs the
-                        Hayes emulator locally; on connect it bridges the call to
-                        the master, which serves its menu or dials a resolved
-                        <code>host:port</code> onward (the slave's <em>local</em>
-                        phonebook resolves; the master dials). Onward-dial
-                        requires the master's <code>allow_peer_dial</code> to be
-                        on, or the master refuses the outbound connection.
-                        <code>+++</code>/<code>ATO</code> work normally.</li>
-                    <li><strong>Console-mode port</strong> &mdash; the slave
-                        registers the port with the master; a master user reaches it
-                        from the master's <strong>Serial Gateway</strong> menu, which
-                        lists local ports plus registered remote ports.</li>
-                </ul>
-                <p>
-                    <strong>Each gateway's serial ports are configured on the
-                    gateway they are physically attached to.</strong> A slave's
-                    ports use the <em>slave's</em> own <code>serial_a_*</code> /
-                    <code>serial_b_*</code> settings (device path, baud, mode,
-                    <code>drive_carrier</code>, S-registers, <code>AT&amp;W</code>);
-                    the master's local ports use the <em>master's</em>. The relay
-                    carries the session &mdash; the byte stream, and for a console
-                    port its label &mdash; not the port configuration. There is no
-                    per-slave serial configuration on the master.
-                </p>
-                <p>
-                    In slave mode the gateway still serves its own telnet/SSH, shows
-                    a &ldquo;SLAVE mode&rdquo; notice with the master's address on
-                    its main menu, and reconnects automatically if the link drops.
-                    Only the SSH transport is implemented
-                    (<code>relay_transport = ssh</code>).
-                </p>
-                <p><strong>Relay limitations worth knowing:</strong></p>
-                <ul>
-                    <li>A modem-mode relay reports only <code>NO CARRIER</code> on
-                        any failure (master down, bad credentials, version skew, or
-                        an unmapped number) &mdash; the specific cause is in the
-                        <em>slave's</em> server log.</li>
-                    <li>Each active relay call and each idle console-port
-                        registration counts against the master's
-                        <code>max_sessions</code>; a master at capacity refuses
-                        further relays.</li>
-                    <li>Master and slave must run a compatible relay protocol
-                        version &mdash; keep both gateways on the same release.</li>
-                    <li>If the master's SSH host key legitimately changes (e.g. a
-                        reinstall), the slave refuses to reconnect until you delete
-                        the master's entry from the slave's <code>gateway_hosts</code>
-                        file.</li>
-                    <li>Changing <code>gateway_role</code> /
-                        <code>master_accept_relays</code> takes effect on the next
-                        server restart, not live.</li>
-                    <li><code>+++</code>/<code>ATO</code> on a relayed <em>menu</em>
-                        call is bounded by the master's idle timeout; onward-dial
-                        (<code>host:port</code>) targets must be a hostname or IPv4
-                        address (no bracketed IPv6).</li>
-                </ul>
-            
-                <div class="cat">Kermit-Server-Mode Ports</div>
-                <p class="dim-text">
-                    A slave port set to <strong>Kermit server</strong> mode pipes its wire to
-                    the master, and the <em>master</em> runs the Kermit server on it. So a user
-                    at the attached machine is talking to the master's server: <code>remote
-                    dir</code> lists the <strong>master's</strong> transfer directory, an upload
-                    lands there, and a download comes from there. The slave never serves Kermit
-                    itself and keeps no copy — "files always land on the master" is true by
-                    construction, not by syncing two directories.
-                </p>
-                <div class="callout callout-tip">
-                    <strong>Off by default:</strong> the master needs
-                    <code>allow_relay_kermit</code> (telnet <em>Server &rsaquo; Master/Slave
-                    &rsaquo; K</em>, the web <em>Master/Slave</em> card, or the GUI Server
-                    <em>More…</em>). Kermit's server mode has no authentication of its own, so
-                    this hands a remote wire unauthenticated access to the transfer directory.
-                    While the master is unreachable the port serves <strong>nothing</strong> —
-                    a local fallback would let a transfer appear to succeed with the file on the
-                    wrong machine.
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- AI CHAT                                       -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="ai-chat">
-                <div class="section-title">AI Chat</div>
-                <p class="intro">Conversational AI powered by Groq's llama-3.3-70b-versatile model.</p>
-
-                <div class="cat">Setup</div>
-                <div class="instructions">
-                    <h3>Getting an API Key</h3>
-                    <ol>
-                        <li>Visit <a href="https://console.groq.com">console.groq.com</a> and create a free account</li>
-                        <li>Generate an API key from the Groq dashboard</li>
-                        <li>In Ethernet Gateway, go to <strong>Configuration &gt; Other Settings</strong></li>
-                        <li>Enter your API key when prompted</li>
-                    </ol>
-                </div>
-
-                <div class="cat">Usage</div>
-                <div class="instructions">
-                    <h3>Chatting</h3>
-                    <ol>
-                        <li>Press <strong>A</strong> from the main menu</li>
-                        <li>Type your question and press Enter</li>
-                        <li>The response is displayed with pagination</li>
-                        <li>Use <strong>P</strong>/<strong>N</strong> to page through long responses</li>
-                        <li>Ask follow-up questions or press <strong>Q</strong> to exit</li>
-                    </ol>
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>Details:</strong> Responses are word-wrapped to fit your
-                    terminal width (40 columns for PETSCII, 80 for ANSI/ASCII). The API
-                    timeout is 30 seconds per request. Maximum response size is 1 MB.
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- WEB BROWSER                                   -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="web-browser">
-                <div class="section-title">Simple Browser</div>
-                <p class="intro">Text-mode web browser supporting HTTP, HTTPS, and Gopher.</p>
-
-                <table class="feature-table">
-                    <tr>
-                        <td class="key-col">[G]</td>
-                        <td class="name-col">Go / Search</td>
-                        <td class="desc-col">Enter a URL or search term to navigate.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[P/N]</td>
-                        <td class="name-col">Page Nav</td>
-                        <td class="desc-col">Previous / Next page of the current document.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[T]</td>
-                        <td class="name-col">Top</td>
-                        <td class="desc-col">Jump to the top of the current page.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[E]</td>
-                        <td class="name-col">End</td>
-                        <td class="desc-col">Jump to the end of the current page.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[S]</td>
-                        <td class="name-col">Find</td>
-                        <td class="desc-col">Search within the current page.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[L]</td>
-                        <td class="name-col">Links</td>
-                        <td class="desc-col">List numbered links on the page and follow one by number.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[F]</td>
-                        <td class="name-col">Forms</td>
-                        <td class="desc-col">Interact with HTML forms (text, dropdown, checkbox, radio, textarea).</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[K]</td>
-                        <td class="name-col">Bookmarks</td>
-                        <td class="desc-col">Save and load bookmarks (up to 100, stored in bookmarks.txt).</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[B]</td>
-                        <td class="name-col">Back</td>
-                        <td class="desc-col">Navigate back through browsing history.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[H]</td>
-                        <td class="name-col">Help</td>
-                        <td class="desc-col">Display browser help.</td>
-                    </tr>
-                    <tr>
-                        <td class="key-col">[Q]</td>
-                        <td class="name-col">Quit</td>
-                        <td class="desc-col">Exit the browser and return to the main menu.</td>
-                    </tr>
-                </table>
-
-                <div class="callout callout-info">
-                    <strong>Limits:</strong> Maximum response body is 1 MB. HTTP timeout
-                    is 15 seconds. Maximum rendered lines per page is 5000. Page width
-                    adapts to terminal (33 columns for PETSCII, 73+ for ANSI/ASCII). On a
-                    TLS failure an HTTPS page load (GET) falls back to HTTP with a warning,
-                    but a form submission (POST) is refused &mdash; never re-sent in the clear.
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- WEATHER                                       -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="weather">
-                <div class="section-title">Weather</div>
-                <p class="intro">Current conditions and 3-day forecast for anywhere in the world &mdash; a city name or a postal code.</p>
-
-                <p class="dim-text">
-                    Press <strong>W</strong> from the main menu. Weather data is provided by
-                    the Open-Meteo API (free, no API key required). Your last-used location
-                    is saved for convenience.
-                </p>
-
-                <p class="dim-text">
-                    <strong>Units follow the place, not the server.</strong> The
-                    <code>weather_units</code> setting defaults to <code>auto</code>, which
-                    infers them from the geocoded country &mdash; Fahrenheit and miles per hour
-                    for a US location, Celsius and km/h everywhere else. Set it to
-                    <code>us</code> or <code>metric</code> to pin one regardless of where you
-                    are asking about.
-                </p>
-
-                <div class="instructions">
-                    <h3>Display Includes</h3>
-                    <ul>
-                        <li><strong>Current:</strong> Temperature, "feels like", humidity %, wind speed and 16-point compass direction</li>
-                        <li><strong>Forecast:</strong> 3-day outlook with daily high/low temperatures and conditions</li>
-                    </ul>
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- CONFIGURATION                                 -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="configuration">
-                <div class="section-title">Configuration</div>
-                <p class="intro">Press C from the main menu. Changes are saved to egateway.conf immediately.</p>
-
-                <div class="cat">Security Settings</div>
-                <p class="dim-text">
-                    Authentication is disabled by default. When disabled, only private/loopback
-                    IPs are allowed. Connections from this network's router are allowed too,
-                    unless you tick "Block connections from the router" &mdash; see
-                    <a href="#security">Security &amp; Networking</a>.
-                </p>
-                <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
-                    <tr><td>Security enabled</td><td>false</td><td>Require login authentication</td></tr>
-                    <tr><td>Username</td><td><code>admin</code></td><td>Login username — shared by telnet, SSH, and the web UI</td></tr>
-                    <tr><td>Password</td><td><code>changeme</code></td><td>Login password — shared by telnet, SSH, and the web UI</td></tr>
-                </table>
-                <div class="callout callout-warn">
-                    <strong>Important:</strong> The default password is <code>changeme</code>.
-                    If you enable security, change the password immediately. After 3 failed
-                    login attempts from the same IP, that address is locked out for 5 minutes —
-                    and the lockout applies to all three protocols (telnet, SSH, web UI), so an
-                    attacker can't bounce between them to reset the counter.
-                </div>
-
-                <div class="cat">Server Configuration</div>
-                <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
-                    <tr><td>Telnet enabled</td><td>true</td><td>Enable/disable the telnet server</td></tr>
-                    <tr><td>Telnet port</td><td>2323</td><td>TCP port for telnet connections</td></tr>
-                    <tr><td>SSH enabled</td><td>false</td><td>Enable/disable the SSH server</td></tr>
-                    <tr><td>SSH port</td><td>2222</td><td>TCP port for SSH connections</td></tr>
-                    <tr><td>Max sessions</td><td>50</td><td>Maximum concurrent connections</td></tr>
-                    <tr><td>Idle timeout</td><td>900s (15 min)</td><td>Disconnect after inactivity (0 = disabled)</td></tr>
-                </table>
-                <p class="dim-text">
-                    <strong>Testing the ports.</strong>  <em>Test ports</em> in the desktop's
-                    Server <em>More&hellip;</em> window and on the web page, or <code>F</code> on
-                    the telnet CONFIGURATION menu, connects to every listener that really bound
-                    &mdash; at this machine's own network address &mdash; and reports what
-                    answered.  One that does not answer is being blocked by something on this
-                    machine: the word <strong>Port</strong> turns red beside it on the graphical
-                    pages, and the telnet screens mark it with a&nbsp;<code>*</code>.  It runs
-                    once at start-up as well.
+                    Every file is published with a SHA-256 sum and a keyless
+                    <a href="https://www.sigstore.dev/">Sigstore</a> signature
+                    (<code>.sha256</code>, <code>.sig</code>, <code>.pem</code>) so a download can be
+                    verified. Older versions, the checksums and the full release notes are on the
+                    <a href="https://github.com/rickybryce/ethernetgateway/releases">releases page</a>;
+                    the source is on <a href="https://github.com/rickybryce/ethernetgateway">GitHub</a>
+                    and builds with <code>cargo build --release</code> on rustc 1.92 or newer.
                 </p>
                 <p class="dim-text">
-                    A port that <em>does</em> answer is deliberately never reported as open.  On
-                    Windows the Filtering Platform exempts traffic a machine sends to its own
-                    address, and macOS's firewall is per-application and does not filter
-                    self-traffic, so on those two a blocked port answers anyway.  The failing
-                    direction is trustworthy on all three; the passing direction is worth
-                    nothing on two of them, and no test running here can see a router that is
-                    not forwarding a port.  Open the ports on your firewall either way.
+                    New here? The <a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">user manual</a> (PDF) walks through the
+                    first launch, the terminal types and every setting.
                 </p>
-
-                <div class="cat">Master/Slave Settings</div>
-                <p class="dim-text">
-                    Reached from <strong>Configuration &rsaquo; S Server &rsaquo;
-                    M Master/Slave</strong> (telnet), the web <em>Master/Slave</em>
-                    card, or the GUI Server &ldquo;More&hellip;&rdquo; popup. See
-                    <a href="#master-slave">Master/Slave Serial Extender</a> above.
-                </p>
-                <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
-                    <tr><td>Role (<code>gateway_role</code>)</td><td>standalone</td><td><code>standalone</code> | <code>master</code> | <code>slave</code></td></tr>
-                    <tr><td>Accept relays (<code>master_accept_relays</code>)</td><td>false</td><td>Master only: accept relay connections from slaves</td></tr>
-                    <tr><td>Master host (<code>slave_master_host</code>)</td><td><em>(none)</em></td><td>Slave only: the master's hostname/IP</td></tr>
-                    <tr><td>Master port (<code>slave_master_port</code>)</td><td>2222</td><td>Slave only: the master's SSH port</td></tr>
-                    <tr><td>Master user (<code>slave_master_username</code>)</td><td><em>(none)</em></td><td>Slave only: must match the master's username</td></tr>
-                    <tr><td>Master pass (<code>slave_master_password</code>)</td><td><em>(none)</em></td><td>Slave only: must match the master's password</td></tr>
-                    <tr><td>Transport (<code>relay_transport</code>)</td><td>ssh</td><td>Only <code>ssh</code> is implemented</td></tr>
-                </table>
-
-                <div class="cat">File Transfer Settings</div>
-                <p class="dim-text">
-                    In the telnet menu, <strong>Configuration &rsaquo; F File Transfer</strong>
-                    opens a submenu with the shared transfer directory plus per-protocol
-                    pages for <strong>X</strong> XMODEM, <strong>Y</strong> YMODEM,
-                    <strong>Z</strong> ZMODEM, <strong>K</strong> Kermit (plus Kermit
-                    server toggles), and <strong>P</strong> Punter. In the GUI, the same fields live under the File
-                    Transfer frame's <strong>More...</strong> popup. The full Kermit-tuning
-                    surface (long packets, sliding windows, streaming, attribute packets,
-                    block-check type, resume, locking shifts, 8th-bit quoting, and the
-                    standalone-listener toggles) is covered on the
-                    <a href="kermit.html"><strong>Kermit Reference page</strong></a>.
-                </p>
-
-                <div class="cat" style="margin-top:12px;">Shared</div>
-                <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Range</th></tr>
-                    <tr><td>Transfer directory</td><td><code>ethernetgateway-data/transfer</code></td><td>&mdash;</td></tr>
-                </table>
-
-                <div class="cat" style="margin-top:12px;">XMODEM / XMODEM-1K / YMODEM</div>
-                <p class="dim-text">
-                    These three protocols share the same <code>xmodem_*</code> config keys
-                    because they use the same send/receive code path. The XMODEM and YMODEM
-                    settings pages edit the same values; the page calls out the shared-family
-                    behavior so operators aren't surprised when editing either page changes
-                    the other.
-                </p>
-                <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Range</th></tr>
-                    <tr><td>Negotiation timeout</td><td>45s</td><td>1&ndash;300 seconds</td></tr>
-                    <tr><td>Retry interval</td><td>7s</td><td>1&ndash;60 seconds (C / NAK poke cadence; XMODEM/YMODEM spec suggests ~10)</td></tr>
-                    <tr><td>Block timeout</td><td>20s</td><td>1&ndash;120 seconds</td></tr>
-                    <tr><td>Max retries</td><td>10</td><td>1&ndash;100</td></tr>
-                </table>
-
-                <div class="cat" style="margin-top:12px;">ZMODEM</div>
-                <p class="dim-text">
-                    Independent tunables. These values used to be hardcoded constants in
-                    the ZMODEM implementation; they now live in <code>egateway.conf</code>
-                    so operators can tune them per environment.
-                </p>
-                <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Range</th></tr>
-                    <tr><td>Negotiation timeout</td><td>45s</td><td>1&ndash;300 seconds (ZRQINIT / ZRINIT handshake)</td></tr>
-                    <tr><td>Retry interval</td><td>5s</td><td>1&ndash;60 seconds (ZRINIT / ZRQINIT re-send gap)</td></tr>
-                    <tr><td>Frame timeout</td><td>30s</td><td>1&ndash;120 seconds (per header / subpacket read)</td></tr>
-                    <tr><td>Max retries</td><td>10</td><td>1&ndash;100 (ZRQINIT / ZRPOS / ZDATA caps)</td></tr>
-                </table>
-
-                <div class="cat" style="margin-top:12px;">Kermit</div>
-                <p class="dim-text">
-                    The defaults below cover the everyday tunables on the Configuration menu
-                    and the GUI's File Transfer popup. The full <code>kermit_*</code>
-                    family &mdash; long packets, sliding windows, streaming, attribute
-                    packets, block-check type, RESEND, locking shifts, 8th-bit quoting,
-                    and the standalone-listener / ATDT-KERMIT toggles &mdash; is documented
-                    on the <a href="kermit.html"><strong>Kermit Reference</strong></a> page.
-                </p>
-                <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Range</th></tr>
-                    <tr><td>Negotiation timeout</td><td>300s</td><td>1&ndash;3600 seconds (Send-Init handshake)</td></tr>
-                    <tr><td>Packet timeout</td><td>10s</td><td>1&ndash;120 seconds (per-packet read)</td></tr>
-                    <tr><td>Idle timeout (server)</td><td>300s</td><td>0 disables; otherwise seconds between client commands</td></tr>
-                    <tr><td>Max retries</td><td>5</td><td>1&ndash;100 (NAK / timeout retransmits)</td></tr>
-                    <tr><td>Max packet length</td><td>4096</td><td>10&ndash;9024 (advertised long-packet cap)</td></tr>
-                    <tr><td>Window size</td><td>4</td><td>1&ndash;31 (1 = stop-and-wait)</td></tr>
-                    <tr><td>Block check type</td><td>3</td><td>1 = checksum, 2 = 12-bit, 3 = CRC-16/KERMIT</td></tr>
-                    <tr><td>Server enabled</td><td>false</td><td>Bind a standalone TCP listener on <code>kermit_server_port</code> (default 2424)</td></tr>
-                    <tr><td>Allow ATDT KERMIT</td><td>false</td><td>Permit serial-modem dial target to drop into Kermit server (bypasses auth gate)</td></tr>
-                </table>
-
-                <div class="cat" style="margin-top:12px;">Punter (C1)</div>
-                <p class="dim-text">
-                    Single-file Punter C1 (&ldquo;New Punter&rdquo;) &mdash; the protocol
-                    CCGMS, Novaterm, and StrikeTerm speak natively on Commodore 64/128 BBSes.
-                    It uses a two-phase handshake (a file-type block, then the data blocks)
-                    with two per-block checksums (a 16-bit additive checksum and a 16-bit
-                    cyclic checksum) and 3-byte ASCII handshake codes (GOO / BAD / ACK / S/B / SYN).
-                    Blocks carry a 248-byte payload plus a 7-byte header; lower the block size
-                    toward ~40 on noisy lines.
-                </p>
-                <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Range</th></tr>
-                    <tr><td>Block size</td><td>255</td><td>8&ndash;255 bytes (lower toward ~40 for noisy lines)</td></tr>
-                    <tr><td>Negotiation timeout</td><td>45s</td><td>1&ndash;300 seconds (file-type handshake)</td></tr>
-                    <tr><td>Retry interval</td><td>5s</td><td>1&ndash;60 seconds (handshake re-send gap)</td></tr>
-                    <tr><td>Block timeout</td><td>20s</td><td>1&ndash;120 seconds (per-block read)</td></tr>
-                    <tr><td>Max retries</td><td>10</td><td>1&ndash;100</td></tr>
-                    <tr><td>Max bad rounds</td><td>30</td><td>Corrupt-block resend rounds tolerated before giving up; kept higher than max retries (a real C64 peer never caps resends)</td></tr>
-                    <tr><td>Hangup on failure</td><td>false</td><td>Drop carrier on give-up so a stranded C64 sees loss-of-carrier (C1 has no in-band abort)</td></tr>
-                </table>
-                <div class="callout callout-info">
-                    <strong>Punter reference:</strong> for the block format, the dual
-                    checksums, the GOO/BAD/ACK/S-B/SYN handshake, and step-by-step upload /
-                    download flows, see the
-                    <a href="punterreference.html"><strong>Punter C1 Protocol Reference page</strong></a>.
-                </div>
-
-                <div class="cat">Serial Modem / Console Settings (per port)</div>
-                <p class="dim-text">
-                    The gateway exposes <strong>two physically independent
-                    serial ports</strong>: <strong>Port&nbsp;A</strong> and
-                    <strong>Port&nbsp;B</strong>.  Each setting below has
-                    a per-port copy keyed under <code>serial_a_*</code> or
-                    <code>serial_b_*</code> in <code>egateway.conf</code>.
-                    The two ports run in separate threads, persist
-                    AT&amp;W state separately, and host independent console
-                    bridges, so you can mix-and-match modes (e.g. modem on
-                    Port&nbsp;A, telnet-serial on Port&nbsp;B).  Legacy
-                    single-port configs auto-migrate into Port&nbsp;A on
-                    first read.
-                </p>
-                <table class="data-table">
-                    <tr><th>Setting (per-port suffix)</th><th>Default</th><th>Description</th></tr>
-                    <tr><td>Mode (<code>mode</code>)</td><td>modem</td><td><code>modem</code> = Hayes AT emulator on this port; <code>console</code> = Telnet-Serial bridge for this port via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> A/B picker; <code>kermit</code> = always-on Kermit server on this port's wire</td></tr>
-                    <tr><td>Serial port (<code>port</code>)</td><td><em>(none)</em></td><td>Device path (e.g. <code>/dev/ttyUSB0</code>, <code>COM3</code>)</td></tr>
-                    <tr><td>Baud rate (<code>baud</code>)</td><td>9600</td><td>Serial line speed</td></tr>
-                    <tr><td>Data bits (<code>databits</code>)</td><td>8</td><td>5, 6, 7, or 8</td></tr>
-                    <tr><td>Parity (<code>parity</code>)</td><td>None</td><td>None, Odd, or Even</td></tr>
-                    <tr><td>Stop bits (<code>stopbits</code>)</td><td>1</td><td>1 or 2</td></tr>
-                    <tr><td>Flow control (<code>flowcontrol</code>)</td><td>None</td><td>None, Software, or Hardware</td></tr>
-                </table>
-
-                <div class="cat">Other Settings</div>
-                <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
-                    <tr><td>Groq API key</td><td><em>(empty)</em></td><td>API key for AI Chat (free at console.groq.com)</td></tr>
-                    <tr><td>Browser homepage</td><td>http://telnetbible.com</td><td>Default URL for the Simple Browser</td></tr>
-                    <tr><td>Weather location</td><td><em>(empty)</em></td><td>City name or postal code, worldwide (<code>weather_location</code>)</td></tr>
-                    <tr><td>Weather units</td><td>auto</td><td><code>auto</code> follows the geocoded country (US &rarr; &deg;F/mph, elsewhere &deg;C/km/h); <code>us</code> or <code>metric</code> pins one (<code>weather_units</code>)</td></tr>
-                    <tr><td>Verbose logging</td><td>false</td><td>Enable detailed per-block / per-subpacket protocol diagnostics across XMODEM, YMODEM, ZMODEM, Kermit, and Punter</td></tr>
-                    <tr><td>Gateway debug trace</td><td>false</td><td>Byte-level trace of the SSH/Telnet gateway proxy loops, for diagnosing input corruption or terminal-translation problems. Read fresh by each gateway session, so it takes effect on the next one without a restart; <code>EGATEWAY_GATEWAY_DEBUG</code> forces it on regardless (<code>gateway_debug</code>)</td></tr>
-                    <tr><td>GUI display scale</td><td>auto</td><td><code>auto</code> follows the monitor's scale factor; a number pins pixels-per-point so the console is not magnified on a high-DPI display (<code>gui_zoom</code>)</td></tr>
-                    <tr><td>GUI console</td><td>true</td><td>Show the GUI window on startup</td></tr>
-                    <tr><td>Log to file</td><td>true</td><td>Also write the log to <code>log_file</code>. Size-bounded: the active file rotates at <code>log_max_size_kb</code> and generations past <code>log_max_files</code> are deleted, so worst-case disk use is 6&nbsp;MB with the defaults. If a write fails (a full disk, a removed drive) logging pauses and reopens the file by itself &mdash; after 30&nbsp;s, backing off to 5&nbsp;min &mdash; and records how many lines were lost while it was away, in the log and in the console pane. Telnet: <strong>Other Settings &gt; L</strong>; GUI/web: the General <strong>More&hellip;</strong> panel</td></tr>
-                </table>
-
-                <div class="cat">Configuration File</div>
-                <p class="dim-text">
-                    The file <code>ethernetgateway-data/egateway.conf</code> uses a simple
-                    <code>key = value</code> format. Lines beginning with <code>#</code> are
-                    comments. The file is auto-created if missing and rewritten to ensure all
-                    keys are present. Everything the gateway writes lives in that one
-                    <code>ethernetgateway-data</code> folder, created in the directory the
-                    gateway was launched from &mdash; the configuration, the log, the SSH host
-                    key and the transfer directory. Started from a desktop icon that is your
-                    home folder (a desktop launch defines no working directory of its own, so
-                    the AppImage pins one rather than letting the same icon build two data
-                    folders); started from a terminal it is the directory you are standing in.
-                    The startup log names the folder it settled on as a full path, on the
-                    <code>Data directory:</code> line.
-                </p>
-                <pre><code><span class="output-text"># Ethernet Gateway Configuration
-telnet_enabled = true
-telnet_port = 2323
-security_enabled = false
-username = admin
-password = changeme
-transfer_dir = ethernetgateway-data/transfer
-max_sessions = 50
-idle_timeout_secs = 900
-ssh_enabled = false
-ssh_port = 2222
-web_enabled = false
-web_port = 8080
-groq_api_key =
-browser_homepage = http://telnetbible.com
-weather_location =
-verbose = false
-enable_console = true
-setup_wizard_completed = false   # the setup wizard runs while this is false
-log_to_file = true               # also write the log to a file, not just stderr
-log_file = ethernetgateway-data/ethernetgateway.log
-log_max_size_kb = 1024           # rotate at this size; 0 = never rotate
-log_max_files = 5                # older generations are DELETED (0 = keep none)
-
-# Serial Port A
-serial_a_enabled = false
-serial_a_mode = modem
-serial_a_port =
-serial_a_baud = 9600
-serial_a_databits = 8
-serial_a_parity = none
-serial_a_stopbits = 1
-serial_a_flowcontrol = none
-# (plus serial_a_echo, serial_a_verbose, serial_a_quiet, serial_a_s_regs,
-#  serial_a_x_code, serial_a_dtr_mode, serial_a_flow_mode, serial_a_dcd_mode,
-#  serial_a_stored_0..3 — all written by AT&amp;W, restored by ATZ)
-# serial_a_drive_carrier = false   # opt-in: drive DTR as a DCD carrier proxy
-#  (reflects physical cabling — config-only, NOT reset by ATZ/AT&amp;F)
-
-# Serial Port B (mirrors Port A's keys with serial_b_ prefix)
-serial_b_enabled = false
-serial_b_mode = modem
-serial_b_port =
-serial_b_baud = 9600
-xmodem_negotiation_timeout = 45
-xmodem_block_timeout = 20
-xmodem_max_retries = 10
-xmodem_negotiation_retry_interval = 7
-zmodem_negotiation_timeout = 45
-zmodem_frame_timeout = 30
-zmodem_max_retries = 10
-zmodem_negotiation_retry_interval = 5
-kermit_negotiation_timeout = 300
-kermit_packet_timeout = 10
-kermit_idle_timeout = 300
-kermit_max_retries = 5
-kermit_max_packet_length = 4096
-kermit_window_size = 4
-kermit_server_enabled = false
-kermit_server_port = 2424
-allow_atdt_kermit = false
-punter_block_size = 255
-punter_negotiation_timeout = 45
-punter_block_timeout = 20
-punter_max_retries = 10
-punter_max_bad_rounds = 30
-punter_negotiation_retry_interval = 5
-punter_hangup_on_failure = false
-disable_ip_safety = false
-ssh_gateway_auth = password
-gateway_role = standalone
-master_accept_relays = false
-slave_master_host =
-slave_master_port = 2222
-slave_master_username =
-slave_master_password =
-relay_transport = ssh</span></code></pre>
-                <p class="dim-text" style="margin-top:8px;">
-                    The <code>egateway.conf</code> auto-creation also writes the full
-                    <code>kermit_*</code> family (long packets, sliding windows, streaming,
-                    attribute packets, block-check type, 8th-bit quoting, resume, locking
-                    shifts) at their defaults &mdash; see the
-                    <a href="kermit.html"><strong>Kermit Reference</strong></a> for what each
-                    one does and when to change it.
-                </p>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- SSH SERVER                                    -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="ssh-server">
-                <div class="section-title">SSH Server</div>
-                <p class="intro">Optional encrypted access providing the same features as the telnet interface.</p>
-
-                <table class="data-table">
-                    <tr><th>Detail</th><th>Value</th></tr>
-                    <tr><td>Default port</td><td>2222</td></tr>
-                    <tr><td>Host key algorithm</td><td>Ed25519</td></tr>
-                    <tr><td>Host key file</td><td><code>ethernet_ssh_host_key</code></td></tr>
-                    <tr><td>Key format</td><td>OpenSSH</td></tr>
-                    <tr><td>File permissions</td><td>0600 (Unix)</td></tr>
-                    <tr><td>Authentication</td><td>Password only</td></tr>
-                    <tr><td>Credentials</td><td>Shared with telnet and the web UI (<code>username</code> / <code>password</code>)</td></tr>
-                </table>
-
-                <p class="dim-text">
-                    The Ed25519 host key is automatically generated on first use. The SSH
-                    server authenticates against the unified <code>username</code> /
-                    <code>password</code> pair in <code>egateway.conf</code> — the same
-                    credentials used for telnet and the configuration web UI. There is no
-                    separate SSH credential pair anymore.
-                </p>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- WEB CONFIGURATION UI                          -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section">
-                <h2 id="web-ui">Web Configuration Interface</h2>
-
-                <p class="intro">Optional browser-based settings page that mirrors the desktop GUI.</p>
-
-                <table class="data-table">
-                    <tr><th>Detail</th><th>Value</th></tr>
-                    <tr><td>Default port</td><td>8080</td></tr>
-                    <tr><td>Default state</td><td>Disabled (opt-in)</td></tr>
-                    <tr><td>Protocol</td><td>HTTP/1.1 (hand-rolled, no external HTTP dep)</td></tr>
-                    <tr><td>Authentication</td><td>HTTP Basic, gated on <code>security_enabled</code></td></tr>
-                    <tr><td>Credentials</td><td>Unified <code>username</code> / <code>password</code> (shared with telnet and SSH)</td></tr>
-                    <tr><td>IP allowlist</td><td>Private/loopback source IPs only, applied whether or not login is required; the single override is <code>disable_ip_safety</code>. (Differs from telnet, where enabling security opens any IP.)</td></tr>
-                    <tr><td>Brute-force lockout</td><td>3 failed logins per IP — 5-minute ban, shared with telnet + SSH</td></tr>
-                    <tr><td>Concurrent connection cap</td><td>16 (excess get HTTP 503)</td></tr>
-                </table>
-
-                <p class="dim-text">
-                    Enable it in the GUI's Server frame (Web Server checkbox) or via the
-                    telnet menu's <strong>Configuration &gt; Server Configuration &gt;
-                    W</strong> (Toggle Web). After enabling and restarting, browse to
-                    <code>http://&lt;server-ip&gt;:8080/</code>. The page mirrors every GUI
-                    frame and uses per-frame Save buttons that match the GUI's behaviors:
-                </p>
-                <ul>
-                    <li><strong>Server frame:</strong> Save and Restart — persists config
-                        and triggers a full server restart so port/listener changes take
-                        effect.</li>
-                    <li><strong>Serial Ports frame:</strong> Save — persists and reloads
-                        the serial port managers only (telnet/SSH sessions are untouched).</li>
-                    <li><strong>Security / File Transfer / AI/Browser / General:</strong>
-                        Save — persists only; the changes are read live by the relevant
-                        code paths without a restart.</li>
-                </ul>
-                <p class="dim-text">
-                    The web page includes a live <code>Console Output</code> tail that
-                    polls every 2&nbsp;seconds, a serial-port dropdown with a refresh
-                    button that re-scans the host's serial devices on click, and inline
-                    confirmation dialogs that warn before disabling the web server or
-                    changing its port (either action will break the operator's current
-                    browser session).
-                </p>
-                <p class="dim-text">
-                    <strong>It works on a phone.</strong> Below 640&nbsp;px the layout
-                    re-flows &mdash; one listener per line instead of two, and the rows
-                    that are pinned to a single line on a desktop are allowed to wrap
-                    &mdash; so the page fits the screen instead of scrolling sideways.
-                    Verified from 320&nbsp;px up, with every <code>More&hellip;</code>
-                    popup open.
-                </p>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- SERIAL MODEM                                  -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="serial-modem">
-                <div class="section-title">Serial Modem / Console (Two Independent Ports)</div>
-                <p class="intro">Hayes AT-compatible modem emulation, or a direct telnet-serial console bridge, on each of <strong>two</strong> physically independent serial ports.</p>
-
-                <p class="dim-text">
-                    Connect vintage computers with serial interfaces to Ethernet Gateway.
-                    The gateway exposes <strong>Port&nbsp;A</strong> and
-                    <strong>Port&nbsp;B</strong>, each fully independent — its own
-                    enabled flag, mode, device, baud, AT/S-register state, and
-                    stored phone-number slots.  Each port runs in one of three modes:
-                </p>
-                <ul>
-                    <li><strong>Modem (AT Command) Mode</strong> &mdash; the default. Accepts standard AT commands and "dials" TCP connections to remote hosts. See the AT command reference below.</li>
-                    <li><strong>Telnet-Serial Mode</strong> &mdash; the Hayes emulator is disabled on this port; the port is exposed via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> A/B picker on the main menu so a telnet/SSH user can talk directly to whatever's connected to that wire (microcontroller console, RS-232 device, etc.). See <a href="#console-mode">Console Mode</a> below.</li>
-                    <li><strong>Kermit Server Mode</strong> &mdash; the Hayes emulator is disabled and the port runs a persistent Kermit server directly on the wire: as soon as it's enabled it listens for Kermit packets (no AT commands, no dialing, no menu), re-arming after every FINISH/BYE. The same server <code>ATDT KERMIT</code> reaches, but always on. See <a href="#kermit-server-mode">Kermit Server Mode</a> below.</li>
-                </ul>
-                <p class="dim-text">
-                    The two ports mix and match freely: run a Hayes modem on
-                    Port&nbsp;A and a console bridge on Port&nbsp;B, two modems,
-                    two bridges, a Kermit server, or any combination.  Switch a
-                    port's mode from
-                    the <strong>Configuration &rarr; M (Serial Configuration) &rarr;
-                    A or B &rarr; T</strong> menu (which cycles Modem &rarr;
-                    Console &rarr; Kermit), from the GUI's <strong>Serial
-                    Port</strong> frame (open that port's <em>More&hellip;</em>
-                    popup and use the Mode dropdown), or by setting
-                    <code>serial_a_mode</code> / <code>serial_b_mode</code> to
-                    <code>modem</code>, <code>console</code>, or <code>kermit</code> in
-                    <code>egateway.conf</code>.  All three paths hot-switch the
-                    affected port's manager thread within one poll interval —
-                    no restart required, and the other port keeps running.
-                    The per-port <strong>T</strong> menu entry is hidden from
-                    sessions connected over a modem itself, since switching
-                    that port's mode would tear down the caller's own
-                    connection before they could acknowledge.
-                </p>
-                <div class="callout callout-warn">
-                    <strong>Device names can move &mdash; port settings don't.</strong>
-                    A port's settings (mode, baud, framing, AT state) are keyed to
-                    Port&nbsp;A / Port&nbsp;B and persist. The device path
-                    (<code>serial_a_port</code>, e.g. <code>/dev/ttyUSB0</code>) is
-                    just a saved string, and Linux assigns <code>ttyUSBn</code> in
-                    enumeration order &mdash; so a reboot or replugging adapters in a
-                    different order can swap which physical device Port&nbsp;A and
-                    Port&nbsp;B point at. To pin a device, use a stable
-                    <code>/dev/serial/by-id/&hellip;</code> path (list them with
-                    <code>ls -l /dev/serial/by-id/</code>) instead of
-                    <code>ttyUSBn</code>, and re-check the device after any
-                    re-cabling.
-                </div>
-
-                <div class="cat" id="at-commands">AT Command Reference</div>
-                <p class="dim-text">
-                    The serial modem emulator speaks the full Hayes AT command set. Every
-                    command, the S-registers, the <code>+++</code> escape sequence, result
-                    codes and <code>ATX</code> levels, dialing and dial-string modifiers, the
-                    <code>AT+PETSCII</code> Commodore extension, command chaining, and worked
-                    examples are documented on a dedicated reference page:
-                </p>
-                <div class="callout callout-info">
-                    <strong>&rarr; <a href="atcommandreference.html">AT Command Reference</a></strong>
-                    &mdash; the complete command-by-command reference for the serial modem
-                    emulator, with usage examples and the <code>+++</code> escape sequence.
-                </div>
-
-                <div class="cat" id="peer-dial">Peer-Dial (Calling Another Port)</div>
-                <p class="dim-text">
-                    With <code>allow_peer_dial</code> enabled (Serial config
-                    &rarr; <strong>P</strong>, or web/GUI), a modem port can
-                    <strong>call another port directly</strong> and talk to the
-                    device on it &mdash; the gateway equivalent of dialing a
-                    friend's modem. Dial the address the Serial Gateway menu
-                    shows, <code>ATD &lt;Port&gt;@&lt;IP&gt;</code> (e.g.
-                    <code>ATD B@192.168.1.50</code>), or just pick the port in
-                    that menu &mdash; same effect.
-                </p>
-                <ul>
-                    <li>A <strong>modem-mode</strong> target <strong>rings</strong>;
-                        its device answers per its own AT rules (auto-answer after
-                        <code>S0</code> rings, or a manual <code>ATA</code>).</li>
-                    <li>A <strong>console-mode</strong> target <strong>connects
-                        directly</strong> (no modem to answer).</li>
-                    <li>Once connected it is a transparent byte pipe &mdash; run
-                        XMODEM/ZMODEM/etc. end to end between the two devices
-                        (turn <code>AT+PETSCII</code> off for binary). Result
-                        codes: <code>CONNECT</code> / <code>BUSY</code> /
-                        <code>NO ANSWER</code> / <code>NO CARRIER</code>.</li>
-                </ul>
-                <p class="dim-text">
-                    Off by default. Cross-gateway: a device on a <strong>slave</strong>
-                    can dial a port on its <strong>master</strong>
-                    (<code>ATD &lt;Port&gt;@&lt;master-ip&gt;</code>) — the slave relays
-                    and the master rings/connects its port. It works both ways:
-                    <code>&lt;Port&gt;@&lt;slave-ip&gt;</code> reaches any port a
-                    slave has (console connects directly, modem rings the attached
-                    device), from the master or, via the crossbar, from another
-                    slave. See the user manual &sect;9.2.3.
-                </p>
-
-                <div class="cat" id="console-mode">Console Mode (Telnet-Serial Bridge)</div>
-                <p class="dim-text">
-                    When a port is set to <strong>Telnet-Serial Mode</strong>, that port's Hayes emulator is disabled and it becomes selectable in the <strong>G&nbsp;&nbsp;Serial Gateway</strong> A/B picker.  Each port toggles independently, so Port&nbsp;A can run the Hayes modem while Port&nbsp;B serves as a console bridge (or vice versa, or both as bridges).  This is useful when a serial port is connected to a microcontroller, embedded console, or other RS-232 device that you want to drive directly from a remote shell.
-                </p>
-
-                <div class="instructions">
-                    <h3>Switching to Console Mode (per port)</h3>
-                    <ol>
-                        <li><strong>GUI:</strong> open the chosen port's <em>More&hellip;</em> popup from the <strong>Serial Port</strong> frame and change the <strong>Mode</strong> dropdown from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>.  Saving reconfigures only the changed port; the other port keeps running.</li>
-                        <li><strong>Telnet/SSH menu:</strong> from <strong>Configuration &rarr; M (Serial Configuration) &rarr; A or B</strong>, press <strong>T</strong> (<em>Mode: Modem/Console/Kermit</em>) inside the per-port menu to cycle the three modes. The banner rotates between <code>PORT A - MODEM EMULATOR</code>, <code>PORT A - SERIAL CONSOLE</code>, and <code>PORT A - KERMIT SERVER</code> (or B), and the Dialup Mapping / Ring Emulator items hide in the two non-modem modes (they're modem-only features). The <strong>T</strong> entry is hidden when you're connected over the modem itself, since flipping that port's mode would tear down your own session before you could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
-                        <li><strong>Config file:</strong> set <code>serial_a_mode = console</code> (or <code>= kermit</code>, or <code>serial_b_mode = &hellip;</code>) in <code>egateway.conf</code>. The change is hot-applied within one manager-poll interval; no restart required.</li>
-                    </ol>
-
-                    <h3>Using the Bridge</h3>
-                    <ol>
-                        <li>From the main menu, press <strong>G</strong> (Serial Gateway).  An A/B picker appears showing both ports' status; ineligible ports (disabled, modem mode, no device) are dimmed.</li>
-                        <li>Press <strong>A</strong> or <strong>B</strong> to pick a port.  The gateway prints that port's active framing (port, baud, data/parity/stop, flow) and asks <code>Connect now? (Y/N):</code> &mdash; press <strong>Y</strong> to enter the bridge.</li>
-                        <li>Bytes flow in both directions with no AT processing or IAC injection on the wire side.</li>
-                        <li>Press <strong>ESC</strong> twice in a row (PETSCII <code>&larr;</code> twice on Commodore terminals) to leave the bridge. A single ESC is forwarded to the wire on the next keystroke, so editors that need ESC (vi, emacs) keep working.</li>
-                    </ol>
-                </div>
-
-                <div class="callout callout-info">
-                    <strong>Single-user per port:</strong> only one telnet/SSH session at a time can hold each port, but Port&nbsp;A and Port&nbsp;B can each host their own concurrent bridge.  A second request to the same port gets <em>Another session is already using Port&nbsp;X</em> until the first session disconnects.  The Serial Gateway item is also hidden from sessions that came in over a serial port itself, and hidden when neither port is in console mode (so the menu doesn't dead-end at an empty picker).
-                </div>
-
-                <div class="cat" id="kermit-server-mode">Kermit Server Mode (Always-On)</div>
-                <p class="dim-text">
-                    When a port is set to <strong>Kermit Server Mode</strong>, its Hayes emulator is disabled and &mdash; as soon as the port is enabled &mdash; it runs a persistent Kermit server directly on the wire: no AT commands, no dialing, no menu.  It is functionally the same server the <code>ATDT KERMIT</code> serial dial reaches and the standalone Kermit TCP listener serves, but permanent instead of dialed.  Point a Kermit client on the attached hardware at the wire and drive its server commands (<code>SEND</code>, <code>GET</code>, <code>DIR</code>, <code>FINISH</code>, <code>BYE</code>); uploaded files land in the configured <code>transfer_dir</code> with the same path-safety validation as every other Kermit path.  A name that already exists is renamed DOS/CP-M-Kermit style (<code>abcdefgh.txt</code> &rarr; <code>abcdefg0.txt</code>, <code>hi.txt</code> &rarr; <code>hi0.txt</code>), never dropped or overwritten.  The server re-arms after every FINISH/BYE so the wire stays a live server, and reopens the device automatically if it disappears (the same reopen policy as modem mode).
-                </p>
-
-                <div class="callout callout-warn">
-                    <strong>Bypasses authentication by design.</strong> Like <code>allow_atdt_kermit</code> and the dedicated Kermit TCP listener, a Kermit-Server-mode port has no auth gate and no telnet menu &mdash; enable it only on trusted serial lines. A Kermit-Server-mode port only ever <em>serves</em>: it is not a Serial Gateway bridge target and is not dialable via peer-dial, so it does not appear as a selectable target in those pickers.
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- GUI CONSOLE                                   -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="gui-console">
-                <div class="section-title">GUI Console</div>
-                <p class="intro">Graphical configuration and monitoring window built with egui.</p>
-
-                <p class="dim-text">
-                    When <code>enable_console = true</code>, the GUI window opens
-                    automatically on startup. It provides a retro amber-on-dark theme
-                    with real-time server management.
-                </p>
-
-                <table class="feature-table">
-                    <tr>
-                        <td class="name-col">Configuration Editor</td>
-                        <td class="desc-col">Modify all server settings in real time with immediate save to egateway.conf.</td>
-                    </tr>
-                    <tr>
-                        <td class="name-col">Console Output</td>
-                        <td class="desc-col">Scrolling log display (up to 2000 lines) showing connections, transfers, and server activity.</td>
-                    </tr>
-                    <tr>
-                        <td class="name-col">Serial Port Detection</td>
-                        <td class="desc-col">Automatically discovers available serial ports on the system.</td>
-                    </tr>
-                    <tr>
-                        <td class="name-col">Server Info</td>
-                        <td class="desc-col">Displays local IP addresses and active services.</td>
-                    </tr>
-                    <tr>
-                        <td class="name-col">Settings Sync</td>
-                        <td class="desc-col">Configuration changes from telnet/SSH sessions are reflected in the GUI.</td>
-                    </tr>
-                    <tr>
-                        <td class="name-col">Setup Wizard</td>
-                        <td class="desc-col">On a fresh install the window opens into the first-run setup wizard instead of the editor; re-runnable from <em>Server &mdash; More&#8230;</em> &rarr; <em>Run setup wizard&#8230;</em>. See <a href="#getting-started">Getting Started</a>.</td>
-                    </tr>
-                </table>
-
-                <div class="callout callout-tip">
-                    <strong>Tip:</strong> Closing the GUI window does <strong>not</strong>
-                    stop the server by itself &mdash; it asks first. <em>Leave It Running</em>
-                    keeps it serving in headless mode; <em>Stop the Server and Quit</em> ends
-                    it. The <em>Quit</em> button in the window header opens the same dialog,
-                    which matters when the gateway was started from a desktop icon rather
-                    than a terminal: there is no <code>Ctrl-C</code> to press.
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- SECURITY                                      -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="security">
-                <div class="section-title">Security &amp; Networking</div>
-
-                <div class="cat">IP Restrictions (Security Disabled)</div>
-                <p class="dim-text">
-                    When security is disabled (the default), Ethernet Gateway restricts
-                    access to private and loopback IP ranges only:
-                </p>
-                <div class="instructions">
-                    <h3>Allowed IP Ranges</h3>
-                    <ul>
-                        <li><code>10.0.0.0/8</code> &mdash; Private (Class A)</li>
-                        <li><code>172.16.0.0/12</code> &mdash; Private (Class B)</li>
-                        <li><code>192.168.0.0/16</code> &mdash; Private (Class C)</li>
-                        <li><code>127.0.0.0/8</code> &mdash; Loopback</li>
-                        <li><code>169.254.0.0/16</code> &mdash; Link-local</li>
-                    </ul>
-                    <p style="margin-top: 8px;">Connections from the network's router are <em>allowed</em> by default &mdash; that address is as often an administrator's machine, or hairpinned LAN traffic, as it is something forwarded in from outside. Refusing it is an opt-in setting; see below.</p>
-                </div>
-
-                <div class="cat">Blocking the Router</div>
-                <p class="dim-text">
-                    Traffic forwarded into your LAN from outside often arrives wearing the
-                    router's source address, so the optional
-                    <code>disable_gateway_connections</code> setting refuses connections from
-                    it. The address is <strong>queried from the operating system</strong>, not
-                    guessed: the gateway reads the default route's next hop and blocks exactly
-                    that, IPv4 and IPv6 alike. A router on <code>.254</code> is caught, and an
-                    ordinary machine that happens to sit on <code>.1</code> is not.
-                </p>
-                <table class="data-table">
-                    <tr><th>Platform</th><th>Where the address comes from</th></tr>
-                    <tr><td>Linux</td><td><code>/proc/net/route</code> and <code>/proc/net/ipv6_route</code>, read directly &mdash; no subprocess</td></tr>
-                    <tr><td>macOS / BSD</td><td><code>route -n get default</code> (and <code>-inet6</code>)</td></tr>
-                    <tr><td>Windows</td><td><code>route print</code> &mdash; the <code>0.0.0.0 0.0.0.0</code> and <code>::/0</code> rows, matched on the addresses rather than the column headings, so a localised Windows works</td></tr>
-                </table>
-                <div class="callout callout-tip">
-                    <strong>Never on the connection path:</strong> the query runs on a
-                    background thread at startup (refreshed if it ages past five minutes, so a
-                    DHCP change is picked up without a restart), and the accept path only reads
-                    the cached answer &mdash; an incoming connection never waits on it. The
-                    detected address is logged at startup and shown in the checkbox label in
-                    all three configuration UIs. If it cannot be determined (unsupported
-                    platform, no default route), the rule falls back to the old "refuse
-                    anything ending in .1" behaviour, so it is never silently weaker. Loopback
-                    is exempt either way, and no detected address can widen the allowlist.
-                </div>
-
-                <div class="cat">Authentication Lockout</div>
-                <table class="data-table">
-                    <tr><th>Policy</th><th>Value</th></tr>
-                    <tr><td>Max failed attempts</td><td>3 per IP address</td></tr>
-                    <tr><td>Lockout duration</td><td>5 minutes</td></tr>
-                    <tr><td>Protocol scope</td><td>Shared across telnet and SSH &mdash; an attacker can't bounce between the two to reset the counter</td></tr>
-                    <tr><td>Counter reset</td><td>After lockout expires or successful login</td></tr>
-                    <tr><td>Credential comparison</td><td>Constant-time (timing attack resistant)</td></tr>
-                </table>
-
-                <div class="cat">File Path Security</div>
-                <p class="dim-text">
-                    All file operations are restricted to the configured transfer directory.
-                    Filenames are validated to prevent path traversal. Directory changes
-                    are canonicalized to prevent symlink escapes.
-                </p>
-
-                <div class="cat">Sensitive File Protection</div>
-                <p class="dim-text">
-                    On Unix, the following files are written with mode <code>0o600</code>
-                    (owner read/write only) so other local users can't read them:
-                </p>
-                <div class="instructions">
-                    <ul>
-                        <li><code>egateway.conf</code> &mdash; contains the unified login password (shared by telnet, SSH, and the web UI) and the Groq API key</li>
-                        <li><code>ethernet_ssh_host_key</code> &mdash; the gateway's SSH server private host key</li>
-                        <li><code>ethernet_gateway_ssh_key</code> &mdash; the gateway's outgoing SSH client key</li>
-                        <li><code>gateway_hosts</code> &mdash; remote-server host keys (privacy: reveals dial history)</li>
-                        <li><code>dialup.conf</code> &mdash; phone-to-host mapping</li>
-                    </ul>
-                </div>
-                <p class="dim-text">
-                    On Windows, NTFS ACLs are inherited from the parent directory. For
-                    multi-user Windows boxes, place the binary in a per-user folder
-                    (e.g. under <code>%USERPROFILE%</code>) so the ACL inherits
-                    owner-only access.
-                </p>
-
-                <div class="cat">Telnet Gateway DoS Protection</div>
-                <p class="dim-text">
-                    Subnegotiation (<code>IAC SB &hellip; IAC SE</code>) bodies from remote
-                    servers are capped at 8&nbsp;KiB to prevent a malicious peer from
-                    exhausting memory by sending a huge SB without a terminating
-                    <code>IAC SE</code>. The state machine still resyncs on the
-                    eventual terminator so the session isn't corrupted.
-                </p>
-
-                <div class="cat">Signal Handling</div>
-                <div class="instructions">
-                    <h3>Graceful Shutdown</h3>
-                    <ul>
-                        <li><strong>SIGINT</strong> (Ctrl-C) &mdash; Graceful shutdown</li>
-                        <li><strong>SIGTERM</strong> &mdash; Graceful shutdown</li>
-                        <li><strong>SIGHUP</strong> &mdash; Graceful shutdown (Unix only)</li>
-                    </ul>
-                    <p style="margin-top: 8px;">Connected sessions receive a shutdown notification before the server stops.</p>
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- TROUBLESHOOTING                               -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="troubleshooting">
-                <div class="section-title">Troubleshooting</div>
-
-                <div class="cat">Terminal Detection</div>
-                <p class="dim-text">
-                    If your terminal is detected as the wrong type, the troubleshooting
-                    feature (press <strong>R</strong> from the main menu) diagnoses input
-                    issues by showing exactly what bytes your terminal sends.
-                </p>
-
-                <div class="cat">File Transfer Problems</div>
-                <table class="data-table">
-                    <tr><th>Symptom</th><th>Solution</th></tr>
-                    <tr>
-                        <td>Transfer times out before starting</td>
-                        <td>Pick the same protocol on both sides: the gateway's upload menu expects XMODEM/YMODEM, ZMODEM, or Punter, and the download menu lets you select XMODEM, XMODEM-1K, YMODEM, ZMODEM, or Punter explicitly. (Kermit is not on either picker &mdash; use Kermit server mode.) If your terminal takes a while to open its Send/Receive dialog, increase <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM, default 45 s), <code>zmodem_negotiation_timeout</code> (ZMODEM, default 45 s), or <code>punter_negotiation_timeout</code> (Punter, default 45 s) in <code>egateway.conf</code>.</td>
-                    </tr>
-                    <tr>
-                        <td>Transfer fails partway through</td>
-                        <td>For XMODEM/XMODEM-1K/YMODEM raise <code>xmodem_block_timeout</code> and <code>xmodem_max_retries</code>. For ZMODEM raise <code>zmodem_frame_timeout</code> and <code>zmodem_max_retries</code>. For Punter raise <code>punter_block_timeout</code> and <code>punter_max_retries</code>, or lower <code>punter_block_size</code> toward ~40 on a noisy line. Check for a noisy or slow connection.</td>
-                    </tr>
-                    <tr>
-                        <td>Consistent block-CRC failures in the same direction</td>
-                        <td>The two sides disagree on IAC escaping. Press <strong>I</strong> in the File Transfer menu to flip and retry. Not a concern on SSH.</td>
-                    </tr>
-                    <tr>
-                        <td>File exceeds size limit</td>
-                        <td>XMODEM is limited to 8 MB. Use a different method for larger files.</td>
-                    </tr>
-                </table>
-
-                <div class="cat">Connection Problems</div>
-                <table class="data-table">
-                    <tr><th>Symptom</th><th>Solution</th></tr>
-                    <tr>
-                        <td>"Connection refused" from non-private IP</td>
-                        <td>For telnet, enable security for public-IP access. For the web UI, enabling login no longer opens any IP &mdash; set <code>disable_ip_safety = true</code>. Or connect from a private network.</td>
-                    </tr>
-                    <tr>
-                        <td>Locked out after failed logins</td>
-                        <td>Wait 5 minutes for the lockout to expire.</td>
-                    </tr>
-                    <tr>
-                        <td>Disconnected unexpectedly</td>
-                        <td>Check idle timeout setting. Set to 0 to disable auto-disconnect.</td>
-                    </tr>
-                    <tr>
-                        <td>AI Chat: "No API key configured"</td>
-                        <td>Set up a Groq API key in Configuration &gt; Other Settings.</td>
-                    </tr>
-                </table>
-
-                <div class="cat">Verbose Logging</div>
-                <p class="dim-text">
-                    Enable verbose mode in <strong>Configuration &gt; Other Settings</strong>
-                    to see detailed XMODEM protocol diagnostics. Useful for debugging
-                    file transfer issues.
-                </p>
-
-                <div class="cat">"Address already in use" / nothing is listening</div>
-                <p class="dim-text">
-                    On startup the gateway warns when <strong>none</strong> of its configured
-                    listeners could bind &mdash; naming the ports, saying the process is
-                    serving nothing, and pointing at the usual cause: a second copy started
-                    without stopping the first. The older copy keeps the ports, so everything
-                    you connect to is still being served by <em>it</em> &mdash; old binary, old
-                    settings &mdash; which makes a rebuild or a "Save and Restart" look like it
-                    did nothing. On Linux the underlying error is <code>os error 98</code>.
-                </p>
-                <div class="instructions">
-                    <h3>Find and stop the other copy</h3>
-                    <ol>
-                        <li><code>pgrep -a -x ethernetgateway</code> &mdash; lists every copy</li>
-                        <li><code>ss -ltnp | grep 2323</code> &mdash; names the PID holding a port</li>
-                        <li>A copy whose <code>/proc/&lt;pid&gt;/exe</code> shows <code>(deleted)</code> is running a binary you have since rebuilt</li>
-                        <li><code>pkill -x ethernetgateway</code>, then start the copy you want</li>
-                        <li>On Windows: <code>netstat -ano | findstr :2323</code>, then stop that PID in Task Manager</li>
-                    </ol>
-                    <p style="margin-top: 8px;">Restarting from the GUI, the telnet menu, or SIGHUP does <em>not</em> leak a listener &mdash; the old ones are torn down before the new ones bind. A warning right after a restart is reporting a conflict that was already there.</p>
-                </div>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
-            <!-- REFERENCES                                    -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="references">
-                <div class="section-title">References</div>
-                <p class="intro">Companion documents that go deeper than this manual.</p>
-
-                <div class="compat-grid compat-grid-2">
-                    <div class="compat-card">
-                        <h3><a href="xmodemreference.html">XMODEM Protocol Reference</a></h3>
-                        <p>
-                            A step-by-step walkthrough of the XMODEM family: how the
-                            receiver negotiates CRC-16 vs. the older checksum, how 128-byte
-                            (XMODEM), 1024-byte (XMODEM-1K), and YMODEM block-0 transfers are
-                            framed, and the full handshake for both uploads (gateway
-                            receives) and downloads (gateway sends), including block anatomy,
-                            error handling, and the timeout tunables.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="ymodemreference.html">YMODEM Protocol Reference</a></h3>
-                        <p>
-                            What YMODEM adds on top of XMODEM-1K: the block-0 header
-                            carrying filename, exact size, mtime, and mode; batch transfers
-                            with the end-of-batch null block; and exact size-based truncation
-                            (so files that end in 0x1A survive). Covers the full handshake
-                            for both uploads and downloads.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="zmodemreference.html">ZMODEM Protocol Reference</a></h3>
-                        <p>
-                            The Forsberg 1988 streaming protocol: ZDLE escaping,
-                            hex / binary16 / binary32 headers, CRC-16 and CRC-32, the
-                            ZRQINIT/ZRINIT/ZFILE/ZDATA/ZEOF/ZFIN handshake, batch transfers,
-                            autostart detection, and position-based resume / ZSKIP &mdash;
-                            with step-by-step download and upload flows.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="kermitreference.html">Kermit Transfer Reference</a></h3>
-                        <p>
-                            The focused transfer walkthrough: packet anatomy, the Send-Init
-                            parameter handshake (QCTL/QBIN/REPT quoting, CHKT block-check
-                            types, CAPAS capability intersection), and the F/A/D/Z/B sequence
-                            for both uploads and downloads &mdash; matching the X/Y/Z pages.
-                            For server mode, the G-subcommand table, and every config key,
-                            see the comprehensive reference below.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="kermit.html">Kermit Protocol Reference</a></h3>
-                        <p>
-                            A protocol-level walkthrough of the Kermit file transfer
-                            implementation: packet format, the 13 packet types, sliding
-                            windows, the SI capability negotiation, attribute (A) packets,
-                            and the legacy fallbacks for vintage receivers like AnzioWin.
-                            Use this when something on the wire isn't behaving the way
-                            you expect, or when you need to map an observed packet back
-                            to the Forsberg/da Cruz spec.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="cpmreference.html">CP/M Emulator Reference</a></h3>
-                        <p>
-                            Everything about running real Z80 software: the
-                            <code>cpm_emu_*</code> config keys, the CCP built-in commands,
-                            every <code>cpm_emu_uart</code> access profile (Z80 SIO/2,
-                            6850 ACIA, Altair 88-SIO, BDOS <code>AUX:</code>, RomWBW HBIOS)
-                            with the port addresses, the bundled EGT8080 terminal and which
-                            driver to pick for which machine, the HBIOS calls we service,
-                            BDOS/BIOS coverage, and the virtual modem's AT commands and
-                            dial targets &mdash; plus booting a disk image outright, and
-                            the <strong>screens</strong> the web UI shows for a booted disk
-                            whose display is memory rather than a port &mdash; a
-                            Processor Technology VDM-1, a Cromemco Dazzler, or both.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="diskreference.html">Disk Format Reference</a></h3>
-                        <p>
-                            The measured layout of every vintage disk image the gateway
-                            reads: the MITS Altair 88-DCDD 8&Prime; floppy (137-byte
-                            sectors, a framing and a sector translation that both change
-                            at track 6, two sector-checksum formulas, and the
-                            <code>EXM&nbsp;0</code> that stops <code>cpmtools</code>
-                            writing these disks), the IBM 3740 8&Prime; SSSD, and the
-                            Altair 88-HDSK hard disk &mdash; plus the technique that
-                            settled the Altair layout after months of near misses: boot
-                            the disk and ask its own operating system.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="punterreference.html">Punter C1 Protocol Reference</a></h3>
-                        <p>
-                            The Commodore protocol CCGMS, Novaterm, and StrikeTerm speak
-                            natively: the 7-byte block header, the dual additive + cyclic
-                            checksums, the size-of-next-block field, the
-                            GOO/BAD/ACK/S-B/SYN handshake, the two-phase (type block then
-                            data blocks) transfer, the end-off, and bad-block recovery &mdash;
-                            with step-by-step upload and download flows.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="appendix.html">Character Code Appendices</a></h3>
-                        <p>
-                            Reference tables for every character set the gateway speaks
-                            to: ASCII (incl. control codes), ANSI escape sequences and
-                            SGR colors, PETSCII (Commodore 64), ATASCII (Atari 8-bit),
-                            Baudot/ITA2, ZX Spectrum, and TRS-80. Useful when decoding
-                            raw byte streams during debugging or when porting the
-                            gateway to talk to a new vintage terminal.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="telnetreference.html">Telnet Negotiation Reference</a></h3>
-                        <p>
-                            A detailed guide to how telnet works here: the IAC command
-                            bytes, the WILL/WONT/DO/DONT verbs and what each means, the
-                            purpose of every option the gateway handles (ECHO, SGA, TTYPE,
-                            NAWS, STATUS, TIMING-MARK), subnegotiation, the RFC 1143 Q-method
-                            that prevents negotiation loops, and the inbound-server vs
-                            outbound-gateway policies &mdash; with example exchanges.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="sshreference.html">SSH Reference</a></h3>
-                        <p>
-                            The encrypted access method, both directions: the inbound
-                            russh server (Ed25519 host key, unified credentials, the
-                            duplex bridge into a session), and the outbound SSH
-                            gateway/proxy &mdash; trust-on-first-use host-key verification
-                            against <code>gateway_hosts</code>, the password-vs-gateway-key
-                            auth modes (no fallback), the three on-disk key files, and ANSI
-                            stripping for PETSCII / ASCII terminals.
-                        </p>
-                    </div>
-                    <div class="compat-card">
-                        <h3><a href="appendix.html#ansi-table">ANSI Escape Sequences</a></h3>
-                        <p>
-                            The cursor-control, colour / SGR, erase, screen-mode, and
-                            scrolling escape codes &mdash; each with its raw hex bytes &mdash;
-                            from the ANSI appendix. Handy when crafting or decoding the
-                            <code>ESC [ &hellip;</code> sequences an ANSI terminal uses.
-                        </p>
-                    </div>
-                </div>
             </div>
 
             <hr class="divider">
@@ -2460,13 +760,65 @@ relay_transport = ssh</span></code></pre>
             <hr class="divider">
 
             <!-- ══════════════════════════════════════════════ -->
-            <!-- SCREENSHOT                                    -->
+            <!-- REFERENCES                                    -->
             <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="screenshot">
-                <div class="section-title">Screenshot</div>
-                <p class="intro">The Ethernet Gateway GUI console in action.</p>
-                <div style="text-align: center; margin-top: 16px;">
-                    <img src="screenshot.png" alt="Ethernet Gateway GUI Console" style="max-width: 100%; height: auto; border: 1px solid var(--cyan); box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);">
+            <div class="section" id="references">
+                <div class="section-title">Documentation &amp; References</div>
+                <p class="intro">The manual, and the companion documents that go deeper than it does.</p>
+
+                <div class="compat-grid compat-grid-2">
+                    <div class="compat-card">
+                        <h3><a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">User Manual (PDF)</a></h3>
+                        <p>The whole gateway end to end: setup, terminal types, the menus, file transfer, the gateways, the modem, the config file and troubleshooting. Kept in the repository and rebuilt with every release.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="cpmreference.html">CP/M Emulator Reference</a></h3>
+                        <p>The emulated Z80/8080 machine, the BDOS and BIOS services, mounting disk images, booting one, the virtual modem and the printer.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="diskreference.html">Disk Format Reference</a></h3>
+                        <p>The measured geometry of every supported <code>.dsk</code> format, the Altair 88-DCDD controller, sector skew and the two sector checksums.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="xmodemreference.html">XMODEM Protocol Reference</a></h3>
+                        <p>CRC-16 versus the older checksum, 128-byte and 1024-byte framing, block anatomy, error handling and the timeout tunables.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="ymodemreference.html">YMODEM Protocol Reference</a></h3>
+                        <p>What YMODEM adds over XMODEM-1K: the block-0 header, batch transfers, the end-of-batch null block and exact size-based truncation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="zmodemreference.html">ZMODEM Protocol Reference</a></h3>
+                        <p>The ZDLE escape layer, hex and binary headers, CRC-16 and CRC-32, batch send and receive, resume, and the <code>rz</code> auto-start trigger.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermitreference.html">Kermit Transfer Reference</a></h3>
+                        <p>Using Kermit through the gateway: client and server modes, the serial Kermit port, and what to set on the vintage end.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermit.html">Kermit Protocol Reference</a></h3>
+                        <p>The protocol itself: packet types, sliding windows, long and extended packets, block-check types and 8-bit quoting.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="punterreference.html">Punter C1 Protocol Reference</a></h3>
+                        <p>The protocol Commodore terminals speak natively: dual checksums, the two-phase block transfer and the CCGMS/Novaterm handshake.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="atcommandreference.html">AT Command Reference</a></h3>
+                        <p>Every Hayes command the modem emulator answers, the S-registers, the result codes and the dial-out forms.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="telnetreference.html">Telnet Negotiation Reference</a></h3>
+                        <p>The IAC option negotiation the gateway performs, which options it accepts, and how binary transfers survive it.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="sshreference.html">SSH Reference</a></h3>
+                        <p>The inbound SSH server and the outbound SSH gateway: host keys, public-key authentication and known-hosts handling.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html">Character Code Appendices</a></h3>
+                        <p>PETSCII, ASCII and control-code tables, and the <a href="appendix.html#ansi-table">ANSI escape sequences</a> the gateway emits and filters.</p>
+                    </div>
                 </div>
             </div>
 

@@ -61,9 +61,36 @@ THIRD-PARTY-NOTICES.md  # only OUR OWN "[ethernetgateway X.Y.Z]" line; every oth
 #                         regeneration's only other change is line endings.
 usermanual.html         # .version header, sha256 example, Kermit identity, ATI/ATI3 strings, footer
 #                         DO NOT bump the historical refs: "removed in v0.6.0", "prior to v0.6.0"
+#
+#                         THIS is the manual now -- web/index.html stopped being one in
+#                         0.9.5 -- and two tests include_str! it:
+#                         `config::tests::test_the_manual_sample_config_matches_the_real_defaults`
+#                         (its sample block AND its Key/Default tables, ~150 rows, against
+#                         a config file written from Config::default) and
+#                         `telnet::tests::test_manual_describes_weather_as_worldwide`.
+#                         Rename it and the build stops, which is the intended failure.
 usermanual.pdf          # regenerate from the updated HTML — same tool as before:
 #                         weasyprint usermanual.html usermanual.pdf   (Producer must stay "WeasyPrint")
-web/index.html          # <title>, .hdr-version, startup-banner output-text, footer
+web/index.html          # <title>, .hdr-version, the "Version X.Y.Z" line in the download
+#                         section, the footer -- AND the four download links, which name
+#                         the tag twice over:
+#                           releases/download/vX.Y.Z/ethernetgateway-vX.Y.Z-<target>.<ext>
+#                         They 404 until the tag exists, so they are bumped with everything
+#                         else here and go live the moment the release publishes.  Check
+#                         them after the release with a HEAD request; the archive names
+#                         come from release.yml's NAME=, so a change there changes these.
+#                         The two AppImage links deliberately use
+#                         `releases/latest/download/`, which needs NO bump: those two
+#                         assets are the only ones whose filename carries no version.
+#
+#                         Since 0.9.5 this page is a LANDING page -- pictures, what the
+#                         project is, the downloads, the author, and links to the
+#                         reference pages.  It used to be the manual as a web page; the
+#                         manual users are sent to is now usermanual.pdf in the repo, and
+#                         the page links it at
+#                         github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf
+#                         -- the same URL the web UI already serves (webserver.rs).  Keep
+#                         those two in step: they are the same promise made twice.
 web/appendix.html       # .hdr-version, footer
 web/kermit.html         # <title>, .hdr-version, "Ethernet Gateway Kermit X.Y.Z" identity strings, footer
 web/kermitreference.html

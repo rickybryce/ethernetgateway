@@ -5939,9 +5939,35 @@ mod tests {
     /// produces. A default that changes without the manual following it fails
     /// here.
     ///
+    /// **Which manual** changed in 0.9.5. This read `web/index.html` while that
+    /// page was the manual as a web page; it is a landing page now, and the
+    /// manual users are sent to is `usermanual.pdf`, built from
+    /// `usermanual.html`. Pointing the scan at the file people actually read
+    /// found the thing that motivates the second half of this test: that file's
+    /// `<pre><code>` sample is a four-line illustration, and everything it
+    /// really states about defaults is in its **key/type/default tables** --
+    /// about a hundred and eighty rows that no test had ever looked at. The
+    /// block scan alone would have passed here while saying almost nothing.
+    ///
+    /// The tables are found by **their own header row, not by a line range**: a
+    /// table is scanned when its first column is headed `Key` and one of its
+    /// columns is headed `Default`, and the default is read from whichever
+    /// column that is -- the manual uses `Key | Type | Default | Description`,
+    /// `Key | Type | Default | Range / validation | Description` and
+    /// `Key | Default | Meaning`. A line range would have rotted at the next
+    /// edit, and matching every `<code>`-keyed row would have been worse: the
+    /// header this rule reads is the one that says
+    /// **`Per-port key (suffix)`**, whose rows are `enabled`, `baud`, `echo`
+    /// and `verbose` -- suffixes of `serial_a_*` / `serial_b_*`, not keys. A
+    /// first attempt at this test matched them and reported eighteen defects
+    /// that were all its own; the one that looked most real, `verbose` stated
+    /// as `true` against a written `false`, is the modem's saved `ATV` state
+    /// and has nothing to do with the top-level verbose-logging key of the
+    /// same name. Two tables can key on the same word and mean different
+    /// things, so the header is what settles which table is being read.
+    ///
     /// Deliberately one-directional: the manual is an *excerpt* and is allowed
-    /// to omit keys (it shows about thirty of eighty). What it may not do is
-    /// state one and be wrong. Compare with
+    /// to omit keys. What it may not do is state one and be wrong. Compare with
     /// `telnet::tests::test_manual_describes_weather_as_worldwide`, which pins
     /// one prose claim; this pins every value.
     #[test]
@@ -5965,7 +5991,7 @@ mod tests {
         }
         assert!(real.len() > 50, "the writer emitted only {} keys", real.len());
 
-        let manual = include_str!("../web/index.html").replace("\r\n", "\n");
+        let manual = include_str!("../usermanual.html").replace("\r\n", "\n");
         // The sample block, not the whole page: prose elsewhere legitimately
         // mentions a key beside a value that is an example rather than the
         // default ("set web_port = 9000", say).
@@ -6001,10 +6027,88 @@ mod tests {
             }
         }
 
-        assert!(checked >= 20, "only matched {checked} keys -- the scan has stopped finding the block");
+        assert!(
+            checked >= 4,
+            "only matched {checked} keys in the sample block -- the scan has stopped finding it"
+        );
+
+        // ---- and the key/default tables, which are where this manual really
+        // states its defaults.  Header-driven: see the note above.
+        let mut table_checked = 0usize;
+        for table in manual.split("<table>").skip(1) {
+            let table = table.split_once("</table>").map_or(table, |(t, _)| t);
+            let headers: Vec<&str> = table
+                .split("<th>")
+                .skip(1)
+                .map(|c| c.split_once("</th>").map_or(c, |(t, _)| t).trim())
+                .collect();
+            // `Key`, exactly -- `Per-port key (suffix)` lists suffixes of
+            // `serial_a_*`/`serial_b_*` and states defaults for a different
+            // thing under the same words.
+            if headers.first() != Some(&"Key") {
+                continue;
+            }
+            let Some(default_col) = headers.iter().position(|h| *h == "Default") else {
+                continue;
+            };
+
+            for row in table.split("<tr>").skip(1) {
+                let row = row.split_once("</tr>").map_or(row, |(r, _)| r);
+                let cells: Vec<&str> = row
+                    .split("<td>")
+                    .skip(1)
+                    .map(|c| c.split_once("</td>").map_or(c, |(t, _)| t).trim())
+                    .collect();
+                if cells.len() <= default_col {
+                    continue;
+                }
+                // One key per row.  A row naming two at once (`username`,
+                // `password`) states two defaults in one cell; the block scan
+                // above covers those.
+                let Some(key) = cells[0].strip_prefix("<code>").and_then(|k| k.strip_suffix("</code>"))
+                else {
+                    continue;
+                };
+                if key.is_empty()
+                    || !key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                {
+                    continue;
+                }
+                let Some(&actual) = real.get(key) else {
+                    wrong.push(format!(
+                        "{key}: the manual's key table documents it, the gateway writes no such key"
+                    ));
+                    continue;
+                };
+                // Only a bare `<code>value</code>` is a claim about the bytes
+                // written.  `<em>(empty)</em>`, `see ch. 9` and `45 s` are
+                // markers and prose -- true of the setting, not of the file.
+                let Some(stated) =
+                    cells[default_col].strip_prefix("<code>").and_then(|v| v.strip_suffix("</code>"))
+                else {
+                    continue;
+                };
+                if stated.contains('<') {
+                    continue;
+                }
+                let stated = stated.replace("&quot;", "\"").replace("&amp;", "&");
+                table_checked += 1;
+                if actual != stated {
+                    wrong.push(format!(
+                        "{key}: the manual's key table says {stated:?}, a default config says {actual:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            table_checked >= 100,
+            "only matched {table_checked} table rows -- the scan has stopped finding the key tables"
+        );
+
         assert!(
             wrong.is_empty(),
-            "the manual's sample configuration disagrees with the real defaults:\n  {}",
+            "the manual disagrees with the real defaults ({checked} sample lines, \
+             {table_checked} table rows checked):\n  {}",
             wrong.join("\n  ")
         );
         let _ = std::fs::remove_dir_all(&dir);
