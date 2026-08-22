@@ -65,6 +65,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does **not** boot, being a disk for *building* a system. Naming the system it
   carries is a fact; calling it a system disk was an inference on top of one.
 
+  Two theme labels were shortened so every line fits 80 columns, which the
+  `readme.txt` beside the catalogue was already held to and this file was not.
+  The marker is what surfaced it — six lines went over, the worst at 96 — and
+  shortening a label beat wrapping a summary, because one line per disk is the
+  point of the index. Both got *more* accurate on the way: `comms tools` covers
+  the transfer programs as well as the terminals, and `development tools` covers
+  the debuggers, `SID` and `ZSID` not being linkers as the old label implied.
+
 ## [0.9.4] - 2026-08-22
 
 ### Added

@@ -579,7 +579,7 @@ mod generate {
         ),
         (
             "duino",
-            "Altair-Duino disks (Jim McNeely) -- what this collection uniquely has",
+            "Altair-Duino disks (Jim McNeely) -- what only it has",
             "AltairRepos/AltairDuino-Disks/original",
             "https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)",
             // Not DISK17.DSK: a name this collection alone has, whose bytes are
@@ -716,6 +716,17 @@ mod generate {
             (&["MOVCPM.COM", "SYSGEN.COM", "CPM64.SYS", "CPM.COM"], 1, "CP/M 2.2"),
         ];
         // (markers, defining, label)
+        //
+        // **The labels are short because they are read on one line.** A summary
+        // is `marker -- system, theme, theme, N files` and must fit 80 columns
+        // beside a readme that is held to 80 -- and it is the LABEL that pays,
+        // because a system name and a file count cannot be shortened without
+        // becoming wrong. `terminal and file-transfer tools` (32 characters)
+        // alone put four entries over, and the worst line at 96. Two of these
+        // got more accurate in the process: `comms tools` covers both the
+        // terminals and the transfer programs the markers actually list, and
+        // `development tools` covers the debuggers -- `SID`/`ZSID` are not
+        // linkers, which the old label implied.
         const THEMES: &[(&[&str], bool, &str)] = &[
             (&["FELIX.COM"], true, "the Felix system"),
             (&["COMAL.COM"], true, "COMAL"),
@@ -734,9 +745,9 @@ mod generate {
             (&["8080EXM.COM", "8080PRE.COM", "EX8080.COM", "EXZ80DOC.COM", "PRELIM.COM", "CPUTEST.COM",
                "ZEXALL.COM", "ZEXDOC.COM"], false, "CPU exercisers"),
             (&["KERMIT.COM", "KERMIT3.COM", "QTERM.COM", "QT-IMSAI.COM", "PCGET.COM", "PCPUT.COM",
-               "MODEM.COM", "XMODEM.COM"], false, "terminal and file-transfer tools"),
+               "MODEM.COM", "XMODEM.COM"], false, "comms tools"),
             (&["M80.COM", "L80.COM", "MAC.COM", "RMAC.COM", "CREF80.COM", "LINK.COM", "ZSID.COM",
-               "SID.COM"], false, "assembler and linker tools"),
+               "SID.COM"], false, "development tools"),
             (&["CHESS.COM", "CHASE.COM", "CATCHUM.COM", "DEFLECT.COM", "ALIENS.COM", "PACMAN.COM",
                "DOGFIGHT.COM", "4DTICTAC.COM", "AMBUSH.COM", "CHECKERS.COM", "MYCHESSN.COM",
                "CRAWL.COM", "LADDER.COM", "ADVENT.COM", "STARTREK.COM", "OTHELLO.COM"], false, "games"),
@@ -1454,6 +1465,31 @@ mod tests {
     /// does not recognise — on one platform only. Pinned in `.gitattributes`;
     /// this fails loudly rather than letting the shape test fail obscurely.
     #[test]
+    /// **The catalogue fits 80 columns, like the readme beside it.**
+    ///
+    /// Both are plain text in one folder, read by one person in one editor, so
+    /// holding one to 80 and not the other was a inconsistency rather than a
+    /// decision. Adding the boot marker is what surfaced it: six lines went
+    /// over, the worst at 96, and the fix was to shorten the two longest theme
+    /// labels rather than to wrap a summary -- one line per disk is the whole
+    /// point of the index.
+    ///
+    /// **The headroom is thin (79 of 80), and that is the useful part.** A new
+    /// disk carrying a long system name and two long themes can exceed it, and
+    /// this test is how that gets noticed at the moment the catalogue is
+    /// regenerated rather than by a reader meeting a wrapped line. If it fires,
+    /// shorten a label -- do not widen the limit, or the readme's rule and this
+    /// one drift apart again.
+    #[test]
+    fn test_the_catalogue_lines_fit_eighty_columns() {
+        let long: Vec<(usize, &str)> = repo_disks()
+            .lines()
+            .map(|l| (l.chars().count(), l))
+            .filter(|(n, _)| *n > 80)
+            .collect();
+        assert!(long.is_empty(), "these lines do not fit 80 columns: {long:#?}");
+    }
+
     fn test_the_catalogue_ships_with_unix_line_endings() {
         assert!(
             !repo_disks().contains('\r'),

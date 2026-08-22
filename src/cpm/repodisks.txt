@@ -41,7 +41,7 @@ WHERE THEY COME FROM
 >>>>> hansel -- Altair-Duino / Altair8800 simulator (David Hansel)
       https://github.com/dhansel/Altair8800  (the disks/ folder)
 
->>>>> duino -- Altair-Duino disks (Jim McNeely) -- what this collection uniquely has
+>>>>> duino -- Altair-Duino disks (Jim McNeely) -- what only it has
       https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)
 
 >>>>> duino-extra -- Altair-Duino disks (Jim McNeely) -- the extra/ folder
@@ -74,7 +74,7 @@ THE DISKS, A TO Z
       boots -- CP/M 2.2, 42 files
 
   CDISK03.DSK  (hansel)
-      boots -- CP/M 2.2, assembler and linker tools, 75 files
+      boots -- CP/M 2.2, development tools, 75 files
 
   cdos236_8.dsk  (cromemcosim)
       boots -- Cromemco CDOS, BASIC, 17 files
@@ -83,7 +83,7 @@ THE DISKS, A TO Z
       boots -- Cromemco CDOS, BASIC, 18 files
 
   comms.dsk  (imsaisim)
-      mount only -- terminal and file-transfer tools, 11 files
+      mount only -- comms tools, 11 files
 
   cpm13.dsk  (altairsim)
       boots -- CP/M 2.2, graphics demos, 33 files
@@ -104,7 +104,7 @@ THE DISKS, A TO Z
       boots -- assorted CP/M files, 4 files
 
   cpm22-1.dsk  (cpmsim)
-      boots -- CP/M 2.2, assembler and linker tools, 32 files
+      boots -- CP/M 2.2, development tools, 32 files
 
   cpm22-2.dsk  (cpmsim)
       mount only -- CP/M 2.2, 20 files
@@ -122,7 +122,7 @@ THE DISKS, A TO Z
       boots -- CP/M 2.2, 38 files
 
   cpm22.dsk  (imsaisim)
-      boots -- CP/M 2.2, assembler and linker tools, 44 files
+      boots -- CP/M 2.2, development tools, 44 files
 
   cpm3-1.dsk  (cpmsim)
       boots -- CP/M 3.0, 31 files
@@ -131,10 +131,10 @@ THE DISKS, A TO Z
       boots -- CP/M 3.0, 29 files
 
   cpm3-2.dsk  (cpmsim)
-      mount only -- CP/M 3.0, assembler and linker tools, 25 files
+      mount only -- CP/M 3.0, development tools, 25 files
 
   cpm3-2.dsk  (imsaisim)
-      mount only -- CP/M 3.0, assembler and linker tools, 27 files
+      mount only -- CP/M 3.0, development tools, 27 files
 
   cromix1127_8.dsk  (cromemcosim)
       boots -- its own operating system, no CP/M filesystem
@@ -158,7 +158,7 @@ THE DISKS, A TO Z
       mount only -- graphics demos, games, 8 files
 
   DISK01.DSK  (hansel)
-      boots -- CP/M 2.2, BASIC, assembler and linker tools, 36 files
+      boots -- CP/M 2.2, BASIC, development tools, 36 files
 
   DISK02.DSK  (hansel)
       boots -- its own operating system, no CP/M filesystem
@@ -173,10 +173,10 @@ THE DISKS, A TO Z
       boots -- CP/M 2.2, BASIC, CPU exercisers, 27 files
 
   DISK06.DSK  (hansel)
-      boots -- SuperCalc worksheets, terminal and file-transfer tools, 20 files
+      boots -- SuperCalc worksheets, comms tools, 20 files
 
   DISK07.DSK  (hansel)
-      boots -- WordStar, terminal and file-transfer tools, 10 files
+      boots -- WordStar, comms tools, 10 files
 
   DISK08.DSK  (hansel)
       boots -- Infocom adventures, 6 files
@@ -212,16 +212,16 @@ THE DISKS, A TO Z
       boots -- assorted CP/M files, 12 files
 
   DISK13.DSK  (hansel)
-      boots -- CP/M 3.0, BASIC, assembler and linker tools, 33 files
+      boots -- CP/M 3.0, BASIC, development tools, 33 files
 
   DISK14.DSK  (hansel)
       boots -- CP/M 3.0, 22 files
 
   DISK15.DSK  (hansel)
-      boots -- the Felix system, terminal and file-transfer tools, 36 files
+      boots -- the Felix system, comms tools, 36 files
 
   DISK16.DSK  (hansel)
-      boots -- CP/M 2.2, BASIC, assembler and linker tools, 35 files
+      boots -- CP/M 2.2, BASIC, development tools, 35 files
 
   hd-tools.dsk  (cpmsim)
       boots -- assorted CP/M files, 345 files
@@ -257,7 +257,7 @@ THE DISKS, A TO Z
       boots -- BASIC, 33 files
 
   imdos205r0-1.dsk  (imsaisim)
-      boots -- IMDOS (IMSAI CP/M), BASIC, assembler and linker tools, 44 files
+      boots -- IMDOS (IMSAI CP/M), BASIC, development tools, 44 files
 
   imdos205r0-2.dsk  (imsaisim)
       boots -- graphics demos, 16 files
@@ -266,7 +266,7 @@ THE DISKS, A TO Z
       boots -- CP/M 2.2, graphics demos, 33 files
 
   itc-cpm.dsk  (cromemcosim)
-      boots -- CP/M 2.2, assembler and linker tools, 79 files
+      boots -- CP/M 2.2, development tools, 79 files
 
   micah-cpm.dsk  (cromemcosim)
       boots -- CP/M 2.2, 46 files
@@ -287,19 +287,19 @@ THE DISKS, A TO Z
       boots -- CP/M 2.2, 20 files
 
   mits-cpm22-lifeboat-56k.dsk  (altairsim)
-      boots -- CP/M 2.2, terminal and file-transfer tools, 25 files
+      boots -- CP/M 2.2, comms tools, 25 files
 
   mpm-1.dsk  (cpmsim)
       boots -- MP/M, 40 files
 
   mpm-2.dsk  (cpmsim)
-      boots -- MP/M, assembler and linker tools, 31 files
+      boots -- MP/M, development tools, 31 files
 
   TDISK01.DSK  (hansel)
       boots -- CP/M 2.2, graphics demos, 31 files
 
   TDISK02.DSK  (hansel)
-      boots -- CP/M 2.2 (62K), graphics demos, terminal and file-transfer tools, 44 files
+      boots -- CP/M 2.2 (62K), graphics demos, comms tools, 44 files
 
   TDISK03.DSK  (hansel)
       boots -- COMAL, 26 files
@@ -448,7 +448,7 @@ XSUB.COM
 
 
 >> CDISK03.DSK
-   (hansel)  boots -- CP/M 2.2, assembler and linker tools, 75 files
+   (hansel)  boots -- CP/M 2.2, development tools, 75 files
 ASM.COM
 CBIOS.ASM
 CDOSCPM.COM
@@ -570,7 +570,7 @@ XFER.COM
 
 
 >> comms.dsk
-   (imsaisim)  mount only -- terminal and file-transfer tools, 11 files
+   (imsaisim)  mount only -- comms tools, 11 files
 KERMIT.COM
 KERMIT3.COM
 QT-IMSAI.ASM
@@ -757,7 +757,7 @@ LOAD.COM
 
 
 >> cpm22-1.dsk
-   (cpmsim)  boots -- CP/M 2.2, assembler and linker tools, 32 files
+   (cpmsim)  boots -- CP/M 2.2, development tools, 32 files
 ASM.COM
 BYE.COM
 CLS.COM
@@ -958,7 +958,7 @@ XSUB.COM
 
 
 >> cpm22.dsk
-   (imsaisim)  boots -- CP/M 2.2, assembler and linker tools, 44 files
+   (imsaisim)  boots -- CP/M 2.2, development tools, 44 files
 ASM.COM
 AUTO.SUB
 BIOS.ASM
@@ -1074,7 +1074,7 @@ VT100DYN.COM
 
 
 >> cpm3-2.dsk
-   (cpmsim)  mount only -- CP/M 3.0, assembler and linker tools, 25 files
+   (cpmsim)  mount only -- CP/M 3.0, development tools, 25 files
 BDOS3.SPR
 BIOS3.MAC
 BNKBDOS3.SPR
@@ -1103,7 +1103,7 @@ WM.HLP
 
 
 >> cpm3-2.dsk
-   (imsaisim)  mount only -- CP/M 3.0, assembler and linker tools, 27 files
+   (imsaisim)  mount only -- CP/M 3.0, development tools, 27 files
 BDOS3.SPR
 BNKBDOS3.SPR
 BNKBIOS3.ASM
@@ -1214,7 +1214,7 @@ SPACEWAR.COM
 
 
 >> DISK01.DSK
-   (hansel)  boots -- CP/M 2.2, BASIC, assembler and linker tools, 36 files
+   (hansel)  boots -- CP/M 2.2, BASIC, development tools, 36 files
 ASM.COM
 CRC.COM
 DDT.COM
@@ -1300,7 +1300,7 @@ WM.HLP
 
 
 >> DISK06.DSK
-   (hansel)  boots -- SuperCalc worksheets, terminal and file-transfer tools, 20 files
+   (hansel)  boots -- SuperCalc worksheets, comms tools, 20 files
 ARCS-DEP.CAL
 BRKEVN.CAL
 BUDGET.CAL
@@ -1324,7 +1324,7 @@ TENMIN.CAL
 
 
 >> DISK07.DSK
-   (hansel)  boots -- WordStar, terminal and file-transfer tools, 10 files
+   (hansel)  boots -- WordStar, comms tools, 10 files
 INSTALL.COM
 PCGET.COM
 PCPUT.COM
@@ -1454,7 +1454,7 @@ README.TXT
 
 
 >> DISK13.DSK
-   (hansel)  boots -- CP/M 3.0, BASIC, assembler and linker tools, 33 files
+   (hansel)  boots -- CP/M 3.0, BASIC, development tools, 33 files
 ACOPY.COM
 AFORMAT.COM
 BDOS3.SPR
@@ -1517,7 +1517,7 @@ SHOW.COM
 
 
 >> DISK15.DSK
-   (hansel)  boots -- the Felix system, terminal and file-transfer tools, 36 files
+   (hansel)  boots -- the Felix system, comms tools, 36 files
 ABSTRACT.035
 BEE.FAS
 BEE#.FEX
@@ -1557,7 +1557,7 @@ TRACE.COM
 
 
 >> DISK16.DSK
-   (hansel)  boots -- CP/M 2.2, BASIC, assembler and linker tools, 35 files
+   (hansel)  boots -- CP/M 2.2, BASIC, development tools, 35 files
 ACOPY.COM
 AFORMAT.COM
 ASM.COM
@@ -2400,7 +2400,7 @@ XDIR.COM
 
 
 >> imdos205r0-1.dsk
-   (imsaisim)  boots -- IMDOS (IMSAI CP/M), BASIC, assembler and linker tools, 44 files
+   (imsaisim)  boots -- IMDOS (IMSAI CP/M), BASIC, development tools, 44 files
 ASM.COM
 BASIC-E.COM
 BASIC8K.COM
@@ -2505,7 +2505,7 @@ XDIR.COM
 
 
 >> itc-cpm.dsk
-   (cromemcosim)  boots -- CP/M 2.2, assembler and linker tools, 79 files
+   (cromemcosim)  boots -- CP/M 2.2, development tools, 79 files
 ASM.COM
 BYE.COM
 CBIOS.ASM
@@ -2711,7 +2711,7 @@ XSUB.COM
 
 
 >> mits-cpm22-lifeboat-56k.dsk
-   (altairsim)  boots -- CP/M 2.2, terminal and file-transfer tools, 25 files
+   (altairsim)  boots -- CP/M 2.2, comms tools, 25 files
 ASM.COM
 CONFIG.COM
 COPY.COM
@@ -2784,7 +2784,7 @@ XSUB.COM
 
 
 >> mpm-2.dsk
-   (cpmsim)  boots -- MP/M, assembler and linker tools, 31 files
+   (cpmsim)  boots -- MP/M, development tools, 31 files
 ABORT.RSP
 BNKBDOS.SPR
 BNKXDOS.SPR
@@ -2854,7 +2854,7 @@ XDIR.COM
 
 
 >> TDISK02.DSK
-   (hansel)  boots -- CP/M 2.2 (62K), graphics demos, terminal and file-transfer tools, 44 files
+   (hansel)  boots -- CP/M 2.2 (62K), graphics demos, comms tools, 44 files
 ASM.COM
 BIOS.ASM
 BIOS.HEX
