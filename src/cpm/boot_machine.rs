@@ -1481,14 +1481,6 @@ impl Machine for BootMachine {
             p if self.has_mmu && super::mmu::Mmu::owns_port(p) => {
                 self.mmu.port_out(p, value);
             }
-            p if self.d7a.is_some() && super::d7a::PORTS.contains(&p) => {
-                // ADCTEST does exactly one of these (`OUT 18h,00`) and SPACEWAR
-                // none, so nothing depends on the value -- but it is still this
-                // board being addressed.
-                if let Some(b) = self.d7a.as_mut() {
-                    b.port_out(p, value);
-                }
-            }
             p if self.controller_for(p).is_some() => {
                 let ctrl = self.controller_for(port).expect("just matched");
                 self.disk_accesses = self.disk_accesses.saturating_add(1);
@@ -1528,6 +1520,22 @@ impl Machine for BootMachine {
             // activity — painting a memory-mapped screen produces no console
             // bytes at all, which is exactly why a VDM-1 guest looks idle, and
             // the pacing is right about that.
+            // **After the controllers and the console, exactly as in `port_in`.**
+            // The two dispatches must agree about precedence or a board could
+            // be written through one door and read through another -- the `0Eh`
+            // lesson, where a disk register and a card register share a number
+            // and the disk has to win. Nothing claims `18h`-`1Ch` today
+            // (controllers sit at `08`-`11`, `30`-`34`, `A0`-`A7`, `F8`-`FC`),
+            // so this was latent rather than live; it is ordered this way so it
+            // cannot become live when a board is added.
+            p if self.d7a.is_some() && super::d7a::PORTS.contains(&p) => {
+                // ADCTEST does exactly one of these (`OUT 18h,00`) and SPACEWAR
+                // none, so nothing depends on the value -- but it is still this
+                // board being addressed.
+                if let Some(b) = self.d7a.as_mut() {
+                    b.port_out(p, value);
+                }
+            }
             super::vdm::SCROLL_PORT => {
                 self.vdm_scroll_latch = value;
                 self.vdm_seen = true;
@@ -4572,6 +4580,48 @@ mod tests {
             screen.contains(&want),
             "the guest never painted {want:?} into screen memory; it holds:\n{screen}"
         );
+    }
+
+    /// **The disk wins, in both directions.**
+    ///
+    /// A board's ports and a disk controller's can share a number — that is the
+    /// `0Eh` lesson, where the Dazzler's status register is also a z80pack disk
+    /// register — so the controller has to be matched first. Nothing claims
+    /// `18h`–`1Ch` today, which means getting this wrong would not have failed
+    /// any test: `port_out` matched the joystick *before* the controllers for
+    /// one commit and the suite stayed green. This pins the precedence in both
+    /// dispatches so it cannot become live when a board is added.
+    ///
+    /// Comment lines are stripped first. A source-scanning test that reads its
+    /// own prose is a trap this project has met before — and the comment beside
+    /// the arm names both "controller" and the port range.
+    #[test]
+    fn test_a_disk_controller_outranks_the_joystick_in_both_dispatches() {
+        let src = include_str!("boot_machine.rs");
+        for (what, sig) in [
+            ("port_in", "fn port_in(&mut self, address: u16) -> u8 {"),
+            ("port_out", "fn port_out(&mut self, address: u16, value: u8) {"),
+        ] {
+            let start = src.find(sig).unwrap_or_else(|| panic!("{what} not found"));
+            let body = &src[start..];
+            let end = body.find("\n    }\n").expect("the end of the fn") + start;
+            let code: String = src[start..end]
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let ctrl = code.find("self.controller_for(p).is_some()");
+            let joy = code.find("super::d7a::PORTS.contains(&p)");
+            let (ctrl, joy) = (
+                ctrl.unwrap_or_else(|| panic!("{what}: no controller arm")),
+                joy.unwrap_or_else(|| panic!("{what}: no joystick arm")),
+            );
+            assert!(
+                ctrl < joy,
+                "{what}: the joystick is matched before the disk controller, so a board \
+                 sharing a controller's port would steal it",
+            );
+        }
     }
 
     /// **The whole path a keypress takes, minus the HTTP.**

@@ -1608,6 +1608,8 @@ fn render_vdm_page(cfg: &Config) -> String {
     out
 }
 
+use crate::cpm::d7a;
+
 /// The joystick keys, in one place: the legend the page prints and the table
 /// the script matches on are both built from this.
 ///
@@ -1618,18 +1620,23 @@ fn render_vdm_page(cfg: &Config) -> String {
 /// fire, and `I/J/K/M` with `N`, which is how two people share one keyboard
 /// without their hands colliding.
 ///
-/// `(key, bit name, stick, what it does)`.
-const JOYSTICK_KEYS: &[(&str, &str, u8, &str)] = &[
-    ("W", "P1_UP", 1, "up"),
-    ("A", "P1_LEFT", 1, "left"),
-    ("S", "P1_RIGHT", 1, "right"),
-    ("Z", "P1_DOWN", 1, "down"),
-    ("X", "P1_FIRE", 1, "fire"),
-    ("I", "P2_UP", 2, "up"),
-    ("J", "P2_LEFT", 2, "left"),
-    ("K", "P2_RIGHT", 2, "right"),
-    ("M", "P2_DOWN", 2, "down"),
-    ("N", "P2_FIRE", 2, "fire"),
+/// `(key, the bit it sets, stick, what it does)`.
+///
+/// The bit is the value from [`crate::cpm::d7a::bit`], not a name to be looked
+/// up: an earlier draft carried the name and matched it at render time, which
+/// put an `unreachable!()` on the path that draws a page. A typo in this table
+/// would have been a panic serving a request rather than a compile error.
+const JOYSTICK_KEYS: &[(&str, u16, u8, &str)] = &[
+    ("W", d7a::bit::P1_UP, 1, "up"),
+    ("A", d7a::bit::P1_LEFT, 1, "left"),
+    ("S", d7a::bit::P1_RIGHT, 1, "right"),
+    ("Z", d7a::bit::P1_DOWN, 1, "down"),
+    ("X", d7a::bit::P1_FIRE, 1, "fire"),
+    ("I", d7a::bit::P2_UP, 2, "up"),
+    ("J", d7a::bit::P2_LEFT, 2, "left"),
+    ("K", d7a::bit::P2_RIGHT, 2, "right"),
+    ("M", d7a::bit::P2_DOWN, 2, "down"),
+    ("N", d7a::bit::P2_FIRE, 2, "fire"),
 ];
 
 /// The bit each key sets, as the script's lookup table.
@@ -1638,22 +1645,8 @@ const JOYSTICK_KEYS: &[(&str, &str, u8, &str)] = &[
 /// page and the board agree about which bit is which by construction rather
 /// than by two lists being kept in step.
 fn joystick_keys_json() -> String {
-    use crate::cpm::d7a::bit;
     let mut out = String::from("{");
-    for (i, (key, name, _, _)) in JOYSTICK_KEYS.iter().enumerate() {
-        let mask = match *name {
-            "P1_UP" => bit::P1_UP,
-            "P1_DOWN" => bit::P1_DOWN,
-            "P1_LEFT" => bit::P1_LEFT,
-            "P1_RIGHT" => bit::P1_RIGHT,
-            "P1_FIRE" => bit::P1_FIRE,
-            "P2_UP" => bit::P2_UP,
-            "P2_DOWN" => bit::P2_DOWN,
-            "P2_LEFT" => bit::P2_LEFT,
-            "P2_RIGHT" => bit::P2_RIGHT,
-            "P2_FIRE" => bit::P2_FIRE,
-            other => unreachable!("unknown joystick bit {other}"),
-        };
+    for (i, (key, mask, _, _)) in JOYSTICK_KEYS.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }

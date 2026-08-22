@@ -66,7 +66,16 @@ pub const SWITCH_PORT: u8 = 0x18;
 pub const AXIS_PORTS: [u8; 4] = [0x19, 0x1A, 0x1B, 0x1C];
 
 /// Every port this board answers.
-pub const PORTS: [u8; 5] = [0x18, 0x19, 0x1A, 0x1B, 0x1C];
+///
+/// Derived from the two above rather than written out again: a port list in two
+/// places is a rule that holds in one, and the compiler can carry this one.
+pub const PORTS: [u8; 5] = [
+    SWITCH_PORT,
+    AXIS_PORTS[0],
+    AXIS_PORTS[1],
+    AXIS_PORTS[2],
+    AXIS_PORTS[3],
+];
 
 /// How long a held key takes to reach full deflection.
 ///
