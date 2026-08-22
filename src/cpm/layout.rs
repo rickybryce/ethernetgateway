@@ -568,14 +568,16 @@ mod generate {
     /// would repeat a quarter of this file to say nothing new. Named disks
     /// instead — the ones that collection uniquely has, which are exactly the
     /// ones the downloader takes from it.
-    const REPOS: &[(&str, &str, &str, &[&str])] = &[
+    const REPOS: &[(&str, &str, &str, &str, &[&str])] = &[
         (
+            "hansel",
             "Altair-Duino / Altair8800 simulator (David Hansel)",
             "AltairRepos/Altair8800/disks",
             "https://github.com/dhansel/Altair8800  (the disks/ folder)",
             &[],
         ),
         (
+            "duino",
             "Altair-Duino disks (Jim McNeely) -- what this collection uniquely has",
             "AltairRepos/AltairDuino-Disks/original",
             "https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)",
@@ -585,15 +587,16 @@ mod generate {
             &["HDSK04.DSK"],
         ),
         (
+            "duino-extra",
             "Altair-Duino disks (Jim McNeely) -- the extra/ folder",
             "AltairRepos/AltairDuino-Disks/extra",
             "https://github.com/jpmcneely/AltairDuino-Disks  (the extra/ folder)",
             &[],
         ),
-        ("z80pack — altairsim library", "z80pack/altairsim/disks/library", Z80PACK, &[]),
-        ("z80pack — cpmsim library", "z80pack/cpmsim/disks/library", Z80PACK, &[]),
-        ("z80pack — cromemcosim library", "z80pack/cromemcosim/disks/library", Z80PACK, &[]),
-        ("z80pack — imsaisim library", "z80pack/imsaisim/disks/library", Z80PACK, &[]),
+        ("altairsim", "z80pack — altairsim library", "z80pack/altairsim/disks/library", Z80PACK, &[]),
+        ("cpmsim", "z80pack — cpmsim library", "z80pack/cpmsim/disks/library", Z80PACK, &[]),
+        ("cromemcosim", "z80pack — cromemcosim library", "z80pack/cromemcosim/disks/library", Z80PACK, &[]),
+        ("imsaisim", "z80pack — imsaisim library", "z80pack/imsaisim/disks/library", Z80PACK, &[]),
         // Deliberately NOT z80pack's intelmdssim library. The Intel MDS is not
         // a machine this gateway emulates, and it shows: four of its seven
         // disks are CP/M that our format table cannot read. Listing a
@@ -650,6 +653,145 @@ mod generate {
         Some(names)
     }
 
+    /// What a disk *is*, worked out from the files that are on it.
+    ///
+    /// The catalogue used to print a name and a directory listing and nothing
+    /// else, so finding the disk you wanted meant reading 98 listings. This is
+    /// the one line that saves that -- and it is derived from the disk's own
+    /// directory, never from a catalogue or from the filename, so it cannot
+    /// claim something the disk does not carry.
+    ///
+    /// Two rules keep it from stating plausible falsehoods, and both were
+    /// written after a first version stated them:
+    ///
+    /// * **A system is claimed only on the files that ARE the system.**
+    ///   `CDOSCPM.COM` is a CDOS-to-CP/M converter that lives on *CP/M* disks;
+    ///   matching it labelled four CP/M disks "Cromemco CDOS". The system
+    ///   markers are the kernel and its generator -- `CDOS.COM` **and**
+    ///   `CDOSGEN.COM`, `CPM3.SYS`, `MPM.SYS` -- not a utility that mentions
+    ///   one.
+    /// * **A passenger is a proportion, not a count.** `hd-tools.dsk` carries
+    ///   345 files including all six Zork files, and calling it "Infocom
+    ///   adventures" would describe a tools disk by its smallest corner. A flat
+    ///   "needs two matches" does **not** stop that -- six clears two easily,
+    ///   and the first version of this rule printed the very label its own
+    ///   comment said it prevented. What separates a subject from a passenger
+    ///   is the share of the disk it occupies: measured over all 94 disks, the
+    ///   three labels this rejects on `hd-tools` are its lowest shares (games
+    ///   0.6%, Infocom 1.8%, assembler 2.4%) and every label worth keeping sits
+    ///   at 3.8% or above, so a theme must be **two matches and a
+    ///   thirty-second of the disk**. Nothing at 2% of 345 files is what a disk
+    ///   *is*; that disk gets the honest fallback instead.
+    ///
+    ///   A *defining* file is exempt from both tests -- one `COMAL.COM` or
+    ///   `TURBO.COM` is what that disk is for -- and those are ranked first for
+    ///   the same reason.
+    ///
+    /// Deliberately card-neutral: `KSCOPE.COM` and `MICRO80.COM` are graphics
+    /// demos on both an Altair and a Cromemco, but the card they drive is a
+    /// VDM-1 on one and a Dazzler on the other, and the disk does not say
+    /// which. "graphics demos" is what the directory supports.
+    ///
+    /// `None` for a disk with no CP/M filesystem: there are no contents to
+    /// derive from, and the entry says it boots its own system instead.
+    fn describe_contents(files: &[String]) -> Option<String> {
+        if files.iter().any(|f| f.starts_with("(no CP/M")) {
+            return None;
+        }
+        // The user-area suffix is ours, not the disk's -- match the real name.
+        let names: std::collections::BTreeSet<&str> =
+            files.iter().map(|f| f.split("  (user ").next().unwrap_or(f)).collect();
+        let n = names.len();
+        let has = |m: &[&str]| m.iter().filter(|f| names.contains(**f)).count();
+
+        // (markers, how many must be present, label)
+        const SYSTEM: &[(&[&str], usize, &str)] = &[
+            (&["CPM3.SYS", "CPMLDR.COM"], 1, "CP/M 3.0"),
+            (&["MPM.SYS", "MPMLDR.COM"], 1, "MP/M"),
+            (&["SYSTEM.PASCAL"], 1, "UCSD p-System"),
+            (&["CDOS.COM", "CDOSGEN.COM"], 2, "Cromemco CDOS"),
+            (&["BDOS.SYS", "BIOS.SYS"], 2, "IMDOS (IMSAI CP/M)"),
+            (&["CPM62.SYS"], 1, "CP/M 2.2 (62K)"),
+            (&["MOVCPM.COM", "SYSGEN.COM", "CPM64.SYS", "CPM.COM"], 1, "CP/M 2.2"),
+        ];
+        // (markers, defining, label)
+        const THEMES: &[(&[&str], bool, &str)] = &[
+            (&["FELIX.COM"], true, "the Felix system"),
+            (&["COMAL.COM"], true, "COMAL"),
+            (&["TURBO.COM"], true, "Turbo Pascal"),
+            (&["DBASE.COM", "DBASE.OVL"], true, "dBASE"),
+            (&["WS.COM", "SPELSTAR.OVR", "SPELSTAR.DCT", "MAILMRGE.OVR", "WSOVLY1.OVR"], true, "WordStar"),
+            (&["SUPERCLC.COM", "BUDGET.CAL", "BRKEVN.CAL", "ARCS-DEP.CAL"], true, "SuperCalc worksheets"),
+            (&["ADEXER.COM"], true, "the Altair hard-disk exerciser"),
+            (&["MBASIC.COM", "BASIC.COM", "BASIC5.COM", "BASCOM.COM", "XYCPM95.COM", "VBASIC.COM",
+               "BASIC-E.COM", "CBASIC.COM"], true, "BASIC"),
+            (&["ZORK1.DAT", "ZORK2.DAT", "ZORK3.DAT", "ZORK1.COM", "ZORK2.COM", "ZORK3.COM"], false,
+             "Infocom adventures"),
+            (&["KSCOPE.COM", "MICRO80.COM", "SKETCH.COM", "COLOR.COM", "BARPLOT.COM", "DAZCHESS.COM",
+               "DAZZLE.COM", "DAZZPLOT.COM", "GDEMO.COM", "GRAPHX.COM", "BOUNCE.COM", "LIFE.COM"], false,
+             "graphics demos"),
+            (&["8080EXM.COM", "8080PRE.COM", "EX8080.COM", "EXZ80DOC.COM", "PRELIM.COM", "CPUTEST.COM",
+               "ZEXALL.COM", "ZEXDOC.COM"], false, "CPU exercisers"),
+            (&["KERMIT.COM", "KERMIT3.COM", "QTERM.COM", "QT-IMSAI.COM", "PCGET.COM", "PCPUT.COM",
+               "MODEM.COM", "XMODEM.COM"], false, "terminal and file-transfer tools"),
+            (&["M80.COM", "L80.COM", "MAC.COM", "RMAC.COM", "CREF80.COM", "LINK.COM", "ZSID.COM",
+               "SID.COM"], false, "assembler and linker tools"),
+            (&["CHESS.COM", "CHASE.COM", "CATCHUM.COM", "DEFLECT.COM", "ALIENS.COM", "PACMAN.COM",
+               "DOGFIGHT.COM", "4DTICTAC.COM", "AMBUSH.COM", "CHECKERS.COM", "MYCHESSN.COM",
+               "CRAWL.COM", "LADDER.COM", "ADVENT.COM", "STARTREK.COM", "OTHELLO.COM"], false, "games"),
+        ];
+        const SOURCE_EXT: &[&str] =
+            &["ASM", "MAC", "Z80", "PRN", "REL", "LIB", "FOR", "PAS", "SRC"];
+        /// A non-defining theme must be at least one part in this many of the
+        /// disk. Measured, not chosen: see the passenger rule above.
+        const THEME_SHARE: usize = 32;
+
+        let system = SYSTEM.iter().find(|(m, need, _)| has(m) >= *need).map(|(_, _, l)| *l);
+
+        let mut themes: Vec<(bool, usize, &str)> = THEMES
+            .iter()
+            .filter_map(|(m, defining, label)| {
+                let hits = has(m);
+                // A small disk is exempt from the share test as well as the
+                // count: two files out of six IS what that disk is, and the
+                // proportion says so anyway -- but a dozen-file disk with one
+                // match would fail a share test that a reader would not.
+                let small = n <= 12;
+                let enough = hits >= 2 && hits * THEME_SHARE >= n;
+                (hits > 0 && (*defining || small || enough)).then_some((*defining, hits, *label))
+            })
+            .collect();
+        // Defining first, then by weight of evidence.  A stable sort keeps the
+        // table's own order for ties, so the list above is the tie-break and
+        // the output cannot depend on hash order.
+        themes.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        themes.truncate(2);
+
+        let source = names
+            .iter()
+            .filter(|f| {
+                f.rsplit_once('.').is_some_and(|(_, e)| SOURCE_EXT.contains(&e))
+            })
+            .count();
+
+        let mut parts: Vec<String> = Vec::new();
+        match (system, themes.is_empty()) {
+            (Some(sys), true) => parts.push(format!("{sys} system disk")),
+            (Some(sys), false) => parts.push(sys.to_string()),
+            (None, _) => {}
+        }
+        parts.extend(themes.iter().map(|(_, _, l)| l.to_string()));
+        if parts.is_empty() {
+            parts.push(
+                if source >= 3.max(n / 2) { "source and listings" } else { "assorted CP/M files" }
+                    .to_string(),
+            );
+        } else if source >= 6.max(n * 2 / 3) {
+            parts.push("with source".to_string());
+        }
+        Some(parts.join(", "))
+    }
+
     /// Regenerate `src/cpm/repodisks.txt` from the collections above.
     ///
     /// Ignored: it needs the disks. Set `REPODISKS_HOME` to the folder holding
@@ -679,21 +821,21 @@ mod generate {
             return;
         }
 
-        let mut s = String::new();
-        s.push_str(REPODISKS_HEADER);
-        s.push_str(
-            "\n\nWhat is on each disk image the gateway is known to run, so you can\n\
-             tell which one you want before going to find it.  These are not\n\
-             shipped with the gateway -- they are other people's collections, and\n\
-             the readme in this folder says how to put one here.\n\n\
-             Each listing is the disk's OWN directory, read through the same\n\
-             mount path the gateway uses.  A disk with no CP/M filesystem says so\n\
-             instead: it boots its own operating system, and where it keeps its\n\
-             files is that system's business.\n",
-        );
+        // Everything first, then one sorted pass: the catalogue is ordered by
+        // disk name across all the collections, not grouped by collection.
+        // Grouping was how it grew and it made the file unusable for its one
+        // purpose -- you cannot look a disk up by name unless you already know
+        // whose collection it is in, which is the thing you came to find out.
+        struct Entry {
+            disk: String,
+            tag: &'static str,
+            order: usize,
+            files: Option<Vec<String>>,
+        }
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut present: Vec<&str> = Vec::new();
 
-        let mut found = 0usize;
-        for (name, rel, from, only) in REPOS {
+        for (order, (tag, name, rel, _from, only)) in REPOS.iter().enumerate() {
             let dir = std::path::Path::new(&home).join(rel);
             if !dir.is_dir() {
                 eprintln!("skipping {name}: no {}", dir.display());
@@ -716,29 +858,86 @@ mod generate {
             if images.is_empty() {
                 continue;
             }
-            // Four line feeds before each repo: the separator has to be visible
-            // at a glance in a plain-text file with no other formatting.
-            s.push_str("\n\n\n\n");
-            s.push_str(&format!(">>>>> {name}\n"));
-                s.push_str(&format!("      {from}\n"));
+            present.push(name);
             for image in images {
                 let disk = image.file_name().unwrap().to_string_lossy().to_string();
-                s.push_str(&format!("\n>> {disk}\n"));
-                match files_on(&image) {
-                    Some(names) if !names.is_empty() => {
-                        for n in names {
-                            s.push_str(&n);
-                            s.push('\n');
-                        }
-                    }
-                    Some(_) => s.push_str("(the CP/M directory is empty)\n"),
-                    None => s.push_str("(no CP/M filesystem -- this disk boots its own system)\n"),
-                }
-                s.push('\n');
-                found += 1;
+                entries.push(Entry { disk, tag, order, files: files_on(&image) });
             }
         }
+        let found = entries.len();
         assert!(found > 0, "no disks found under {home} — set REPODISKS_HOME");
+
+        // Case-insensitively, because `CDISK01.DSK` and `cpm13.dsk` are one
+        // list to a reader and two to a byte comparison -- ASCII order would
+        // put every upper-case name first and hide half the catalogue below
+        // the other half.  Ties go to the order the collections are declared
+        // in, so the eight names that exist in more than one collection
+        // (`cpm22.dsk` is in three) always land the same way round.
+        entries.sort_by(|a, b| {
+            a.disk.to_ascii_lowercase().cmp(&b.disk.to_ascii_lowercase()).then(a.order.cmp(&b.order))
+        });
+
+        /// What one entry says about itself, wherever it is printed.
+        fn summary(e: &Entry) -> String {
+            match &e.files {
+                None => "boots its own operating system -- no CP/M filesystem".to_string(),
+                Some(f) if f.is_empty() => "an empty CP/M directory".to_string(),
+                Some(f) => {
+                    let what = describe_contents(f).unwrap_or_else(|| "assorted CP/M files".into());
+                    let n = f.len();
+                    format!("{what} -- {n} file{}", if n == 1 { "" } else { "s" })
+                }
+            }
+        }
+
+        let mut s = String::new();
+        s.push_str(REPODISKS_HEADER);
+        s.push_str(
+            "\n\nWhat is on each disk image the gateway is known to run, so you can\n\
+             tell which one you want before going to find it.  These are not\n\
+             shipped with the gateway -- they are other people's collections, and\n\
+             the readme in this folder says how to put one here.\n\n\
+             Every disk is listed once, by name, A to Z, whichever collection it\n\
+             came from -- the index below, then the same disks in full.  Eight\n\
+             names exist in more than one collection and are different disks, so\n\
+             each entry names the collection it came from.\n\n\
+             Each listing is the disk's OWN directory, read through the same\n\
+             mount path the gateway uses, and the line under each name is worked\n\
+             out from those files -- not from the filename and not from anyone's\n\
+             catalogue.  A disk with no CP/M filesystem says so instead: it boots\n\
+             its own operating system, and where it keeps its files is that\n\
+             system's business.\n",
+        );
+
+        s.push_str("\n\n\nWHERE THEY COME FROM\n--------------------\n");
+        for (tag, name, _rel, from, _only) in REPOS {
+            if !present.contains(name) {
+                continue;
+            }
+            s.push_str(&format!("\n>>>>> {tag} -- {name}\n"));
+            s.push_str(&format!("      {from}\n"));
+        }
+
+        s.push_str("\n\n\nTHE DISKS, A TO Z\n-----------------\n");
+        for e in &entries {
+            s.push_str(&format!("\n  {}  ({})\n      {}\n", e.disk, e.tag, summary(e)));
+        }
+
+        s.push_str("\n\n\nEVERY DISK IN FULL\n------------------\n");
+        for e in &entries {
+            s.push_str(&format!("\n>> {}\n   {} -- {}\n", e.disk, e.tag, summary(e)));
+            match &e.files {
+                Some(names) if !names.is_empty() => {
+                    for n in names {
+                        s.push_str(n);
+                        s.push('\n');
+                    }
+                }
+                Some(_) => s.push_str("(the CP/M directory is empty)\n"),
+                None => s.push_str("(no CP/M filesystem -- this disk boots its own system)\n"),
+            }
+            s.push('\n');
+        }
 
         // A collection already in the catalogue must still be in it.  The loop
         // above *skips* a collection whose folder is absent, so regenerating
@@ -749,10 +948,10 @@ mod generate {
         if let Ok(old) = std::fs::read_to_string(&out) {
             let lost: Vec<&str> = REPOS
                 .iter()
-                .map(|(name, ..)| *name)
+                .map(|(_tag, name, ..)| *name)
                 .filter(|name| {
-                    let heading = format!(">>>>> {name}");
-                    old.contains(&heading) && !s.contains(&heading)
+                    let heading = format!("-- {name}");
+                    old.contains(name) && !s.contains(&heading)
                 })
                 .collect();
             assert!(
@@ -764,6 +963,107 @@ mod generate {
         }
         std::fs::write(&out, &s).expect("write");
         eprintln!("wrote {out}: {found} disks, {} bytes", s.len());
+    }
+
+    /// `describe_contents` runs only when the catalogue is regenerated, which
+    /// needs the disks and so cannot happen in CI -- and it is the one part of
+    /// the generator that makes a *claim* rather than copying a directory
+    /// listing. So its rules are tested here from file lists alone, where the
+    /// real disks are not needed. Both rules below were written after a first
+    /// version stated the falsehood each one now prevents.
+    #[cfg(test)]
+    mod tests {
+        use super::describe_contents;
+
+        fn files(names: &[&str]) -> Vec<String> {
+            names.iter().map(|n| n.to_string()).collect()
+        }
+
+        /// Padding to a size, so a rule about proportion can be tested at one.
+        fn filler(n: usize) -> Vec<String> {
+            (0..n).map(|i| format!("FILL{i:04}.TXT")).collect()
+        }
+
+        fn describe(names: &[&str], pad: usize) -> String {
+            let mut f = files(names);
+            f.extend(filler(pad));
+            describe_contents(&f).expect("a CP/M directory describes itself")
+        }
+
+        #[test]
+        fn test_a_disk_with_no_filesystem_has_nothing_to_describe() {
+            // The marker the generator itself writes, not a real file name.
+            let f = files(&["(no CP/M filesystem -- this disk boots its own system)"]);
+            assert_eq!(describe_contents(&f), None);
+        }
+
+        /// The measured case: `hd-tools.dsk`, 345 files, all six Zork files.
+        /// A flat two-match rule prints "Infocom adventures" here, which is the
+        /// defect this test exists to hold shut.
+        #[test]
+        fn test_zork_on_a_tools_disk_is_a_passenger_not_the_subject() {
+            let zork = &["ZORK1.COM", "ZORK1.DAT", "ZORK2.COM", "ZORK2.DAT", "ZORK3.COM", "ZORK3.DAT"];
+            let big = describe(zork, 339);
+            assert!(
+                !big.contains("Infocom"),
+                "six Zork files out of 345 is 1.8% of the disk and must not name it: {big}",
+            );
+            // The positive control: the same six files ARE the subject of a
+            // disk that is only those files.  Without this, the assertion above
+            // passes just as well when the label has been deleted outright.
+            let small = describe(zork, 0);
+            assert!(small.contains("Infocom adventures"), "a Zork disk is a Zork disk: {small}");
+        }
+
+        /// Between those two sizes the rule is the share, so check it bites at
+        /// the boundary rather than only at the extremes.
+        #[test]
+        fn test_a_theme_is_named_on_its_share_of_the_disk() {
+            // 6 files, one part in 32 => named up to 192 files, not beyond.
+            let zork = &["ZORK1.COM", "ZORK1.DAT", "ZORK2.COM", "ZORK2.DAT", "ZORK3.COM", "ZORK3.DAT"];
+            assert!(describe(zork, 192 - 6).contains("Infocom"), "6 of 192 is the last size that qualifies");
+            assert!(!describe(zork, 193 - 6).contains("Infocom"), "6 of 193 is a passenger");
+        }
+
+        /// A single *defining* file is exempt from both tests -- that is the
+        /// whole point of the flag, and a proportional rule would otherwise
+        /// bury it on any large disk.
+        #[test]
+        fn test_one_defining_file_names_a_disk_of_any_size() {
+            assert!(describe(&["COMAL.COM"], 0).contains("COMAL"));
+            assert!(describe(&["COMAL.COM"], 400).contains("COMAL"));
+        }
+
+        /// A theme with a single match on a big disk was never named, and must
+        /// still not be: the share test is an addition to the count, not a
+        /// replacement for it.
+        #[test]
+        fn test_one_match_still_does_not_name_a_large_disk() {
+            let d = describe(&["CHESS.COM"], 40);
+            assert!(!d.contains("games"), "one game among 41 files is not a games disk: {d}");
+        }
+
+        /// The measured case behind the other rule: `CDOSCPM.COM` is a
+        /// CDOS-to-CP/M *converter* and lives on CP/M disks. Matching it
+        /// labelled four CP/M disks "Cromemco CDOS".
+        #[test]
+        fn test_a_system_is_claimed_only_on_the_files_that_are_the_system() {
+            let d = describe(&["CDOSCPM.COM", "MOVCPM.COM", "SYSGEN.COM"], 20);
+            assert!(!d.contains("CDOS"), "a converter is not the system it converts: {d}");
+            assert!(d.contains("CP/M 2.2"), "and the system that IS there is named: {d}");
+            // Both markers together are the system.
+            let real = describe(&["CDOS.COM", "CDOSGEN.COM"], 20);
+            assert!(real.contains("Cromemco CDOS"), "the kernel and its generator are: {real}");
+        }
+
+        /// A disk that matches nothing still gets an honest line rather than an
+        /// empty one -- and the source-heavy variant is a different answer.
+        #[test]
+        fn test_a_disk_matching_nothing_says_so_without_guessing() {
+            assert_eq!(describe(&["IMP.COM", "MLOAD.COM"], 10), "assorted CP/M files");
+            let src = describe(&["THING.ASM", "THING.PRN", "THING.REL", "OTHER.MAC"], 0);
+            assert_eq!(src, "source and listings");
+        }
     }
 }
 
@@ -861,21 +1161,81 @@ mod tests {
         let s = repo_disks();
         assert!(s.starts_with(REPODISKS_HEADER), "the header is what marks it as ours");
 
-        let repos: Vec<&str> = s.lines().filter(|l| l.starts_with(">>>>> ")).collect();
-        let disks: Vec<&str> = s.lines().filter(|l| l.starts_with(">> ")).collect();
-        assert!(repos.len() >= 4, "every collection we support: {repos:?}");
-        assert!(disks.len() > 80, "one entry per image, got {}", disks.len());
+        // The three sections the header promises, in the order it promises
+        // them.  A `find` on each rather than a `contains`, because "the index
+        // below, then the same disks in full" is a claim about order.
+        let (where_from, a_to_z, in_full) = (
+            s.find("\nWHERE THEY COME FROM\n").expect("a provenance section"),
+            s.find("\nTHE DISKS, A TO Z\n").expect("an index"),
+            s.find("\nEVERY DISK IN FULL\n").expect("the full listings"),
+        );
+        assert!(where_from < a_to_z && a_to_z < in_full, "the sections are in reading order");
 
-        // Four line feeds before each collection, two between disks — the only
-        // way the eye finds a collection in a file this long.
+        // Every collection says who it came from, on the line under its name.
+        let repos: Vec<&str> = s.lines().filter(|l| l.starts_with(">>>>> ")).collect();
+        assert!(repos.len() >= 4, "every collection we support: {repos:?}");
         for r in &repos {
-            assert!(s.contains(&format!("\n\n\n\n{r}\n")), "{r} needs its four blank lines");
+            assert!(r.contains(" -- "), "{r} names its short tag and then itself");
+            let after = s.split_once(&format!("{r}\n")).expect("a heading has a body").1;
+            let url = after.lines().next().unwrap_or_default();
+            assert!(url.contains("https://"), "{r} must say where to get it, got {url:?}");
         }
-        // Every disk names a `.dsk`, and every one of them says *something*:
-        // a listing, or why there is none.
-        assert!(disks.iter().all(|d| d.to_ascii_lowercase().ends_with(".dsk")), "{disks:?}");
-        for block in s.split("\n>> ").skip(1) {
+
+        // The index and the full listings are the same disks.  This is the
+        // promise that a reader leans on -- looking a name up in the index and
+        // finding nothing under it is the one failure that makes the file
+        // useless -- and it is exactly what a partial regeneration breaks.
+        let index: Vec<&str> = s[a_to_z..in_full]
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.starts_with("      ") && !l.trim().is_empty())
+            .map(|l| l.trim())
+            .collect();
+        let full: Vec<&str> = s[in_full..].lines().filter_map(|l| l.strip_prefix(">> ")).collect();
+        assert!(index.len() > 80, "one index row per image, got {}", index.len());
+        assert_eq!(
+            index.len(),
+            full.len(),
+            "the index and the listings must be the same disks, not {} and {}",
+            index.len(),
+            full.len(),
+        );
+        for (row, disk) in index.iter().zip(&full) {
+            // The index row is "NAME  (tag)"; the listing heading is the name.
+            let (name, tag) = row.split_once("  (").expect("an index row names its collection");
+            assert_eq!(name, *disk, "the index and the listings must run in the same order");
+            assert!(tag.ends_with(')') && tag.len() > 1, "{row} names a collection");
+            assert!(name.to_ascii_lowercase().ends_with(".dsk"), "{name} is a disk image");
+        }
+
+        // A to Z, case-insensitively -- the whole reason the file was
+        // reordered.  Byte order would put every upper-case name first and
+        // hide half the catalogue below the other half.
+        let keys: Vec<String> = full.iter().map(|d| d.to_ascii_lowercase()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "the disks must be in A-to-Z order");
+
+        // Eight names exist in more than one collection, and the header says
+        // so in prose -- so the prose is checked against the file rather than
+        // left to rot.  `cpm22.dsk` is the one in three.
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for d in &full {
+            *counts.entry(*d).or_default() += 1;
+        }
+        let shared: Vec<(&&str, &usize)> = counts.iter().filter(|(_, n)| **n > 1).collect();
+        assert_eq!(shared.len(), 8, "the header promises eight shared names: {shared:?}");
+        assert!(
+            s.contains("Eight\nnames exist in more than one collection"),
+            "and the header says eight, in the words a reader sees",
+        );
+        assert_eq!(counts.get("cpm22.dsk"), Some(&3), "cpm22.dsk is the one in three");
+
+        // Every disk says *something*: a summary line, then a listing or why
+        // there is none.
+        for block in s[in_full..].split("\n>> ").skip(1) {
             let (name, rest) = block.split_once('\n').expect("a disk block has a body");
+            let summary = rest.lines().next().unwrap_or_default();
+            assert!(summary.contains(" -- "), "{name} needs its one-line summary, got {summary:?}");
             assert!(!rest.trim().is_empty(), "{name} has an empty entry");
         }
 

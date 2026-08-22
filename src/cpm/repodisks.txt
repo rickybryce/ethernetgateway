@@ -6,18 +6,369 @@ tell which one you want before going to find it.  These are not
 shipped with the gateway -- they are other people's collections, and
 the readme in this folder says how to put one here.
 
+Every disk is listed once, by name, A to Z, whichever collection it
+came from -- the index below, then the same disks in full.  Eight
+names exist in more than one collection and are different disks, so
+each entry names the collection it came from.
+
 Each listing is the disk's OWN directory, read through the same
-mount path the gateway uses.  A disk with no CP/M filesystem says so
-instead: it boots its own operating system, and where it keeps its
-files is that system's business.
+mount path the gateway uses, and the line under each name is worked
+out from those files -- not from the filename and not from anyone's
+catalogue.  A disk with no CP/M filesystem says so instead: it boots
+its own operating system, and where it keeps its files is that
+system's business.
 
 
 
+WHERE THEY COME FROM
+--------------------
 
->>>>> Altair-Duino / Altair8800 simulator (David Hansel)
+>>>>> hansel -- Altair-Duino / Altair8800 simulator (David Hansel)
       https://github.com/dhansel/Altair8800  (the disks/ folder)
 
+>>>>> duino -- Altair-Duino disks (Jim McNeely) -- what this collection uniquely has
+      https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)
+
+>>>>> duino-extra -- Altair-Duino disks (Jim McNeely) -- the extra/ folder
+      https://github.com/jpmcneely/AltairDuino-Disks  (the extra/ folder)
+
+>>>>> altairsim -- z80pack — altairsim library
+      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
+
+>>>>> cpmsim -- z80pack — cpmsim library
+      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
+
+>>>>> cromemcosim -- z80pack — cromemcosim library
+      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
+
+>>>>> imsaisim -- z80pack — imsaisim library
+      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
+
+
+
+THE DISKS, A TO Z
+-----------------
+
+  apu.dsk  (imsaisim)
+      source and listings -- 15 files
+
+  CDISK01.DSK  (hansel)
+      Cromemco CDOS, BASIC -- 15 files
+
+  CDISK02.DSK  (hansel)
+      CP/M 2.2 system disk -- 42 files
+
+  CDISK03.DSK  (hansel)
+      CP/M 2.2, assembler and linker tools -- 75 files
+
+  cdos236_8.dsk  (cromemcosim)
+      Cromemco CDOS, BASIC -- 17 files
+
+  cdos258_8.dsk  (cromemcosim)
+      Cromemco CDOS, BASIC -- 18 files
+
+  comms.dsk  (imsaisim)
+      terminal and file-transfer tools -- 11 files
+
+  cpm13.dsk  (altairsim)
+      CP/M 2.2, graphics demos -- 33 files
+
+  cpm13.dsk  (cpmsim)
+      CP/M 2.2 system disk -- 24 files
+
+  cpm14-vdm.dsk  (altairsim)
+      CP/M 2.2, graphics demos -- 28 files
+
+  cpm14.dsk  (altairsim)
+      CP/M 2.2, graphics demos -- 34 files
+
+  cpm14.dsk  (cpmsim)
+      CP/M 2.2 system disk -- 25 files
+
+  cpm1975.dsk  (cpmsim)
+      assorted CP/M files -- 4 files
+
+  cpm22-1.dsk  (cpmsim)
+      CP/M 2.2, assembler and linker tools -- 32 files
+
+  cpm22-2.dsk  (cpmsim)
+      CP/M 2.2 system disk -- 20 files
+
+  cpm22-62khd.dsk  (cpmsim)
+      CP/M 2.2 (62K) system disk -- 6 files
+
+  cpm22-vdm.dsk  (altairsim)
+      CP/M 2.2, graphics demos -- 37 files
+
+  cpm22.dsk  (altairsim)
+      CP/M 2.2 (62K), graphics demos -- 44 files
+
+  cpm22.dsk  (cromemcosim)
+      CP/M 2.2 system disk -- 38 files
+
+  cpm22.dsk  (imsaisim)
+      CP/M 2.2, assembler and linker tools -- 44 files
+
+  cpm3-1.dsk  (cpmsim)
+      CP/M 3.0 system disk -- 31 files
+
+  cpm3-1.dsk  (imsaisim)
+      CP/M 3.0 system disk -- 29 files
+
+  cpm3-2.dsk  (cpmsim)
+      CP/M 3.0, assembler and linker tools -- 25 files
+
+  cpm3-2.dsk  (imsaisim)
+      CP/M 3.0, assembler and linker tools -- 27 files
+
+  cromix1127_8.dsk  (cromemcosim)
+      boots its own operating system -- no CP/M filesystem
+
+  cromix_work.dsk  (cromemcosim)
+      boots its own operating system -- no CP/M filesystem
+
+  cyclops.dsk  (imsaisim)
+      source and listings -- 16 files
+
+  dazzler.dsk  (imsaisim)
+      graphics demos -- 4 files
+
+  dazzler_graphics.dsk  (cromemcosim)
+      BASIC, graphics demos -- 16 files
+
+  dazzler_stuff.dsk  (cromemcosim)
+      graphics demos -- 6 files
+
+  dazzlerII.dsk  (imsaisim)
+      graphics demos, games -- 8 files
+
+  DISK01.DSK  (hansel)
+      CP/M 2.2, BASIC, assembler and linker tools -- 36 files
+
+  DISK02.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK03.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK04.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK05.DSK  (hansel)
+      CP/M 2.2, BASIC, CPU exercisers -- 27 files
+
+  DISK06.DSK  (hansel)
+      SuperCalc worksheets, terminal and file-transfer tools -- 20 files
+
+  DISK07.DSK  (hansel)
+      WordStar, terminal and file-transfer tools -- 10 files
+
+  DISK08.DSK  (hansel)
+      Infocom adventures -- 6 files
+
+  DISK09.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK0A.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK0B.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK0C.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK0D.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK0E.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK0F.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  DISK10.DSK  (hansel)
+      graphics demos, games -- 24 files
+
+  DISK11.DSK  (hansel)
+      BASIC, games -- 23 files
+
+  DISK12.DSK  (hansel)
+      assorted CP/M files -- 12 files
+
+  DISK13.DSK  (hansel)
+      CP/M 3.0, BASIC, assembler and linker tools -- 33 files
+
+  DISK14.DSK  (hansel)
+      CP/M 3.0 system disk -- 22 files
+
+  DISK15.DSK  (hansel)
+      the Felix system, terminal and file-transfer tools -- 36 files
+
+  DISK16.DSK  (hansel)
+      CP/M 2.2, BASIC, assembler and linker tools -- 35 files
+
+  hd-tools.dsk  (cpmsim)
+      assorted CP/M files -- 345 files
+
+  hd-toolsrc.dsk  (cpmsim)
+      source and listings -- 17 files
+
+  HDSK01.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  HDSK02.DSK  (hansel)
+      boots its own operating system -- no CP/M filesystem
+
+  HDSK03.DSK  (hansel)
+      CP/M 2.2, the Altair hard-disk exerciser, BASIC -- 48 files
+
+  HDSK04.DSK  (duino)
+      CP/M 2.2, the Altair hard-disk exerciser, BASIC -- 95 files
+
+  HDSK05.DSK  (duino-extra)
+      BASIC, the Altair hard-disk exerciser -- 76 files
+
+  HDSK06.DSK  (duino-extra)
+      the Altair hard-disk exerciser, BASIC -- 63 files
+
+  HDSK07.DSK  (duino-extra)
+      dBASE, the Altair hard-disk exerciser -- 73 files
+
+  i8080tests.dsk  (cpmsim)
+      CPU exercisers -- 8 files
+
+  imdos202.dsk  (imsaisim)
+      BASIC -- 33 files
+
+  imdos205r0-1.dsk  (imsaisim)
+      IMDOS (IMSAI CP/M), BASIC, assembler and linker tools -- 44 files
+
+  imdos205r0-2.dsk  (imsaisim)
+      graphics demos -- 16 files
+
+  imsai-cpm13.dsk  (imsaisim)
+      CP/M 2.2, graphics demos -- 33 files
+
+  itc-cpm.dsk  (cromemcosim)
+      CP/M 2.2, assembler and linker tools -- 79 files
+
+  micah-cpm.dsk  (cromemcosim)
+      CP/M 2.2 system disk -- 46 files
+
+  mits-basic40.dsk  (altairsim)
+      boots its own operating system -- no CP/M filesystem
+
+  mits-basic50.dsk  (altairsim)
+      boots its own operating system -- no CP/M filesystem
+
+  mits-cpm-tools.dsk  (altairsim)
+      assorted CP/M files -- 13 files
+
+  mits-cpm14-24k.dsk  (altairsim)
+      CP/M 2.2 system disk -- 18 files
+
+  mits-cpm22-burcon-56k.dsk  (altairsim)
+      CP/M 2.2 system disk -- 20 files
+
+  mits-cpm22-lifeboat-56k.dsk  (altairsim)
+      CP/M 2.2, terminal and file-transfer tools -- 25 files
+
+  mpm-1.dsk  (cpmsim)
+      MP/M system disk -- 40 files
+
+  mpm-2.dsk  (cpmsim)
+      MP/M, assembler and linker tools -- 31 files
+
+  TDISK01.DSK  (hansel)
+      CP/M 2.2, graphics demos -- 31 files
+
+  TDISK02.DSK  (hansel)
+      CP/M 2.2 (62K), graphics demos, terminal and file-transfer tools -- 44 files
+
+  TDISK03.DSK  (hansel)
+      COMAL -- 26 files
+
+  TDISK04.DSK  (hansel)
+      CP/M 2.2, graphics demos -- 28 files
+
+  TDISK05.DSK  (hansel)
+      CP/M 2.2, graphics demos -- 37 files
+
+  TDISK06.DSK  (hansel)
+      games -- 26 files
+
+  ucsd-i5-1.dsk  (altairsim)
+      boots its own operating system -- no CP/M filesystem
+
+  ucsd-i5-2.dsk  (altairsim)
+      boots its own operating system -- no CP/M filesystem
+
+  ucsd-i5-interp.dsk  (altairsim)
+      boots its own operating system -- no CP/M filesystem
+
+  ucsd-iv-1.dsk  (cpmsim)
+      boots its own operating system -- no CP/M filesystem
+
+  ucsd-iv-1.dsk  (imsaisim)
+      boots its own operating system -- no CP/M filesystem
+
+  ucsd-iv-2.dsk  (cpmsim)
+      boots its own operating system -- no CP/M filesystem
+
+  ucsd-iv-2.dsk  (imsaisim)
+      boots its own operating system -- no CP/M filesystem
+
+  ucsd-iv-interp.dsk  (cpmsim)
+      boots its own operating system -- no CP/M filesystem
+
+  ucsd-iv-interp.dsk  (imsaisim)
+      boots its own operating system -- no CP/M filesystem
+
+  um-cpm13.dsk  (imsaisim)
+      CP/M 2.2, graphics demos -- 33 files
+
+  vbasic.dsk  (imsaisim)
+      BASIC -- 10 files
+
+  vdm-stuff.dsk  (altairsim)
+      games -- 26 files
+
+  vio-stuff.dsk  (imsaisim)
+      games -- 11 files
+
+  xybasic.dsk  (imsaisim)
+      BASIC -- 7 files
+
+  z80tests.dsk  (cpmsim)
+      CPU exercisers -- 6 files
+
+
+
+EVERY DISK IN FULL
+------------------
+
+>> apu.dsk
+   imsaisim -- source and listings -- 15 files
+AM9511.MAC
+AM9511.PRN
+AM9511.REL
+APU.MAC
+APU.PRN
+APU.REL
+APU.SUB
+README.TXT
+TEST.FOR
+TEST.PRN
+TEST.REL
+TEST.SUB
+TESTAPU.COM
+TESTAPU.SYM
+TESTNAPU.COM
+
+
 >> CDISK01.DSK
+   hansel -- Cromemco CDOS, BASIC -- 15 files
 BASIC.COM
 BATCH.COM
 CDOS.COM
@@ -36,6 +387,7 @@ XFER.COM
 
 
 >> CDISK02.DSK
+   hansel -- CP/M 2.2 system disk -- 42 files
 ASM.COM
 ATRIB.COM
 BEGDAT.REL
@@ -81,6 +433,7 @@ XSUB.COM
 
 
 >> CDISK03.DSK
+   hansel -- CP/M 2.2, assembler and linker tools -- 75 files
 ASM.COM
 CBIOS.ASM
 CDOSCPM.COM
@@ -158,973 +511,66 @@ ZCPRD400.ASM
 ZPRCREMC.COM
 
 
->> DISK01.DSK
-ASM.COM
-CRC.COM
-DDT.COM
-DEMO.ASM
-DEMO.COM
-DEMO.HEX
-DEMO.PRN
-DUMP.COM
-ED.COM
-FORMAT.COM
-L80.COM
-LADDER.COM
-LADDER.DAT
-LOAD.COM
-LS.COM
-LUNAR.BAS
-M80.COM
-MAC.COM
-MBASIC.COM
-MOVCPM.COM
-NSWP.COM
-OTHELLO.COM
-PCGET.COM
-PCPUT.COM
-PIP.COM
-STARINS.BAS
-STARTRK.BAS
-STAT.COM
-SUBMIT.COM
-SURVEY.COM
-SYSGEN.COM
-TICTAK.BAS
-VIEW.COM
-WM.COM
-WM.HLP
-XSUB.COM
-
-
->> DISK02.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK03.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK04.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK05.DSK
-8080EXM.COM
-8080PRE.COM
-CATCHUM.COM
-CATCHUM.DAT
-CHASE.BAS
-CPUTEST.COM
-LADDER.COM
-LADDER.DAT
-LS.COM
-LUNAR.BAS
-MBASIC.COM
-MOVCPM.COM
-NSWP.COM
-OTHELLO.COM
-PCGET.COM
-PCPUT.COM
-PIP.COM
-STARINS.BAS
-STARTRK.BAS
-STAT.COM
-SURVEY.COM
-SYSGEN.COM
-TICTAK.BAS
-TST8080.COM
-VIEW.COM
-WM.COM
-WM.HLP
-
-
->> DISK06.DSK
-ARCS-DEP.CAL
-BRKEVN.CAL
-BUDGET.CAL
-DATTIM.COM
-INSTALL.COM
-INSTALL.DAT
-INSTALL.OVL
-MAINTAIN.COM
-PCGET.COM
-PCPUT.COM
-RULE-78.CAL
-SAMPLE.CAL
-SC.HLP
-SC2.COM
-SC2.HLP
-SC2.OVL
-SDI.COM
-SDI.OVL
-TEN.CAL
-TENMIN.CAL
-
-
->> DISK07.DSK
-INSTALL.COM
-PCGET.COM
-PCPUT.COM
-PIP.COM
-SPELSTAR.DCT
-SPELSTAR.OVR
-STAT.COM
-WS.COM
-WSMSGS.OVR
-WSOVLY1.OVR
-
-
->> DISK08.DSK
-ZORK1.COM
-ZORK1.DAT
-ZORK2.COM
-ZORK2.DAT
-ZORK3.COM
-ZORK3.DAT
-
-
->> DISK09.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK0A.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK0B.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK0C.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK0D.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK0E.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK0F.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> DISK10.DSK
-4DTICTAC.COM
-ADCTEST.COM
-AMBUSH.COM
-BARPLOT.COM
-CHASE.COM
-CHESS.COM
-COLOR.COM
-DAZZPLOT.COM
-DMATION.COM
-DOGFIGHT.COM
-DOODLE.COM
-GDEMO.COM
-GOTCHA.COM
-KSCOPE.COM
-LIFE.COM
-LS.COM
-PCGET.COM
-PIP.COM
-SKETCH.COM
-SPACEWAR.COM
-TANKWAR.COM
-TRACK.COM
-WRITER.COM
-XLIFE.COM
-
-
->> DISK11.DSK
-BASIC5.COM
-BIOS.ASM
-CHASE.COM
-CHECKERS.COM
-CHESS.COM
-DEFLECT.COM
-EXTBASIC.COM
-GALAXY.COM
-LIFE.COM
-LIFE8.COM
-LS.COM
-MSBASIC.COM
-PATTERN.COM
-PCGET.COM
-PIP.COM
-PIRANHA.COM
-PONG.COM
-RAIDERS.COM
-README.TXT
-TARGET.COM
-TARGET1.COM
-TRAIN.COM
-TREK80.COM
-
-
->> DISK12.DSK
-8BIT.HEX
-FILES.TXT
-I2A8-1.ASM
-I2A8-1.HEX
-I2FUNC.COM
-I2LIB.COM
-IMP.COM
-IMP245.COM
-IMP8.COM
-MLOAD.COM
-PIP.COM
-README.TXT
-
-
->> DISK13.DSK
-ACOPY.COM
-AFORMAT.COM
-BDOS3.SPR
-BIOS3.SPR
-CCP.COM
-COPYSYS.COM
-CPM3.SYS
-DEVICE.COM
-DIR.COM
-DUMP.COM
-ED.COM
-ERASE.COM
-GENCPM.COM
-GENCPM.SUB
-GET.COM
-LINK.COM
-LS.COM
-MBASIC.COM
-NSWP.COM
-PATCH.COM
-PCGET.COM
-PCPUT.COM
-PIP.COM
-PUT.COM
-README.TXT
-RENAME.COM
-RMAC.COM
-SAVE.COM
-SETDEF.COM
-SHOW.COM
-SID.COM
-SUBMIT.COM
-TYPE.COM
-
-
->> DISK14.DSK
-CCP.COM
-CPM3.SYS
-DATE.COM
-DIR.COM
-DUMP.COM
-ED.COM
-ERASE.COM
-FLOP2PC.COM
-GENCOM.COM
-GET.COM
-HELP.COM
-HELP.HLP
-HEXCOM.COM
-INITDIR.COM
-LIB.COM
-LS.COM
-MAC.COM
-PATCH.COM
-PC2FLOP.COM
-PIP.COM
-SET.COM
-SHOW.COM
-
-
->> DISK15.DSK
-ABSTRACT.035
-BEE.FAS
-BEE#.FEX
-CHECKOU&.FEX
-CHECKOUT.FAS
-DISTEST.FAS
-DISTEST&.FEX
-DOODLE.COM
-EXEC.COM
-EXEC.OBJ
-FANCY#.FEX
-FASM.COM
-FELIX.COM
-FELIX.DOC
-FELIX.OBJ
-FELIXV1.CAT
-LOADBACK.COM
-LOADOB.COM
-LOADPROG.COM
-LS.COM
-MUSTANG.FAS
-MUSTANG&.FEX
-PAINT.FAS
-PAINT.FEX
-PAINT&.FEX
-PAINTER.FEX
-PAINTER&.FEX
-PCGET.COM
-PCPUT.COM
-PIP.COM
-README.TXT
-SAPD.COM
-SAVEBACK.COM
-SAVEOB.COM
-SINCOS.OBJ
-TRACE.COM
-
-
->> DISK16.DSK
-ACOPY.COM
-AFORMAT.COM
-ASM.COM
-COPY.COM
-CRC.COM
-DDT.COM
-DUMP.COM
-ED.COM
-IOBYTE.TXT
-L80.COM
-LADDER.COM
-LADDER.DAT
-LOAD.COM
-LS.COM
-LUNAR.BAS
-M80.COM
-MAC.COM
-MBASIC.COM
-MOVCPM8.COM
-NSWP.COM
-OTHELLO.COM
-PCGET.COM
-PCPUT.COM
-PIP.COM
-STARINS.BAS
-STARTRK.BAS
-STAT.COM
-SUBMIT.COM
-SURVEY.COM
-SYSGEN.COM
-TICTAK.BAS
-VIEW.COM
-WM.COM
-WM.HLP
-XSUB.COM
-
-
->> HDSK01.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> HDSK02.DSK
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> HDSK03.DSK
-ACOPY.ASM
-ACOPY.COM
-ADEXER.ASM
-ADEXER.COM
-AFORMAT.ASM
-AFORMAT.COM
-ASM.COM
-BIOS.ASM
-BOOT.ASM
-CATCHUM.COM
-CATCHUM.DAT
-CPM22.ASM
-CPMOVE.ASM
-CPMSIZE.LIB
-CRC.COM
-DDT.COM
-DUMP.COM
-IOBYTE.TXT
-L80.COM
-LADDER.COM
-LADDER.DAT
-LOAD.COM
-LS.COM
-M80.COM
-MAC.COM
-MBASIC.COM
-MITSCNVT.COM
-MITSCNVT.TXT
-MOVCPM.SUB
-MOVCPMH.COM
-NSWP.COM
-PCGET.COM
-PCPUT.COM
-PIP.COM
-STAT.COM
-SUBMIT.COM
-SURVEY.COM
-SYSGEN.ASM
-SYSGEN.COM
-WM.COM
-WM.HLP
-XSUB.COM
-ZORK1.COM
-ZORK1.DAT
-ZORK2.COM
-ZORK2.DAT
-ZORK3.COM
-ZORK3.DAT
-
-
->> TDISK01.DSK
-ASM.COM
-BIOS.ASM
-BIOS.HEX
-BIOS.PRN
-BOOT.ASM
-BOOT.HEX
-BOOT.PRN
+>> cdos236_8.dsk
+   cromemcosim -- Cromemco CDOS, BASIC -- 17 files
+BASIC.COM
+BATCH.COM
 BYE.COM
+CDOS.COM
+CDOSGEN.COM
 CLS.COM
-CPM62.COM
-DDT.COM
-DUMP.ASM
 DUMP.COM
-ED.COM
-FORMAT.ASM
-FORMAT.COM
-KSCOPE.ASM
-KSCOPE.COM
-LOAD.COM
-MEMMAP.COM
-MICRO80.COM
-MOVCPM.COM
-PIP.COM
+EDIT.COM
+INIT.COM
+R.COM
+RDOS.COM
 STAT.COM
-SUBMIT.COM
-SYSGEN.COM
-SYSGEN.TXT
-VIEW.COM
+W.COM
 WM.COM
 WM.HLP
-XDIR.COM
+WRTSYS.COM
+XFER.COM
 
 
->> TDISK02.DSK
-ASM.COM
-BIOS.ASM
-BIOS.HEX
-BIOS.PRN
-BIOS.SYM
-BOOT.ASM
-BOOT.HEX
-BOOT.PRN
-BOOT.SYM
+>> cdos258_8.dsk
+   cromemcosim -- Cromemco CDOS, BASIC -- 18 files
+BASIC.COM
+BATCH.COM
 BYE.COM
+CDOS.COM
+CDOSGEN.COM
 CLS.COM
-COPY.ASM
-COPY.COM
-CPM62.SYS
-DDT.COM
-DISKDEF.LIB
-DUMP.ASM
 DUMP.COM
-ED.COM
-FORMAT.ASM
-FORMAT.COM
-KSCOPE.ASM
-KSCOPE.COM
-LOAD.COM
-MAC.COM
-MEMMAP.COM
-MICRO80.COM
-MOVCPM.COM
-PCGET.COM
-PCPUT.COM
-PIP.COM
-SDIR.COM
+EDIT.COM
+INIT271.COM
+INIT282.COM
+R.COM
+RDOS.COM
 STAT.COM
-SUBMIT.COM
-SURVEY.COM
-SURVEY.MAC
-SYSGEN.COM
-SYSGEN.SUB
-SYSGEN.TXT
-VIEW.COM
+W.COM
 WM.COM
 WM.HLP
-XDIR.COM
-XSUB.COM
+WRTSYS.COM
+XFER.COM
 
 
->> TDISK03.DSK
-APPLES.SAV
-BYE.COM
-CALENDAR.SAV
-CMDLIST.DOC
-COMAL.COM
-HANOI.SAV
-HELLO.SAV
-HI.SAV
-INSTALL.COM
-INSTALL.DAT
-KEYSC128.SAV
-MAGICSQR.SAV
-NAMES.DTA
-NIM.SAV
-NUM2WORD.SAV
-PHONEBK.SAV
-PIP.COM
-POLYNY.SAV
-PRIMES.SAV
-PRINTERR.SAV
-PRINTUSE.SAV
-RUNTIME.COM
-SORTING.SAV
-STARTED.DOC
-STAT.COM
-TRIANGLE.SAV
+>> comms.dsk
+   imsaisim -- terminal and file-transfer tools -- 11 files
+KERMIT.COM
+KERMIT3.COM
+QT-IMSAI.ASM
+QT-IMSAI.COM
+QTCHAT.DOC
+QTERM.DOC
+QTERM.PAT
+README.TXT
+XMODEM.ASM
+XMODEM.CFG
+XMODEM.COM
 
-
->> TDISK04.DSK
-ASM.COM
-BIOS.ASM
-BIOS.HEX
-BIOS.PRN
-BOOT.ASM
-BOOT.HEX
-BOOT.PRN
-BYE.COM
-CPM48.COM
-DDT.COM
-DUMP.ASM
-DUMP.COM
-ED.COM
-FORMAT.ASM
-FORMAT.COM
-KSCOPE.ASM
-KSCOPE.COM
-LOAD.COM
-MEMMAP.COM
-MICRO80.COM
-MOVCPM.COM
-PIP.COM
-STAT.COM
-SUBMIT.COM
-SURVEY.COM
-SYSGEN.COM
-SYSGEN.TXT
-XDIR.COM
-
-
->> TDISK05.DSK
-ASM.COM
-BIOS.ASM
-BIOS.HEX
-BIOS.PRN
-BOOT.ASM
-BOOT.HEX
-BOOT.PRN
-BYE.COM
-CLS.COM
-COPY.ASM
-COPY.COM
-CPM48.SYS
-DDT.COM
-DUMP.ASM
-DUMP.COM
-ED.COM
-FORMAT.ASM
-FORMAT.COM
-KSCOPE.ASM
-KSCOPE.COM
-LOAD.COM
-MEMMAP.COM
-MICRO80.COM
-MOVCPM.COM
-PIP.COM
-SDIR.COM
-STAT.COM
-SUBMIT.COM
-SURVEY.COM
-SURVEY.MAC
-SYSGEN.COM
-SYSGEN.SUB
-SYSGEN.TXT
-WM.COM
-WM.HLP
-XDIR.COM
-XSUB.COM
-
-
->> TDISK06.DSK
-CHASE.ASM
-CHASE.COM
-CHASE.HEX
-CHASE.PRN
-DEFLECT.ASM
-DEFLECT.COM
-DEFLECT.HEX
-DEFLECT.PRN
-LIFE.ASM
-LIFE.COM
-LIFE.HEX
-LIFE.PRN
-LIFE8.ASM
-LIFE8.COM
-LIFE8.DOC
-LIFE8.HEX
-LIFE8.PRN
-PCL-DSII.COM
-PONG.ASM
-PONG.COM
-PONG.HEX
-PONG.PRN
-TARGET.ASM
-TARGET.COM
-TARGET.HEX
-TARGET.PRN
-
-
-
-
-
->>>>> Altair-Duino disks (Jim McNeely) -- what this collection uniquely has
-      https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)
-
->> HDSK04.DSK
-ACOPY.ASM
-ACOPY.COM
-ADEXER.ASM
-ADEXER.COM
-AFORMAT.ASM
-AFORMAT.COM
-ASM.COM
-BALLYHOO.COM
-BALLYHOO.DAT
-BIOS.ASM
-BOOT.ASM
-CATCHUM.COM
-CATCHUM.DAT
-CPM22.ASM
-CPMOVE.ASM
-CPMSIZE.LIB
-CRC.COM
-CUTTHROA.COM
-CUTTHROA.DAT
-DDT.COM
-DEADLINE.COM
-DEADLINE.DAT
-DUMP.COM
-ENCHANTR.COM
-ENCHANTR.DAT
-HITCHHIK.COM
-HITCHHIK.DAT
-HOLLYWOO.COM
-HOLLYWOO.DAT
-ICFILES.TXT
-INFIDEL.COM
-INFIDEL.DAT
-IOBYTE.TXT
-KILLBIT.ASM
-KILLBIT.COM
-L80.COM
-LADDER.COM
-LADDER.DAT
-LEATHER.COM
-LEATHER.DAT
-LOAD.COM
-LS.COM
-LURKHORR.COM
-LURKHORR.DAT
-M80.COM
-MAC.COM
-MBASIC.COM
-MITSCNVT.COM
-MITSCNVT.TXT
-MOONMIST.COM
-MOONMIST.DAT
-MOVCPM.SUB
-MOVCPMH.COM
-NSWP.COM
-PCGET.COM
-PCPUT.COM
-PIP.COM
-PLANETFA.COM
-PLANETFA.DAT
-PLUNDERE.COM
-PLUNDERE.DAT
-SEASTALK.COM
-SEASTALK.DAT
-SORCERER.COM
-SORCERER.DAT
-SPELBRKR.COM
-SPELBRKR.DAT
-STARCROS.COM
-STARCROS.DAT
-STAT.COM
-STATIONF.COM
-STATIONF.DAT
-STATLINE.C
-STATLINE.COM
-SUBMIT.COM
-SURVEY.COM
-SUSPECT.COM
-SUSPECT.DAT
-SUSPNDED.COM
-SUSPNDED.DAT
-SYSGEN.ASM
-SYSGEN.COM
-WISHBRIN.COM
-WISHBRIN.DAT
-WITNESS.COM
-WITNESS.DAT
-WM.COM
-WM.HLP
-XSUB.COM
-ZORK1.COM
-ZORK1.DAT
-ZORK2.COM
-ZORK2.DAT
-ZORK3.COM
-ZORK3.DAT
-
-
-
-
-
->>>>> Altair-Duino disks (Jim McNeely) -- the extra/ folder
-      https://github.com/jpmcneely/AltairDuino-Disks  (the extra/ folder)
-
->> HDSK05.DSK
-ACOPY.COM
-ADEXER.COM
-AFORMAT.COM
-ASM.COM
-BASCOM.COM
-BASCOM.HLP
-BASCOM.SUB
-BASCOM2.HLP
-BASLIB.REL
-BCLOAD
-BLACKJAK.BAS
-BLACKJAK.COM
-BLACKJAK.INT
-BRUN.COM
-CB80.COM
-CB80.IRL
-CB80.OV1
-CB80.OV2
-CB80.OV3
-CB80.SUB
-CBASE2.COM
-CBASIC.COM
-CBASIC.SUB
-CBASXREF.COM
-CHASE.BAS
-CRC.COM
-CRUN.COM
-CRUN2.COM
-DDT.COM
-DEMOGRAF.BAS
-DUMP.COM
-ELIZA.BAS
-GRAPHCOM.BAS
-GRAPHR.BAS
-GSXPREP.BAS
-HAMURS.BAS
-HORSE.BAS
-KING4K.BAS
-L80.COM
-LANDER4K.BAS
-LIB.COM
-LINK.COM
-LK80.COM
-LOAD.COM
-LS.COM
-M80.COM
-MAC.COM
-MBASIC.COM
-MBASIC45.COM
-MBASIC51.COM
-MBASIC52.COM
-MITSCNVT.COM
-MITSCNVT.TXT
-MSTMND.BAS
-OBSLIB.REL
-PCGET.COM
-PCPUT.COM
-PIP.COM
-RANTEST.ASC
-RANTEST.BAS
-RANTEST.COM
-READ.ME
-ROCKET.BAS
-SAMPLE.BAS
-SAMPLE.SUB
-SIEVE.BAS
-STARTREK.BAS
-STAT.COM
-SUBMIT.COM
-SURVEY.COM
-TAXMAN.BAS
-TRADE.BAS
-TSTCIR.BAS
-WUMPUS4K.BAS
-XBASIC.COM
-XSUB.COM
-
-
->> HDSK06.DSK
-ACOPY.COM
-ADEXER.COM
-AFORMAT.COM
-ASM.COM
-C.SUB
-CDADDS.MAC
-CDADDS.REL
-CDADM3.MAC
-CDADM3.REL
-CDANSI.MAC
-CDANSI.REL
-CDBEE.MAC
-CDBEE.REL
-CDHZ15.MAC
-CDHZ15.REL
-CDISB.MAC
-CDISB.REL
-CDPERK.MAC
-CDPERK.REL
-CDSROC.MAC
-CDSROC.REL
-CDVT100.MAC
-CDVT100.REL
-CDWH19.MAC
-CDWH19.REL
-CDZEPH.MAC
-CDZEPH.REL
-COBLBX.REL
-COBLIB.REL
-COBLOC
-COBOL.COM
-COBOL1.OVR
-COBOL2.OVR
-COBOL3.OVR
-COBOL4.OVR
-CRC.COM
-CRTDRV.REL
-CRTEST.COB
-CVISAM.COM
-DDT.COM
-DEBUG.REL
-DUMP.COM
-L80.COM
-LD80.COM
-LOAD.COM
-LS.COM
-M80.COM
-MAC.COM
-MBASIC.COM
-MITSCNVT.COM
-MITSCNVT.TXT
-PCGET.COM
-PCPUT.COM
-PIP.COM
-REBUILD.COM
-RECOVR.COB
-RUNCOB.COM
-SEQCVT.COM
-SQUARO.COB
-STAT.COM
-SUBMIT.COM
-SURVEY.COM
-XSUB.COM
-
-
->> HDSK07.DSK
-ACOPY.COM
-ADEXER.COM
-AFORMAT.COM
-APPECARD.FMT
-ASM.COM
-CHECKS.DBF
-CHXBOOK.MEM
-CHXDEPOS.FMT
-CHXINPUT.FMT
-CHXMENU.CMD
-CMAIN.CMD
-CPRINT.CMD
-CRC.COM
-CREATE.CMD
-DATER.CMD
-DATESYS.CMD
-DATETEST.HEX
-DBASE.COM
-DBASEMSG.TXT
-DBASEOVR.COM
-DDT.COM
-DEPOSITS.DBF
-DUMP.COM
-EBYNAME.NDX
-EBYNMBR.NDX
-EDITCARD.FMT
-EMAIN.CMD
-EMP-CONS.FRM
-EMP-ENTR.CMD
-EMP-PRT.FRM
-EMP-RPRT.CMD
-EMP-TERM.CMD
-EMP-UPD.CMD
-EMP-UPD.FMT
-EMPLOYEE.DBF
-EMPLOYEE.MEM
-EMPSCRN.FMT
-ESETUP.CMD
-IBYDESC.NDX
-IBYNMBR.NDX
-IMAIN.CMD
-INSTALL.COM
-INVCONS.FRM
-INVENT.DBF
-INVMAINT.CMD
-INVPRTR.FRM
-INVQUAN.CMD
-INVREAD.CMD
-INVRPRT.CMD
-ISETUP.CMD
-KEYWORD.NDX
-L80.COM
-LABELS.CMD
-LOAD.COM
-LS.COM
-M80.COM
-MAC.COM
-MBASIC.COM
-MITSCNVT.COM
-MITSCNVT.TXT
-NAMES.DBF
-PCGET.COM
-PCPUT.COM
-PIP.COM
-SETS.CMD
-STARTUP.CMD
-STAT.COM
-SUBMIT.COM
-SURVEY.COM
-TEXT.DBF
-TICKLE.FRM
-TICKLE.NDX
-XSUB.COM
-
-
-
-
-
->>>>> z80pack — altairsim library
-      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
 
 >> cpm13.dsk
+   altairsim -- CP/M 2.2, graphics demos -- 33 files
 ASM.COM
 BIOS.ASM
 BIOS.HEX
@@ -1160,7 +606,36 @@ WM.HLP
 XDIR.COM
 
 
+>> cpm13.dsk
+   cpmsim -- CP/M 2.2 system disk -- 24 files
+ASM.COM
+BIOS.ASM
+BIOS.HEX
+BIOS.PRN
+BOOT.ASM
+BOOT.HEX
+BOOT.PRN
+BYE.COM
+CLS.COM
+CPM63.SYS
+DDT.COM
+DUMP.COM
+ED.COM
+LOAD.COM
+MOVCPM.COM
+PIP.COM
+RESET.COM
+STAT.COM
+SUBMIT.COM
+SYSGEN.COM
+SYSGEN.SUB
+WM.COM
+WM.HLP
+XDIR.COM
+
+
 >> cpm14-vdm.dsk
+   altairsim -- CP/M 2.2, graphics demos -- 28 files
 ASM.COM
 BIOS.ASM
 BIOS.HEX
@@ -1192,6 +667,7 @@ XDIR.COM
 
 
 >> cpm14.dsk
+   altairsim -- CP/M 2.2, graphics demos -- 34 files
 ASM.COM
 BIOS.ASM
 BIOS.HEX
@@ -1228,7 +704,115 @@ WM.HLP
 XDIR.COM
 
 
+>> cpm14.dsk
+   cpmsim -- CP/M 2.2 system disk -- 25 files
+ASM.COM
+BIOS.ASM
+BIOS.HEX
+BIOS.PRN
+BOOT.ASM
+BOOT.HEX
+BOOT.PRN
+BYE.COM
+CLS.COM
+CPM63.SYS
+DDT.COM
+DUMP.ASM
+DUMP.COM
+ED.COM
+LOAD.COM
+MOVCPM.COM
+PIP.COM
+RESET.COM
+STAT.COM
+SUBMIT.COM
+SYSGEN.COM
+SYSGEN.SUB
+WM.COM
+WM.HLP
+XDIR.COM
+
+
+>> cpm1975.dsk
+   cpmsim -- assorted CP/M files -- 4 files
+BYE.COM
+DDT.COM
+HELLO.COM
+LOAD.COM
+
+
+>> cpm22-1.dsk
+   cpmsim -- CP/M 2.2, assembler and linker tools -- 32 files
+ASM.COM
+BYE.COM
+CLS.COM
+CREF80.COM
+DDT.COM
+DUMP.COM
+ED.COM
+HIST.COM
+HIST.UTL
+L80.COM
+LIB.COM
+LIB80.COM
+LINK.COM
+LOAD.COM
+M80.COM
+MAC.COM
+MOVCPM.COM
+PIP.COM
+RESET.COM
+RMAC.COM
+SDIR.COM
+SID.COM
+SLRNK.COM
+STAT.COM
+SUBMIT.COM
+SYSGEN.COM
+TRACE.UTL
+WM.COM
+WM.HLP
+XSUB.COM
+Z80ASM.COM
+ZSID.COM
+
+
+>> cpm22-2.dsk
+   cpmsim -- CP/M 2.2 system disk -- 20 files
+BIOS.HEX
+BIOS.Z80
+BOOT.HEX
+BOOT.Z80
+BYE.ASM
+BYE.COM
+CLS.COM
+CLS.MAC
+CPM64.SYS
+R.ASM
+R.COM
+RESET.ASM
+RESET.COM
+SPEED.C
+SPEED.COM
+SURVEY.COM
+SURVEY.MAC
+SYSGEN.SUB
+W.ASM
+W.COM
+
+
+>> cpm22-62khd.dsk
+   cpmsim -- CP/M 2.2 (62K) system disk -- 6 files
+BIOSHD.HEX
+BIOSHD.Z80
+BOOT.HEX
+BOOT.Z80
+CPM62.SYS
+SYSGEN.SUB
+
+
 >> cpm22-vdm.dsk
+   altairsim -- CP/M 2.2, graphics demos -- 37 files
 ASM.COM
 BIOS.ASM
 BIOS.HEX
@@ -1269,6 +853,7 @@ XSUB.COM
 
 
 >> cpm22.dsk
+   altairsim -- CP/M 2.2 (62K), graphics demos -- 44 files
 ASM.COM
 BIOS.ASM
 BIOS.HEX
@@ -1315,279 +900,98 @@ XDIR.COM
 XSUB.COM
 
 
->> mits-basic40.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> mits-basic50.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> mits-cpm-tools.dsk
+>> cpm22.dsk
+   cromemcosim -- CP/M 2.2 system disk -- 38 files
+ASM.COM
 BYE.COM
+CDOSCPM.COM
+CDOSCPM.DOC
+CDOSCPM.Z80
 CLS.COM
-LS.COM
-MEMMAP.COM
+CPM64.SYS
+CROBIOS.ASM
+CROBIOS.HEX
+CROBIOS.PRN
+CROBIOS.SYM
+CROBOOT.ASM
+CROBOOT.HEX
+CROBOOT.PRN
+CROBOOT.SYM
+DDT.COM
+DUMP.COM
+ED.COM
+INIT.COM
+LOAD.COM
+MAC.COM
+MOVCPM.COM
+PIP.COM
 R.COM
+RDOS.COM
 SDIR.COM
+STAT.COM
+SUBMIT.COM
 SURVEY.COM
+SURVEY.MAC
+SYSGEN.COM
+SYSGEN.SUB
 VIEW.COM
 W.COM
 WM.COM
 WM.HLP
-XMODEM.CFG
-XMODEM.COM
-
-
->> mits-cpm14-24k.dsk
-ASM.COM
-CONFIG.COM
-COPY.COM
-DDT.COM
-DUMP.ASM
-DUMP.COM
-ED.COM
-FILECOPY.COM
-FORMAT.COM
-LIST.COM
-LOAD.COM
-MOVCPM.COM
-PIP.COM
-SAVEUSER.COM
-STAT.COM
-SUBMIT.COM
-SYSGEN.COM
-USER.ASM
-
-
->> mits-cpm22-burcon-56k.dsk
-ASM.COM
-BIOS.ASM
-BIOS.HEX
-BIOS.PRN
-BOOT.ASM
-BOOT.HEX
-BOOT.PRN
-CPM56.SYS
-DDT.COM
-DUMP.COM
-ED.COM
-FORMAT.COM
-LOAD.COM
-MOVCPM.COM
-PIP.COM
-STAT.COM
-SUBMIT.COM
-SYSGEN.COM
-SYSGEN.SUB
+XDIR.COM
 XSUB.COM
 
 
->> mits-cpm22-lifeboat-56k.dsk
+>> cpm22.dsk
+   imsaisim -- CP/M 2.2, assembler and linker tools -- 44 files
 ASM.COM
-CONFIG.COM
-COPY.COM
-DDT.COM
-DISKDEF.LIB
-DUMP.ASM
-DUMP.COM
-ED.COM
-FILECOPY.COM
-FORMAT.COM
-LOAD.COM
-MEMR.COM
-MEMR.DOC
-MOVCPM.COM
-PCGET.COM
-PCPUT.COM
-PIP.COM
-READ-ME.DOC
-SAVEUSER.COM
-SETCPM.COM
-STAT.COM
-SUBMIT.COM
-SYSGEN.COM
-USER.ASM
-XSUB.COM
-
-
->> ucsd-i5-1.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> ucsd-i5-2.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> ucsd-i5-interp.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> vdm-stuff.dsk
-CHASE.ASM
-CHASE.COM
-CHASE.HEX
-CHASE.PRN
-DEFLECT.ASM
-DEFLECT.COM
-DEFLECT.HEX
-DEFLECT.PRN
-LIFE.ASM
-LIFE.COM
-LIFE.HEX
-LIFE.PRN
-LIFE8.ASM
-LIFE8.COM
-LIFE8.DOC
-LIFE8.HEX
-LIFE8.PRN
-PCL-DSII.COM
-PONG.ASM
-PONG.COM
-PONG.HEX
-PONG.PRN
-TARGET.ASM
-TARGET.COM
-TARGET.HEX
-TARGET.PRN
-
-
-
-
-
->>>>> z80pack — cpmsim library
-      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
-
->> cpm13.dsk
-ASM.COM
+AUTO.SUB
 BIOS.ASM
 BIOS.HEX
 BIOS.PRN
+BIOS.SYM
 BOOT.ASM
 BOOT.HEX
 BOOT.PRN
 BYE.COM
 CLS.COM
-CPM63.SYS
-DDT.COM
-DUMP.COM
-ED.COM
-LOAD.COM
-MOVCPM.COM
-PIP.COM
-RESET.COM
-STAT.COM
-SUBMIT.COM
-SYSGEN.COM
-SYSGEN.SUB
-WM.COM
-WM.HLP
-XDIR.COM
-
-
->> cpm14.dsk
-ASM.COM
-BIOS.ASM
-BIOS.HEX
-BIOS.PRN
-BOOT.ASM
-BOOT.HEX
-BOOT.PRN
-BYE.COM
-CLS.COM
-CPM63.SYS
+CLSV.COM
+CPM54.SYS
 DDT.COM
 DUMP.ASM
 DUMP.COM
 ED.COM
 LOAD.COM
-MOVCPM.COM
-PIP.COM
-RESET.COM
-STAT.COM
-SUBMIT.COM
-SYSGEN.COM
-SYSGEN.SUB
-WM.COM
-WM.HLP
-XDIR.COM
-
-
->> cpm1975.dsk
-BYE.COM
-DDT.COM
-HELLO.COM
-LOAD.COM
-
-
->> cpm22-1.dsk
-ASM.COM
-BYE.COM
-CLS.COM
-CREF80.COM
-DDT.COM
-DUMP.COM
-ED.COM
-HIST.COM
-HIST.UTL
-L80.COM
-LIB.COM
-LIB80.COM
-LINK.COM
-LOAD.COM
-M80.COM
 MAC.COM
+MEMMAP.COM
+MODEM.SUB
 MOVCPM.COM
 PIP.COM
-RESET.COM
-RMAC.COM
+PROFILE.SUB
+R.COM
 SDIR.COM
+SERIAL.SUB
 SID.COM
-SLRNK.COM
 STAT.COM
 SUBMIT.COM
-SYSGEN.COM
-TRACE.UTL
-WM.COM
-WM.HLP
-XSUB.COM
-Z80ASM.COM
-ZSID.COM
-
-
->> cpm22-2.dsk
-BIOS.HEX
-BIOS.Z80
-BOOT.HEX
-BOOT.Z80
-BYE.ASM
-BYE.COM
-CLS.COM
-CLS.MAC
-CPM64.SYS
-R.ASM
-R.COM
-RESET.ASM
-RESET.COM
-SPEED.C
-SPEED.COM
 SURVEY.COM
 SURVEY.MAC
-SYSGEN.SUB
-W.ASM
+SYSGEN.COM
+SYSGEN54.SUB
+SYSGEN60.SUB
+SYSGEN64.SUB
+VIEW.COM
+VMODE.COM
 W.COM
-
-
->> cpm22-62khd.dsk
-BIOSHD.HEX
-BIOSHD.Z80
-BOOT.HEX
-BOOT.Z80
-CPM62.SYS
-SYSGEN.SUB
+WM.HLP
+WM-ANSI.COM
+WM-LSI.COM
+XDIR.COM
+XSUB.COM
 
 
 >> cpm3-1.dsk
+   cpmsim -- CP/M 3.0 system disk -- 31 files
 BYE.COM
 CLS.COM
 CPM3.SYS
@@ -1621,7 +1025,41 @@ TYPE.COM
 VT100DYN.COM
 
 
+>> cpm3-1.dsk
+   imsaisim -- CP/M 3.0 system disk -- 29 files
+BYE.COM
+CCP.COM
+CLS.COM
+CPM3.SYS
+DATE.COM
+DEVICE.COM
+DIR.COM
+DUMP.COM
+ED.COM
+ERASE.COM
+GENCOM.COM
+GET.COM
+HELP.COM
+HELP.HLP
+HEXCOM.COM
+HIST.UTL
+PIP.COM
+PROFILE.SUB
+PUT.COM
+RENAME.COM
+SAVE.COM
+SET.COM
+SETDEF.COM
+SHOW.COM
+SID.COM
+SUBMIT.COM
+TRACE.UTL
+TYPE.COM
+VT100DYN.COM
+
+
 >> cpm3-2.dsk
+   cpmsim -- CP/M 3.0, assembler and linker tools -- 25 files
 BDOS3.SPR
 BIOS3.MAC
 BNKBDOS3.SPR
@@ -1649,7 +1087,501 @@ WM.COM
 WM.HLP
 
 
+>> cpm3-2.dsk
+   imsaisim -- CP/M 3.0, assembler and linker tools -- 27 files
+BDOS3.SPR
+BNKBDOS3.SPR
+BNKBIOS3.ASM
+BNKBIOS3.REL
+BNKBIOS3.SPR
+BOOT.ASM
+BOOT.HEX
+COPYSYS.COM
+CPM3.SYS
+CPMLDR.COM
+CPMLDR.REL
+GENCPM.COM
+GENCPM.DAT
+INITDIR.COM
+LDR.SUB
+LDRBIOS.ASM
+LDRBIOS.REL
+LINK.COM
+MAC.COM
+PATCH.COM
+RESBDOS3.SPR
+RMAC.COM
+SCB.ASM
+SCB.REL
+SYSGEN.SUB
+WM.HLP
+WM-ANSI.COM
+
+
+>> cromix1127_8.dsk
+   cromemcosim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> cromix_work.dsk
+   cromemcosim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> cyclops.dsk
+   imsaisim -- source and listings -- 16 files
+CC3FS2.ASM
+CC3FS2.COM
+CC3FS2.HEX
+CC3FS2.PRN
+CCC-1.ASM
+CCC-1.COM
+CCC-1.HEX
+CCC-1.PRN
+CCC-3.ASM
+CCC-3.COM
+CCC-3.HEX
+CCC-3.PRN
+CCC-3B.ASM
+CCC-3B.COM
+CCC-3B.HEX
+CCC-3B.PRN
+
+
+>> dazzler.dsk
+   imsaisim -- graphics demos -- 4 files
+KSCOPE.ASM
+KSCOPE.COM
+MICRO80.ASM
+MICRO80.COM
+
+
+>> dazzler_graphics.dsk
+   cromemcosim -- BASIC, graphics demos -- 16 files
+BARPLOT.COM
+BARPLOT.FOR
+BARPLOT.REL
+BASIC.COM
+BOUNCE.LIS
+CROMEMCO.DAT
+CUBE.DAT
+DAZZPLOT.COM
+GDEMO.COM
+GDEMO.REL
+GDEMO.Z80
+GRAPHFOR.REL
+GRAPHX.COM
+GRAPHZ80.REL
+ROTATE.LIS
+TETRAHED.DAT
+
+
+>> dazzler_stuff.dsk
+   cromemcosim -- graphics demos -- 6 files
+DAZCHESS.COM
+KSCOPE.ASM
+KSCOPE.COM
+KSCOPE.HEX
+KSCOPE.PRN
+MICRO80.COM
+
+
+>> dazzlerII.dsk
+   imsaisim -- graphics demos, games -- 8 files
+ADCTEST.COM
+COLOR.COM
+DOGFIGHT.COM
+KSCOPE.COM
+SKETCH.COM
+SOUND.COM
+SOUNDF.COM
+SPACEWAR.COM
+
+
+>> DISK01.DSK
+   hansel -- CP/M 2.2, BASIC, assembler and linker tools -- 36 files
+ASM.COM
+CRC.COM
+DDT.COM
+DEMO.ASM
+DEMO.COM
+DEMO.HEX
+DEMO.PRN
+DUMP.COM
+ED.COM
+FORMAT.COM
+L80.COM
+LADDER.COM
+LADDER.DAT
+LOAD.COM
+LS.COM
+LUNAR.BAS
+M80.COM
+MAC.COM
+MBASIC.COM
+MOVCPM.COM
+NSWP.COM
+OTHELLO.COM
+PCGET.COM
+PCPUT.COM
+PIP.COM
+STARINS.BAS
+STARTRK.BAS
+STAT.COM
+SUBMIT.COM
+SURVEY.COM
+SYSGEN.COM
+TICTAK.BAS
+VIEW.COM
+WM.COM
+WM.HLP
+XSUB.COM
+
+
+>> DISK02.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK03.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK04.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK05.DSK
+   hansel -- CP/M 2.2, BASIC, CPU exercisers -- 27 files
+8080EXM.COM
+8080PRE.COM
+CATCHUM.COM
+CATCHUM.DAT
+CHASE.BAS
+CPUTEST.COM
+LADDER.COM
+LADDER.DAT
+LS.COM
+LUNAR.BAS
+MBASIC.COM
+MOVCPM.COM
+NSWP.COM
+OTHELLO.COM
+PCGET.COM
+PCPUT.COM
+PIP.COM
+STARINS.BAS
+STARTRK.BAS
+STAT.COM
+SURVEY.COM
+SYSGEN.COM
+TICTAK.BAS
+TST8080.COM
+VIEW.COM
+WM.COM
+WM.HLP
+
+
+>> DISK06.DSK
+   hansel -- SuperCalc worksheets, terminal and file-transfer tools -- 20 files
+ARCS-DEP.CAL
+BRKEVN.CAL
+BUDGET.CAL
+DATTIM.COM
+INSTALL.COM
+INSTALL.DAT
+INSTALL.OVL
+MAINTAIN.COM
+PCGET.COM
+PCPUT.COM
+RULE-78.CAL
+SAMPLE.CAL
+SC.HLP
+SC2.COM
+SC2.HLP
+SC2.OVL
+SDI.COM
+SDI.OVL
+TEN.CAL
+TENMIN.CAL
+
+
+>> DISK07.DSK
+   hansel -- WordStar, terminal and file-transfer tools -- 10 files
+INSTALL.COM
+PCGET.COM
+PCPUT.COM
+PIP.COM
+SPELSTAR.DCT
+SPELSTAR.OVR
+STAT.COM
+WS.COM
+WSMSGS.OVR
+WSOVLY1.OVR
+
+
+>> DISK08.DSK
+   hansel -- Infocom adventures -- 6 files
+ZORK1.COM
+ZORK1.DAT
+ZORK2.COM
+ZORK2.DAT
+ZORK3.COM
+ZORK3.DAT
+
+
+>> DISK09.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK0A.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK0B.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK0C.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK0D.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK0E.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK0F.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> DISK10.DSK
+   hansel -- graphics demos, games -- 24 files
+4DTICTAC.COM
+ADCTEST.COM
+AMBUSH.COM
+BARPLOT.COM
+CHASE.COM
+CHESS.COM
+COLOR.COM
+DAZZPLOT.COM
+DMATION.COM
+DOGFIGHT.COM
+DOODLE.COM
+GDEMO.COM
+GOTCHA.COM
+KSCOPE.COM
+LIFE.COM
+LS.COM
+PCGET.COM
+PIP.COM
+SKETCH.COM
+SPACEWAR.COM
+TANKWAR.COM
+TRACK.COM
+WRITER.COM
+XLIFE.COM
+
+
+>> DISK11.DSK
+   hansel -- BASIC, games -- 23 files
+BASIC5.COM
+BIOS.ASM
+CHASE.COM
+CHECKERS.COM
+CHESS.COM
+DEFLECT.COM
+EXTBASIC.COM
+GALAXY.COM
+LIFE.COM
+LIFE8.COM
+LS.COM
+MSBASIC.COM
+PATTERN.COM
+PCGET.COM
+PIP.COM
+PIRANHA.COM
+PONG.COM
+RAIDERS.COM
+README.TXT
+TARGET.COM
+TARGET1.COM
+TRAIN.COM
+TREK80.COM
+
+
+>> DISK12.DSK
+   hansel -- assorted CP/M files -- 12 files
+8BIT.HEX
+FILES.TXT
+I2A8-1.ASM
+I2A8-1.HEX
+I2FUNC.COM
+I2LIB.COM
+IMP.COM
+IMP245.COM
+IMP8.COM
+MLOAD.COM
+PIP.COM
+README.TXT
+
+
+>> DISK13.DSK
+   hansel -- CP/M 3.0, BASIC, assembler and linker tools -- 33 files
+ACOPY.COM
+AFORMAT.COM
+BDOS3.SPR
+BIOS3.SPR
+CCP.COM
+COPYSYS.COM
+CPM3.SYS
+DEVICE.COM
+DIR.COM
+DUMP.COM
+ED.COM
+ERASE.COM
+GENCPM.COM
+GENCPM.SUB
+GET.COM
+LINK.COM
+LS.COM
+MBASIC.COM
+NSWP.COM
+PATCH.COM
+PCGET.COM
+PCPUT.COM
+PIP.COM
+PUT.COM
+README.TXT
+RENAME.COM
+RMAC.COM
+SAVE.COM
+SETDEF.COM
+SHOW.COM
+SID.COM
+SUBMIT.COM
+TYPE.COM
+
+
+>> DISK14.DSK
+   hansel -- CP/M 3.0 system disk -- 22 files
+CCP.COM
+CPM3.SYS
+DATE.COM
+DIR.COM
+DUMP.COM
+ED.COM
+ERASE.COM
+FLOP2PC.COM
+GENCOM.COM
+GET.COM
+HELP.COM
+HELP.HLP
+HEXCOM.COM
+INITDIR.COM
+LIB.COM
+LS.COM
+MAC.COM
+PATCH.COM
+PC2FLOP.COM
+PIP.COM
+SET.COM
+SHOW.COM
+
+
+>> DISK15.DSK
+   hansel -- the Felix system, terminal and file-transfer tools -- 36 files
+ABSTRACT.035
+BEE.FAS
+BEE#.FEX
+CHECKOU&.FEX
+CHECKOUT.FAS
+DISTEST.FAS
+DISTEST&.FEX
+DOODLE.COM
+EXEC.COM
+EXEC.OBJ
+FANCY#.FEX
+FASM.COM
+FELIX.COM
+FELIX.DOC
+FELIX.OBJ
+FELIXV1.CAT
+LOADBACK.COM
+LOADOB.COM
+LOADPROG.COM
+LS.COM
+MUSTANG.FAS
+MUSTANG&.FEX
+PAINT.FAS
+PAINT.FEX
+PAINT&.FEX
+PAINTER.FEX
+PAINTER&.FEX
+PCGET.COM
+PCPUT.COM
+PIP.COM
+README.TXT
+SAPD.COM
+SAVEBACK.COM
+SAVEOB.COM
+SINCOS.OBJ
+TRACE.COM
+
+
+>> DISK16.DSK
+   hansel -- CP/M 2.2, BASIC, assembler and linker tools -- 35 files
+ACOPY.COM
+AFORMAT.COM
+ASM.COM
+COPY.COM
+CRC.COM
+DDT.COM
+DUMP.COM
+ED.COM
+IOBYTE.TXT
+L80.COM
+LADDER.COM
+LADDER.DAT
+LOAD.COM
+LS.COM
+LUNAR.BAS
+M80.COM
+MAC.COM
+MBASIC.COM
+MOVCPM8.COM
+NSWP.COM
+OTHELLO.COM
+PCGET.COM
+PCPUT.COM
+PIP.COM
+STARINS.BAS
+STARTRK.BAS
+STAT.COM
+SUBMIT.COM
+SURVEY.COM
+SYSGEN.COM
+TICTAK.BAS
+VIEW.COM
+WM.COM
+WM.HLP
+XSUB.COM
+
+
 >> hd-tools.dsk
+   cpmsim -- assorted CP/M files -- 345 files
 ASM.COM
 BVIEW.COM
 BYE.COM
@@ -1998,6 +1930,7 @@ ZORK3.DAT  (user 8)
 
 
 >> hd-toolsrc.dsk
+   cpmsim -- source and listings -- 17 files
 BYE.ASM
 CLS.MAC
 CPU.ASM
@@ -2017,7 +1950,393 @@ W.ASM
 XDIR.ASM
 
 
+>> HDSK01.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> HDSK02.DSK
+   hansel -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> HDSK03.DSK
+   hansel -- CP/M 2.2, the Altair hard-disk exerciser, BASIC -- 48 files
+ACOPY.ASM
+ACOPY.COM
+ADEXER.ASM
+ADEXER.COM
+AFORMAT.ASM
+AFORMAT.COM
+ASM.COM
+BIOS.ASM
+BOOT.ASM
+CATCHUM.COM
+CATCHUM.DAT
+CPM22.ASM
+CPMOVE.ASM
+CPMSIZE.LIB
+CRC.COM
+DDT.COM
+DUMP.COM
+IOBYTE.TXT
+L80.COM
+LADDER.COM
+LADDER.DAT
+LOAD.COM
+LS.COM
+M80.COM
+MAC.COM
+MBASIC.COM
+MITSCNVT.COM
+MITSCNVT.TXT
+MOVCPM.SUB
+MOVCPMH.COM
+NSWP.COM
+PCGET.COM
+PCPUT.COM
+PIP.COM
+STAT.COM
+SUBMIT.COM
+SURVEY.COM
+SYSGEN.ASM
+SYSGEN.COM
+WM.COM
+WM.HLP
+XSUB.COM
+ZORK1.COM
+ZORK1.DAT
+ZORK2.COM
+ZORK2.DAT
+ZORK3.COM
+ZORK3.DAT
+
+
+>> HDSK04.DSK
+   duino -- CP/M 2.2, the Altair hard-disk exerciser, BASIC -- 95 files
+ACOPY.ASM
+ACOPY.COM
+ADEXER.ASM
+ADEXER.COM
+AFORMAT.ASM
+AFORMAT.COM
+ASM.COM
+BALLYHOO.COM
+BALLYHOO.DAT
+BIOS.ASM
+BOOT.ASM
+CATCHUM.COM
+CATCHUM.DAT
+CPM22.ASM
+CPMOVE.ASM
+CPMSIZE.LIB
+CRC.COM
+CUTTHROA.COM
+CUTTHROA.DAT
+DDT.COM
+DEADLINE.COM
+DEADLINE.DAT
+DUMP.COM
+ENCHANTR.COM
+ENCHANTR.DAT
+HITCHHIK.COM
+HITCHHIK.DAT
+HOLLYWOO.COM
+HOLLYWOO.DAT
+ICFILES.TXT
+INFIDEL.COM
+INFIDEL.DAT
+IOBYTE.TXT
+KILLBIT.ASM
+KILLBIT.COM
+L80.COM
+LADDER.COM
+LADDER.DAT
+LEATHER.COM
+LEATHER.DAT
+LOAD.COM
+LS.COM
+LURKHORR.COM
+LURKHORR.DAT
+M80.COM
+MAC.COM
+MBASIC.COM
+MITSCNVT.COM
+MITSCNVT.TXT
+MOONMIST.COM
+MOONMIST.DAT
+MOVCPM.SUB
+MOVCPMH.COM
+NSWP.COM
+PCGET.COM
+PCPUT.COM
+PIP.COM
+PLANETFA.COM
+PLANETFA.DAT
+PLUNDERE.COM
+PLUNDERE.DAT
+SEASTALK.COM
+SEASTALK.DAT
+SORCERER.COM
+SORCERER.DAT
+SPELBRKR.COM
+SPELBRKR.DAT
+STARCROS.COM
+STARCROS.DAT
+STAT.COM
+STATIONF.COM
+STATIONF.DAT
+STATLINE.C
+STATLINE.COM
+SUBMIT.COM
+SURVEY.COM
+SUSPECT.COM
+SUSPECT.DAT
+SUSPNDED.COM
+SUSPNDED.DAT
+SYSGEN.ASM
+SYSGEN.COM
+WISHBRIN.COM
+WISHBRIN.DAT
+WITNESS.COM
+WITNESS.DAT
+WM.COM
+WM.HLP
+XSUB.COM
+ZORK1.COM
+ZORK1.DAT
+ZORK2.COM
+ZORK2.DAT
+ZORK3.COM
+ZORK3.DAT
+
+
+>> HDSK05.DSK
+   duino-extra -- BASIC, the Altair hard-disk exerciser -- 76 files
+ACOPY.COM
+ADEXER.COM
+AFORMAT.COM
+ASM.COM
+BASCOM.COM
+BASCOM.HLP
+BASCOM.SUB
+BASCOM2.HLP
+BASLIB.REL
+BCLOAD
+BLACKJAK.BAS
+BLACKJAK.COM
+BLACKJAK.INT
+BRUN.COM
+CB80.COM
+CB80.IRL
+CB80.OV1
+CB80.OV2
+CB80.OV3
+CB80.SUB
+CBASE2.COM
+CBASIC.COM
+CBASIC.SUB
+CBASXREF.COM
+CHASE.BAS
+CRC.COM
+CRUN.COM
+CRUN2.COM
+DDT.COM
+DEMOGRAF.BAS
+DUMP.COM
+ELIZA.BAS
+GRAPHCOM.BAS
+GRAPHR.BAS
+GSXPREP.BAS
+HAMURS.BAS
+HORSE.BAS
+KING4K.BAS
+L80.COM
+LANDER4K.BAS
+LIB.COM
+LINK.COM
+LK80.COM
+LOAD.COM
+LS.COM
+M80.COM
+MAC.COM
+MBASIC.COM
+MBASIC45.COM
+MBASIC51.COM
+MBASIC52.COM
+MITSCNVT.COM
+MITSCNVT.TXT
+MSTMND.BAS
+OBSLIB.REL
+PCGET.COM
+PCPUT.COM
+PIP.COM
+RANTEST.ASC
+RANTEST.BAS
+RANTEST.COM
+READ.ME
+ROCKET.BAS
+SAMPLE.BAS
+SAMPLE.SUB
+SIEVE.BAS
+STARTREK.BAS
+STAT.COM
+SUBMIT.COM
+SURVEY.COM
+TAXMAN.BAS
+TRADE.BAS
+TSTCIR.BAS
+WUMPUS4K.BAS
+XBASIC.COM
+XSUB.COM
+
+
+>> HDSK06.DSK
+   duino-extra -- the Altair hard-disk exerciser, BASIC -- 63 files
+ACOPY.COM
+ADEXER.COM
+AFORMAT.COM
+ASM.COM
+C.SUB
+CDADDS.MAC
+CDADDS.REL
+CDADM3.MAC
+CDADM3.REL
+CDANSI.MAC
+CDANSI.REL
+CDBEE.MAC
+CDBEE.REL
+CDHZ15.MAC
+CDHZ15.REL
+CDISB.MAC
+CDISB.REL
+CDPERK.MAC
+CDPERK.REL
+CDSROC.MAC
+CDSROC.REL
+CDVT100.MAC
+CDVT100.REL
+CDWH19.MAC
+CDWH19.REL
+CDZEPH.MAC
+CDZEPH.REL
+COBLBX.REL
+COBLIB.REL
+COBLOC
+COBOL.COM
+COBOL1.OVR
+COBOL2.OVR
+COBOL3.OVR
+COBOL4.OVR
+CRC.COM
+CRTDRV.REL
+CRTEST.COB
+CVISAM.COM
+DDT.COM
+DEBUG.REL
+DUMP.COM
+L80.COM
+LD80.COM
+LOAD.COM
+LS.COM
+M80.COM
+MAC.COM
+MBASIC.COM
+MITSCNVT.COM
+MITSCNVT.TXT
+PCGET.COM
+PCPUT.COM
+PIP.COM
+REBUILD.COM
+RECOVR.COB
+RUNCOB.COM
+SEQCVT.COM
+SQUARO.COB
+STAT.COM
+SUBMIT.COM
+SURVEY.COM
+XSUB.COM
+
+
+>> HDSK07.DSK
+   duino-extra -- dBASE, the Altair hard-disk exerciser -- 73 files
+ACOPY.COM
+ADEXER.COM
+AFORMAT.COM
+APPECARD.FMT
+ASM.COM
+CHECKS.DBF
+CHXBOOK.MEM
+CHXDEPOS.FMT
+CHXINPUT.FMT
+CHXMENU.CMD
+CMAIN.CMD
+CPRINT.CMD
+CRC.COM
+CREATE.CMD
+DATER.CMD
+DATESYS.CMD
+DATETEST.HEX
+DBASE.COM
+DBASEMSG.TXT
+DBASEOVR.COM
+DDT.COM
+DEPOSITS.DBF
+DUMP.COM
+EBYNAME.NDX
+EBYNMBR.NDX
+EDITCARD.FMT
+EMAIN.CMD
+EMP-CONS.FRM
+EMP-ENTR.CMD
+EMP-PRT.FRM
+EMP-RPRT.CMD
+EMP-TERM.CMD
+EMP-UPD.CMD
+EMP-UPD.FMT
+EMPLOYEE.DBF
+EMPLOYEE.MEM
+EMPSCRN.FMT
+ESETUP.CMD
+IBYDESC.NDX
+IBYNMBR.NDX
+IMAIN.CMD
+INSTALL.COM
+INVCONS.FRM
+INVENT.DBF
+INVMAINT.CMD
+INVPRTR.FRM
+INVQUAN.CMD
+INVREAD.CMD
+INVRPRT.CMD
+ISETUP.CMD
+KEYWORD.NDX
+L80.COM
+LABELS.CMD
+LOAD.COM
+LS.COM
+M80.COM
+MAC.COM
+MBASIC.COM
+MITSCNVT.COM
+MITSCNVT.TXT
+NAMES.DBF
+PCGET.COM
+PCPUT.COM
+PIP.COM
+SETS.CMD
+STARTUP.CMD
+STAT.COM
+SUBMIT.COM
+SURVEY.COM
+TEXT.DBF
+TICKLE.FRM
+TICKLE.NDX
+XSUB.COM
+
+
 >> i8080tests.dsk
+   cpmsim -- CPU exercisers -- 8 files
 8080PRE.COM
 8080PRE.MAC
 CPUTEST.COM
@@ -2028,229 +2347,150 @@ TEST8080.ASM
 TEST8080.COM
 
 
->> mpm-1.dsk
-ABORT.PRL
-ASM.PRL
-BYE.COM
-CLS.COM
-CONSOLE.PRL
-DDT.COM
-DIR.PRL
-DSKRESET.PRL
-DUMP.PRL
-ED.PRL
-ERA.PRL
-ERAQ.PRL
-LINK.COM
-LOAD.COM
-MPM.SYS
-MPMLDR.COM
-MPMSTAT.PRL
-PIP.COM
-PIP.PRL
-PRINTER.PRL
-PRLCOM.PRL
-RDT.PRL
-REN.PRL
-RESET.COM
-SCHED.PRL
-SDIR.PRL
-SET.PRL
-SETTOD.PRL
-SHOW.PRL
-SPOOL.PRL
-STAT.PRL
-STOPSPLR.PRL
-SUBMIT.COM
-SUBMIT.PRL
-TOD.PRL
-TYPE.PRL
-USER.PRL
-WM.COM
-WM.HLP
-XSUB.COM
-
-
->> mpm-2.dsk
-ABORT.RSP
-BNKBDOS.SPR
-BNKXDOS.SPR
-BNKXIOS.MAC
-BNKXIOS.SPR
-GENSYS.COM
-HWCLOCK.ASM
-HWCLOCK.RSP
-HWCLOCK.SUB
-LDR.SUB
-LDRBIOS.Z80
-M80.COM
-MPM.SYS
-MPMLDR.COM
-MPMSTAT.BRS
-MPMSTAT.RSP
-RESBDOS.SPR
-RESXIOS.SPR
-RMAC.COM
-SCHED.BRS
-SCHED.RSP
-SETTOD.ASM
-SETTOD.PRL
-SETTOD.SUB
-SPOOL.BRS
-SPOOL.RSP
-SYSGEN.SUB
-SYSTEM.DAT
-TMP.SPR
-XDOS.SPR
-Z80ASM.COM
-
-
->> ucsd-iv-1.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> ucsd-iv-2.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> ucsd-iv-interp.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> z80tests.dsk
-CPUTEST.COM
-EX.MAC
-EXZ80DOC.COM
-EXZ80DOC.MAC
-PRELIM.COM
-PRELIM.MAC
-
-
-
-
-
->>>>> z80pack — cromemcosim library
-      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
-
->> cdos236_8.dsk
-BASIC.COM
-BATCH.COM
-BYE.COM
-CDOS.COM
-CDOSGEN.COM
-CLS.COM
-DUMP.COM
-EDIT.COM
-INIT.COM
-R.COM
-RDOS.COM
-STAT.COM
-W.COM
-WM.COM
-WM.HLP
-WRTSYS.COM
-XFER.COM
-
-
->> cdos258_8.dsk
-BASIC.COM
-BATCH.COM
-BYE.COM
-CDOS.COM
-CDOSGEN.COM
-CLS.COM
-DUMP.COM
-EDIT.COM
-INIT271.COM
-INIT282.COM
-R.COM
-RDOS.COM
-STAT.COM
-W.COM
-WM.COM
-WM.HLP
-WRTSYS.COM
-XFER.COM
-
-
->> cpm22.dsk
+>> imdos202.dsk
+   imsaisim -- BASIC -- 33 files
 ASM.COM
+BASIC-E.COM
+BIOS.ASM
+BOOT.ASM
 BYE.COM
-CDOSCPM.COM
-CDOSCPM.DOC
-CDOSCPM.Z80
 CLS.COM
-CPM64.SYS
-CROBIOS.ASM
-CROBIOS.HEX
-CROBIOS.PRN
-CROBIOS.SYM
-CROBOOT.ASM
-CROBOOT.HEX
-CROBOOT.PRN
-CROBOOT.SYM
+CLSV.COM
 DDT.COM
+DIABLO.ASM
+DIABLO.COM
 DUMP.COM
 ED.COM
-INIT.COM
+FORMAT.COM
+GEN.SUB
+LIST.ASM
+LIST.COM
 LOAD.COM
-MAC.COM
+NED.COM
+PIP.COM
+R.COM
+RELOC.COM
+RUN-E.COM
+SHAKDOWN.COM
+STAT.COM
+SUBMIT.COM
+SYSMOV.COM
+VIEW.COM
+VMODE.COM
+W.COM
+WM.HLP
+WM-ANSI.COM
+WM-LSI.COM
+XDIR.COM
+
+
+>> imdos205r0-1.dsk
+   imsaisim -- IMDOS (IMSAI CP/M), BASIC, assembler and linker tools -- 44 files
+ASM.COM
+BASIC-E.COM
+BASIC8K.COM
+BDOS.SYS
+BIOS.SYS
+BIOS22.SYS
+BIOS4.SYS
+BOOT.SYS
+BYE.COM
+CCP.SYS
+CLS.COM
+CLSV.COM
+CREF80.COM
+DDENS.SYS
+DDT.COM
+DISKCOPY.COM
+DUMP.COM
+ED.COM
+ENTRY.SYS
+FORMAT.COM
+GENESYS.COM
+L80.COM
+LIB.COM
+LIST.COM
+LOAD.COM
+M80.COM
+NED.COM
+PIP.COM
+PRINT.COM
+R.COM
+RUN-E.COM
+SDENS.SYS
+SHAKDOWN.COM
+STAT.COM
+SUBMIT.COM
+SYSMOV.COM
+VIEW.COM
+VMODE.COM
+W.COM
+WM.HLP
+WM-ANSI.COM
+WM-LSI.COM
+XDIR.COM
+XREF.COM
+
+
+>> imdos205r0-2.dsk
+   imsaisim -- graphics demos -- 16 files
+BIOS.MAC
+BIOS.PRN
+BIOS.REL
+BIOSORG.MAC
+KSCOPE.ASM
+KSCOPE.COM
+KSCOPE.HEX
+KSCOPE.PRN
+LIST.ASM
+LIST.COM
+LIST.HEX
+LIST.PRN
+MICRO80.COM
+STRTRK.BAS
+STRTRK.INT
+TREKINST
+
+
+>> imsai-cpm13.dsk
+   imsaisim -- CP/M 2.2, graphics demos -- 33 files
+ASM.COM
+BIOS.ASM
+BIOS.HEX
+BIOS.PRN
+BOOT.ASM
+BOOT.HEX
+BOOT.PRN
+BYE.COM
+CLS.COM
+CPM16.COM
+DDT.COM
+DUMP.ASM
+DUMP.COM
+ED.COM
+KSCOPE.ASM
+KSCOPE.COM
+KSCOPE.HEX
+KSCOPE.PRN
+LOAD.COM
+MEMMAP.COM
+MICRO80.COM
 MOVCPM.COM
 PIP.COM
 R.COM
-RDOS.COM
-SDIR.COM
+README.TXT
 STAT.COM
 SUBMIT.COM
-SURVEY.COM
-SURVEY.MAC
 SYSGEN.COM
-SYSGEN.SUB
 VIEW.COM
 W.COM
 WM.COM
 WM.HLP
 XDIR.COM
-XSUB.COM
-
-
->> cromix1127_8.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> cromix_work.dsk
-(no CP/M filesystem -- this disk boots its own system)
-
-
->> dazzler_graphics.dsk
-BARPLOT.COM
-BARPLOT.FOR
-BARPLOT.REL
-BASIC.COM
-BOUNCE.LIS
-CROMEMCO.DAT
-CUBE.DAT
-DAZZPLOT.COM
-GDEMO.COM
-GDEMO.REL
-GDEMO.Z80
-GRAPHFOR.REL
-GRAPHX.COM
-GRAPHZ80.REL
-ROTATE.LIS
-TETRAHED.DAT
-
-
->> dazzler_stuff.dsk
-DAZCHESS.COM
-KSCOPE.ASM
-KSCOPE.COM
-KSCOPE.HEX
-KSCOPE.PRN
-MICRO80.COM
 
 
 >> itc-cpm.dsk
+   cromemcosim -- CP/M 2.2, assembler and linker tools -- 79 files
 ASM.COM
 BYE.COM
 CBIOS.ASM
@@ -2333,6 +2573,7 @@ ZPRCREMC.COM
 
 
 >> micah-cpm.dsk
+   cromemcosim -- CP/M 2.2 system disk -- 46 files
 ASM.COM
 ATRIB.COM
 BEGDAT.REL
@@ -2381,47 +2622,225 @@ XDIR.COM
 XSUB.COM
 
 
+>> mits-basic40.dsk
+   altairsim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
 
 
-
->>>>> z80pack — imsaisim library
-      https://github.com/udo-munk/z80pack  (<sim>/disks/library)
-
->> apu.dsk
-AM9511.MAC
-AM9511.PRN
-AM9511.REL
-APU.MAC
-APU.PRN
-APU.REL
-APU.SUB
-README.TXT
-TEST.FOR
-TEST.PRN
-TEST.REL
-TEST.SUB
-TESTAPU.COM
-TESTAPU.SYM
-TESTNAPU.COM
+>> mits-basic50.dsk
+   altairsim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
 
 
->> comms.dsk
-KERMIT.COM
-KERMIT3.COM
-QT-IMSAI.ASM
-QT-IMSAI.COM
-QTCHAT.DOC
-QTERM.DOC
-QTERM.PAT
-README.TXT
-XMODEM.ASM
+>> mits-cpm-tools.dsk
+   altairsim -- assorted CP/M files -- 13 files
+BYE.COM
+CLS.COM
+LS.COM
+MEMMAP.COM
+R.COM
+SDIR.COM
+SURVEY.COM
+VIEW.COM
+W.COM
+WM.COM
+WM.HLP
 XMODEM.CFG
 XMODEM.COM
 
 
->> cpm22.dsk
+>> mits-cpm14-24k.dsk
+   altairsim -- CP/M 2.2 system disk -- 18 files
 ASM.COM
-AUTO.SUB
+CONFIG.COM
+COPY.COM
+DDT.COM
+DUMP.ASM
+DUMP.COM
+ED.COM
+FILECOPY.COM
+FORMAT.COM
+LIST.COM
+LOAD.COM
+MOVCPM.COM
+PIP.COM
+SAVEUSER.COM
+STAT.COM
+SUBMIT.COM
+SYSGEN.COM
+USER.ASM
+
+
+>> mits-cpm22-burcon-56k.dsk
+   altairsim -- CP/M 2.2 system disk -- 20 files
+ASM.COM
+BIOS.ASM
+BIOS.HEX
+BIOS.PRN
+BOOT.ASM
+BOOT.HEX
+BOOT.PRN
+CPM56.SYS
+DDT.COM
+DUMP.COM
+ED.COM
+FORMAT.COM
+LOAD.COM
+MOVCPM.COM
+PIP.COM
+STAT.COM
+SUBMIT.COM
+SYSGEN.COM
+SYSGEN.SUB
+XSUB.COM
+
+
+>> mits-cpm22-lifeboat-56k.dsk
+   altairsim -- CP/M 2.2, terminal and file-transfer tools -- 25 files
+ASM.COM
+CONFIG.COM
+COPY.COM
+DDT.COM
+DISKDEF.LIB
+DUMP.ASM
+DUMP.COM
+ED.COM
+FILECOPY.COM
+FORMAT.COM
+LOAD.COM
+MEMR.COM
+MEMR.DOC
+MOVCPM.COM
+PCGET.COM
+PCPUT.COM
+PIP.COM
+READ-ME.DOC
+SAVEUSER.COM
+SETCPM.COM
+STAT.COM
+SUBMIT.COM
+SYSGEN.COM
+USER.ASM
+XSUB.COM
+
+
+>> mpm-1.dsk
+   cpmsim -- MP/M system disk -- 40 files
+ABORT.PRL
+ASM.PRL
+BYE.COM
+CLS.COM
+CONSOLE.PRL
+DDT.COM
+DIR.PRL
+DSKRESET.PRL
+DUMP.PRL
+ED.PRL
+ERA.PRL
+ERAQ.PRL
+LINK.COM
+LOAD.COM
+MPM.SYS
+MPMLDR.COM
+MPMSTAT.PRL
+PIP.COM
+PIP.PRL
+PRINTER.PRL
+PRLCOM.PRL
+RDT.PRL
+REN.PRL
+RESET.COM
+SCHED.PRL
+SDIR.PRL
+SET.PRL
+SETTOD.PRL
+SHOW.PRL
+SPOOL.PRL
+STAT.PRL
+STOPSPLR.PRL
+SUBMIT.COM
+SUBMIT.PRL
+TOD.PRL
+TYPE.PRL
+USER.PRL
+WM.COM
+WM.HLP
+XSUB.COM
+
+
+>> mpm-2.dsk
+   cpmsim -- MP/M, assembler and linker tools -- 31 files
+ABORT.RSP
+BNKBDOS.SPR
+BNKXDOS.SPR
+BNKXIOS.MAC
+BNKXIOS.SPR
+GENSYS.COM
+HWCLOCK.ASM
+HWCLOCK.RSP
+HWCLOCK.SUB
+LDR.SUB
+LDRBIOS.Z80
+M80.COM
+MPM.SYS
+MPMLDR.COM
+MPMSTAT.BRS
+MPMSTAT.RSP
+RESBDOS.SPR
+RESXIOS.SPR
+RMAC.COM
+SCHED.BRS
+SCHED.RSP
+SETTOD.ASM
+SETTOD.PRL
+SETTOD.SUB
+SPOOL.BRS
+SPOOL.RSP
+SYSGEN.SUB
+SYSTEM.DAT
+TMP.SPR
+XDOS.SPR
+Z80ASM.COM
+
+
+>> TDISK01.DSK
+   hansel -- CP/M 2.2, graphics demos -- 31 files
+ASM.COM
+BIOS.ASM
+BIOS.HEX
+BIOS.PRN
+BOOT.ASM
+BOOT.HEX
+BOOT.PRN
+BYE.COM
+CLS.COM
+CPM62.COM
+DDT.COM
+DUMP.ASM
+DUMP.COM
+ED.COM
+FORMAT.ASM
+FORMAT.COM
+KSCOPE.ASM
+KSCOPE.COM
+LOAD.COM
+MEMMAP.COM
+MICRO80.COM
+MOVCPM.COM
+PIP.COM
+STAT.COM
+SUBMIT.COM
+SYSGEN.COM
+SYSGEN.TXT
+VIEW.COM
+WM.COM
+WM.HLP
+XDIR.COM
+
+
+>> TDISK02.DSK
+   hansel -- CP/M 2.2 (62K), graphics demos, terminal and file-transfer tools -- 44 files
+ASM.COM
 BIOS.ASM
 BIOS.HEX
 BIOS.PRN
@@ -2429,245 +2848,108 @@ BIOS.SYM
 BOOT.ASM
 BOOT.HEX
 BOOT.PRN
+BOOT.SYM
 BYE.COM
 CLS.COM
-CLSV.COM
-CPM54.SYS
+COPY.ASM
+COPY.COM
+CPM62.SYS
 DDT.COM
+DISKDEF.LIB
 DUMP.ASM
 DUMP.COM
 ED.COM
+FORMAT.ASM
+FORMAT.COM
+KSCOPE.ASM
+KSCOPE.COM
 LOAD.COM
 MAC.COM
 MEMMAP.COM
-MODEM.SUB
+MICRO80.COM
 MOVCPM.COM
+PCGET.COM
+PCPUT.COM
 PIP.COM
-PROFILE.SUB
-R.COM
 SDIR.COM
-SERIAL.SUB
-SID.COM
 STAT.COM
 SUBMIT.COM
 SURVEY.COM
 SURVEY.MAC
 SYSGEN.COM
-SYSGEN54.SUB
-SYSGEN60.SUB
-SYSGEN64.SUB
+SYSGEN.SUB
+SYSGEN.TXT
 VIEW.COM
-VMODE.COM
-W.COM
+WM.COM
 WM.HLP
-WM-ANSI.COM
-WM-LSI.COM
 XDIR.COM
 XSUB.COM
 
 
->> cpm3-1.dsk
+>> TDISK03.DSK
+   hansel -- COMAL -- 26 files
+APPLES.SAV
 BYE.COM
-CCP.COM
-CLS.COM
-CPM3.SYS
-DATE.COM
-DEVICE.COM
-DIR.COM
-DUMP.COM
-ED.COM
-ERASE.COM
-GENCOM.COM
-GET.COM
-HELP.COM
-HELP.HLP
-HEXCOM.COM
-HIST.UTL
+CALENDAR.SAV
+CMDLIST.DOC
+COMAL.COM
+HANOI.SAV
+HELLO.SAV
+HI.SAV
+INSTALL.COM
+INSTALL.DAT
+KEYSC128.SAV
+MAGICSQR.SAV
+NAMES.DTA
+NIM.SAV
+NUM2WORD.SAV
+PHONEBK.SAV
 PIP.COM
-PROFILE.SUB
-PUT.COM
-RENAME.COM
-SAVE.COM
-SET.COM
-SETDEF.COM
-SHOW.COM
-SID.COM
-SUBMIT.COM
-TRACE.UTL
-TYPE.COM
-VT100DYN.COM
+POLYNY.SAV
+PRIMES.SAV
+PRINTERR.SAV
+PRINTUSE.SAV
+RUNTIME.COM
+SORTING.SAV
+STARTED.DOC
+STAT.COM
+TRIANGLE.SAV
 
 
->> cpm3-2.dsk
-BDOS3.SPR
-BNKBDOS3.SPR
-BNKBIOS3.ASM
-BNKBIOS3.REL
-BNKBIOS3.SPR
+>> TDISK04.DSK
+   hansel -- CP/M 2.2, graphics demos -- 28 files
+ASM.COM
+BIOS.ASM
+BIOS.HEX
+BIOS.PRN
 BOOT.ASM
 BOOT.HEX
-COPYSYS.COM
-CPM3.SYS
-CPMLDR.COM
-CPMLDR.REL
-GENCPM.COM
-GENCPM.DAT
-INITDIR.COM
-LDR.SUB
-LDRBIOS.ASM
-LDRBIOS.REL
-LINK.COM
-MAC.COM
-PATCH.COM
-RESBDOS3.SPR
-RMAC.COM
-SCB.ASM
-SCB.REL
-SYSGEN.SUB
-WM.HLP
-WM-ANSI.COM
-
-
->> cyclops.dsk
-CC3FS2.ASM
-CC3FS2.COM
-CC3FS2.HEX
-CC3FS2.PRN
-CCC-1.ASM
-CCC-1.COM
-CCC-1.HEX
-CCC-1.PRN
-CCC-3.ASM
-CCC-3.COM
-CCC-3.HEX
-CCC-3.PRN
-CCC-3B.ASM
-CCC-3B.COM
-CCC-3B.HEX
-CCC-3B.PRN
-
-
->> dazzler.dsk
-KSCOPE.ASM
-KSCOPE.COM
-MICRO80.ASM
-MICRO80.COM
-
-
->> dazzlerII.dsk
-ADCTEST.COM
-COLOR.COM
-DOGFIGHT.COM
-KSCOPE.COM
-SKETCH.COM
-SOUND.COM
-SOUNDF.COM
-SPACEWAR.COM
-
-
->> imdos202.dsk
-ASM.COM
-BASIC-E.COM
-BIOS.ASM
-BOOT.ASM
+BOOT.PRN
 BYE.COM
-CLS.COM
-CLSV.COM
+CPM48.COM
 DDT.COM
-DIABLO.ASM
-DIABLO.COM
+DUMP.ASM
 DUMP.COM
 ED.COM
+FORMAT.ASM
 FORMAT.COM
-GEN.SUB
-LIST.ASM
-LIST.COM
+KSCOPE.ASM
+KSCOPE.COM
 LOAD.COM
-NED.COM
+MEMMAP.COM
+MICRO80.COM
+MOVCPM.COM
 PIP.COM
-R.COM
-RELOC.COM
-RUN-E.COM
-SHAKDOWN.COM
 STAT.COM
 SUBMIT.COM
-SYSMOV.COM
-VIEW.COM
-VMODE.COM
-W.COM
-WM.HLP
-WM-ANSI.COM
-WM-LSI.COM
+SURVEY.COM
+SYSGEN.COM
+SYSGEN.TXT
 XDIR.COM
 
 
->> imdos205r0-1.dsk
-ASM.COM
-BASIC-E.COM
-BASIC8K.COM
-BDOS.SYS
-BIOS.SYS
-BIOS22.SYS
-BIOS4.SYS
-BOOT.SYS
-BYE.COM
-CCP.SYS
-CLS.COM
-CLSV.COM
-CREF80.COM
-DDENS.SYS
-DDT.COM
-DISKCOPY.COM
-DUMP.COM
-ED.COM
-ENTRY.SYS
-FORMAT.COM
-GENESYS.COM
-L80.COM
-LIB.COM
-LIST.COM
-LOAD.COM
-M80.COM
-NED.COM
-PIP.COM
-PRINT.COM
-R.COM
-RUN-E.COM
-SDENS.SYS
-SHAKDOWN.COM
-STAT.COM
-SUBMIT.COM
-SYSMOV.COM
-VIEW.COM
-VMODE.COM
-W.COM
-WM.HLP
-WM-ANSI.COM
-WM-LSI.COM
-XDIR.COM
-XREF.COM
-
-
->> imdos205r0-2.dsk
-BIOS.MAC
-BIOS.PRN
-BIOS.REL
-BIOSORG.MAC
-KSCOPE.ASM
-KSCOPE.COM
-KSCOPE.HEX
-KSCOPE.PRN
-LIST.ASM
-LIST.COM
-LIST.HEX
-LIST.PRN
-MICRO80.COM
-STRTRK.BAS
-STRTRK.INT
-TREKINST
-
-
->> imsai-cpm13.dsk
+>> TDISK05.DSK
+   hansel -- CP/M 2.2, graphics demos -- 37 files
 ASM.COM
 BIOS.ASM
 BIOS.HEX
@@ -2677,45 +2959,113 @@ BOOT.HEX
 BOOT.PRN
 BYE.COM
 CLS.COM
-CPM16.COM
+COPY.ASM
+COPY.COM
+CPM48.SYS
 DDT.COM
 DUMP.ASM
 DUMP.COM
 ED.COM
+FORMAT.ASM
+FORMAT.COM
 KSCOPE.ASM
 KSCOPE.COM
-KSCOPE.HEX
-KSCOPE.PRN
 LOAD.COM
 MEMMAP.COM
 MICRO80.COM
 MOVCPM.COM
 PIP.COM
-R.COM
-README.TXT
+SDIR.COM
 STAT.COM
 SUBMIT.COM
+SURVEY.COM
+SURVEY.MAC
 SYSGEN.COM
-VIEW.COM
-W.COM
+SYSGEN.SUB
+SYSGEN.TXT
 WM.COM
 WM.HLP
 XDIR.COM
+XSUB.COM
+
+
+>> TDISK06.DSK
+   hansel -- games -- 26 files
+CHASE.ASM
+CHASE.COM
+CHASE.HEX
+CHASE.PRN
+DEFLECT.ASM
+DEFLECT.COM
+DEFLECT.HEX
+DEFLECT.PRN
+LIFE.ASM
+LIFE.COM
+LIFE.HEX
+LIFE.PRN
+LIFE8.ASM
+LIFE8.COM
+LIFE8.DOC
+LIFE8.HEX
+LIFE8.PRN
+PCL-DSII.COM
+PONG.ASM
+PONG.COM
+PONG.HEX
+PONG.PRN
+TARGET.ASM
+TARGET.COM
+TARGET.HEX
+TARGET.PRN
+
+
+>> ucsd-i5-1.dsk
+   altairsim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> ucsd-i5-2.dsk
+   altairsim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> ucsd-i5-interp.dsk
+   altairsim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
 
 
 >> ucsd-iv-1.dsk
+   cpmsim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> ucsd-iv-1.dsk
+   imsaisim -- boots its own operating system -- no CP/M filesystem
 (no CP/M filesystem -- this disk boots its own system)
 
 
 >> ucsd-iv-2.dsk
+   cpmsim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> ucsd-iv-2.dsk
+   imsaisim -- boots its own operating system -- no CP/M filesystem
 (no CP/M filesystem -- this disk boots its own system)
 
 
 >> ucsd-iv-interp.dsk
+   cpmsim -- boots its own operating system -- no CP/M filesystem
+(no CP/M filesystem -- this disk boots its own system)
+
+
+>> ucsd-iv-interp.dsk
+   imsaisim -- boots its own operating system -- no CP/M filesystem
 (no CP/M filesystem -- this disk boots its own system)
 
 
 >> um-cpm13.dsk
+   imsaisim -- CP/M 2.2, graphics demos -- 33 files
 ASM.COM
 BIOS.ASM
 BIOS.HEX
@@ -2752,6 +3102,7 @@ XDIR.COM
 
 
 >> vbasic.dsk
+   imsaisim -- BASIC -- 10 files
 VBASIC.COM
 VBJACK.ASC
 VBJACKUP.ASC
@@ -2764,7 +3115,38 @@ VPOKER.ASC
 VTEST.ASC
 
 
+>> vdm-stuff.dsk
+   altairsim -- games -- 26 files
+CHASE.ASM
+CHASE.COM
+CHASE.HEX
+CHASE.PRN
+DEFLECT.ASM
+DEFLECT.COM
+DEFLECT.HEX
+DEFLECT.PRN
+LIFE.ASM
+LIFE.COM
+LIFE.HEX
+LIFE.PRN
+LIFE8.ASM
+LIFE8.COM
+LIFE8.DOC
+LIFE8.HEX
+LIFE8.PRN
+PCL-DSII.COM
+PONG.ASM
+PONG.COM
+PONG.HEX
+PONG.PRN
+TARGET.ASM
+TARGET.COM
+TARGET.HEX
+TARGET.PRN
+
+
 >> vio-stuff.dsk
+   imsaisim -- games -- 11 files
 ALIENS.COM
 ALIENS.TXT
 CRAWL.COM
@@ -2779,6 +3161,7 @@ VIOPEN.MAC
 
 
 >> xybasic.dsk
+   imsaisim -- BASIC -- 7 files
 3DPLOT.XYB
 MANDEL.XYB
 README.TXT
@@ -2786,4 +3169,14 @@ SIN.XYB
 XYCPM95.COM
 XYCPMBCD.COM
 XYCPMFP.COM
+
+
+>> z80tests.dsk
+   cpmsim -- CPU exercisers -- 6 files
+CPUTEST.COM
+EX.MAC
+EXZ80DOC.COM
+EXZ80DOC.MAC
+PRELIM.COM
+PRELIM.MAC
 

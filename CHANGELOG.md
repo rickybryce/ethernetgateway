@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.5] - Unreleased
 
+### Changed
+
+- **`repodisks.txt` is ordered by disk name, and every disk says what it is.**
+  The catalogue was grouped by collection, which made it unusable for its one
+  purpose: you cannot look a disk up by name unless you already know whose
+  collection it is in, and that is the thing you came to find out. Every disk
+  is now listed once, A to Z, whichever collection it came from — an index of
+  all 98 first, then the same disks in full — with every collection's address
+  gathered at the head of the file and a short tag naming it on each entry.
+  Eight names exist in more than one collection and are genuinely different
+  disks (`cpm22.dsk` is in three), so that tag is what tells them apart, and
+  the sort is case-insensitive because byte order would put every upper-case
+  name first and hide half the catalogue below the other half.
+
+  Each entry also carries **one line saying what is on the disk**, so choosing
+  one no longer means reading 98 directory listings. It is derived from the
+  disk's own directory — never from the filename, never from anyone else's
+  catalogue — which is what keeps it from claiming something the disk does not
+  carry, and two rules keep it from stating plausible falsehoods instead. A
+  system is claimed only on the files that *are* the system: `CDOSCPM.COM` is a
+  CDOS-to-CP/M converter that lives on CP/M disks, and matching it labelled
+  four CP/M disks "Cromemco CDOS". And **a passenger is a proportion, not a
+  count**: `hd-tools.dsk` carries 345 files including all six Zork files, so a
+  flat "needs two matches" printed "Infocom adventures" for a tools disk —
+  describing it by its smallest corner, which is the very thing the rule was
+  written to prevent. Measured across all 98 disks, the labels rejected there
+  are its lowest shares (0.6%, 1.8%, 2.4%) and every label worth keeping sits
+  at 3.8% or above, so a theme must be two matches *and* a thirty-second of the
+  disk. A disk where nothing clears that gets the honest fallback. A single
+  *defining* file is exempt either way — one `COMAL.COM` is what that disk is
+  for.
+
 ## [0.9.4] - 2026-08-22
 
 ### Added
