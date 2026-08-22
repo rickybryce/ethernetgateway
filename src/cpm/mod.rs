@@ -45,6 +45,7 @@ pub mod layout;
 mod machine;
 pub mod mmu;
 pub mod modem_port;
+pub mod d7a;
 pub mod dazzler;
 pub mod fetch;
 pub mod printer;

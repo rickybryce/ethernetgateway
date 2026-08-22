@@ -1465,10 +1465,17 @@ mod tests {
     /// does not recognise — on one platform only. Pinned in `.gitattributes`;
     /// this fails loudly rather than letting the shape test fail obscurely.
     #[test]
+    fn test_the_catalogue_ships_with_unix_line_endings() {
+        assert!(
+            !repo_disks().contains('\r'),
+            "repodisks.txt has CRLF: the .gitattributes `text eol=lf` pin is missing or lost"
+        );
+    }
+
     /// **The catalogue fits 80 columns, like the readme beside it.**
     ///
     /// Both are plain text in one folder, read by one person in one editor, so
-    /// holding one to 80 and not the other was a inconsistency rather than a
+    /// holding one to 80 and not the other was an inconsistency rather than a
     /// decision. Adding the boot marker is what surfaced it: six lines went
     /// over, the worst at 96, and the fix was to shorten the two longest theme
     /// labels rather than to wrap a summary -- one line per disk is the whole
@@ -1488,13 +1495,6 @@ mod tests {
             .filter(|(n, _)| *n > 80)
             .collect();
         assert!(long.is_empty(), "these lines do not fit 80 columns: {long:#?}");
-    }
-
-    fn test_the_catalogue_ships_with_unix_line_endings() {
-        assert!(
-            !repo_disks().contains('\r'),
-            "repodisks.txt has CRLF: the .gitattributes `text eol=lf` pin is missing or lost"
-        );
     }
 
     /// A disk with no CP/M filesystem says so rather than showing an empty
