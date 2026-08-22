@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - Unreleased
+
 ## [0.9.4] - 2026-08-22
 
 ### Added
@@ -5898,6 +5900,7 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - S-register persistence via `AT&W`.
 
 [Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.4...HEAD
+[0.9.5]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.4...HEAD
 [0.9.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.4
 [0.9.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.3
 [0.9.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.2
