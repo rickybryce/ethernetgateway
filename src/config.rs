@@ -3106,7 +3106,9 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   N; the page says so.  A held key SWINGS -- centred when pressed, full
 #   deflection half a second later -- because these are analogue controls and a
 #   key has no magnitude.  Needs the web server on; the terminal that started
-#   the session cannot play.
+#   the session cannot play.  Read when a boot STARTS, not per keypress: a board
+#   is attached to a machine, so changing this leaves a session already running
+#   with the hardware it booted with.
 # cpm_boot_writable: may a booted disk WRITE to the images it is running?
 #   ON by default, because a vintage OS saves files, formats disks and updates
 #   its own directory -- boot one read-only and every SAVE appears to work and

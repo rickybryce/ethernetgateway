@@ -1240,9 +1240,12 @@ impl TelnetSession {
                 // must not reach for a lock tens of thousands of times a
                 // second.
                 //
-                // Unconditional because it is one relaxed atomic load when
-                // nothing is held, the same bargain as `publish_screen`, and
-                // because a board that is switched off ignores it anyway.
+                // Unconditional because it is one atomic load when nothing is
+                // held -- and that is true of both halves, which is worth
+                // saying because it was not at first: `Screen::joystick`
+                // returns on the mask before reading a clock, and
+                // `set_joystick_held` reads one only if the machine has a
+                // board. The same bargain as `publish_screen`.
                 machine.set_joystick_held(screen.joystick());
 
                 // The screens, at the same seam and to whoever has them

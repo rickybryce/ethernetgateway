@@ -217,6 +217,14 @@ impl Screen {
     /// [`JOYSTICK_IDLE_MS`], so a closed tab releases the stick rather than
     /// leaving a guest with the helm hard over.
     pub fn joystick(&self) -> crate::cpm::d7a::Held {
+        // **Nothing held is one atomic load and no clock.** The session pump
+        // calls this at every seam, and reading a wall clock to find out that a
+        // stick nobody is touching is still centred is a cost with no purchase.
+        // The mask is checked again inside, which is cheaper than the
+        // `Instant::elapsed` this avoids.
+        if self.live.joystick.load(Ordering::Acquire) == 0 {
+            return crate::cpm::d7a::Held::none();
+        }
         self.joystick_at(crate::cpm::d7a::now_ms())
     }
 
@@ -229,15 +237,28 @@ impl Screen {
     /// the clock tests the rule without a one-second sleep, the same choice the
     /// printer's idle close made.
     fn joystick_at(&self, now: u64) -> crate::cpm::d7a::Held {
-        let mask = self.live.joystick.load(Ordering::Relaxed);
+        // `Acquire`, paired with the writer's `Release` on this same field: it
+        // is what makes the timestamp read below certain to be the one that
+        // belongs to this mask. See `set_joystick` for the race that needs it.
+        let mask = self.live.joystick.load(Ordering::Acquire);
         if mask == 0 {
             return crate::cpm::d7a::Held::none();
         }
-        let at = self.live.joystick_at.load(Ordering::Relaxed);
+        let at = self.live.joystick_at.load(Ordering::Acquire);
         if now.saturating_sub(at) > JOYSTICK_IDLE_MS {
             // Latch it off, so this costs one comparison rather than a clock
             // read on every seam thereafter.
-            self.live.joystick.store(0, Ordering::Relaxed);
+            //
+            // **Conditionally**, not a plain store: between the decision above
+            // and this line a viewer can press a key, and a blind `store(0)`
+            // would throw that press away. Zero it only if it is still the mask
+            // we judged.
+            let _ = self.live.joystick.compare_exchange(
+                mask,
+                0,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
             return crate::cpm::d7a::Held::none();
         }
         crate::cpm::d7a::Held::from_mask(mask)
@@ -315,8 +336,21 @@ pub fn set_joystick(id: u64, mask: u16) -> bool {
             None => return false,
         }
     };
-    live.joystick.store(mask & crate::cpm::d7a::bit::ALL, Ordering::Relaxed);
-    live.joystick_at.store(crate::cpm::d7a::now_ms(), Ordering::Relaxed);
+    // **The timestamp goes first, and the orderings are not decoration.**
+    // These are two atomics holding one fact, and the reader checks the mask
+    // before the time. Written the other way round -- mask first -- a reader
+    // could see a *fresh* mask beside a *stale* timestamp, decide the page had
+    // gone quiet, and throw the keypress away; with `Relaxed` on both, the
+    // compiler and the processor are free to produce exactly that even from
+    // source in this order. Storing the time first and releasing the mask means
+    // a reader that has acquired this mask has necessarily also seen its time.
+    //
+    // It matters most at the moment it is least forgivable: a page that has been
+    // open and idle carries an old timestamp, so the *first* key of a game is
+    // the one at risk, and the symptom would be a press that does nothing until
+    // the next heartbeat.
+    live.joystick_at.store(crate::cpm::d7a::now_ms(), Ordering::Release);
+    live.joystick.store(mask & crate::cpm::d7a::bit::ALL, Ordering::Release);
     true
 }
 
@@ -584,6 +618,79 @@ mod tests {
         );
         // And it is latched off, so the next read costs no clock.
         assert_eq!(live.joystick.load(Ordering::Relaxed), 0);
+    }
+
+    /// **A press after the idle release is honoured.**
+    ///
+    /// Note what this does *not* cover, because the first version of this
+    /// comment claimed it did: the race is a press landing *between* the
+    /// judgement and the latch, and no single-threaded test can produce that
+    /// interleaving. Replacing the conditional latch with a blind
+    /// `store(0)` leaves this test passing — measured, not assumed — so the
+    /// conditional store is pinned from the source in
+    /// `test_the_joystick_timestamp_is_published_before_the_mask` instead. What
+    /// this test does hold is the part a caller can see: the latch is not
+    /// sticky, and a report after it works.
+    #[test]
+    fn test_a_press_after_the_idle_release_is_honoured() {
+        use crate::cpm::d7a::bit;
+        let screen = register("TEST.DSK");
+        assert!(set_joystick(screen.id(), bit::P1_LEFT));
+        let later = crate::cpm::d7a::now_ms() + JOYSTICK_IDLE_MS + 1;
+        assert_eq!(screen.joystick_at(later), crate::cpm::d7a::Held::none(), "released");
+
+        // A new press after the latch is honoured, not swallowed by it.
+        assert!(set_joystick(screen.id(), bit::P1_RIGHT));
+        let held = screen.joystick();
+        assert!(held.right[0], "the press after a release must reach the guest");
+        assert!(!held.left[0], "and it is the new direction, not the old one");
+    }
+
+    /// The two atomics hold one fact, so the writer must publish the time
+    /// *before* the mask — a reader checks the mask first, and a fresh mask
+    /// beside a stale time reads as silence. Pinned from the source because the
+    /// consequence is a dropped keypress that no single-threaded test can see.
+    #[test]
+    fn test_the_joystick_timestamp_is_published_before_the_mask() {
+        let src = include_str!("screen.rs");
+        let start = src.find("pub fn set_joystick(id: u64, mask: u16)").expect("the fn");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("the end") + start;
+        let code: String = src[start..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = code.find("joystick_at.store").expect("the timestamp store");
+        let mask = code.find("joystick.store").expect("the mask store");
+        assert!(
+            at < mask,
+            "the mask is published before its timestamp, so a reader can see a fresh press \
+             beside a stale time and discard it",
+        );
+        assert!(code.contains("Ordering::Release"), "and both stores must release");
+
+        // The other half of the same race, and pinned here for the same reason:
+        // a blind `store(0)` in the idle latch discards a press that arrives
+        // while the reader is deciding, and every behavioural test still passes
+        // with one -- which was checked by putting one back.
+        let start = src.find("fn joystick_at(&self, now: u64)").expect("the reader");
+        let body = &src[start..];
+        let end = body.find("\n    }\n").expect("the end") + start;
+        let reader: String = src[start..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            reader.contains("compare_exchange"),
+            "the idle latch must zero the mask only if it is still the one it judged; an \
+             unconditional store throws away a press that landed in between",
+        );
+        assert!(
+            !reader.contains("joystick.store("),
+            "an unconditional store to the mask is exactly what must not be here",
+        );
     }
 
     /// A page left open across the end of a session is told, like typing is.

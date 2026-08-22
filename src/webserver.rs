@@ -2093,7 +2093,13 @@ function vdmKbNote() {
   joyNote();
 })();
 document.getElementById('vdm-id').addEventListener('change', function() {
+  /* Let go of the stick before leaving: the session being left would otherwise
+     hold whatever was pushed until its idle release, and a guest left with the
+     helm over because somebody changed sessions is nobody's intention. */
+  joyRelease();
   vdmCurrent = this.value ? parseInt(this.value, 10) : null;
+  JOY_SEEN = false;
+  joyNote();
   vdmPoll();
 });
 vdmRefreshList();

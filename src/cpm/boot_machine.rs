@@ -326,8 +326,11 @@ impl BootMachine {
     /// so the board is handed a *set* once per pass rather than the port read
     /// reaching for a lock tens of thousands of times a second.
     pub fn set_joystick_held(&mut self, held: super::d7a::Held) {
-        let now = super::d7a::now_ms();
+        // The clock is read only if there is a board to tell. This is called at
+        // every pump seam -- thousands of times a second -- and a machine with
+        // no joystick must cost nothing at all for one it does not have.
         if let Some(b) = self.d7a.as_mut() {
+            let now = super::d7a::now_ms();
             b.set_held(held, now);
         }
     }

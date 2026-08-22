@@ -2286,7 +2286,9 @@ impl App {
              and note the alternative -- ports 18h-1Ch read FFh when nobody \
              claims them, and on an analogue axis FFh is a stick pushed hard \
              over rather than no stick at all.  Needs the web server on; the \
-             terminal that started the session cannot play.",
+             terminal that started the session cannot play.  Read when a boot \
+             starts, so a session already running keeps the hardware it booted \
+             with.",
         );
         // Writes by a *booted* disk.  A standing setting since 0.9.2, when the
         // telnet boot picker -- which asked it once per visit -- was removed for
