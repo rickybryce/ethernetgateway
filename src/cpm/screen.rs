@@ -652,7 +652,16 @@ mod tests {
     /// consequence is a dropped keypress that no single-threaded test can see.
     #[test]
     fn test_the_joystick_timestamp_is_published_before_the_mask() {
-        let src = include_str!("screen.rs");
+        // **`\r` stripped first, because this scan runs on Windows too.**
+        // A pattern with only a *leading* newline survives CRLF -- the `\r`
+        // sits before the `\n`, so `"\n    /// x"` still matches, which is why
+        // every older scan in this project gets away with it. A pattern with a
+        // *trailing* newline does not: `"\n}\n"` needs the brace followed
+        // immediately by `\n`, and under CRLF it is followed by `\r`. Both of
+        // these tests passed on Linux and macOS and failed on Windows for
+        // exactly that reason.
+        let src = include_str!("screen.rs").replace('\r', "");
+        let src = src.as_str();
         let start = src.find("pub fn set_joystick(id: u64, mask: u16)").expect("the fn");
         let body = &src[start..];
         let end = body.find("\n}\n").expect("the end") + start;

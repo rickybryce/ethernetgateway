@@ -4620,7 +4620,16 @@ mod tests {
     /// the arm names both "controller" and the port range.
     #[test]
     fn test_a_disk_controller_outranks_the_joystick_in_both_dispatches() {
-        let src = include_str!("boot_machine.rs");
+        // **`\r` stripped first, because this scan runs on Windows too.**
+        // A pattern with only a *leading* newline survives CRLF -- the `\r`
+        // sits before the `\n`, so `"\n    /// x"` still matches, which is why
+        // every older scan in this project gets away with it. A pattern with a
+        // *trailing* newline does not: `"\n}\n"` needs the brace followed
+        // immediately by `\n`, and under CRLF it is followed by `\r`. Both of
+        // these tests passed on Linux and macOS and failed on Windows for
+        // exactly that reason.
+        let src = include_str!("boot_machine.rs").replace('\r', "");
+        let src = src.as_str();
         for (what, sig) in [
             ("port_in", "fn port_in(&mut self, address: u16) -> u8 {"),
             ("port_out", "fn port_out(&mut self, address: u16, value: u8) {"),
