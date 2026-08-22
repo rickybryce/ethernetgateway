@@ -1659,7 +1659,7 @@ fn joystick_keys_json() -> String {
 /// The visible legend: every key, said plainly, beside a switch.
 fn render_joystick_panel() -> String {
     let mut out = String::from(
-        "<div class=\"joy\"><div class=\"joy-head\">         <label><input type=\"checkbox\" id=\"joy-on\">          <strong>Joystick</strong> &mdash; Cromemco D+7A</label>         <span id=\"joy-note\" class=\"vdm-status\"></span></div>",
+        "<div class=\"joy\"><div class=\"joy-head\">         <label><input type=\"checkbox\" id=\"joy-on\" checked>          <strong>Joystick</strong> &mdash; Cromemco D+7A</label>         <span id=\"joy-note\" class=\"vdm-status\"></span></div>",
     );
     // Two columns, one per stick, each naming its five keys.
     for stick in [1u8, 2u8] {
@@ -1673,7 +1673,7 @@ fn render_joystick_panel() -> String {
         out.push_str("</div>");
     }
     out.push_str(
-        "<div class=\"joy-hint\">Hold a direction and it <strong>swings</strong> &mdash;          centred when you press, full deflection half a second later, because these are          analogue sticks and a key has no halfway. While the joystick is on, those ten          letters drive it instead of typing at the guest.</div></div>",
+        "<div class=\"joy-hint\">Hold a direction and it <strong>swings</strong> &mdash;          centred when you press, full deflection half a second later, because these are          analogue sticks and a key has no halfway. While the joystick is on, those ten          letters drive it instead of typing at the guest &mdash; it starts on because this          gateway has the board enabled, so untick it to type them.</div></div>",
     );
     out
 }
@@ -1929,6 +1929,12 @@ function vdmSendKeys(bytes) {
    not heard for VDM_JOY_IDLE_MS -- which is what makes a closed tab let go of
    the helm. */
 var JOY_MASK = 0;
+/* Whether the stick is live.  Seeded from the checkbox rather than written here,
+   which is what keeps the two from disagreeing: the panel renders pre-ticked
+   when the gateway has the board enabled -- an operator who switched the board
+   on in the configuration meant to play, not to find another switch off -- and a
+   browser restoring a soft-reloaded page hands back the state the player last
+   chose, which a constant here would silently overrule. */
 var JOY_ON = false;
 var JOY_SEEN = false;
 var joyBeat = null;
@@ -2041,10 +2047,12 @@ function joyNote() {
 (function() {
   var box = document.getElementById('joy-on');
   if (!box) { return; }
+  JOY_ON = box.checked;
   box.addEventListener('change', function() {
     JOY_ON = this.checked;
     if (!JOY_ON) { joyRelease(); }
     joyNote();
+    vdmKbNote();
     var stage = document.getElementById('vdm-stage');
     if (JOY_ON && stage) { stage.focus(); }
   });
@@ -2058,9 +2066,16 @@ function vdmKbNote() {
     return;
   }
   var here = document.activeElement === document.getElementById('vdm-stage');
-  el.textContent = here
-    ? 'Typing goes to the guest. The terminal that started the session can type too.'
-    : 'Click the screen to type at this guest.';
+  if (!here) {
+    el.textContent = 'Click the screen to type at this guest.';
+    return;
+  }
+  /* The joystick's ten letters are the exception, so say so while it is on
+     rather than promising typing this page is about to intercept. */
+  el.textContent = JOY_ON
+    ? 'Typing goes to the guest, except the ten joystick letters.'
+      + ' The terminal that started the session can type too.'
+    : 'Typing goes to the guest. The terminal that started the session can type too.';
 }
 (function() {
   var stage = document.getElementById('vdm-stage');
@@ -6066,6 +6081,38 @@ mod tests {
         // reads as an unresponsive one for its first fraction of a second.
         assert!(page.contains("swings"), "the ramp has to be described, not discovered");
         assert!(page.contains("Cromemco D+7A"), "the board is named");
+    }
+
+    /// **A setting that is on must not land as a switch that is off.** The
+    /// panel only exists when `cpm_joystick` is enabled, so an operator
+    /// reaching this page has already said they want the board -- finding an
+    /// unticked box reads as the setting not having taken, which is the
+    /// "a setting is not an outcome" trap from the other direction. The
+    /// script seeds `JOY_ON` from the box rather than carrying its own
+    /// constant, or the two answers could differ (and a browser restoring a
+    /// soft-reloaded page would be overruled).
+    #[test]
+    fn test_the_switch_starts_on_when_the_board_is_enabled() {
+        let cfg = Config { cpm_joystick: true, ..Default::default() };
+        let page = render_vdm_page(&cfg);
+        assert!(
+            page.contains("id=\"joy-on\" checked"),
+            "the joystick switch must render already ticked",
+        );
+        assert!(
+            page.contains("JOY_ON = box.checked"),
+            "and the script must take its state from that box, not from a constant",
+        );
+        assert!(
+            !page.contains("var JOY_ON = true"),
+            "a second answer about the same fact is how the two drift apart",
+        );
+        // And the panel says which way it starts, since ten ordinary letters
+        // quietly not reaching the guest is otherwise a mystery.
+        assert!(
+            page.contains("it starts on because"),
+            "the page has to say the stick is live before a player types a W",
+        );
     }
 
     /// The legend and the handler are built from one table, and this is what

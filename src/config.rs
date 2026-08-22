@@ -535,7 +535,10 @@ const DEFAULT_CPM_SCREEN_INPUT: bool = true;
 /// byte for byte what it was -- the same courtesy `cpm_printer_port` gets.
 ///
 /// The keyboard for it is the browser's, on the Dazzler/VDM screen page, so
-/// this key does nothing whatever if the web server is off.
+/// this key does nothing whatever if the web server is off.  That page's own
+/// *Joystick* switch starts **on** when this is on: the operator has already
+/// answered the question here, and a second switch defaulting the other way
+/// reads as the setting not having taken.
 const DEFAULT_CPM_JOYSTICK: bool = true;
 
 /// How fast a booted guest is allowed to run — see [`crate::cpm::speed`].
@@ -3130,7 +3133,8 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   them, and on an analogue axis FFh is a stick pushed hard over rather than no
 #   stick at all -- so SPACEWAR and its neighbours have always run against a
 #   jammed joystick.  Player 1 is W/A/S/Z with X to fire, player 2 I/J/K/M with
-#   N; the page says so.  A held key SWINGS -- centred when pressed, full
+#   N; the page says so, and its Joystick switch starts ON while this is on.
+#   A held key SWINGS -- centred when pressed, full
 #   deflection half a second later -- because these are analogue controls and a
 #   key has no magnitude.  Needs the web server on; the terminal that started
 #   the session cannot play.  Read when a boot STARTS, not per keypress: a board
