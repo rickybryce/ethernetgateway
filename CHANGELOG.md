@@ -41,6 +41,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *defining* file is exempt either way — one `COMAL.COM` is what that disk is
   for.
 
+- **Every catalogue entry says whether the disk boots or is mount only.** It
+  leads the line, because booting and mounting are different things a disk is
+  *for* and which one it can do is the fact you are choosing on. Three states —
+  `boots`, `mount only` (a CP/M filesystem but no boot program), `neither` (no
+  boot program and no CP/M filesystem, so data in another system's format).
+  Across the 98 disks that is 73 / 17 / 8.
+
+  The marker comes from the product's own `boot::image_can_boot`, not a second
+  opinion, so the catalogue and the boot picker cannot disagree — and that
+  function is false for exactly one reason, `Bootability::NoBootProgram`, the
+  machine-independent one, which is what makes the answer safe to ship in a
+  file. A disk this machine merely has no *board* for still counts as bootable.
+
+  This corrected a claim rather than only adding one. The old text printed
+  "boots its own operating system" for **any** disk with no CP/M filesystem,
+  which flatly asserted a boot for the eight that cannot: `DISK0B`, `DISK0D`,
+  `DISK0F` and the five `ucsd-*` second disks. Two independent readings of one
+  file — sector 0, and the CP/M directory — had been collapsed into a single
+  sentence that only happened to be right for the disks anyone had tried. For
+  the same reason the summary no longer calls anything a "system disk":
+  `cpm22-2.dsk` carries `CPM64.SYS` with the BIOS and BOOT sources beside it and
+  does **not** boot, being a disk for *building* a system. Naming the system it
+  carries is a fact; calling it a system disk was an inference on top of one.
+
 ## [0.9.4] - 2026-08-22
 
 ### Added

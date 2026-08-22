@@ -131,8 +131,9 @@ while an image is mounted, and they come straight back when you unmount it.
 
 repodisks.txt beside this file lists what is on every disk in the
 collections this gateway is known to run, so you can tell which one you
-want before you go and find it.  The disks themselves are not ours to
-ship - that file says where each collection comes from.
+want before you go and find it.  Every disk is listed once by name, and
+each line says whether that disk BOOTS or is MOUNT ONLY.  The disks
+themselves are not ours to ship - that file says where each comes from.
 
 
 MOUNTING IS NOT BOOTING
@@ -775,10 +776,15 @@ mod generate {
             .count();
 
         let mut parts: Vec<String> = Vec::new();
-        match (system, themes.is_empty()) {
-            (Some(sys), true) => parts.push(format!("{sys} system disk")),
-            (Some(sys), false) => parts.push(sys.to_string()),
-            (None, _) => {}
+        // The system it carries, named and nothing more. It used to read
+        // "{sys} system disk" when no theme followed it, and the marker on the
+        // line now says whether it boots -- which showed that suffix up:
+        // `cpm22-2.dsk` carries CPM64.SYS with the BIOS and BOOT sources beside
+        // it and does NOT boot, being a disk for *building* a system. Naming
+        // the system is the fact; calling it a system disk was an inference on
+        // top of it, and the CDOSCPM.COM category error one step along.
+        if let Some(sys) = system {
+            parts.push(sys.to_string());
         }
         parts.extend(themes.iter().map(|(_, _, l)| l.to_string()));
         if parts.is_empty() {
@@ -790,6 +796,72 @@ mod generate {
             parts.push("with source".to_string());
         }
         Some(parts.join(", "))
+    }
+
+    /// One catalogue row, before it is rendered.
+    ///
+    /// Hoisted out of `record_repodisks` so the marker logic can be tested
+    /// without the disks: the generator needs real images and so can never
+    /// run in CI, but what it *claims* takes no disk at all. Exactly the
+    /// reasoning that put `describe_contents` under test.
+    struct Entry {
+        disk: String,
+        tag: &'static str,
+        order: usize,
+        files: Option<Vec<String>>,
+        /// Whether a boot list would offer this disk, from the product's
+        /// own [`crate::cpm::boot::image_can_boot`] rather than a second
+        /// opinion — so the catalogue and the picker cannot disagree.
+        ///
+        /// That function is false for exactly one reason,
+        /// `Bootability::NoBootProgram`, which is the machine-independent
+        /// one: "cannot boot on any machine in any configuration". A disk
+        /// this machine merely has no *board* for still counts as bootable
+        /// here, which is what makes the answer safe to ship in a file.
+        boots: bool,
+    }
+
+
+    /// What one entry says about itself, wherever it is printed.
+    ///
+    /// **The marker comes first because it is the decision.** Booting and
+    /// mounting are different things a disk is *for*, and which of them a
+    /// disk can do is the fact a reader is choosing on — more so than what
+    /// is on it. It leads the line so it can be scanned down in a
+    /// plain-text file with no other formatting.
+    ///
+    /// Three states, from two independent readings of the same file: the
+    /// boot marker is sector 0, the directory is the CP/M filesystem, and
+    /// neither is derived from the other. `neither` is not a hedge — a disk
+    /// with no boot program *and* no CP/M directory is one this gateway can
+    /// do nothing with, and saying so is more use than describing it twice
+    /// over as an absence.
+    ///
+    /// Naming these was the point of the exercise. The old text said
+    /// "boots its own operating system" for any disk with no CP/M
+    /// filesystem, which flatly claimed a boot for the six that cannot:
+    /// `DISK0B`, `DISK0D`, `DISK0F` and the three `ucsd-*` second disks.
+    /// Two independent facts had been collapsed into one sentence that only
+    /// happened to be right for the disks anyone had tried.
+    fn summary(e: &Entry) -> String {
+        let what = match &e.files {
+            None if e.boots => "its own operating system, no CP/M filesystem".to_string(),
+            // The legend says what `neither` means; this adds what it IS
+            // rather than repeating the two absences back.
+            None => "data in another system's format".to_string(),
+            Some(f) if f.is_empty() => "an empty CP/M directory".to_string(),
+            Some(f) => {
+                let what = describe_contents(f).unwrap_or_else(|| "assorted CP/M files".into());
+                let n = f.len();
+                format!("{what}, {n} file{}", if n == 1 { "" } else { "s" })
+            }
+        };
+        let mark = match (e.boots, e.files.is_some()) {
+            (true, _) => "boots",
+            (false, true) => "mount only",
+            (false, false) => "neither",
+        };
+        format!("{mark} -- {what}")
     }
 
     /// Regenerate `src/cpm/repodisks.txt` from the collections above.
@@ -826,12 +898,6 @@ mod generate {
         // Grouping was how it grew and it made the file unusable for its one
         // purpose -- you cannot look a disk up by name unless you already know
         // whose collection it is in, which is the thing you came to find out.
-        struct Entry {
-            disk: String,
-            tag: &'static str,
-            order: usize,
-            files: Option<Vec<String>>,
-        }
         let mut entries: Vec<Entry> = Vec::new();
         let mut present: Vec<&str> = Vec::new();
 
@@ -861,7 +927,8 @@ mod generate {
             present.push(name);
             for image in images {
                 let disk = image.file_name().unwrap().to_string_lossy().to_string();
-                entries.push(Entry { disk, tag, order, files: files_on(&image) });
+                let boots = crate::cpm::boot::image_can_boot(&image);
+                entries.push(Entry { disk, tag, order, files: files_on(&image), boots });
             }
         }
         let found = entries.len();
@@ -877,19 +944,6 @@ mod generate {
             a.disk.to_ascii_lowercase().cmp(&b.disk.to_ascii_lowercase()).then(a.order.cmp(&b.order))
         });
 
-        /// What one entry says about itself, wherever it is printed.
-        fn summary(e: &Entry) -> String {
-            match &e.files {
-                None => "boots its own operating system -- no CP/M filesystem".to_string(),
-                Some(f) if f.is_empty() => "an empty CP/M directory".to_string(),
-                Some(f) => {
-                    let what = describe_contents(f).unwrap_or_else(|| "assorted CP/M files".into());
-                    let n = f.len();
-                    format!("{what} -- {n} file{}", if n == 1 { "" } else { "s" })
-                }
-            }
-        }
-
         let mut s = String::new();
         s.push_str(REPODISKS_HEADER);
         s.push_str(
@@ -904,9 +958,21 @@ mod generate {
              Each listing is the disk's OWN directory, read through the same\n\
              mount path the gateway uses, and the line under each name is worked\n\
              out from those files -- not from the filename and not from anyone's\n\
-             catalogue.  A disk with no CP/M filesystem says so instead: it boots\n\
-             its own operating system, and where it keeps its files is that\n\
-             system's business.\n",
+             catalogue.\n\n\
+             Every line begins with what the disk can DO, which is the choice\n\
+             you are making.  Booting and mounting are different things:\n\n\
+             \x20 boots        it carries a boot program -- set it as the boot\n\
+             \x20              disk and its own operating system takes the\n\
+             \x20              machine.  It can also be mounted.\n\
+             \x20 mount only   no boot program, but it has a CP/M filesystem --\n\
+             \x20              mount it on a drive letter.  A disk of programs\n\
+             \x20              FOR another disk is one to mount, not to boot.\n\
+             \x20 neither      no boot program and no CP/M filesystem: data in\n\
+             \x20              some other system's format, which this gateway\n\
+             \x20              can do nothing with.\n\n\
+             Those are two separate readings of the same file -- the boot marker\n\
+             is sector 0, the file list is the CP/M directory -- so neither is\n\
+             guessed from the other.\n",
         );
 
         s.push_str("\n\n\nWHERE THEY COME FROM\n--------------------\n");
@@ -925,7 +991,11 @@ mod generate {
 
         s.push_str("\n\n\nEVERY DISK IN FULL\n------------------\n");
         for e in &entries {
-            s.push_str(&format!("\n>> {}\n   {} -- {}\n", e.disk, e.tag, summary(e)));
+            // `({tag})  {summary}` and not `{tag} -- {summary}`: the summary
+            // already leads with a `-- `-separated marker, so the old form put
+            // three of them on one line -- and it made the summary text differ
+            // between the index and here, when it is one `summary` call.
+            s.push_str(&format!("\n>> {}\n   ({})  {}\n", e.disk, e.tag, summary(e)));
             match &e.files {
                 Some(names) if !names.is_empty() => {
                     for n in names {
@@ -988,6 +1058,73 @@ mod generate {
             let mut f = files(names);
             f.extend(filler(pad));
             describe_contents(&f).expect("a CP/M directory describes itself")
+        }
+
+        /// **The marker is the decision, and it must be two readings not one.**
+        /// The text this replaced said "boots its own operating system" for any
+        /// disk with no CP/M filesystem, which claimed a boot for the eight that
+        /// cannot -- `DISK0B`, `DISK0D`, `DISK0F` and the five `ucsd-*` second
+        /// disks. Sector 0 and the CP/M directory are independent, so all four
+        /// combinations are real and each gets its own answer here.
+        #[test]
+        fn test_every_entry_says_what_the_disk_can_do() {
+            let e = |files: Option<Vec<String>>, boots: bool| super::Entry {
+                disk: "x.dsk".into(),
+                tag: "t",
+                order: 0,
+                files,
+                boots,
+            };
+            let some = |names: &[&str]| Some(files(names));
+
+            // Boots, and its filesystem is its own business.
+            let s = super::summary(&e(None, true));
+            assert!(s.starts_with("boots -- "), "{s}");
+            assert!(s.contains("no CP/M filesystem"), "{s}");
+
+            // The case that was wrong: no boot program AND no CP/M directory.
+            let s = super::summary(&e(None, false));
+            assert!(s.starts_with("neither -- "), "{s}");
+            assert!(
+                !s.contains("boots its own"),
+                "a disk that cannot boot must not be said to boot: {s}",
+            );
+
+            // A CP/M directory and no boot program: the mount-only case, which
+            // is what most of these disks are for.
+            let s = super::summary(&e(some(&["CHESS.COM", "CHASE.COM"]), false));
+            assert!(s.starts_with("mount only -- "), "{s}");
+            assert!(s.contains("2 files"), "and it still says what is on it: {s}");
+
+            // Boots AND has a directory -- the ordinary system disk.
+            let s = super::summary(&e(some(&["MOVCPM.COM"]), true));
+            assert!(s.starts_with("boots -- "), "{s}");
+            assert!(s.contains("CP/M 2.2"), "{s}");
+            assert!(s.contains("1 file") && !s.contains("1 files"), "singular: {s}");
+
+            // An empty directory is not the same as no directory.
+            let s = super::summary(&e(Some(Vec::new()), false));
+            assert!(s.starts_with("mount only -- "), "{s}");
+            assert!(s.contains("empty CP/M directory"), "{s}");
+        }
+
+        /// A system disk that does not boot is a real disk, not a contradiction
+        /// -- `cpm22-2.dsk` carries `CPM64.SYS` beside the BIOS and BOOT
+        /// sources and is for *building* a system. So the summary may name the
+        /// system, and must not call the disk a system disk.
+        #[test]
+        fn test_carrying_a_system_is_not_the_same_as_booting_one() {
+            let e = super::Entry {
+                disk: "cpm22-2.dsk".into(),
+                tag: "cpmsim",
+                order: 0,
+                files: Some(files(&["CPM64.SYS", "BIOS.Z80", "BOOT.Z80", "SYSGEN.SUB"])),
+                boots: false,
+            };
+            let s = super::summary(&e);
+            assert!(s.starts_with("mount only -- "), "{s}");
+            assert!(s.contains("CP/M 2.2"), "the system it carries is a fact: {s}");
+            assert!(!s.contains("system disk"), "but calling it one is an inference: {s}");
         }
 
         #[test]
@@ -1238,6 +1375,74 @@ mod tests {
             assert!(summary.contains(" -- "), "{name} needs its one-line summary, got {summary:?}");
             assert!(!rest.trim().is_empty(), "{name} has an empty entry");
         }
+
+        // **Every entry declares what the disk can DO, and the words are the
+        // legend's.** Booting and mounting are different things, and the marker
+        // is the field a reader chooses on -- so a disk that carried none, or
+        // one whose marker the legend never explains, is the failure that
+        // matters here. Checked in the index and the listings both, because the
+        // two are rendered from one `summary` and a reader uses whichever is in
+        // front of them.
+        const MARKS: [&str; 3] = ["boots", "mount only", "neither"];
+        for m in MARKS {
+            assert!(s.contains(&format!("\n  {m}  ")) || s.contains(&format!(" {m}   ")),
+                    "the legend must explain {m:?}");
+        }
+        let mut tally = std::collections::BTreeMap::new();
+        for (where_, lines) in [("index", &s[a_to_z..in_full]), ("listings", &s[in_full..])] {
+            let summaries: Vec<&str> = lines
+                .lines()
+                .filter(|l| l.contains(" -- ") && l.starts_with("   "))
+                .collect();
+            assert_eq!(
+                summaries.len(),
+                full.len(),
+                "one summary per disk in the {where_}, got {}",
+                summaries.len(),
+            );
+            for line in summaries {
+                // The listings prefix the summary with `(tag)`; the index
+                // does not. Strip it so the SAME summary is checked in both.
+                let body = line.trim();
+                let body = match body.strip_prefix('(') {
+                    Some(r) => r.split_once(')').expect("a tag closes").1.trim(),
+                    None => body,
+                };
+                let mark = MARKS.iter().find(|m| {
+                    body.strip_prefix(**m).is_some_and(|r| r.starts_with(" -- "))
+                });
+                let mark = mark.unwrap_or_else(|| {
+                    panic!("a {where_} summary must begin with a marker the legend explains: {body:?}")
+                });
+                *tally.entry((where_, *mark)).or_insert(0usize) += 1;
+            }
+        }
+        // The index and the listings must AGREE about every disk, not merely
+        // each be well-formed: they are one `summary` rendered twice, so a
+        // disagreement means a disk is described two ways in one file.
+        for m in MARKS {
+            assert_eq!(
+                tally.get(&("index", m)).copied().unwrap_or(0),
+                tally.get(&("listings", m)).copied().unwrap_or(0),
+                "the index and the listings disagree about how many disks are {m:?}",
+            );
+        }
+        // A marker no disk carries would mean the legend documents a state the
+        // generator cannot produce -- and one carried by every disk would mean
+        // the distinction is not being drawn at all.
+        for m in MARKS {
+            let n = tally.get(&("index", m)).copied().unwrap_or(0);
+            assert!(n > 0, "no disk is {m:?}, so the legend explains a state that cannot happen");
+            assert!(n < full.len(), "every disk is {m:?}, so nothing is being distinguished");
+        }
+
+        // The marker is about sector 0 and the file list is about the CP/M
+        // directory, so "boots" must not be a restatement of "has files". A
+        // disk that boots and has no filesystem, and one that has files and
+        // does not boot, both have to exist or the two readings have collapsed
+        // into one -- which is exactly the defect this replaced.
+        assert!(s.contains("boots -- its own operating system"), "a boot with no CP/M directory");
+        assert!(s.contains("mount only -- "), "a CP/M directory with no boot program");
 
         // The collection we cannot read must not be advertised as one we run.
         assert!(!s.contains("intelmds"), "the Intel MDS is not a machine this gateway emulates");
