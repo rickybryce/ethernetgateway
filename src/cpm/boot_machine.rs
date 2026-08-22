@@ -332,6 +332,26 @@ impl BootMachine {
         }
     }
 
+    /// Force the axis bytes, for a deterministic probe.
+    #[cfg(test)]
+    pub fn force_axes(&mut self, values: Option<[u8; 4]>) {
+        if let Some(b) = self.d7a.as_mut() {
+            b.force_axes(values);
+        }
+    }
+
+    /// Force the switch byte, for probing which switch a game listens to.
+    ///
+    /// Test-only: `Held` names one button per stick because that is what the
+    /// keyboard offers, and the hardware has four. Finding out which of the four
+    /// a program uses needs a way to press the others.
+    #[cfg(test)]
+    pub fn force_switch_bits(&mut self, byte: Option<u8>) {
+        if let Some(b) = self.d7a.as_mut() {
+            b.force_switches(byte);
+        }
+    }
+
     /// Has a guest actually read the joystick board? Reported, never a gate.
     pub fn joystick_addressed(&self) -> bool {
         self.d7a.as_ref().is_some_and(|b| b.addressed())
@@ -4682,6 +4702,133 @@ mod tests {
             assert_eq!(m.port_in(port as u16), 0xFF, "{port:#04x} unclaimed reads 0xFF");
         }
         assert!(!m.joystick_addressed());
+    }
+
+    /// **SPACEWAR responds to every input the keyboard offers.**
+    ///
+    /// ADCTEST proves the board reports what it is told. This proves the game
+    /// *acts* on it, which is the question a player is actually asking.
+    ///
+    /// **Getting a trustworthy answer took three attempts, and the first two
+    /// are the interesting part.** Holding a direction and looking at the
+    /// picture proves nothing: the ships carry inertia and the display animates
+    /// regardless, so something always changed. Counting lit pixels was no
+    /// better — every condition oscillated between roughly 55 and 95 and the
+    /// series were indistinguishable. Both were measuring the game rather than
+    /// the control. A first "controlled" version counted distinct sprite
+    /// orientations and *failed*, reporting fewer under a held stick than under
+    /// none, because the count conflated which sprites existed with how they
+    /// were turned.
+    ///
+    /// What works is an experiment rather than an observation: boot a fresh
+    /// machine per condition, run the **same instruction counts** to the same
+    /// point, apply exactly one input, run on, and compare the pictures. The
+    /// emulator is deterministic once the wall-clock ramp is out of the way,
+    /// which is what `force_axes` and `force_switches` exist for. Then a
+    /// difference is *caused* by the input, and no interpretation of the picture
+    /// is needed.
+    ///
+    /// **The repeat of the baseline is the whole thing's licence.** Running the
+    /// do-nothing case twice must give byte-identical pictures; without that,
+    /// every "differs" verdict below could be the emulator wandering, and the
+    /// test would read as proof while proving nothing.
+    ///
+    /// The measured answer: all four axes and both sticks' first switch move the
+    /// game, and switches 2, 3 and 4 of each stick do nothing at all in this
+    /// program — so the two bits the keyboard drives are exactly the two
+    /// SPACEWAR reads. That is not asserted as a requirement, only reported: a
+    /// different game on the same board may well use the others.
+    ///
+    /// Ignored: set `CPM_SPACEWAR_IMAGE` to a disk carrying `SPACEWAR.COM`.
+    #[test]
+    #[ignore]
+    fn test_spacewar_responds_to_the_joystick() {
+        use crate::cpm::{d7a, screen};
+        let Ok(path) = std::env::var("CPM_SPACEWAR_IMAGE") else {
+            eprintln!("set CPM_SPACEWAR_IMAGE to a disk carrying SPACEWAR.COM");
+            return;
+        };
+        let image = std::fs::read(&path).unwrap();
+
+        /// Boot, start SPACEWAR, apply one input, and return the picture.
+        fn run(image: &[u8], axes: [u8; 4], switches: u8) -> crate::cpm::dazzler::Picture {
+            let live = screen::register("spacewar");
+            let _ = screen::look(live.id());
+            let mut m = BootMachine::new();
+            m.insert(0, image.to_vec(), false).expect("bootable");
+            m.set_joystick(true);
+            let mut cpu = BootMachine::new_cpu();
+            m.boot(&mut cpu, 0).expect("boots");
+            for _ in 0..60_000_000u64 {
+                m.step(&mut cpu);
+                let _ = m.take_output();
+            }
+            for &b in b"SPACEWAR\r" {
+                m.send_key(b);
+            }
+            for _ in 0..40_000_000u64 {
+                m.step(&mut cpu);
+                let _ = m.take_output();
+            }
+            m.force_axes(Some(axes));
+            m.force_switch_bits(Some(switches));
+            for _ in 0..30_000_000u64 {
+                m.step(&mut cpu);
+                let _ = m.take_output();
+            }
+            assert!(m.joystick_addressed(), "SPACEWAR must read the board at all");
+            m.publish_screen(&live);
+            let screen::Look::Frame(snap) = screen::look(live.id()) else {
+                panic!("no frame published")
+            };
+            let dz = snap.dazzler.as_ref().expect("SPACEWAR drives a Dazzler");
+            crate::cpm::dazzler::frame(&dz.bytes, crate::cpm::dazzler::Format::from_byte(dz.format))
+        }
+
+        let (full, neg, idle) = (d7a::FULL as u8, (-d7a::FULL) as u8, 0xFFu8);
+        let base = run(&image, [0, 0, 0, 0], idle);
+        let differs = |p: &crate::cpm::dazzler::Picture| {
+            base.cells.iter().zip(p.cells.iter()).filter(|(a, b)| a != b).count()
+        };
+        println!("baseline: {} lit", base.cells.iter().filter(|c| **c != 0).count());
+
+        // The licence for every number below.
+        let again = run(&image, [0, 0, 0, 0], idle);
+        assert_eq!(
+            differs(&again),
+            0,
+            "the same run twice gave different pictures, so nothing here can be attributed \
+             to an input",
+        );
+        println!("   repeatability: identical, so a difference below is caused by the input");
+
+        // Every input the keyboard can produce must move the game.
+        let moves: [(&str, [u8; 4], u8); 10] = [
+            ("P1 left  (1X 81)", [neg, 0, 0, 0], idle),
+            ("P1 right (1X 7F)", [full, 0, 0, 0], idle),
+            ("P1 up    (1Y 7F)", [0, full, 0, 0], idle),
+            ("P1 down  (1Y 81)", [0, neg, 0, 0], idle),
+            ("P2 left  (2X 81)", [0, 0, neg, 0], idle),
+            ("P2 right (2X 7F)", [0, 0, full, 0], idle),
+            ("P2 up    (2Y 7F)", [0, 0, 0, full], idle),
+            ("P2 down  (2Y 81)", [0, 0, 0, neg], idle),
+            ("P1 fire  (bit 0)", [0, 0, 0, 0], !0x01),
+            ("P2 fire  (bit 4)", [0, 0, 0, 0], !0x10),
+        ];
+        for (what, axes, switches) in moves {
+            let d = differs(&run(&image, axes, switches));
+            println!("  {what}: {d} cells differ");
+            assert!(d > 0, "{what} changed nothing: the game is not acting on it");
+        }
+
+        // Reported, not required: the other three switches per stick.
+        for bit in [1u8, 2, 3, 5, 6, 7] {
+            let d = differs(&run(&image, [0, 0, 0, 0], !(1u8 << bit)));
+            println!(
+                "  switch bit {bit}: {d} cells differ{}",
+                if d == 0 { "   (unused by SPACEWAR)" } else { "" }
+            );
+        }
     }
 
     /// **What Cromemco's own joystick test makes of our board.**

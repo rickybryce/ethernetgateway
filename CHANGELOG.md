@@ -55,6 +55,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and an operator is entitled to a booted guest that is byte for byte what it
   was.
 
+  **SPACEWAR itself was then driven, and it responds to every input the
+  keyboard offers.** Proving that took three attempts, and the failures are the
+  useful part: holding a direction and watching the picture proves nothing, since
+  the ships carry inertia and the display animates regardless; counting lit
+  pixels was no better, every condition oscillating between roughly 55 and 95;
+  and a first "controlled" version counting distinct sprite orientations *failed*,
+  because the count conflated which sprites existed with how they were turned.
+  What works is an experiment rather than an observation — boot a fresh machine
+  per condition, run identical instruction counts, apply exactly one input, and
+  compare pictures, the emulator being deterministic once the wall-clock ramp is
+  forced out of the way. A **repeat of the do-nothing run** is that method's
+  licence: without byte-identical baselines every verdict could be the emulator
+  wandering. Measured, all eight axis directions and both sticks' first switch
+  change the game (41–140 cells of a 16,384-cell picture), and switches 2, 3 and
+  4 of each stick change nothing at all — so the two bits the keyboard drives are
+  exactly the two SPACEWAR reads.
+
 ### Changed
 
 - **`repodisks.txt` is ordered by disk name, and every disk says what it is.**

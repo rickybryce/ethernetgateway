@@ -232,6 +232,12 @@ pub struct D7a {
     /// because we cannot know in advance which disks want one, and this is how
     /// a screen can say whether anything is actually listening.
     addressed: bool,
+    /// Test-only override of the switch byte; see [`D7a::force_switches`].
+    #[cfg(test)]
+    forced_switches: Option<u8>,
+    /// Test-only override of the axes; see [`D7a::force_axes`].
+    #[cfg(test)]
+    forced_axes: Option<[u8; 4]>,
 }
 
 impl D7a {
@@ -261,6 +267,10 @@ impl D7a {
     /// Centre is zero and the two directions are the two signs, which is what
     /// ADCTEST's zero adjustment says the hardware does.
     pub fn axis(&self, axis: Axis, now_ms: u64) -> u8 {
+        #[cfg(test)]
+        if let Some(forced) = self.forced_axes {
+            return forced[axis as usize];
+        }
         let swing = self.swings[axis as usize];
         if swing.dir == 0 {
             return 0;
@@ -280,6 +290,10 @@ impl D7a {
     /// stay high — a stick with three buttons nobody is pressing, which is
     /// exactly what an unwired switch reads.
     pub fn switches(&self) -> u8 {
+        #[cfg(test)]
+        if let Some(forced) = self.forced_switches {
+            return forced;
+        }
         let mut byte = 0xFFu8;
         if self.held.fire[0] {
             byte &= !P1_FIRE_BIT;
@@ -288,6 +302,27 @@ impl D7a {
             byte &= !P2_FIRE_BIT;
         }
         byte
+    }
+
+    /// Force the four axis bytes, for a *deterministic* probe.
+    ///
+    /// Test-only, and the reason it exists is worth stating: the ramp is
+    /// wall-clock, which makes a run unrepeatable, and an experiment that
+    /// compares two runs needs them to differ in exactly one thing. Forcing the
+    /// value takes the clock out.
+    #[cfg(test)]
+    pub fn force_axes(&mut self, values: Option<[u8; 4]>) {
+        self.forced_axes = values;
+    }
+
+    /// Force the switch byte, for probing which switch a program uses.
+    ///
+    /// Test-only. `Held` carries one button per stick because that is what the
+    /// keyboard offers; the board has four per stick, and which of them a game
+    /// reads is a question only the game can answer.
+    #[cfg(test)]
+    pub fn force_switches(&mut self, byte: Option<u8>) {
+        self.forced_switches = byte;
     }
 
     /// Answer a port read, or `None` if this board does not own the port.
