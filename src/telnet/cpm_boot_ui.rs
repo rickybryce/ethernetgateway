@@ -815,6 +815,12 @@ impl TelnetSession {
             .and(crate::cpm::printer::port_for(&printer_cfg.cpm_printer_port))
             .map(|p| p.data);
         machine.attach_printer(printer_port);
+        // The joystick board, last of the three, and gated on its own key for
+        // the same reason the printer is: ports `18h`-`1Ch` read `0xFF`
+        // unclaimed, and `0xFF` on an analogue axis is a stick jammed
+        // off-centre rather than an absence of one -- so a machine whose
+        // operator did not ask for a joystick must be left exactly as it was.
+        machine.set_joystick(printer_cfg.cpm_joystick);
         let mut modem = CpmModem::new(matches!(attach, ModemAttach::Ports(_, _)));
         modem.set_menu_context(self.shutdown.clone(), self.restart.clone(), self.lockouts.clone());
         // Joins the inbound `CPM@<ip>` pool for as long as the boot lasts, so a
@@ -1225,6 +1231,19 @@ impl TelnetSession {
                 for b in screen.take_keys() {
                     machine.send_key(boot_key_for_guest(b, false, erase));
                 }
+
+                // And what the browser is *holding*, which is a different act
+                // from typing and so a different call.  Read rather than
+                // drained: a direction stays pushed until the hand moves, so
+                // handing the board the whole set once per seam is both the
+                // cheapest and the only correct shape -- the port read itself
+                // must not reach for a lock tens of thousands of times a
+                // second.
+                //
+                // Unconditional because it is one relaxed atomic load when
+                // nothing is held, the same bargain as `publish_screen`, and
+                // because a board that is switched off ignores it anyway.
+                machine.set_joystick_held(screen.joystick());
 
                 // The screens, at the same seam and to whoever has them
                 // open in the browser.  A no-op — one atomic load — unless a

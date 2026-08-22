@@ -521,6 +521,23 @@ const DEFAULT_CPM_EMU_ENABLED: bool = true;
 /// somebody else is sitting at is not a keystroke.
 const DEFAULT_CPM_SCREEN_INPUT: bool = true;
 
+/// Give a booted machine the Cromemco D+7A joystick board.
+///
+/// On by default, and the reasoning is the opposite of a port being "free".
+/// Ports `18h`-`1Ch` read `0xFF` when nobody claims them, and on an analogue
+/// axis `0xFF` is a stick pinned hard over -- not an absence of one. So the
+/// Cromemco games have always been played against a jammed joystick, and the
+/// choice here is not whether to add hardware but which wrong answer to give:
+/// a centred stick nobody is touching, or a hard-over one.
+///
+/// It is still a key rather than always-on, because claiming a port is a real
+/// change to the machine and an operator is entitled to a booted guest that is
+/// byte for byte what it was -- the same courtesy `cpm_printer_port` gets.
+///
+/// The keyboard for it is the browser's, on the Dazzler/VDM screen page, so
+/// this key does nothing whatever if the web server is off.
+const DEFAULT_CPM_JOYSTICK: bool = true;
+
 /// Booting writes to its images unless the operator says otherwise.
 ///
 /// **On, because a disk that cannot be written is not the machine the software
@@ -1047,6 +1064,9 @@ pub struct Config {
     /// The screen is always readable; this decides whether it is also a
     /// keyboard.  See [`DEFAULT_CPM_SCREEN_INPUT`].
     pub cpm_screen_input: bool,
+    /// Give a booted machine the Cromemco D+7A joystick board, played from the
+    /// browser's screen page.  See [`DEFAULT_CPM_JOYSTICK`].
+    pub cpm_joystick: bool,
     /// One-shot: open the VDM / Dazzler screen once the gateway is back up.
     ///
     /// **Not a setting, and deliberately not on any configuration screen** —
@@ -1305,6 +1325,7 @@ impl Default for Config {
             web_port: DEFAULT_WEB_PORT,
             cpm_emu_enabled: DEFAULT_CPM_EMU_ENABLED,
             cpm_screen_input: DEFAULT_CPM_SCREEN_INPUT,
+            cpm_joystick: DEFAULT_CPM_JOYSTICK,
             cpm_boot_writable: DEFAULT_CPM_BOOT_WRITABLE,
             open_screen_after_restart: false,
             disable_gateway_connections: DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
@@ -2235,6 +2256,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_screen_input")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_CPM_SCREEN_INPUT),
+        cpm_joystick: map
+            .get("cpm_joystick")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_CPM_JOYSTICK),
         cpm_boot_writable: map
             .get("cpm_boot_writable")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -3072,6 +3097,16 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   characters interleave if they do it at once, which is what a shared
 #   terminal is.  The ESC ESC exit gesture is NOT honoured from a browser:
 #   ending a session somebody else is sitting at is not a keystroke.
+# cpm_joystick: give a booted machine the Cromemco D+7A joystick board, played
+#   from the keyboard of the browser watching its screen.  On by default, and
+#   note what the alternative is: ports 18h-1Ch read FFh when nobody claims
+#   them, and on an analogue axis FFh is a stick pushed hard over rather than no
+#   stick at all -- so SPACEWAR and its neighbours have always run against a
+#   jammed joystick.  Player 1 is W/A/S/Z with X to fire, player 2 I/J/K/M with
+#   N; the page says so.  A held key SWINGS -- centred when pressed, full
+#   deflection half a second later -- because these are analogue controls and a
+#   key has no magnitude.  Needs the web server on; the terminal that started
+#   the session cannot play.
 # cpm_boot_writable: may a booted disk WRITE to the images it is running?
 #   ON by default, because a vintage OS saves files, formats disks and updates
 #   its own directory -- boot one read-only and every SAVE appears to work and
@@ -3093,6 +3128,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 ");
     write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
     write_kv(&mut content, "cpm_screen_input", cfg.cpm_screen_input);
+    write_kv(&mut content, "cpm_joystick", cfg.cpm_joystick);
     write_kv(&mut content, "cpm_boot_writable", cfg.cpm_boot_writable);
     write_kv(&mut content, "open_screen_after_restart", cfg.open_screen_after_restart);
     write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);
@@ -3812,6 +3848,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         }
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_screen_input" => cfg.cpm_screen_input = value.eq_ignore_ascii_case("true"),
+        "cpm_joystick" => cfg.cpm_joystick = value.eq_ignore_ascii_case("true"),
         "cpm_boot_writable" => cfg.cpm_boot_writable = value.eq_ignore_ascii_case("true"),
         "open_screen_after_restart" => {
             cfg.open_screen_after_restart = value.eq_ignore_ascii_case("true")
@@ -5297,6 +5334,7 @@ mod tests {
             web_port: 9090,
             cpm_emu_enabled: true,
             cpm_screen_input: false,
+            cpm_joystick: false,
             disable_gateway_connections: true,
             cpm_emu_max_minstr: 500,
             cpm_emu_uart: "rc2014_1b".to_string(),

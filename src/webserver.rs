@@ -470,6 +470,45 @@ async fn handle_connection(
             )
             .await?;
         }
+        ("POST", "/vdm/joy") => {
+            // Holding a direction, which is a different act from typing and so
+            // a different route: a keystroke is delivered once and a stick is a
+            // position that persists. Gated on its own key, read live, for the
+            // same reason `/vdm/key` reads `cpm_screen_input` live.
+            //
+            // The whole mask arrives every time rather than a change, which is
+            // what makes a dropped request harmless -- the next one restates
+            // the truth. A mask is a plain integer, so unlike a keystroke it
+            // needs no percent-encoding.
+            let text = String::from_utf8_lossy(&request.body).to_string();
+            let form = parse_form(&text);
+            let id = form.get("id").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let mask = form.get("m").and_then(|s| s.parse::<u16>().ok());
+            let body = if !config::get_config().cpm_joystick {
+                // A refusal the page can act on: it unticks its own switch and
+                // hands the ten letters back to the keyboard.
+                "{\"held\":false,\"why\":\"off\"}".to_string()
+            } else {
+                match mask {
+                    // `0` is a real and important report -- it is the release,
+                    // and dropping it as "nothing" would leave the stick over.
+                    Some(m) if crate::cpm::screen::set_joystick(id, m) => {
+                        "{\"held\":true}".to_string()
+                    }
+                    Some(_) => "{\"held\":false,\"why\":\"gone\"}".to_string(),
+                    None => "{\"held\":false,\"why\":\"nothing\"}".to_string(),
+                }
+            };
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
         ("POST", "/vdm/key") => {
             // Typing at a booted guest.  Gated on `cpm_screen_input`, read
             // live rather than captured at start-up so turning it off takes
@@ -1228,6 +1267,7 @@ fn collect_form_updates(
         "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
         "cpm_emu_enabled",
         "cpm_screen_input",
+        "cpm_joystick",
         "cpm_boot_writable",
         "place_bundled_terminals",
         "kermit_long_packets", "kermit_sliding_windows", "kermit_streaming",
@@ -1483,13 +1523,14 @@ fn vdm_frame_json(id: u64, look: &crate::cpm::screen::Look) -> String {
             format!(
                 "{{\"id\":{id},\"state\":\"live\",\"label\":\"{label}\",\"gen\":{generation},\
                  \"scroll\":{scroll},\"active\":{active},\"rows\":[{rows}],\"inv\":[{inv}],\
-                 \"dazzler\":{dazzler}}}",
+                 \"joy\":{joy},\"dazzler\":{dazzler}}}",
                 label = json_escape(&snap.label),
                 generation = snap.generation,
                 scroll = snap.vdm.scroll,
                 active = snap.vdm.active,
                 rows = join(&rows),
                 inv = join(&inv),
+                joy = snap.joystick_seen,
             )
         }
     }
@@ -1542,20 +1583,118 @@ fn render_vdm_page(cfg: &Config) -> String {
     );
     out.push_str("</div>");
     out.push_str("<div id=\"vdm-kb\" class=\"vdm-status\"></div>");
+    // **The joystick panel names every key.** A control you cannot see is a
+    // control nobody uses: these games read a board with no console, so there
+    // is nothing on the guest's own screen to say a joystick exists, let alone
+    // which keys are it. The mapping is rendered from the same table the
+    // script keys off, so the legend cannot drift from what the page sends.
+    if cfg.cpm_joystick {
+        out.push_str(&render_joystick_panel());
+    }
     out.push_str("</section>");
     // The two intervals are Rust constants, so the page cannot drift from the
     // rate this file documents.
     out.push_str(&format!(
         "<script>var VDM_POLL_MS={VDM_POLL_MS};var VDM_LIST_MS={VDM_LIST_MS};\
-         var VDM_INPUT={input};</script>",
+         var VDM_INPUT={input};var VDM_JOY={joy};\
+         var VDM_JOY_KEYS={keys};var VDM_JOY_IDLE_MS={idle};</script>",
         input = cfg.cpm_screen_input,
+        joy = cfg.cpm_joystick,
+        keys = joystick_keys_json(),
+        idle = crate::cpm::screen::JOYSTICK_IDLE_MS,
     ));
     out.push_str(VDM_SCRIPT);
     out.push_str("</body></html>");
     out
 }
 
+/// The joystick keys, in one place: the legend the page prints and the table
+/// the script matches on are both built from this.
+///
+/// **One table and not two.** The mapping is the whole interface — a player who
+/// reads `S` for right and presses `D` gets nothing, and a legend that drifts
+/// from the handler is worse than no legend, because it is believed. The keys
+/// are the ones the operator asked for: `W/A/S/Z` around a diamond with `X` to
+/// fire, and `I/J/K/M` with `N`, which is how two people share one keyboard
+/// without their hands colliding.
+///
+/// `(key, bit name, stick, what it does)`.
+const JOYSTICK_KEYS: &[(&str, &str, u8, &str)] = &[
+    ("W", "P1_UP", 1, "up"),
+    ("A", "P1_LEFT", 1, "left"),
+    ("S", "P1_RIGHT", 1, "right"),
+    ("Z", "P1_DOWN", 1, "down"),
+    ("X", "P1_FIRE", 1, "fire"),
+    ("I", "P2_UP", 2, "up"),
+    ("J", "P2_LEFT", 2, "left"),
+    ("K", "P2_RIGHT", 2, "right"),
+    ("M", "P2_DOWN", 2, "down"),
+    ("N", "P2_FIRE", 2, "fire"),
+];
+
+/// The bit each key sets, as the script's lookup table.
+///
+/// Built from [`JOYSTICK_KEYS`] and [`crate::cpm::d7a::bit`] together, so the
+/// page and the board agree about which bit is which by construction rather
+/// than by two lists being kept in step.
+fn joystick_keys_json() -> String {
+    use crate::cpm::d7a::bit;
+    let mut out = String::from("{");
+    for (i, (key, name, _, _)) in JOYSTICK_KEYS.iter().enumerate() {
+        let mask = match *name {
+            "P1_UP" => bit::P1_UP,
+            "P1_DOWN" => bit::P1_DOWN,
+            "P1_LEFT" => bit::P1_LEFT,
+            "P1_RIGHT" => bit::P1_RIGHT,
+            "P1_FIRE" => bit::P1_FIRE,
+            "P2_UP" => bit::P2_UP,
+            "P2_DOWN" => bit::P2_DOWN,
+            "P2_LEFT" => bit::P2_LEFT,
+            "P2_RIGHT" => bit::P2_RIGHT,
+            "P2_FIRE" => bit::P2_FIRE,
+            other => unreachable!("unknown joystick bit {other}"),
+        };
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!("\"{}\":{}", key.to_ascii_lowercase(), mask));
+    }
+    out.push('}');
+    out
+}
+
+/// The visible legend: every key, said plainly, beside a switch.
+fn render_joystick_panel() -> String {
+    let mut out = String::from(
+        "<div class=\"joy\"><div class=\"joy-head\">         <label><input type=\"checkbox\" id=\"joy-on\">          <strong>Joystick</strong> &mdash; Cromemco D+7A</label>         <span id=\"joy-note\" class=\"vdm-status\"></span></div>",
+    );
+    // Two columns, one per stick, each naming its five keys.
+    for stick in [1u8, 2u8] {
+        out.push_str(&format!("<div class=\"joy-p\"><span class=\"joy-who\">Player {stick}</span>"));
+        for (key, _, s, what) in JOYSTICK_KEYS.iter().filter(|(_, _, s, _)| *s == stick) {
+            let _ = s;
+            out.push_str(&format!(
+                "<span class=\"joy-key\"><kbd>{key}</kbd> {what}</span>"
+            ));
+        }
+        out.push_str("</div>");
+    }
+    out.push_str(
+        "<div class=\"joy-hint\">Hold a direction and it <strong>swings</strong> &mdash;          centred when you press, full deflection half a second later, because these are          analogue sticks and a key has no halfway. While the joystick is on, those ten          letters drive it instead of typing at the guest.</div></div>",
+    );
+    out
+}
+
 const VDM_STYLE: &str = "<style>
+.joy { margin-top: 12px; padding: 10px 12px; border: 1px solid #3a3a3a; border-radius: 6px; }
+.joy-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.joy-p { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 4px 0; }
+.joy-who { min-width: 72px; font-weight: bold; }
+.joy-key { white-space: nowrap; }
+.joy-key kbd { display: inline-block; min-width: 1.4em; padding: 1px 5px; text-align: center;
+  border: 1px solid #666; border-bottom-width: 2px; border-radius: 4px; font-family: monospace; }
+.joy-hint { margin-top: 6px; font-size: 0.9em; opacity: 0.85; }
+.joy-live kbd { border-color: #7fd07f; }
 .vdm-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .vdm-pick select { min-width: 260px; }
 .vdm-note { color: var(--amber-dim); font-style: italic; }
@@ -1647,6 +1786,12 @@ function vdmPaint(d) {
      memory.  Giving that equal space to the picture it is really painting reads
      as a fault in the picture.  Collapsed rather than removed, because the
      bytes are still honestly there and the note says so. */
+  /* Whether the guest is reading the joystick board, so the panel can say so
+     rather than leaving a player guessing at silence. */
+  if (JOY_SEEN !== !!d.joy) {
+    JOY_SEEN = !!d.joy;
+    joyNote();
+  }
   var idle = !d.active && d.dazzler;
   screen.hidden = idle;
   screen.innerHTML = idle ? '' : html.join('\\n');
@@ -1775,6 +1920,143 @@ function vdmSendKeys(bytes) {
     }
   }).catch(function() {});
 }
+/* ---- Joystick -------------------------------------------------------------
+   The board is a LEVEL, not a stream of presses, so the page reports the whole
+   set of held keys and lets the gateway time the swing.  Two consequences that
+   are the point of the design:
+
+   * every report carries every key, so one dropped request is corrected by the
+     next rather than leaving a direction stuck;
+   * the ramp is not computed here.  The guest reads its ports tens of thousands
+     of times a second and this page can only speak on its own poll, so a level
+     computed in the browser would arrive in visible steps.  We say what is
+     held; the swing is the board's arithmetic.
+
+   A repeat heartbeat exists because the gateway centres everything if it has
+   not heard for VDM_JOY_IDLE_MS -- which is what makes a closed tab let go of
+   the helm. */
+var JOY_MASK = 0;
+var JOY_ON = false;
+var JOY_SEEN = false;
+var joyBeat = null;
+
+function joyBit(e) {
+  if (!JOY_ON || e.ctrlKey || e.altKey || e.metaKey) { return 0; }
+  var k = (e.key || '').toLowerCase();
+  return VDM_JOY_KEYS[k] || 0;
+}
+
+function joySend() {
+  if (vdmCurrent === null) { return; }
+  fetch('/vdm/joy', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'id=' + vdmCurrent + '&m=' + JOY_MASK
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.held && d.why === 'off') {
+      /* The operator turned the board off while this page was open. */
+      JOY_ON = false;
+      var box = document.getElementById('joy-on');
+      if (box) { box.checked = false; }
+      joyStopBeat();
+      joyNote();
+    }
+  }).catch(function() {});
+}
+
+/* While anything is held, keep saying so: the gateway lets go on silence, and
+   silence is how a closed tab is told apart from a steady hand. */
+function joyStartBeat() {
+  if (joyBeat === null) {
+    joyBeat = setInterval(function() {
+      if (JOY_MASK !== 0) { joySend(); } else { joyStopBeat(); }
+    }, Math.max(100, Math.floor(VDM_JOY_IDLE_MS / 3)));
+  }
+}
+function joyStopBeat() {
+  if (joyBeat !== null) { clearInterval(joyBeat); joyBeat = null; }
+}
+
+function joyKeydown(e) {
+  var bit = joyBit(e);
+  if (!bit) { return false; }
+  e.preventDefault();
+  if ((JOY_MASK & bit) === 0) {
+    JOY_MASK |= bit;
+    joySend();
+    joyPaint();
+  }
+  joyStartBeat();
+  return true; /* handled: this letter is a control, not a character */
+}
+
+function joyKeyup(e) {
+  var bit = joyBit(e);
+  if (!bit) { return; }
+  e.preventDefault();
+  if ((JOY_MASK & bit) !== 0) {
+    JOY_MASK &= ~bit;
+    joySend();
+    joyPaint();
+  }
+}
+
+function joyRelease() {
+  if (JOY_MASK !== 0) {
+    JOY_MASK = 0;
+    joySend();
+    joyPaint();
+  }
+  joyStopBeat();
+}
+
+/* Light the keys that are down, so a player can see the page is hearing them
+   -- a stick with no visible position is indistinguishable from a broken one. */
+function joyPaint() {
+  var keys = document.querySelectorAll('.joy-key');
+  for (var i = 0; i < keys.length; i++) {
+    var kbd = keys[i].querySelector('kbd');
+    if (!kbd) { continue; }
+    var bit = VDM_JOY_KEYS[kbd.textContent.toLowerCase()] || 0;
+    if (bit && (JOY_MASK & bit) !== 0) {
+      keys[i].classList.add('joy-live');
+    } else {
+      keys[i].classList.remove('joy-live');
+    }
+  }
+}
+
+function joyNote() {
+  var el = document.getElementById('joy-note');
+  if (!el) { return; }
+  if (!JOY_ON) {
+    el.textContent = 'Off — those ten letters type at the guest.';
+    return;
+  }
+  if (vdmCurrent === null) {
+    el.textContent = 'On — choose a session above.';
+    return;
+  }
+  /* Whether the guest has actually READ the board, which is the one thing the
+     picture cannot tell a player: a program that wants no joystick looks
+     exactly like a joystick that is not working. */
+  el.textContent = JOY_SEEN
+    ? 'On — this program is reading the joystick. Click the screen and play.'
+    : 'On — click the screen and play. This program has not read the joystick yet.';
+}
+
+(function() {
+  var box = document.getElementById('joy-on');
+  if (!box) { return; }
+  box.addEventListener('change', function() {
+    JOY_ON = this.checked;
+    if (!JOY_ON) { joyRelease(); }
+    joyNote();
+    var stage = document.getElementById('vdm-stage');
+    if (JOY_ON && stage) { stage.focus(); }
+  });
+})();
+
 function vdmKbNote() {
   var el = document.getElementById('vdm-kb');
   if (!VDM_INPUT) {
@@ -1792,6 +2074,10 @@ function vdmKbNote() {
   stage.addEventListener('focus', vdmKbNote);
   stage.addEventListener('blur', vdmKbNote);
   stage.addEventListener('keydown', function(e) {
+    /* The joystick first, and only while it is switched on: its ten letters
+       are ordinary printable characters, so a player holding W must not also
+       type a W at the guest.  When it is off they type, exactly as before. */
+    if (joyKeydown(e)) { return; }
     if (!VDM_INPUT || vdmCurrent === null) { return; }
     var bytes = vdmKeyBytes(e);
     if (!bytes) { return; }
@@ -1800,7 +2086,18 @@ function vdmKbNote() {
     e.preventDefault();
     vdmSendKeys(bytes);
   });
+  stage.addEventListener('keyup', joyKeyup);
+  /* **A stick must not stay pushed when the page stops being played.**  A
+     key-up that never arrives is the one failure a level-based control has and
+     a keystroke queue does not: blur, a tab switch, or the window going away
+     all leave a finger down for ever otherwise. */
+  stage.addEventListener('blur', joyRelease);
+  window.addEventListener('blur', joyRelease);
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) { joyRelease(); }
+  });
   vdmKbNote();
+  joyNote();
 })();
 document.getElementById('vdm-id').addEventListener('change', function() {
   vdmCurrent = this.value ? parseInt(this.value, 10) : null;
@@ -3179,6 +3476,7 @@ fn render_more_popups(cfg: &Config) -> String {
          </select></div>\
          <div class=\"row\">{cpm}</div>\
          <div class=\"row\">{cpmscreen}</div>\
+         <div class=\"row\">{cpmjoy}</div>\
          <div class=\"row\">{cpmwrite}</div>\
          <div class=\"row\">{cpmmax}\
              <span class=\"hint\">Runaway ceiling for one CP/M emulator program, \
@@ -3212,6 +3510,11 @@ fn render_more_popups(cfg: &Config) -> String {
             "cpm_screen_input",
             "VDM / Dazzler screen may type at a booted disk (it is readable either way)",
             cfg.cpm_screen_input,
+        ),
+        cpmjoy = checkbox(
+            "cpm_joystick",
+            "Joystick for a booted disk, played from the VDM / Dazzler screen (W A S Z X, I J K M N)",
+            cfg.cpm_joystick,
         ),
         cpmwrite = checkbox(
             "cpm_boot_writable",
@@ -5576,7 +5879,7 @@ mod tests {
         use crate::cpm::{screen, vdm};
         let screen = screen::register("webserver unit test — frame json");
         // 'H', then 'I' with bit 7 set: the same letter, lit differently.
-        screen.publish(vdm_part(&[(0, b'H'), (1, b'I' | 0x80)], true), None);
+        screen.publish(vdm_part(&[(0, b'H'), (1, b'I' | 0x80)], true), None, false);
         let screen::Look::Frame(_) = screen::look(screen.id()) else { panic!("published") };
         let json = vdm_frame_json(9, &screen::look(screen.id()));
 
@@ -5598,7 +5901,7 @@ mod tests {
     fn test_vdm_frame_json_escapes_what_a_guest_can_paint() {
         use crate::cpm::screen;
         let screen = screen::register("webserver unit test — escaping");
-        screen.publish(vdm_part(&[(0, b'"'), (1, b'\\')], false), None);
+        screen.publish(vdm_part(&[(0, b'"'), (1, b'\\')], false), None, false);
         let json = vdm_frame_json(1, &screen::look(screen.id()));
         assert!(json.contains(r#"\"\\"#), "got {json}");
     }
@@ -5641,6 +5944,7 @@ mod tests {
         s.publish(
             vdm_part(&[], false),
             Some(screen::DazzlerPart { bytes, address: 0x81, format: 0x30 }),
+            false,
         );
         let json = vdm_frame_json(3, &screen::look(s.id()));
         assert!(json.contains(r#""w":64,"h":64,"colour":true"#), "got {json}");
@@ -5657,7 +5961,7 @@ mod tests {
     fn test_vdm_frame_json_says_null_when_there_is_no_dazzler() {
         use crate::cpm::screen;
         let s = screen::register("webserver unit test — no dazzler");
-        s.publish(vdm_part(&[], false), None);
+        s.publish(vdm_part(&[], false), None, false);
         assert!(vdm_frame_json(1, &screen::look(s.id())).contains(r#""dazzler":null"#));
     }
 
@@ -5725,6 +6029,73 @@ mod tests {
 
     /// The page is inert HTML plus two fetches; if the endpoints it names ever
     /// drift from the routes, it silently shows nothing at all.
+    /// **The page states every key, because nothing else can.** These games
+    /// read a board with no console, so the guest's own screen says nothing
+    /// about a joystick existing, let alone which keys are it. A control you
+    /// cannot see is a control nobody uses.
+    #[test]
+    fn test_the_page_names_every_joystick_key() {
+        let cfg = Config { cpm_joystick: true, ..Default::default() };
+        let page = render_vdm_page(&cfg);
+        for (key, _, stick, what) in JOYSTICK_KEYS {
+            assert!(
+                page.contains(&format!("<kbd>{key}</kbd> {what}")),
+                "the page must say that {key} is player {stick}'s {what}",
+            );
+        }
+        assert!(page.contains("Player 1") && page.contains("Player 2"), "both sticks are named");
+        // And the swing is explained, because a control that starts at centre
+        // reads as an unresponsive one for its first fraction of a second.
+        assert!(page.contains("swings"), "the ramp has to be described, not discovered");
+        assert!(page.contains("Cromemco D+7A"), "the board is named");
+    }
+
+    /// The legend and the handler are built from one table, and this is what
+    /// makes that worth doing: a legend that has drifted from the keys the page
+    /// actually sends is worse than none, because it is believed.
+    #[test]
+    fn test_the_legend_and_the_script_agree_about_every_bit() {
+        use crate::cpm::d7a::bit;
+        let json = joystick_keys_json();
+        let expect = [
+            ("w", bit::P1_UP),
+            ("a", bit::P1_LEFT),
+            ("s", bit::P1_RIGHT),
+            ("z", bit::P1_DOWN),
+            ("x", bit::P1_FIRE),
+            ("i", bit::P2_UP),
+            ("j", bit::P2_LEFT),
+            ("k", bit::P2_RIGHT),
+            ("m", bit::P2_DOWN),
+            ("n", bit::P2_FIRE),
+        ];
+        for (key, mask) in expect {
+            assert!(
+                json.contains(&format!("\"{key}\":{mask}")),
+                "the script must map {key} to {mask}; got {json}",
+            );
+        }
+        // Ten distinct keys and ten distinct bits: a duplicate either way would
+        // silently make one direction unreachable.
+        let keys: std::collections::BTreeSet<&str> =
+            JOYSTICK_KEYS.iter().map(|(k, ..)| *k).collect();
+        assert_eq!(keys.len(), JOYSTICK_KEYS.len(), "no key does two jobs");
+        let bits: std::collections::BTreeSet<u16> = expect.iter().map(|(_, m)| *m).collect();
+        assert_eq!(bits.len(), expect.len(), "no bit is set by two keys");
+        // Every bit the board knows about is reachable from the keyboard.
+        let all: u16 = bits.iter().fold(0, |a, b| a | b);
+        assert_eq!(all, bit::ALL, "every direction and button must have a key");
+    }
+
+    /// Off means off: no panel, and the ten letters stay ordinary characters.
+    #[test]
+    fn test_the_panel_is_absent_when_the_board_is_off() {
+        let cfg = Config { cpm_joystick: false, ..Default::default() };
+        let page = render_vdm_page(&cfg);
+        assert!(!page.contains("Cromemco D+7A"), "no legend for a board that is not there");
+        assert!(page.contains("var VDM_JOY=false"), "and the script is told");
+    }
+
     #[test]
     fn test_the_vdm_page_polls_the_routes_that_exist() {
         let page = render_vdm_page(&Config::default());

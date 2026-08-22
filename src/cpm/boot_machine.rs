@@ -240,6 +240,15 @@ pub struct BootMachine {
     /// that has never seen a Dazzler answers `IN 0Eh` exactly as it did before
     /// this existed. A card the guest has not addressed is a card that is not
     /// in the machine.
+    /// The joystick board, when the operator has one switched on.
+    ///
+    /// `None` means ports `18h`-`1Ch` are unclaimed and answer exactly what
+    /// they always did, so a gateway with `cpm_joystick` off is byte for byte
+    /// the machine it was before this existed -- the same posture as
+    /// `printer_port`. The games read those ports whether or not anything
+    /// answers, and an unclaimed port reads `0xFF`, which on an axis is a stick
+    /// pinned off-centre: the floating-sense-switch reading again.
+    d7a: Option<super::d7a::D7a>,
     dazzler_address: Option<u8>,
     /// The Dazzler's format register.
     ///
@@ -298,6 +307,36 @@ pub struct BootMachine {
 }
 
 impl BootMachine {
+    /// Give this machine a joystick board, or take it away.
+    ///
+    /// Off by default so that a machine is unchanged unless the operator asked
+    /// for one: these ports read `0xFF` unclaimed, and `0xFF` on an axis is a
+    /// stick jammed off-centre rather than no answer.
+    pub fn set_joystick(&mut self, on: bool) {
+        match (on, self.d7a.is_some()) {
+            (true, false) => self.d7a = Some(super::d7a::D7a::new()),
+            (false, true) => self.d7a = None,
+            _ => {}
+        }
+    }
+
+    /// Take what the viewer is holding down.
+    ///
+    /// Called from the session's pump at the same seam that takes typed keys,
+    /// so the board is handed a *set* once per pass rather than the port read
+    /// reaching for a lock tens of thousands of times a second.
+    pub fn set_joystick_held(&mut self, held: super::d7a::Held) {
+        let now = super::d7a::now_ms();
+        if let Some(b) = self.d7a.as_mut() {
+            b.set_held(held, now);
+        }
+    }
+
+    /// Has a guest actually read the joystick board? Reported, never a gate.
+    pub fn joystick_addressed(&self) -> bool {
+        self.d7a.as_ref().is_some_and(|b| b.addressed())
+    }
+
     pub fn new() -> BootMachine {
         BootMachine {
             mem: vec![0; 0x10000],
@@ -324,6 +363,7 @@ impl BootMachine {
             printer_port: None,
             vdm_scroll_latch: 0,
             vdm_seen: false,
+            d7a: None,
             dazzler_address: None,
             dazzler_format: 0,
             instructions: 0,
@@ -946,7 +986,7 @@ impl BootMachine {
             super::screen::DazzlerPart { bytes, address, format: self.dazzler_format }
         });
 
-        screen.publish(vdm, dazzler);
+        screen.publish(vdm, dazzler, self.joystick_addressed());
     }
 
     /// Accesses to the disk controller's ports since the machine was made.
@@ -1401,6 +1441,15 @@ impl Machine for BootMachine {
             // means "a frame is never over": the guest polls for ever and looks
             // like a hang. That is the floating-sense-switch mistake exactly —
             // 0xFF is a *reading*, not the absence of one.
+            // The joystick board, and only when the operator switched one on.
+            // After the controllers by construction -- this arm is below their
+            // guard in the same `match` -- which is the `0Eh` lesson: a disk
+            // register and a card register can share a number, and the disk
+            // must win.
+            p if self.d7a.is_some() && super::d7a::PORTS.contains(&p) => {
+                let now = super::d7a::now_ms();
+                self.d7a.as_mut().and_then(|b| b.port_in(p, now)).unwrap_or(0xFF)
+            }
             super::dazzler::ADDRESS_PORT if self.dazzler_address.is_some() => {
                 // The line parity alternates far faster than the frame does;
                 // deriving both from the one clock keeps them consistent.
@@ -1431,6 +1480,14 @@ impl Machine for BootMachine {
         match port {
             p if self.has_mmu && super::mmu::Mmu::owns_port(p) => {
                 self.mmu.port_out(p, value);
+            }
+            p if self.d7a.is_some() && super::d7a::PORTS.contains(&p) => {
+                // ADCTEST does exactly one of these (`OUT 18h,00`) and SPACEWAR
+                // none, so nothing depends on the value -- but it is still this
+                // board being addressed.
+                if let Some(b) = self.d7a.as_mut() {
+                    b.port_out(p, value);
+                }
             }
             p if self.controller_for(p).is_some() => {
                 let ctrl = self.controller_for(port).expect("just matched");
@@ -4515,6 +4572,194 @@ mod tests {
             screen.contains(&want),
             "the guest never painted {want:?} into screen memory; it holds:\n{screen}"
         );
+    }
+
+    /// **The whole path a keypress takes, minus the HTTP.**
+    ///
+    /// The browser's report lands in the screen registry, the session's pump
+    /// reads it at a seam, the board integrates the swing, and the guest reads
+    /// a port. Each of those is tested on its own; this is the one that would
+    /// catch them being wired to each other wrongly -- a mask bit meaning one
+    /// direction at the page and another at the board would pass every unit
+    /// test and still send the ship the wrong way.
+    #[test]
+    fn test_a_browser_report_reaches_the_guests_ports() {
+        use crate::cpm::{d7a, screen};
+        let mut m = BootMachine::new();
+        m.set_joystick(true);
+        let live = screen::register("chain");
+
+        // Nothing held: a centred stick, which is NOT what an unclaimed port
+        // would say -- that would be 0xFF, a stick hard over.
+        m.set_joystick_held(live.joystick());
+        for axis in d7a::Axis::ALL {
+            assert_eq!(m.port_in(axis.port() as u16), 0, "{axis:?} centred");
+        }
+        assert_eq!(m.port_in(d7a::SWITCH_PORT as u16), 0xFF, "no button pressed");
+
+        // Player 2 pushes left and fires, the way the page reports it.
+        assert!(screen::set_joystick(live.id(), d7a::bit::P2_LEFT | d7a::bit::P2_FIRE));
+        m.set_joystick_held(live.joystick());
+        // The swing starts at centre, so wait out the ramp in wall time -- the
+        // one place in this machine where real milliseconds matter.
+        std::thread::sleep(std::time::Duration::from_millis(d7a::RAMP_MS + 50));
+        assert_eq!(
+            m.port_in(d7a::Axis::P2X.port() as u16) as i8,
+            -d7a::FULL,
+            "2X hard left, and left is the negative sign ADCTEST read back",
+        );
+        assert_eq!(m.port_in(d7a::Axis::P2Y.port() as u16), 0, "2Y untouched");
+        assert_eq!(m.port_in(d7a::Axis::P1X.port() as u16), 0, "the other stick untouched");
+        assert_eq!(
+            m.port_in(d7a::SWITCH_PORT as u16),
+            !0x10u8,
+            "stick 2's button clears bit 4, active low (0xEF)",
+        );
+        assert!(m.joystick_addressed(), "and the guest reading it is on record");
+
+        // Let go: everything centres, and the button comes back up.
+        assert!(screen::set_joystick(live.id(), 0));
+        m.set_joystick_held(live.joystick());
+        assert_eq!(m.port_in(d7a::Axis::P2X.port() as u16), 0, "released");
+        assert_eq!(m.port_in(d7a::SWITCH_PORT as u16), 0xFF, "button up");
+    }
+
+    /// A machine without the board is the machine it always was.
+    #[test]
+    fn test_without_the_board_those_ports_are_untouched() {
+        let mut m = BootMachine::new();
+        for port in crate::cpm::d7a::PORTS {
+            assert_eq!(m.port_in(port as u16), 0xFF, "{port:#04x} unclaimed reads 0xFF");
+        }
+        assert!(!m.joystick_addressed());
+    }
+
+    /// **What Cromemco's own joystick test makes of our board.**
+    ///
+    /// `ADCTEST.COM` is on `DISK10.DSK` and it is a *calibration* program: it
+    /// displays all four analogue channels and the switch byte continuously,
+    /// and its own on-screen text says what each row should read. That makes it
+    /// the one oracle for the parts of the D+7A no port trace can settle --
+    /// which channel is which stick's which axis, which way a deflection
+    /// signs, and which bit a button clears -- because the answer comes back in
+    /// a period program's own terms rather than from reasoning about polarity.
+    ///
+    /// The strong-evidence rule from the disk-format work applies here too: a
+    /// check that can only *score* a hypothesis will sit at "nearly right"
+    /// indefinitely. This one asks the program.
+    ///
+    /// Ignored: set `CPM_D7A_IMAGE` to a disk carrying `ADCTEST.COM`.
+    #[test]
+    #[ignore]
+    fn test_adctest_reads_back_what_the_board_was_told() {
+        let Ok(path) = std::env::var("CPM_D7A_IMAGE") else {
+            eprintln!("set CPM_D7A_IMAGE to a disk carrying ADCTEST.COM");
+            return;
+        };
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(&path).unwrap(), false).expect("a bootable image");
+        m.set_joystick(true);
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let _ = run_until_quiet(&mut m, &mut cpu, 60_000_000);
+
+        for &b in b"ADCTEST\r" {
+            m.send_key(b);
+        }
+        let mut settle = Vec::new();
+        for _ in 0..40_000_000u64 {
+            m.step(&mut cpu);
+            settle.extend(m.take_output());
+        }
+        println!("--- ADCTEST, stick centred ---\n{}", printable(&settle));
+
+        let live = crate::cpm::screen::register("d7a gate");
+        let _ = crate::cpm::screen::look(live.id()); // ask, so a seam will publish
+
+        /// Decode one of ADCTEST's readout rows from the picture.
+        ///
+        /// It draws each byte as **eight binary digits, MSB at the left** (its
+        /// own words), six pixels tall, on a six-pixel pitch starting at x=17.
+        /// A `0` glyph's top row is `###` and a `1`'s is a single stem, so three
+        /// lit pixels in the window is a nought and one is a one — and anything
+        /// else means the geometry has moved, which is reported rather than
+        /// guessed at.
+        fn digits(pic: &crate::cpm::dazzler::Picture, top: usize) -> u8 {
+            let mut byte = 0u8;
+            for i in 0..8 {
+                let lit = (0..3)
+                    .filter(|dx| {
+                        let x = 17 + 6 * i + dx;
+                        x < pic.width && pic.cells[top * pic.width + x] != 0
+                    })
+                    .count();
+                let bit = match lit {
+                    3 => 0,
+                    1 => 1,
+                    other => panic!("digit {i} of the row at y={top} is neither 0 nor 1 ({other} lit): the readout moved"),
+                };
+                byte = (byte << 1) | bit; // MSB first, left to right
+            }
+            byte
+        }
+
+        /// The four axis rows and the switch row, as ADCTEST lays them out.
+        fn readout(pic: &crate::cpm::dazzler::Picture) -> ([u8; 4], u8) {
+            ([digits(pic, 0), digits(pic, 12), digits(pic, 24), digits(pic, 36)], digits(pic, 56))
+        }
+
+        let full = crate::cpm::d7a::FULL as u8; // 0x7F
+        let neg = (-crate::cpm::d7a::FULL) as u8; // 0x81
+        let held = |m: &mut BootMachine, f: fn(&mut crate::cpm::d7a::Held)| {
+            let mut h = crate::cpm::d7a::Held::none();
+            f(&mut h);
+            m.set_joystick_held(h);
+        };
+
+        // (what, set it, expected four axes, expected switch byte)
+        type Case = (&'static str, fn(&mut crate::cpm::d7a::Held), [u8; 4], u8);
+        let cases: [Case; 8] = [
+            ("centred", |_| {}, [0, 0, 0, 0], 0xFF),
+            ("stick 1 RIGHT", |h| h.right[0] = true, [full, 0, 0, 0], 0xFF),
+            ("stick 1 LEFT", |h| h.left[0] = true, [neg, 0, 0, 0], 0xFF),
+            ("stick 1 UP", |h| h.up[0] = true, [0, full, 0, 0], 0xFF),
+            ("stick 1 DOWN", |h| h.down[0] = true, [0, neg, 0, 0], 0xFF),
+            ("stick 2 RIGHT", |h| h.right[1] = true, [0, 0, full, 0], 0xFF),
+            ("stick 2 UP", |h| h.up[1] = true, [0, 0, 0, full], 0xFF),
+            ("both FIRE", |h| {
+                h.fire[0] = true;
+                h.fire[1] = true;
+            }, [0, 0, 0, 0], 0xEE),
+        ];
+
+        for (what, set, want_axes, want_switch) in cases {
+            held(&mut m, set);
+            // The ramp is wall-clock, so real milliseconds have to pass before
+            // the instruction budget can see full deflection.
+            std::thread::sleep(std::time::Duration::from_millis(crate::cpm::d7a::RAMP_MS + 50));
+            for _ in 0..20_000_000u64 {
+                m.step(&mut cpu);
+                let _ = m.take_output();
+            }
+            m.publish_screen(&live);
+            let crate::cpm::screen::Look::Frame(snap) = crate::cpm::screen::look(live.id()) else {
+                panic!("the seam published no frame")
+            };
+            let dz = snap.dazzler.expect("ADCTEST drives a Dazzler");
+            let pic = crate::cpm::dazzler::frame(
+                &dz.bytes,
+                crate::cpm::dazzler::Format::from_byte(dz.format),
+            );
+            let (axes, switches) = readout(&pic);
+            println!(
+                "{what:>14}: 1X={:02X} 1Y={:02X} 2X={:02X} 2Y={:02X}  switches={switches:02X}",
+                axes[0], axes[1], axes[2], axes[3]
+            );
+            assert_eq!(axes, want_axes, "{what}: ADCTEST read the axes back differently");
+            assert_eq!(switches, want_switch, "{what}: the switch byte");
+        }
+
+        assert!(m.joystick_addressed(), "ADCTEST must actually have read the board");
     }
 
     /// **What a Cromemco Dazzler program actually drives.**

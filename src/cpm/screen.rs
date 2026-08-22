@@ -20,7 +20,7 @@
 //! browser polling every 150 ms costs seven snapshots a second and no timer
 //! exists anywhere.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The VDM-1 half of a snapshot: the card's window, and the one piece of state
@@ -77,6 +77,15 @@ pub struct Snapshot {
     /// because "this machine has no colour card" and "the card is showing
     /// black" are different facts and only one of them is worth a canvas.
     pub dazzler: Option<DazzlerPart>,
+    /// Has this guest actually *read* the joystick board?
+    ///
+    /// Reported, never used to gate anything — the VDM-1's `C8h` lesson. It
+    /// answers the one question a player cannot get from the picture: whether
+    /// the program running is one that wants a joystick at all. A board is
+    /// offered on every booted session because we cannot know in advance which
+    /// disks use one, and this is how the page can stop looking broken when the
+    /// answer is no.
+    pub joystick_seen: bool,
 }
 
 struct Live {
@@ -98,6 +107,23 @@ struct Live {
     /// key down while the guest is busy reading a track must not be able to
     /// grow this without limit, and a real keyboard's buffer overflows too.
     keys: Mutex<std::collections::VecDeque<u8>>,
+    /// What the viewer is holding on the joystick, as a mask of
+    /// [`crate::cpm::d7a::bit`] flags.
+    ///
+    /// **A level, not a queue, and that is the whole distinction.** A keystroke
+    /// is an event and is delivered once; a joystick is a position that persists
+    /// until the hand moves. So this is stored rather than drained, and it is an
+    /// atomic rather than a mutex because the session reads it at every seam
+    /// while a viewer writes it only when a key goes down or up.
+    joystick: AtomicU16,
+    /// When the page last said anything about the joystick, in
+    /// [`crate::cpm::d7a::now_ms`] milliseconds.
+    ///
+    /// A page that has stopped talking — closed, navigated away, or its network
+    /// gone — must not leave a stick held. Without this a lost key-up is
+    /// permanent, and "the ship spins for ever" is the failure a level-based
+    /// input has that a queue does not.
+    joystick_at: AtomicU64,
 }
 
 /// How many typed bytes may wait for a busy guest.
@@ -151,6 +177,8 @@ pub fn register(label: impl Into<String>) -> Screen {
         dazzler_on: AtomicBool::new(false),
         frame: Mutex::new(None),
         keys: Mutex::new(std::collections::VecDeque::new()),
+        joystick: AtomicU16::new(0),
+        joystick_at: AtomicU64::new(0),
     });
     if let Ok(mut list) = screens().lock() {
         list.push((id, live.clone()));
@@ -182,12 +210,45 @@ impl Screen {
         }
     }
 
+    /// What the viewer is holding on the joystick.
+    ///
+    /// Read, never drained: a held direction has to still be held next time the
+    /// session looks. Everything centres if the page has gone quiet for
+    /// [`JOYSTICK_IDLE_MS`], so a closed tab releases the stick rather than
+    /// leaving a guest with the helm hard over.
+    pub fn joystick(&self) -> crate::cpm::d7a::Held {
+        self.joystick_at(crate::cpm::d7a::now_ms())
+    }
+
+    /// [`Screen::joystick`] with the clock supplied.
+    ///
+    /// **The idle release cannot be tested by backdating the stored stamp**, and
+    /// finding that out is why this exists: `now_ms` counts from the first call
+    /// in the process, so a few milliseconds in there is no "earlier" to move a
+    /// report to — the subtraction saturates and the stick stays put. Injecting
+    /// the clock tests the rule without a one-second sleep, the same choice the
+    /// printer's idle close made.
+    fn joystick_at(&self, now: u64) -> crate::cpm::d7a::Held {
+        let mask = self.live.joystick.load(Ordering::Relaxed);
+        if mask == 0 {
+            return crate::cpm::d7a::Held::none();
+        }
+        let at = self.live.joystick_at.load(Ordering::Relaxed);
+        if now.saturating_sub(at) > JOYSTICK_IDLE_MS {
+            // Latch it off, so this costs one comparison rather than a clock
+            // read on every seam thereafter.
+            self.live.joystick.store(0, Ordering::Relaxed);
+            return crate::cpm::d7a::Held::none();
+        }
+        crate::cpm::d7a::Held::from_mask(mask)
+    }
+
     /// Publish what the guest can see.
     ///
     /// The caller does the sampling because only it has the machine — and it
     /// must sample through the machine's own `peek`, so a banked guest is read
     /// through its MMU rather than out of the array behind it.
-    pub fn publish(&self, vdm: VdmPart, dazzler: Option<DazzlerPart>) {
+    pub fn publish(&self, vdm: VdmPart, dazzler: Option<DazzlerPart>, joystick_seen: bool) {
         self.live.vdm_active.store(vdm.active, Ordering::Relaxed);
         self.live.dazzler_on.store(dazzler.is_some(), Ordering::Relaxed);
         if let Ok(mut slot) = self.live.frame.lock() {
@@ -197,6 +258,7 @@ impl Screen {
                 generation,
                 vdm,
                 dazzler,
+                joystick_seen,
             });
         }
     }
@@ -227,6 +289,34 @@ pub fn push_keys(id: u64, bytes: &[u8]) -> bool {
             q.push_back(*b);
         }
     }
+    true
+}
+
+/// How long a joystick report stands before everything centres.
+///
+/// Comfortably longer than the page's own report interval, so an ordinary late
+/// request never drops a held direction, and short enough that a closed tab
+/// lets go while the player is still looking at the screen.
+pub const JOYSTICK_IDLE_MS: u64 = 1_000;
+
+/// Hold or release directions at one screen's guest.
+///
+/// Takes the **whole** set every time rather than a change, which is what makes
+/// a dropped request harmless: the next one restates the truth. Bits outside
+/// [`crate::cpm::d7a::bit::ALL`] are discarded rather than trusted.
+///
+/// Returns false when the screen has gone, like [`push_keys`], so a page left
+/// open across the end of a session is told.
+pub fn set_joystick(id: u64, mask: u16) -> bool {
+    let live = {
+        let Ok(list) = screens().lock() else { return false };
+        match list.iter().find(|(sid, _)| *sid == id) {
+            Some((_, l)) => l.clone(),
+            None => return false,
+        }
+    };
+    live.joystick.store(mask & crate::cpm::d7a::bit::ALL, Ordering::Relaxed);
+    live.joystick_at.store(crate::cpm::d7a::now_ms(), Ordering::Relaxed);
     true
 }
 
@@ -315,7 +405,7 @@ mod tests {
         assert!(screen.wanted(), "the request was heard");
         assert!(!screen.wanted(), "and taken exactly once");
 
-        screen.publish(blank_vdm(), None);
+        screen.publish(blank_vdm(), None, false);
         let Look::Frame(snap) = look(screen.id()) else { panic!("published") };
         assert_eq!(snap.generation, 1);
         assert!(snap.dazzler.is_none());
@@ -339,9 +429,9 @@ mod tests {
             Look::Frame(s) => s.generation,
             _ => panic!("published"),
         };
-        screen.publish(blank_vdm(), None);
+        screen.publish(blank_vdm(), None, false);
         let first = generation_of(screen.id());
-        screen.publish(blank_vdm(), None);
+        screen.publish(blank_vdm(), None, false);
         assert_eq!(
             generation_of(screen.id()),
             first + 1,
@@ -359,6 +449,7 @@ mod tests {
         screen.publish(
             vdm,
             Some(DazzlerPart { bytes: vec![0x0F; 512], address: 0x81, format: 0x30 }),
+            false,
         );
         let listed = list();
         let mine = listed.iter().find(|l| l.id == screen.id()).expect("registered");
@@ -377,8 +468,9 @@ mod tests {
         screen.publish(
             blank_vdm(),
             Some(DazzlerPart { bytes: vec![0; 512], address: 0x81, format: 0x30 }),
+            false,
         );
-        screen.publish(blank_vdm(), None);
+        screen.publish(blank_vdm(), None, false);
         let listed = list();
         let mine = listed.iter().find(|l| l.id == screen.id()).expect("registered");
         assert!(!mine.dazzler_on);
@@ -434,5 +526,73 @@ mod tests {
     #[test]
     fn test_an_unknown_screen_id_is_not_an_error() {
         assert!(matches!(look(u64::MAX), Look::Gone), "a closed session's link just stops working");
+    }
+
+    /// **A joystick is a level, so it is read and not drained.** The whole
+    /// difference from the key queue: a keystroke is delivered once, a held
+    /// direction has to still be held next time the session looks.
+    #[test]
+    fn test_a_held_direction_survives_being_read() {
+        use crate::cpm::d7a::bit;
+        let screen = register("TEST.DSK");
+        assert!(set_joystick(screen.id(), bit::P1_LEFT | bit::P1_FIRE));
+        for read in 0..3 {
+            let held = screen.joystick();
+            assert!(held.left[0], "still pushed left on read {read}");
+            assert!(held.fire[0], "and still firing on read {read}");
+        }
+        // Releasing is a report of its own, and zero is a real value: dropping
+        // it as "nothing to say" would leave the stick over.
+        assert!(set_joystick(screen.id(), 0));
+        assert_eq!(screen.joystick(), crate::cpm::d7a::Held::none(), "an empty mask centres all");
+    }
+
+    /// Bits we do not define must not become directions.
+    #[test]
+    fn test_a_stray_bit_is_discarded() {
+        use crate::cpm::d7a::bit;
+        let screen = register("TEST.DSK");
+        assert!(set_joystick(screen.id(), 0xFFFF));
+        let held = screen.joystick();
+        assert_eq!(
+            crate::cpm::d7a::Held::from_mask(bit::ALL),
+            held,
+            "everything defined is held, and nothing else was invented",
+        );
+    }
+
+    /// **A page that stops talking must let go of the stick.** This is the one
+    /// failure a level has and a queue does not: a key-up that never arrives —
+    /// a closed tab, a lost network — would otherwise hold the helm over for
+    /// the rest of the session.
+    #[test]
+    fn test_a_silent_page_releases_the_stick() {
+        use crate::cpm::d7a::bit;
+        let screen = register("TEST.DSK");
+        assert!(set_joystick(screen.id(), bit::P1_RIGHT));
+        assert_ne!(screen.joystick(), crate::cpm::d7a::Held::none(), "held while talking");
+        // Backdate the report past the idle window rather than sleeping for it.
+        let live = {
+            let list = screens().lock().unwrap();
+            list.iter().find(|(id, _)| *id == screen.id()).map(|(_, l)| l.clone()).unwrap()
+        };
+        let later = crate::cpm::d7a::now_ms() + JOYSTICK_IDLE_MS + 1;
+        assert_eq!(
+            screen.joystick_at(later),
+            crate::cpm::d7a::Held::none(),
+            "silence centres it",
+        );
+        // And it is latched off, so the next read costs no clock.
+        assert_eq!(live.joystick.load(Ordering::Relaxed), 0);
+    }
+
+    /// A page left open across the end of a session is told, like typing is.
+    #[test]
+    fn test_holding_at_a_screen_that_has_gone() {
+        let id = {
+            let screen = register("TEST.DSK");
+            screen.id()
+        };
+        assert!(!set_joystick(id, 1), "the screen went with its session");
     }
 }

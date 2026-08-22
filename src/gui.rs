@@ -2267,6 +2267,27 @@ impl App {
             &mut self.cfg.cpm_screen_input,
             "VDM / Dazzler screen may type at a booted disk (it is readable either way)",
         );
+        // The joystick board, beside the typing switch because it is the same
+        // question one step along: whether the browser watching a booted guest
+        // is also a *controller*.  Named by what it is rather than by the
+        // config key, and it names the keys, because a control nobody can find
+        // the keys for is a control nobody uses.
+        ui.checkbox(
+            &mut self.cfg.cpm_joystick,
+            "Joystick for a booted disk, played from the VDM / Dazzler screen",
+        )
+        .on_hover_text(
+            "Gives a booted machine the Cromemco D+7A, the board SPACEWAR, \
+             GOTCHA, DOGFIGHT, TANKWAR, CHASE, AMBUSH and TRACK read their \
+             joysticks from.  Player 1 is W/A/S/Z with X to fire, player 2 \
+             I/J/K/M with N, and the screen page says so.  A held key SWINGS: \
+             centred when pressed, full deflection half a second later, because \
+             these are analogue sticks and a key has no halfway.  On by default, \
+             and note the alternative -- ports 18h-1Ch read FFh when nobody \
+             claims them, and on an analogue axis FFh is a stick pushed hard \
+             over rather than no stick at all.  Needs the web server on; the \
+             terminal that started the session cannot play.",
+        );
         // Writes by a *booted* disk.  A standing setting since 0.9.2, when the
         // telnet boot picker -- which asked it once per visit -- was removed for
         // being a second way to boot.  Kept beside the CP/M controls rather than

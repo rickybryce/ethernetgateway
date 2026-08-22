@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.5] - Unreleased
 
+### Added
+
+- **The Cromemco joystick games are playable, from the browser watching the
+  screen.** `SPACEWAR`, `GOTCHA`, `DOGFIGHT`, `TANKWAR`, `CHASE`, `AMBUSH` and
+  `TRACK` read the **D+7A** analog board — two joysticks, two axes and four
+  switches each, on ports `18h`–`1Ch`. `cpm_joystick` (on by default) gives a
+  booted machine one, and the keyboard of any browser on the `/vdm` page plays
+  it: player 1 `W`/`A`/`S`/`Z` with `X` to fire, player 2 `I`/`J`/`K`/`M` with
+  `N`. The page lists all ten, from the same table the handler keys off, so the
+  legend cannot drift from what it sends.
+
+  **A held key swings**: centred at the press, full deflection half a second
+  later. A key has no magnitude and these are analog controls — SPACEWAR turns
+  its ship at a rate set by deflection, so a fixed full-scale would only ever
+  spin flat out. The ramp is integrated by the board and not in the browser,
+  because the guest reads those ports tens of thousands of times a second while
+  a page can only speak on its own 150 ms poll; a level computed in the browser
+  would arrive in visible steps, and a late request would change the shape of
+  the swing rather than only when it started.
+
+  **The page reports the whole set of held keys every time, not changes.** A
+  dropped request is then corrected by the next one instead of leaving a
+  direction stuck down — the one failure a level-based control has that a
+  keystroke queue does not. For the same reason the gateway centres everything
+  if a page has said nothing for a second, so a closed tab lets go of the helm.
+
+  **Every value was measured against Cromemco's own `ADCTEST.COM`**, a
+  calibration program on `DISK10.DSK` that displays all four channels and the
+  switch byte, and which the board is now tested against:
+  `test_adctest_reads_back_what_the_board_was_told` drives the real program and
+  decodes its own readout. A centred stick reads `00`, right and up `7F`, left
+  and down `81`; the switch byte is active low with player 1's button on bit 0
+  and player 2's on bit 4. Nothing here was taken from a remembered manual —
+  the ports came from a port trace, the channel order and the polarity from the
+  period program's own display. The bit-4 assignment was a guess when it was
+  written and is a measurement now.
+
+  This also corrects something that was quietly wrong: an unclaimed port reads
+  `FFh`, and on an analog axis `FFh` is not "no joystick" but a stick pushed
+  hard over — so these games have always run against a jammed control. That is
+  why the key defaults to on: the choice was never whether to add hardware but
+  which wrong answer to give, a centred stick nobody is touching or a hard-over
+  one. It is still a key, because claiming a port is a real change to a machine
+  and an operator is entitled to a booted guest that is byte for byte what it
+  was.
+
 ### Changed
 
 - **`repodisks.txt` is ordered by disk name, and every disk says what it is.**

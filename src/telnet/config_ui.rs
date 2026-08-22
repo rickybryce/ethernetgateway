@@ -1513,10 +1513,18 @@ impl TelnetSession {
             .await?;
             // State and action on one row: this screen is at exactly 22 and a
             // separate status line for a boolean would cost a second.
+            // **Two toggles on one row, because this screen is pinned at 22.**
+            // Both are the browser acting as an input device, so they belong
+            // together anyway -- and `test_cpm_boot_screen_row_count` asserts
+            // the screen is exactly full, which means a new setting shares a
+            // row or opens its own screen. At 39 columns with both off, it fits
+            // the 40 a PETSCII C64 has.
             self.send_line(&format!(
-                "  {}  Browser typing: {}",
+                "  Browser:  {} typing: {}  {} stick: {}",
                 self.cyan("S"),
-                if cfg.cpm_screen_input { self.green("ON") } else { self.dim("off") }
+                if cfg.cpm_screen_input { self.green("ON") } else { self.dim("off") },
+                self.cyan("J"),
+                if cfg.cpm_joystick { self.green("ON") } else { self.dim("off") }
             ))
             .await?;
             self.send_line("").await?;
@@ -1607,6 +1615,18 @@ impl TelnetSession {
                     let v = (!cfg.cpm_screen_input).to_string();
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value("cpm_screen_input", &v);
+                    })
+                    .await
+                    .ok();
+                }
+                "j" => {
+                    // The joystick board. Read when a boot *starts* rather than
+                    // per keystroke, unlike `S` -- a board is attached to a
+                    // machine at construction, so a session already running
+                    // keeps the hardware it booted with.
+                    let v = (!cfg.cpm_joystick).to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_joystick", &v);
                     })
                     .await
                     .ok();

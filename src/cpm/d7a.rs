@@ -183,41 +183,6 @@ impl Held {
         }
     }
 
-    /// The wire mask for this state — the inverse of [`Held::from_mask`].
-    pub fn to_mask(self) -> u16 {
-        let mut m = 0u16;
-        for (i, b) in [(0usize, bit::P1_UP), (1, bit::P2_UP)] {
-            if self.up[i] {
-                m |= b;
-            }
-        }
-        for (i, b) in [(0usize, bit::P1_DOWN), (1, bit::P2_DOWN)] {
-            if self.down[i] {
-                m |= b;
-            }
-        }
-        for (i, b) in [(0usize, bit::P1_LEFT), (1, bit::P2_LEFT)] {
-            if self.left[i] {
-                m |= b;
-            }
-        }
-        for (i, b) in [(0usize, bit::P1_RIGHT), (1, bit::P2_RIGHT)] {
-            if self.right[i] {
-                m |= b;
-            }
-        }
-        for (i, b) in [(0usize, bit::P1_FIRE), (1, bit::P2_FIRE)] {
-            if self.fire[i] {
-                m |= b;
-            }
-        }
-        m
-    }
-
-    /// Is anything held at all?
-    pub fn is_idle(self) -> bool {
-        self == Self::default()
-    }
 }
 
 /// Milliseconds since this process started, for the ramp.
@@ -325,7 +290,7 @@ impl D7a {
         if port == SWITCH_PORT {
             return Some(self.switches());
         }
-        let axis = Axis::ALL[AXIS_PORTS.iter().position(|p| *p == port)?];
+        let axis = Axis::ALL.iter().copied().find(|a| a.port() == port)?;
         Some(self.axis(axis, now_ms))
     }
 
@@ -347,10 +312,6 @@ impl D7a {
         self.addressed
     }
 
-    /// What is currently held, for a screen that wants to show it.
-    pub fn held(&self) -> Held {
-        self.held
-    }
 }
 
 /// Stick 1's fire button, in the switch byte.
@@ -388,10 +349,10 @@ mod tests {
         let mut h = Held::none();
         h.fire[0] = true;
         b.set_held(h, 0);
-        assert_eq!(b.switches(), 0xFF & !P1_FIRE_BIT);
+        assert_eq!(b.switches(), !P1_FIRE_BIT, "0xFE: every switch high but stick 1's");
         h.fire[1] = true;
         b.set_held(h, 0);
-        assert_eq!(b.switches(), 0xFF & !P1_FIRE_BIT & !P2_FIRE_BIT);
+        assert_eq!(b.switches(), !(P1_FIRE_BIT | P2_FIRE_BIT), "0xEE, as ADCTEST read back");
         // And the three switches per stick that have no key stay high.
         assert_eq!(b.switches() & 0x0E, 0x0E, "stick 1's unwired switches");
         assert_eq!(b.switches() & 0xE0, 0xE0, "stick 2's unwired switches");
@@ -457,7 +418,9 @@ mod tests {
         h.right[0] = true;
         b.set_held(h, 0);
         assert_eq!(b.axis(Axis::P1X, RAMP_MS), 0);
-        assert_eq!(b.held().direction(Axis::P1X), 0);
+        // And the rule lives in `direction`, so it is checked there too rather
+        // than only through the board that consults it.
+        assert_eq!(h.direction(Axis::P1X), 0);
     }
 
     #[test]

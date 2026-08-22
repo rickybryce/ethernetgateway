@@ -1431,15 +1431,23 @@ altairhd_cobol.dsk</code></pre>
                 </div>
                 <div class="callout callout-warn">
                     <p>
-                        <strong>The joystick games are not supported.</strong> Cromemco's
-                        <code>SPACEWAR</code>, <code>GOTCHA</code>, <code>DOGFIGHT</code>,
-                        <code>TANKWAR</code>, <code>CHASE</code>, <code>AMBUSH</code> and
-                        <code>TRACK</code> read the D+7A analog board on ports
-                        <code>18h</code>&ndash;<code>1Ch</code> &mdash; a pair of joysticks with
-                        four switches and two analog axes each. They will run and draw, but nothing
-                        a terminal or a browser produces is an X/Y voltage, so they cannot be
-                        played. That board is a separate piece of work and is deliberately not
-                        attempted here.
+                        <strong>The joystick games are playable from the browser.</strong>
+                        Cromemco's <code>SPACEWAR</code>, <code>GOTCHA</code>,
+                        <code>DOGFIGHT</code>, <code>TANKWAR</code>, <code>CHASE</code>,
+                        <code>AMBUSH</code> and <code>TRACK</code> read the D+7A analog board on
+                        ports <code>18h</code>&ndash;<code>1Ch</code> &mdash; a pair of joysticks
+                        with four switches and two analog axes each. The board is emulated
+                        (<code>cpm_joystick</code>, on by default) and played from the keyboard of
+                        the browser watching the screen: player 1 <kbd>W</kbd> <kbd>A</kbd>
+                        <kbd>S</kbd> <kbd>Z</kbd> with <kbd>X</kbd> to fire, player 2 <kbd>I</kbd>
+                        <kbd>J</kbd> <kbd>K</kbd> <kbd>M</kbd> with <kbd>N</kbd>. A held key
+                        <em>swings</em> &mdash; centred when pressed, full deflection half a second
+                        later &mdash; because these are analog controls and a key has no halfway.
+                        Every value was measured against Cromemco's own
+                        <code>ADCTEST.COM</code>, which displays all four channels and the switch
+                        byte: a centred stick reads <code>00</code>, right and up read
+                        <code>7F</code>, left and down <code>81</code>, and the switch byte is
+                        active low with player 1's button on bit 0 and player 2's on bit 4.
                     </p>
                 </div>
             </div>
