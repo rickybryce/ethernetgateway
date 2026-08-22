@@ -11,6 +11,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A booted guest now runs at its processor's speed, and `cpm_boot_speed`
+  decides.** Nothing paced the CPU before: the pump naps when a guest is *idle*,
+  but one that is working ran at whatever the host could manage. Measured, that
+  is **16.65 MHz while actually playing SPACEWAR over telnet — about eight times
+  an Altair 8800** — and **141 MHz** stepped in a tight loop with nothing else to
+  do. A compile enjoys it; anything that keeps time by counting does not, which
+  is why SPACEWAR was unplayable.
+
+  `auto` (the default) holds the guest to what the processor you chose actually
+  ran at: **2 MHz for the 8080, 4 MHz for the Z80**. `unlimited` restores the old
+  behaviour, and a bare number is megahertz. Held to `2`, the same SPACEWAR
+  session measured **1.95 MHz**.
+
+  Paced on **cycles, not instructions** — `iz80` counts them from separate tables
+  for the 8080 and the Z80, so the rate is as accurate as the instruction mix
+  rather than an average assumed on our side. The governor lives in the session
+  pump and **never in `BootMachine::step`**: what is being limited is a session
+  with a person watching it, and every live gate in this project drives `step` in
+  a loop hundreds of millions of times, so a governor down there would slow the
+  test suite by the same factor and make the disk survey unrunnable.
+
+  **The pacing is against the wall clock, so it does not depend on this
+  computer.** A faster host reaches the cycle budget sooner and sleeps longer; the
+  guest still runs at 2 MHz. The governor can only ever slow a guest *down* —
+  measured on this machine, targets of 2 and 4 MHz were held to 1.95 and 3.93,
+  while a target of 8 reached only 6.92 because this host cannot sustain more in a
+  live session. Arrears are deliberately not repaid: a guest that fell behind
+  while idle or waiting on a disk is not given a burst at full speed to catch up,
+  because arriving in bursts is the symptom being fixed. Every session logs the
+  clock it actually achieved, which is the only way to check that a setting did
+  what it says.
+
 - **The Cromemco joystick games are playable, from the browser watching the
   screen.** `SPACEWAR`, `GOTCHA`, `DOGFIGHT`, `TANKWAR`, `CHASE`, `AMBUSH` and
   `TRACK` read the **D+7A** analog board — two joysticks, two axes and four

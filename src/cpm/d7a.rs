@@ -194,21 +194,6 @@ impl Held {
 
 }
 
-/// Milliseconds since this process started, for the ramp.
-///
-/// **Deliberately wall time, on a machine whose only other clock is its
-/// instruction count.** How long a finger has been on a key is a fact about the
-/// room, not about the emulation: tie it to instructions and the same press
-/// swings further on a fast host than a slow one, and further still while the
-/// guest is busy. One shared base so the web request that records a press and
-/// the machine that reads the axis are measuring from the same zero.
-pub fn now_ms() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
-
 /// One axis's swing: which way, and since when.
 #[derive(Debug, Clone, Copy, Default)]
 struct Swing {

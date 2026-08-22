@@ -538,6 +538,25 @@ const DEFAULT_CPM_SCREEN_INPUT: bool = true;
 /// this key does nothing whatever if the web server is off.
 const DEFAULT_CPM_JOYSTICK: bool = true;
 
+/// How fast a booted guest is allowed to run — see [`crate::cpm::speed`].
+///
+/// **`auto`, meaning the speed the chosen processor actually ran at**, and this
+/// is a change of behaviour rather than a new option with an old default. Every
+/// version before this ran a booted guest flat out: an effective **141 MHz**
+/// stepped in a tight loop, and **16.65 MHz measured while actually playing
+/// SPACEWAR over telnet** — about eight times an Altair 8800, which is what an
+/// operator meets and is still unplayable. A compile enjoys that speed; anything
+/// that keeps time by counting does not.
+///
+/// The judgement is which surprise is worse. Unlimited by default means the
+/// real-time software on these disks is unusable until an operator finds a
+/// setting they have no reason to look for — and cannot easily guess is the
+/// cause, since "too fast" does not look like a configuration problem. Period
+/// speed by default means a machine behaves like the machine it says it is, and
+/// an operator who wants their disk work to fly can say `unlimited` and get
+/// exactly what they had before.
+const DEFAULT_CPM_BOOT_SPEED: &str = crate::cpm::speed::DEFAULT;
+
 /// Booting writes to its images unless the operator says otherwise.
 ///
 /// **On, because a disk that cannot be written is not the machine the software
@@ -1067,6 +1086,9 @@ pub struct Config {
     /// Give a booted machine the Cromemco D+7A joystick board, played from the
     /// browser's screen page.  See [`DEFAULT_CPM_JOYSTICK`].
     pub cpm_joystick: bool,
+    /// How fast a booted guest may run: `auto`, `unlimited`, or a number of
+    /// megahertz.  See [`DEFAULT_CPM_BOOT_SPEED`].
+    pub cpm_boot_speed: String,
     /// One-shot: open the VDM / Dazzler screen once the gateway is back up.
     ///
     /// **Not a setting, and deliberately not on any configuration screen** —
@@ -1326,6 +1348,7 @@ impl Default for Config {
             cpm_emu_enabled: DEFAULT_CPM_EMU_ENABLED,
             cpm_screen_input: DEFAULT_CPM_SCREEN_INPUT,
             cpm_joystick: DEFAULT_CPM_JOYSTICK,
+            cpm_boot_speed: DEFAULT_CPM_BOOT_SPEED.to_string(),
             cpm_boot_writable: DEFAULT_CPM_BOOT_WRITABLE,
             open_screen_after_restart: false,
             disable_gateway_connections: DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
@@ -2260,6 +2283,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_joystick")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_CPM_JOYSTICK),
+        cpm_boot_speed: map
+            .get("cpm_boot_speed")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_CPM_BOOT_SPEED.to_string()),
         cpm_boot_writable: map
             .get("cpm_boot_writable")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -3109,6 +3136,17 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   the session cannot play.  Read when a boot STARTS, not per keypress: a board
 #   is attached to a machine, so changing this leaves a session already running
 #   with the hardware it booted with.
+# cpm_boot_speed: how fast may a booted guest run?  auto (default) = the speed
+#   the processor you chose actually ran at -- 2 MHz for 8080, 4 MHz for Z80;
+#   unlimited = as fast as this host can, which is what every version before
+#   0.9.5 did; or a number of megahertz, e.g. 4.  Measured, the unlimited case
+#   reached 16.65 MHz while actually playing SPACEWAR over telnet -- about EIGHT
+#   TIMES an Altair 8800 -- and 141 MHz stepped with nothing else to do.  Held to
+#   2, the same session measured 1.95 MHz.  A compile enjoys the speed.  Anything
+#   that keeps time by counting
+#   does not: the Dazzler games are unplayable, delay loops vanish and music
+#   routines are noise.  Set unlimited if you would rather your disk work flew
+#   and you are not running anything real-time.  Read when a boot STARTS.
 # cpm_boot_writable: may a booted disk WRITE to the images it is running?
 #   ON by default, because a vintage OS saves files, formats disks and updates
 #   its own directory -- boot one read-only and every SAVE appears to work and
@@ -3131,6 +3169,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     write_kv(&mut content, "cpm_emu_enabled", cfg.cpm_emu_enabled);
     write_kv(&mut content, "cpm_screen_input", cfg.cpm_screen_input);
     write_kv(&mut content, "cpm_joystick", cfg.cpm_joystick);
+    write_kv(&mut content, "cpm_boot_speed", &cfg.cpm_boot_speed);
     write_kv(&mut content, "cpm_boot_writable", cfg.cpm_boot_writable);
     write_kv(&mut content, "open_screen_after_restart", cfg.open_screen_after_restart);
     write_kv(&mut content, "cpm_emu_max_minstr", cfg.cpm_emu_max_minstr);
@@ -3851,6 +3890,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "web_enabled" => cfg.web_enabled = value.eq_ignore_ascii_case("true"),
         "cpm_screen_input" => cfg.cpm_screen_input = value.eq_ignore_ascii_case("true"),
         "cpm_joystick" => cfg.cpm_joystick = value.eq_ignore_ascii_case("true"),
+        "cpm_boot_speed" => cfg.cpm_boot_speed = value.to_string(),
         "cpm_boot_writable" => cfg.cpm_boot_writable = value.eq_ignore_ascii_case("true"),
         "open_screen_after_restart" => {
             cfg.open_screen_after_restart = value.eq_ignore_ascii_case("true")
@@ -5337,6 +5377,7 @@ mod tests {
             cpm_emu_enabled: true,
             cpm_screen_input: false,
             cpm_joystick: false,
+            cpm_boot_speed: "unlimited".to_string(),
             disable_gateway_connections: true,
             cpm_emu_max_minstr: 500,
             cpm_emu_uart: "rc2014_1b".to_string(),

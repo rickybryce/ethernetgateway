@@ -3509,18 +3509,46 @@ fn test_cpm_boot_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("// ─── SECURITY SETTINGS").expect("the next section") + start;
     let body = &src[start..end];
 
-    let hint = "Press R, M, B, C, W, S, or Q.";
-    assert!(body.contains(hint), "the error hint changed: it must list every key");
-    for key in ["R", "M", "B", "C", "W", "S"] {
+    // **Derived from the screen, not hand-copied beside it.** This test carried
+    // the hint as a literal and the key list as an array, so it compared the
+    // source against a copy of itself. When `J` was added with the joystick it
+    // was displayed and handled and left out of the hint — precisely what this
+    // test exists to catch — and it passed, because `J` was not in its array
+    // either. A guard whose expectations are typed by the same hand that edits
+    // the screen guarantees nothing.
+    let hint = body
+        .split("Press ")
+        .nth(1)
+        .and_then(|s| s.split_once('"'))
+        .map(|(m, _)| m.to_string())
+        .expect("the wrong-key hint");
+
+    let handled: Vec<char> = body
+        .lines()
+        .filter_map(|l| {
+            let (key, tail) = l.trim().strip_prefix('"')?.split_once('"')?;
+            tail.trim_start().starts_with("=>").then_some(())?;
+            let mut cs = key.chars();
+            let c = cs.next()?;
+            cs.next().is_none().then_some(c.to_ascii_uppercase())
+        })
+        .collect();
+    assert!(handled.len() >= 8, "expected this screen's keys, derived {handled:?}");
+
+    for key in handled {
+        assert!(
+            hint.contains(key),
+            "{key} is handled but the error hint does not name it: {hint:?}",
+        );
+        if key == 'Q' {
+            // Q is drawn as an action prompt, not as a coloured menu key.
+            assert!(body.contains("action_prompt(\"Q\""), "Q must still be offered");
+            continue;
+        }
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
-            "{key} must be a displayed menu item"
+            "{key} is handled but never displayed, so nobody can find it",
         );
-        assert!(
-            body.contains(&format!("\"{}\" => ", key.to_ascii_lowercase())),
-            "{key} is displayed but never handled — pressing it would just error"
-        );
-        assert!(hint.contains(key), "{key} is displayed but missing from the error hint");
     }
 }
 

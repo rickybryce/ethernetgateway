@@ -101,6 +101,19 @@ pub fn cpu_label(value: &str) -> &'static str {
     CPU_CHOICES.iter().find(|(v, _)| *v == want).map(|(_, l)| *l).unwrap_or(want)
 }
 
+/// The processor's name alone, for a status row that has to share its width.
+///
+/// `cpu_label` carries the guidance an operator wants while *choosing* ("runs
+/// most 8080 code"); a row reporting the current state wants the name and
+/// nothing else, so that a clock can sit beside it on a 40-column screen.
+pub fn cpu_short(value: &str) -> &'static str {
+    if is_8080(value) {
+        "8080"
+    } else {
+        "Z80"
+    }
+}
+
 /// The CPU a `cpm_cpu` value names, ready to run.
 ///
 /// The single place either machine turns the setting into a processor, so the

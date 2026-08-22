@@ -330,7 +330,7 @@ impl BootMachine {
         // every pump seam -- thousands of times a second -- and a machine with
         // no joystick must cost nothing at all for one it does not have.
         if let Some(b) = self.d7a.as_mut() {
-            let now = super::d7a::now_ms();
+            let now = super::speed::now_ms();
             b.set_held(held, now);
         }
     }
@@ -1470,7 +1470,7 @@ impl Machine for BootMachine {
             // register and a card register can share a number, and the disk
             // must win.
             p if self.d7a.is_some() && super::d7a::PORTS.contains(&p) => {
-                let now = super::d7a::now_ms();
+                let now = super::speed::now_ms();
                 self.d7a.as_mut().and_then(|b| b.port_in(p, now)).unwrap_or(0xFF)
             }
             super::dazzler::ADDRESS_PORT if self.dazzler_address.is_some() => {
@@ -4705,6 +4705,65 @@ mod tests {
             assert_eq!(m.port_in(port as u16), 0xFF, "{port:#04x} unclaimed reads 0xFF");
         }
         assert!(!m.joystick_addressed());
+    }
+
+    /// **How fast do we actually run a booted guest?**
+    ///
+    /// The question a real-time program makes urgent. Nothing in this machine
+    /// paces the CPU: the session pump naps only when a guest is *idle*, so one
+    /// that is working runs at whatever the host can manage. For a compile that
+    /// is a gift and for SPACEWAR it is unplayable, and the size of the gap is
+    /// the thing to measure rather than estimate.
+    ///
+    /// `iz80` counts cycles per instruction from **separate tables for the 8080
+    /// and the Z80**, so the effective clock here is a real figure and not an
+    /// average assumed on our side.
+    ///
+    /// Ignored: set `CPM_SPEED_IMAGE` to a bootable disk (a program that spins is
+    /// best — `CPM_SPEED_CMD` runs one).
+    #[test]
+    #[ignore]
+    fn measure_how_fast_a_booted_guest_runs() {
+        let Ok(path) = std::env::var("CPM_SPEED_IMAGE") else {
+            eprintln!("set CPM_SPEED_IMAGE to a bootable disk");
+            return;
+        };
+        let mut m = BootMachine::new();
+        m.insert(0, std::fs::read(&path).unwrap(), false).expect("bootable");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let _ = run_until_quiet(&mut m, &mut cpu, 60_000_000);
+        if let Ok(cmd) = std::env::var("CPM_SPEED_CMD") {
+            for &b in format!("{cmd}\r").as_bytes() {
+                m.send_key(b);
+            }
+            for _ in 0..20_000_000u64 {
+                m.step(&mut cpu);
+                let _ = m.take_output();
+            }
+        }
+
+        // Time a fixed run, with the output drain included: this is meant to be
+        // the rate a session really achieves, not a CPU microbenchmark.
+        const N: u64 = 200_000_000;
+        let cyc0 = cpu.cycle_count();
+        let t0 = std::time::Instant::now();
+        for _ in 0..N {
+            m.step(&mut cpu);
+            let _ = m.take_output();
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        let cycles = cpu.cycle_count().saturating_sub(cyc0);
+
+        let ips = N as f64 / secs;
+        let hz = cycles as f64 / secs;
+        println!("ran {N} instructions in {secs:.2}s");
+        println!("  {:.2} M instructions/sec", ips / 1e6);
+        println!("  {:.2} cycles/instruction (average, from iz80's own table)", cycles as f64 / N as f64);
+        println!("  effective clock: {:.2} MHz", hz / 1e6);
+        for (what, mhz) in [("Altair 8800 (8080)", 2.0), ("Cromemco / RC2014 Z80", 4.0)] {
+            println!("  {:.0}x faster than a {what} at {mhz} MHz", hz / (mhz * 1e6), );
+        }
     }
 
     /// **SPACEWAR responds to every input the keyboard offers.**

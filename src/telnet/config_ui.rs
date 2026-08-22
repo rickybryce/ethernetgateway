@@ -1469,9 +1469,22 @@ impl TelnetSession {
             // The one line on this screen that is *not* only about a booted
             // disk: the CPU is underneath the emulator too.  Said in the note
             // below rather than left for the operator to discover.
+            // **CPU and clock share a row, because this screen is pinned at 22
+            // and a clock belongs to a processor.** The short CPU name rather
+            // than `cpu_label`: that label's guidance ("runs most 8080 code") is
+            // for choosing, and the choice menu still shows it -- a status row
+            // wants the name and the number. `S` changes the speed; the CPU
+            // keeps the key it had.
             self.send_line(&format!(
                 "  CPU:       {}",
-                self.amber(&truncate_to_width(crate::cpm::cpu::cpu_label(&cfg.cpm_cpu), w))
+                self.amber(&truncate_to_width(
+                    &format!(
+                        "{}, {}",
+                        crate::cpm::cpu::cpu_short(&cfg.cpm_cpu),
+                        crate::cpm::speed::short_label(&cfg.cpm_boot_speed, &cfg.cpm_cpu)
+                    ),
+                    w
+                ))
             ))
             .await?;
             self.send_line("").await?;
@@ -1500,7 +1513,15 @@ impl TelnetSession {
             self.send_line(&format!("  {}  Choose what CP/M runs", self.cyan("R"))).await?;
             self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;
             self.send_line(&format!("  {}  Cycle the backspace key", self.cyan("B"))).await?;
-            self.send_line(&format!("  {}  Cycle the CPU (Z80 / 8080)", self.cyan("C"))).await?;
+            // Two keys on one row, the same 22-row squeeze as the browser row
+            // below: the CPU and its clock belong together, and the current
+            // value of both is on the `CPU:` line above.
+            self.send_line(&format!(
+                "  {}  CPU (Z80/8080)   {}  Speed",
+                self.cyan("C"),
+                self.cyan("Z")
+            ))
+            .await?;
             // The row that took the boot picker's place.  Writes used to be a
             // question asked once per visit on a screen that no longer exists;
             // as a standing setting it is a stronger thing, so it shows its
@@ -1590,6 +1611,25 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "z" => {
+                    // The clock the guest is held to.  Cycled through the same
+                    // list the web UI and the desktop offer, so the three
+                    // surfaces cannot drift.  A hand-edited number that is not
+                    // in the list lands on the first choice next, which is
+                    // `auto` -- the safe end, not `unlimited`.
+                    let choices = crate::cpm::speed::SPEED_CHOICES;
+                    let idx = choices
+                        .iter()
+                        .position(|(v, _)| *v == cfg.cpm_boot_speed.trim().to_ascii_lowercase())
+                        .map(|i| (i + 1) % choices.len())
+                        .unwrap_or(0);
+                    let next = choices[idx].0.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_boot_speed", &next);
+                    })
+                    .await
+                    .ok();
+                }
                 "c" => {
                     // Two processors, cycled like everything else here.  An
                     // unrecognised value lands on the Z80 next, which is what
@@ -1644,7 +1684,14 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.send_line(&format!("  {}", self.red("Press R, M, B, C, W, S, or Q."))).await?;
+                    // Every key this screen handles, and it has been wrong
+                    // before: `J` was added with the joystick and never listed,
+                    // which is the whole reason a wrong-key message exists.
+                    self.send_line(&format!(
+                        "  {}",
+                        self.red("Press R, M, B, C, Z, W, S, J, or Q.")
+                    ))
+                    .await?;
                     self.flush().await?;
                     tokio::time::sleep(std::time::Duration::from_millis(900)).await;
                 }

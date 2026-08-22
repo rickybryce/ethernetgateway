@@ -1234,7 +1234,7 @@ fn collect_form_updates(
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "cpm_emu_max_minstr", "cpm_emu_uart", "cpm_boot_image", "cpm_boot_machine",
-        "cpm_boot_backspace", "cpm_cpu",
+        "cpm_boot_backspace", "cpm_cpu", "cpm_boot_speed",
         "cpm_printer", "cpm_printer_port", "cpm_printer_autolf",
         // The CP/M virtual modem's saved AT profile (what AT&W writes), the
         // same fields the serial ports expose for theirs.
@@ -3476,6 +3476,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{cpm}</div>\
          <div class=\"row\">{cpmscreen}</div>\
          <div class=\"row\">{cpmjoy}</div>\
+         <div class=\"row\">{cpmspeed}</div>\
          <div class=\"row\">{cpmwrite}</div>\
          <div class=\"row\">{cpmmax}\
              <span class=\"hint\">Runaway ceiling for one CP/M emulator program, \
@@ -3510,6 +3511,21 @@ fn render_more_popups(cfg: &Config) -> String {
             "VDM / Dazzler screen may type at a booted disk (it is readable either way)",
             cfg.cpm_screen_input,
         ),
+        cpmspeed = {
+            let mut o = String::from(
+                "<label>Booted-disk speed <select name=\"cpm_boot_speed\">",
+            );
+            for (value, label) in crate::cpm::speed::SPEED_CHOICES {
+                let sel = if cfg.cpm_boot_speed.trim().eq_ignore_ascii_case(value) {
+                    " selected"
+                } else {
+                    ""
+                };
+                o.push_str(&format!("<option value=\"{value}\"{sel}>{label}</option>"));
+            }
+            o.push_str("</select></label>");
+            o
+        },
         cpmjoy = checkbox(
             "cpm_joystick",
             "Joystick for a booted disk, played from the VDM / Dazzler screen (W A S Z X, I J K M N)",
@@ -5003,6 +5019,7 @@ mod tests {
             "cpm_boot_machine",
             "cpm_boot_backspace",
             "cpm_cpu",
+            "cpm_boot_speed",
             "cpm_emu_uart",
         ];
         for name in keys {

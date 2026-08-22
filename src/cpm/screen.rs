@@ -117,7 +117,7 @@ struct Live {
     /// while a viewer writes it only when a key goes down or up.
     joystick: AtomicU16,
     /// When the page last said anything about the joystick, in
-    /// [`crate::cpm::d7a::now_ms`] milliseconds.
+    /// [`crate::cpm::speed::now_ms`] milliseconds.
     ///
     /// A page that has stopped talking — closed, navigated away, or its network
     /// gone — must not leave a stick held. Without this a lost key-up is
@@ -225,7 +225,7 @@ impl Screen {
         if self.live.joystick.load(Ordering::Acquire) == 0 {
             return crate::cpm::d7a::Held::none();
         }
-        self.joystick_at(crate::cpm::d7a::now_ms())
+        self.joystick_at(crate::cpm::speed::now_ms())
     }
 
     /// [`Screen::joystick`] with the clock supplied.
@@ -349,7 +349,7 @@ pub fn set_joystick(id: u64, mask: u16) -> bool {
     // open and idle carries an old timestamp, so the *first* key of a game is
     // the one at risk, and the symptom would be a press that does nothing until
     // the next heartbeat.
-    live.joystick_at.store(crate::cpm::d7a::now_ms(), Ordering::Release);
+    live.joystick_at.store(crate::cpm::speed::now_ms(), Ordering::Release);
     live.joystick.store(mask & crate::cpm::d7a::bit::ALL, Ordering::Release);
     true
 }
@@ -610,7 +610,7 @@ mod tests {
             let list = screens().lock().unwrap();
             list.iter().find(|(id, _)| *id == screen.id()).map(|(_, l)| l.clone()).unwrap()
         };
-        let later = crate::cpm::d7a::now_ms() + JOYSTICK_IDLE_MS + 1;
+        let later = crate::cpm::speed::now_ms() + JOYSTICK_IDLE_MS + 1;
         assert_eq!(
             screen.joystick_at(later),
             crate::cpm::d7a::Held::none(),
@@ -636,7 +636,7 @@ mod tests {
         use crate::cpm::d7a::bit;
         let screen = register("TEST.DSK");
         assert!(set_joystick(screen.id(), bit::P1_LEFT));
-        let later = crate::cpm::d7a::now_ms() + JOYSTICK_IDLE_MS + 1;
+        let later = crate::cpm::speed::now_ms() + JOYSTICK_IDLE_MS + 1;
         assert_eq!(screen.joystick_at(later), crate::cpm::d7a::Held::none(), "released");
 
         // A new press after the latch is honoured, not swallowed by it.

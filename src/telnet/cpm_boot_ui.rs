@@ -167,6 +167,22 @@ const KEY_POLL_INTERVAL: u64 = 20_000;
 /// at 161% CPU.
 const YIELD_INTERVAL: u64 = 200_000;
 
+/// How often the speed governor is consulted, in instructions.
+///
+/// Much finer than [`KEY_POLL_INTERVAL`], and it has to be: at 2 MHz and the
+/// measured 6.73 cycles an instruction, twenty thousand instructions is 67 ms of
+/// virtual time, so checking there would let the guest run in seventh-of-a-second
+/// bursts and the pacing would be visible as stutter. Two thousand is about
+/// 6.7 ms at 2 MHz, which is the same order as `speed::SLACK`. It divides both
+/// the key and yield intervals, so the seams still line up.
+const SPEED_CHECK_INTERVAL: u64 = 2_000;
+
+/// A speed check coarser than the key poll would pace in visible bursts.
+///
+/// At compile time rather than in a test, because both sides are constants: a
+/// build that got this wrong should not produce a binary at all.
+const _: () = assert!(SPEED_CHECK_INTERVAL < KEY_POLL_INTERVAL);
+
 /// Are these two paths the same file?
 ///
 /// Textual equality is not enough on its own.  The boot image's path and a
@@ -1044,6 +1060,16 @@ impl TelnetSession {
             printer_board.map(|b| b.auto_lf).unwrap_or(false),
         );
         let mut spool: Option<crate::cpm::printer::SpoolJob> = None;
+        // What the guest actually achieved, reported once when the session ends.
+        //
+        // Here rather than inside the run loop because that loop has half a
+        // dozen exits and this has to cover all of them -- and because the
+        // achieved figure is the only way an operator can *check* that a speed
+        // setting did what it says. A governor that is quietly not working looks
+        // exactly like one that is, right up to the moment somebody plays a
+        // game.
+        let pace_cycles = cpu.cycle_count();
+        let pace_started = std::time::Instant::now();
         let result = self
             .cpm_boot_run_inner(
                 cpu,
@@ -1061,6 +1087,16 @@ impl TelnetSession {
         // written before anything here can fail, so a hung-up session loses the
         // notice and keeps the document.
         let _ = self.cpm_boot_spool_close(&mut spool, print_format, &transfer_dir).await;
+        let secs = pace_started.elapsed().as_secs_f64();
+        let cycles = cpu.cycle_count().saturating_sub(pace_cycles);
+        if secs > 0.5 && cycles > 0 {
+            glog!(
+                "CP/M boot: session ran {:.1}s at an effective {:.2} MHz ({} cycles)",
+                secs,
+                cycles as f64 / secs / 1e6,
+                cycles
+            );
+        }
         result
     }
 
@@ -1120,6 +1156,22 @@ impl TelnetSession {
         transfer_dir: &str,
         screen: &crate::cpm::screen::Screen,
     ) -> Result<(), std::io::Error> {
+        // The speed governor, if the operator asked for one.  Built here rather
+        // than inside the machine on purpose: this limits a *session*, and every
+        // live gate in this project drives `BootMachine::step` in a loop
+        // hundreds of millions of times -- a governor down there would slow the
+        // test suite by the same factor it slows a guest.
+        // Read once, here, rather than threaded through eight arguments: both
+        // keys are read when a boot starts, and this is where the run begins.
+        let (speed_setting, cpu_setting) = {
+            let cfg = config::get_config();
+            (cfg.cpm_boot_speed.clone(), cfg.cpm_cpu.clone())
+        };
+        let mut governor = crate::cpm::speed::mhz_for(&speed_setting, &cpu_setting)
+            .map(|mhz| crate::cpm::speed::Governor::new(mhz, cpu.cycle_count(), crate::cpm::speed::now_ms()));
+        if let Some(g) = governor.as_ref() {
+            glog!("CP/M boot: holding the guest to {:.2} MHz", g.mhz());
+        }
         let mut executed: u64 = 0;
         let mut esc_run = 0u8;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
@@ -1143,6 +1195,17 @@ impl TelnetSession {
             // there.  See `BootMachine::step`.
             machine.step(cpu);
             executed += 1;
+
+            // Pace the guest to its processor's clock.  Cycles rather than
+            // instructions, from `iz80`'s own per-CPU tables, so the rate is as
+            // accurate as the instruction mix rather than an average we assumed.
+            if let Some(g) = governor.as_ref() {
+                if executed.is_multiple_of(SPEED_CHECK_INTERVAL) {
+                    if let Some(nap) = g.behind(cpu.cycle_count(), crate::cpm::speed::now_ms()) {
+                        tokio::time::sleep(nap).await;
+                    }
+                }
+            }
 
             if executed.is_multiple_of(KEY_POLL_INTERVAL) {
                 // Everything the guest printed since the last seam, in one
@@ -1330,6 +1393,15 @@ impl TelnetSession {
                     idle_seams = idle_seams.saturating_add(1);
                     if let Some(nap) = idle_nap(idle_seams) {
                         tokio::time::sleep(nap).await;
+                        // **Forget the arrears.** While the guest was napped it
+                        // fell behind its clock, and without this an hour spent
+                        // at a prompt would buy an hour of virtual time to be
+                        // spent at full speed the moment somebody typed -- the
+                        // burst this governor exists to prevent, arriving by the
+                        // one path that looks like good citizenship.
+                        if let Some(g) = governor.as_mut() {
+                            g.rebase(cpu.cycle_count(), crate::cpm::speed::now_ms());
+                        }
                     }
                 }
                 disk_before = disk_now;
@@ -1464,6 +1536,17 @@ mod tests {
     /// the yield drift apart and one of them effectively stops happening.
     #[test]
     fn test_the_loop_intervals_line_up() {
+        // The speed check is finer than both, and must divide them or the seams
+        // drift apart: a pace check landing between a key poll and a yield
+        // would make the pacing depend on where in the loop it happened to fall.
+        assert!(
+            KEY_POLL_INTERVAL.is_multiple_of(SPEED_CHECK_INTERVAL),
+            "the key poll must land on a speed check: {KEY_POLL_INTERVAL} / {SPEED_CHECK_INTERVAL}",
+        );
+        assert!(
+            YIELD_INTERVAL.is_multiple_of(SPEED_CHECK_INTERVAL),
+            "and so must the yield",
+        );
         assert!(
             YIELD_INTERVAL.is_multiple_of(KEY_POLL_INTERVAL),
             "the yield must fall on a key-poll boundary, or the two drift apart \

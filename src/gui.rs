@@ -2267,6 +2267,37 @@ impl App {
             &mut self.cfg.cpm_screen_input,
             "VDM / Dazzler screen may type at a booted disk (it is readable either way)",
         );
+        // How fast a booted guest may run.  Beside the CPU rather than the
+        // disks, because a clock belongs to a processor -- and it is the setting
+        // that decides whether the real-time software on these disks is usable
+        // at all.
+        ui.horizontal(|ui| {
+            ui.label("Booted-disk speed:");
+            let current = crate::cpm::speed::label_for(&self.cfg.cpm_boot_speed);
+            egui::ComboBox::from_id_salt("cpm_boot_speed")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (value, label) in crate::cpm::speed::SPEED_CHOICES {
+                        ui.selectable_value(
+                            &mut self.cfg.cpm_boot_speed,
+                            (*value).to_string(),
+                            *label,
+                        );
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "Every version before 0.9.5 ran a booted guest as fast as the host \
+             could: measured at 16.65 MHz while actually playing SPACEWAR over \
+             telnet, about eight times an Altair 8800, and 141 MHz stepped with \
+             nothing else to do.  A compile enjoys that; anything that keeps time \
+             by counting does not -- the Dazzler games are unplayable, delay loops \
+             vanish and music routines are noise.  `Period speed` holds the guest \
+             to what the processor you chose actually ran at (2 MHz for 8080, \
+             4 MHz for Z80).  Pick `As fast as this host can` if you would rather \
+             your disk work flew.  Read when a boot starts.",
+        );
         // The joystick board, beside the typing switch because it is the same
         // question one step along: whether the browser watching a booted guest
         // is also a *controller*.  Named by what it is rather than by the
