@@ -7,29 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.4] - Unreleased
-
-### Fixed
-
-- **The desktop labelled the same Hayes toggle two different ways in one
-  window.** The serial ports' advanced panel says `Echo (E1)` / `Verbose (V1)` /
-  `Quiet (Q1)`; the CP/M virtual modem's block, eight hundred lines away, said a
-  bare `Echo` / `Verbose` / `Quiet` and put the AT letter in a tooltip — under a
-  comment claiming that block exists "for the same reason the ports' is". The AT
-  letter is what an operator matches against the manual and against what the
-  guest typed, so it belongs in the label. All three surfaces now agree on those
-  three, and a test pins it: whole-file matching would have passed on the serial
-  block alone, so it checks the CP/M checkboxes themselves. The longer fields
-  are deliberately left to differ, since telnet has 40 columns and the web has a
-  form row.
-
-- **A doc comment pointed at a function that does not exist.**
-  `cpm_emu.rs` sent a reader to `TelnetSession::cpmemu_place_egt80` for how the
-  bundled terminals are placed; there is no such method and no `cpmemu_place*`
-  anything — the real one is `place_bundled_terminals`. Found by running
-  `cargo doc`, which also caught two comments rendering wrongly: a literal
-  `<err>` and `<label>`-style placeholders read as HTML tags, and a `Stop::Hbios`
-  link that could not resolve from its module.
+## [0.9.4] - 2026-08-22
 
 ### Added
 
@@ -55,7 +33,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   persist to the config file, and `X`/`&C` cycle within the ranges the
   emulator's own AT parser accepts.
 
+- **A second copy offers to take over instead of coming up useless.** Launching
+  the gateway twice in the same directory used to produce a process that
+  started fully, opened a window, offered every configuration screen, and held
+  no listener at all — while the *first* copy went on answering connections.
+  Five copies stacked up that way on 2026-08-19, the oldest still serving
+  telnet while a newer one served the web UI, so a Save in the visible window
+  never reached the process that was answering.
+
+  A launch now finds out first. It claims the directory with an OS-level lock —
+  never a PID file, which goes stale on a crash and whose PIDs get reused — and
+  a second copy is offered **Take Over** or **Quit** in a window with no server
+  behind it, naming the running copy by PID. Nothing is offered to edit there,
+  because saving settings from a window whose server was never started is how
+  the copies came to disagree in the first place.
+
+  **The handover is cooperative, not a kill.** `SIGTERM` was the obvious
+  mechanism and is wrong twice over: it does not exist on Windows, and it skips
+  the gateway's own shutdown — the broadcast that tells connected sessions the
+  server is going down, the bounded join of the serial threads, the staged
+  write of a booted disk image. The newcomer leaves a request file instead and
+  the holder, which polls for it, trips the same `shutdown` flag its own Quit
+  button uses. Identical on every platform, with no new signal plumbing.
+
+  A **headless** launch refuses instead of asking: with no window there is
+  nobody to ask, and a service started twice by accident must not stop a
+  working gateway on nobody's authority.
+
+  Two files were missed in the first pass of the folder move and are now inside
+  it as well: `gateway_hosts` (the accumulated known-host fingerprints for
+  outbound SSH) and `bookmarks.txt` for the text browser — whose own doc comment
+  said "stored next to the binary", so grepping for paths found it where
+  grepping for the rule would not have. And every writer of a file in that
+  folder now ensures the folder exists rather than trusting `main` to have done
+  it: a unit test reaches those writers without going through `main`, which is
+  how the gap was found, and an operator can delete the folder while the gateway
+  is running.
+
+- **Closing the GUI window asks whether you meant to stop the server, and a
+  Quit button says so out loud.** Closing the console window leaves the server
+  running, which is right from a shell — the terminal is still there and Ctrl-C
+  still reaches the process — and a trap from a desktop icon: the AppImage's own
+  desktop entry sets `Terminal=false`, so the process inherits the graphical VT
+  and no shell exists to press it in.
+
+  With no Quit control anywhere either, the only move the window offered was to
+  close it and relaunch, and **a second copy binds nothing**. Measured: five
+  copies stacked up, the oldest still serving telnet while a newer one served
+  the web UI, so a Save in the visible window never reached the process
+  answering connections — `bindwatch` had been saying exactly that in the log
+  the whole time.
+
+  The close is now vetoed and asks: *Stop the Server and Quit*, *Leave It
+  Running*, or *Cancel*. The **Quit** button sits in the window header rather
+  than under a `More...` popup, because somebody who cannot find how to stop a
+  program does not go looking under Server. Dismissing the dialog is Cancel,
+  never an answer — a modal that stopped a server because it was waved away
+  would be worse than the trap it replaced. The wizard's own title-bar X is
+  untouched, and a Save and Restart still returns a fresh window.
+
+- **A root or `sudo` session is warned before it writes anything, not after.**
+  The same trap the unreadable-config diagnosis explains a day late, caught
+  while it can still be avoided: a red banner across the top of the GUI, and
+  the same lines in the startup log so a root run with no window says it too.
+
+  `SUDO_USER` is the signal, not root alone. A machine that always runs the
+  gateway as root is doing nothing wrong and will never hit this — root writes
+  the files and root reads them back. A *temporary* escalation is the dangerous
+  shape, because the operator is coming back as themselves afterwards, and
+  `SUDO_USER` names exactly who: the warning says which account will be locked
+  out, that the serial port it was escalated for does not need root, and the
+  `chown` that hands the directory back. **Dismiss** puts it away for that
+  window; it is deliberately not a config key, since persisting it would
+  silence the warning on the installs that have never seen it. It returns after
+  a Save and Restart, which is right rather than sloppy — a Save is precisely
+  when a root session has just written `egateway.conf` as root.
+
+  The serial group is a parameter rather than a hardcoded `dialout`: Linux gates
+  a serial device that way, macOS does not (a `/dev/cu.*` is not group-gated),
+  so naming it on a Mac would send the operator looking for something that does
+  not exist. Windows never sees this warning at all, and that is correct rather
+  than a gap — the `0600` that causes the lockout is applied only on the unix
+  write path, so a file an elevated Windows process creates inherits the
+  folder's ACL and stays readable.
+
+
+### Changed
+
+- **BREAKING: everything the gateway creates now lives in one
+  `ethernetgateway-data` folder.** A launch used to write straight into
+  whatever directory it was started from, which for a desktop icon is wherever
+  that icon lives: `egateway.conf`, a log, an SSH host key and a whole
+  `transfer/` tree dropped among the operator's own files. A launch now adds
+  exactly **one** entry to that directory, and everything goes inside it.
+
+  **Existing installations do not carry over, deliberately.** There is no
+  fallback and no migration: an upgrade will not find the old `egateway.conf`,
+  the old SSH host key or the old transfer directory, and will create fresh
+  ones. Moving somebody's host key and disk images automatically is the kind of
+  thing that goes wrong once and cannot be undone, so the choice is left with
+  the operator — move the old files into `ethernetgateway-data` by hand, or
+  start fresh. Note the SSH host key: a new one means every client that
+  connected before reports the host identity has changed.
+
+  The **working** directory, not the binary's — they are the same thing when
+  the binary is run from its own folder, and very different for an AppImage,
+  where the executable sits in a read-only temp mount at a fresh path every
+  launch and nothing can be written beside it. And not a folder called
+  `ethernetgateway`, which cannot work at all: that collides with the binary
+  whenever the two share a directory (`create_dir_all` fails with `File
+  exists`), and a case variant is no escape on macOS or Windows, where
+  filenames are case-insensitive.
+
+  Two settings are **defaults, not rules**: `transfer_dir` and `log_file` now
+  default inside the folder, but a value you set is used exactly as written, so
+  `transfer_dir = /mnt/bbsfiles` is never relocated. That is why they are
+  defaults rather than a resolution step — a rule that rewrote relative paths
+  would have to be idempotent or it would prefix its own output on the next
+  load.
+
+
 ### Fixed
+
+- **The desktop labelled the same Hayes toggle two different ways in one
+  window.** The serial ports' advanced panel says `Echo (E1)` / `Verbose (V1)` /
+  `Quiet (Q1)`; the CP/M virtual modem's block, eight hundred lines away, said a
+  bare `Echo` / `Verbose` / `Quiet` and put the AT letter in a tooltip — under a
+  comment claiming that block exists "for the same reason the ports' is". The AT
+  letter is what an operator matches against the manual and against what the
+  guest typed, so it belongs in the label. All three surfaces now agree on those
+  three, and a test pins it: whole-file matching would have passed on the serial
+  block alone, so it checks the CP/M checkboxes themselves. The longer fields
+  are deliberately left to differ, since telnet has 40 columns and the web has a
+  form row.
+
+- **A doc comment pointed at a function that does not exist.**
+  `cpm_emu.rs` sent a reader to `TelnetSession::cpmemu_place_egt80` for how the
+  bundled terminals are placed; there is no such method and no `cpmemu_place*`
+  anything — the real one is `place_bundled_terminals`. Found by running
+  `cargo doc`, which also caught two comments rendering wrongly: a literal
+  `<err>` and `<label>`-style placeholders read as HTML tags, and a `Stop::Hbios`
+  link that could not resolve from its module.
 
 - **The images readme gave two different telnet routes to the CP/M screen.**
   The mounting section said `C (Configuration)`, then `O (Other Settings)`, then
@@ -487,127 +605,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as plausible immediately after one. It now consults both flags, and what it
   advises depends on the launch: Ctrl-C from a shell, and a `pkill` when the
   process has no terminal to press it in.
-
-### Changed
-
-- **BREAKING: everything the gateway creates now lives in one
-  `ethernetgateway-data` folder.** A launch used to write straight into
-  whatever directory it was started from, which for a desktop icon is wherever
-  that icon lives: `egateway.conf`, a log, an SSH host key and a whole
-  `transfer/` tree dropped among the operator's own files. A launch now adds
-  exactly **one** entry to that directory, and everything goes inside it.
-
-  **Existing installations do not carry over, deliberately.** There is no
-  fallback and no migration: an upgrade will not find the old `egateway.conf`,
-  the old SSH host key or the old transfer directory, and will create fresh
-  ones. Moving somebody's host key and disk images automatically is the kind of
-  thing that goes wrong once and cannot be undone, so the choice is left with
-  the operator — move the old files into `ethernetgateway-data` by hand, or
-  start fresh. Note the SSH host key: a new one means every client that
-  connected before reports the host identity has changed.
-
-  The **working** directory, not the binary's — they are the same thing when
-  the binary is run from its own folder, and very different for an AppImage,
-  where the executable sits in a read-only temp mount at a fresh path every
-  launch and nothing can be written beside it. And not a folder called
-  `ethernetgateway`, which cannot work at all: that collides with the binary
-  whenever the two share a directory (`create_dir_all` fails with `File
-  exists`), and a case variant is no escape on macOS or Windows, where
-  filenames are case-insensitive.
-
-  Two settings are **defaults, not rules**: `transfer_dir` and `log_file` now
-  default inside the folder, but a value you set is used exactly as written, so
-  `transfer_dir = /mnt/bbsfiles` is never relocated. That is why they are
-  defaults rather than a resolution step — a rule that rewrote relative paths
-  would have to be idempotent or it would prefix its own output on the next
-  load.
-
-### Added
-- **A second copy offers to take over instead of coming up useless.** Launching
-  the gateway twice in the same directory used to produce a process that
-  started fully, opened a window, offered every configuration screen, and held
-  no listener at all — while the *first* copy went on answering connections.
-  Five copies stacked up that way on 2026-08-19, the oldest still serving
-  telnet while a newer one served the web UI, so a Save in the visible window
-  never reached the process that was answering.
-
-  A launch now finds out first. It claims the directory with an OS-level lock —
-  never a PID file, which goes stale on a crash and whose PIDs get reused — and
-  a second copy is offered **Take Over** or **Quit** in a window with no server
-  behind it, naming the running copy by PID. Nothing is offered to edit there,
-  because saving settings from a window whose server was never started is how
-  the copies came to disagree in the first place.
-
-  **The handover is cooperative, not a kill.** `SIGTERM` was the obvious
-  mechanism and is wrong twice over: it does not exist on Windows, and it skips
-  the gateway's own shutdown — the broadcast that tells connected sessions the
-  server is going down, the bounded join of the serial threads, the staged
-  write of a booted disk image. The newcomer leaves a request file instead and
-  the holder, which polls for it, trips the same `shutdown` flag its own Quit
-  button uses. Identical on every platform, with no new signal plumbing.
-
-  A **headless** launch refuses instead of asking: with no window there is
-  nobody to ask, and a service started twice by accident must not stop a
-  working gateway on nobody's authority.
-
-  Two files were missed in the first pass of the folder move and are now inside
-  it as well: `gateway_hosts` (the accumulated known-host fingerprints for
-  outbound SSH) and `bookmarks.txt` for the text browser — whose own doc comment
-  said "stored next to the binary", so grepping for paths found it where
-  grepping for the rule would not have. And every writer of a file in that
-  folder now ensures the folder exists rather than trusting `main` to have done
-  it: a unit test reaches those writers without going through `main`, which is
-  how the gap was found, and an operator can delete the folder while the gateway
-  is running.
-
-
-- **Closing the GUI window asks whether you meant to stop the server, and a
-  Quit button says so out loud.** Closing the console window leaves the server
-  running, which is right from a shell — the terminal is still there and Ctrl-C
-  still reaches the process — and a trap from a desktop icon: the AppImage's own
-  desktop entry sets `Terminal=false`, so the process inherits the graphical VT
-  and no shell exists to press it in.
-
-  With no Quit control anywhere either, the only move the window offered was to
-  close it and relaunch, and **a second copy binds nothing**. Measured: five
-  copies stacked up, the oldest still serving telnet while a newer one served
-  the web UI, so a Save in the visible window never reached the process
-  answering connections — `bindwatch` had been saying exactly that in the log
-  the whole time.
-
-  The close is now vetoed and asks: *Stop the Server and Quit*, *Leave It
-  Running*, or *Cancel*. The **Quit** button sits in the window header rather
-  than under a `More...` popup, because somebody who cannot find how to stop a
-  program does not go looking under Server. Dismissing the dialog is Cancel,
-  never an answer — a modal that stopped a server because it was waved away
-  would be worse than the trap it replaced. The wizard's own title-bar X is
-  untouched, and a Save and Restart still returns a fresh window.
-
-- **A root or `sudo` session is warned before it writes anything, not after.**
-  The same trap the unreadable-config diagnosis explains a day late, caught
-  while it can still be avoided: a red banner across the top of the GUI, and
-  the same lines in the startup log so a root run with no window says it too.
-
-  `SUDO_USER` is the signal, not root alone. A machine that always runs the
-  gateway as root is doing nothing wrong and will never hit this — root writes
-  the files and root reads them back. A *temporary* escalation is the dangerous
-  shape, because the operator is coming back as themselves afterwards, and
-  `SUDO_USER` names exactly who: the warning says which account will be locked
-  out, that the serial port it was escalated for does not need root, and the
-  `chown` that hands the directory back. **Dismiss** puts it away for that
-  window; it is deliberately not a config key, since persisting it would
-  silence the warning on the installs that have never seen it. It returns after
-  a Save and Restart, which is right rather than sloppy — a Save is precisely
-  when a root session has just written `egateway.conf` as root.
-
-  The serial group is a parameter rather than a hardcoded `dialout`: Linux gates
-  a serial device that way, macOS does not (a `/dev/cu.*` is not group-gated),
-  so naming it on a Mac would send the operator looking for something that does
-  not exist. Windows never sees this warning at all, and that is correct rather
-  than a gap — the `0600` that causes the lockout is applied only on the unix
-  write path, so a file an elevated Windows process creates inherits the
-  folder's ACL and stays readable.
-
 
 ## [0.9.3] - 2026-08-16
 
@@ -5900,8 +5897,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.3...HEAD
-[0.9.4]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.4
 [0.9.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.3
 [0.9.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.2
 [0.9.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.1
