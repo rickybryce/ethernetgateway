@@ -136,6 +136,24 @@ pub fn short_label(setting: &str, cpu: &str) -> String {
     }
 }
 
+/// A choice's label with `auto` resolved for the CPU in use.
+///
+/// `auto` on its own does not tell an operator what their machine is doing, and
+/// the telnet screen already shows the number because it shows the resolved
+/// value. The web select and the desktop combo showed the phrase alone, so the
+/// same setting read differently on three surfaces; this is what makes them
+/// agree.
+pub fn choice_label(value: &str, label: &str, cpu: &str) -> String {
+    if value.eq_ignore_ascii_case("auto") {
+        match mhz_for(value, cpu) {
+            Some(mhz) if mhz.fract() == 0.0 => return format!("{label} ({mhz:.0} MHz)"),
+            Some(mhz) => return format!("{label} ({mhz} MHz)"),
+            None => {}
+        }
+    }
+    label.to_string()
+}
+
 /// Milliseconds since this process started.
 ///
 /// One shared monotonic base, so everything that reasons about real time here —
@@ -260,6 +278,22 @@ mod tests {
         // prefix, so they cannot be long.
         for (_, label) in SPEED_CHOICES {
             assert!(label.chars().count() <= 26, "{label:?} is too long for 40 columns");
+        }
+    }
+
+    /// **The same setting must not read differently on three screens.** The
+    /// telnet row shows the resolved clock because it shows a resolved value;
+    /// the web select and the desktop combo showed the phrase alone, so `auto`
+    /// told an operator nothing about what their machine was doing.
+    #[test]
+    fn test_auto_says_what_it_resolves_to() {
+        let (v, l) = SPEED_CHOICES[0];
+        assert_eq!(v, "auto", "the first choice is the one that needs resolving");
+        assert_eq!(choice_label(v, l, "8080"), format!("{l} (2 MHz)"));
+        assert_eq!(choice_label(v, l, "z80"), format!("{l} (4 MHz)"));
+        // Every other choice already says what it is, so it is left alone.
+        for (value, label) in &SPEED_CHOICES[1..] {
+            assert_eq!(&choice_label(value, label, "z80"), label, "{value}");
         }
     }
 

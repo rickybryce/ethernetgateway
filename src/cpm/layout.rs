@@ -1312,6 +1312,15 @@ mod tests {
         // The three sections the header promises, in the order it promises
         // them.  A `find` on each rather than a `contains`, because "the index
         // below, then the same disks in full" is a claim about order.
+        //
+        // **These patterns end in a newline, which is only safe here because of
+        // another test.** A trailing `\n` does not match a CRLF file -- the
+        // heading is followed by `\r` -- and two source-scanning tests failed on
+        // Windows for exactly that reason. This one is reading `repodisks.txt`,
+        // which `.gitattributes` pins to LF and
+        // `test_the_catalogue_ships_with_unix_line_endings` proves is free of
+        // `\r` on every platform. That guard is load-bearing for this test, not
+        // merely tidy.
         let (where_from, a_to_z, in_full) = (
             s.find("\nWHERE THEY COME FROM\n").expect("a provenance section"),
             s.find("\nTHE DISKS, A TO Z\n").expect("an index"),

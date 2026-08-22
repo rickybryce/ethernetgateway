@@ -3521,7 +3521,9 @@ fn render_more_popups(cfg: &Config) -> String {
                 } else {
                     ""
                 };
-                o.push_str(&format!("<option value=\"{value}\"{sel}>{label}</option>"));
+                let shown =
+                    crate::cpm::speed::choice_label(value, label, &cfg.cpm_cpu);
+                o.push_str(&format!("<option value=\"{value}\"{sel}>{shown}</option>"));
             }
             o.push_str("</select></label>");
             o

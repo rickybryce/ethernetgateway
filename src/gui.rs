@@ -2273,7 +2273,12 @@ impl App {
         // at all.
         ui.horizontal(|ui| {
             ui.label("Booted-disk speed:");
-            let current = crate::cpm::speed::label_for(&self.cfg.cpm_boot_speed);
+            let cpu = self.cfg.cpm_cpu.clone();
+            let current = crate::cpm::speed::choice_label(
+                &self.cfg.cpm_boot_speed,
+                &crate::cpm::speed::label_for(&self.cfg.cpm_boot_speed),
+                &cpu,
+            );
             egui::ComboBox::from_id_salt("cpm_boot_speed")
                 .selected_text(current)
                 .show_ui(ui, |ui| {
@@ -2281,7 +2286,7 @@ impl App {
                         ui.selectable_value(
                             &mut self.cfg.cpm_boot_speed,
                             (*value).to_string(),
-                            *label,
+                            crate::cpm::speed::choice_label(value, label, &cpu),
                         );
                     }
                 });
