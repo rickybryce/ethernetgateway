@@ -590,23 +590,63 @@
         <!-- NAV                                               -->
         <!-- ══════════════════════════════════════════════════ -->
         <nav class="site-nav">
-            <a href="#about">About</a>
             <a href="#download">Download</a>
-            <a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">User Manual</a>
+            <a href="#about">About</a>
             <a href="#author">Author</a>
+            <a href="#screenshot">Screenshot</a>
+            <a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">User Manual</a>
             <a href="#references">References</a>
         </nav>
 
         <div class="body-content">
 
             <!-- ══════════════════════════════════════════════ -->
-            <!-- SCREENSHOT                                    -->
+            <!-- DOWNLOAD                                      -->
             <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="screenshot">
-                <div style="text-align: center;">
-                    <img src="screenshot.png" alt="Ethernet Gateway GUI console" style="max-width: 100%; height: auto; border: 1px solid var(--cyan); box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);">
+            <div class="section" id="download">
+                <div class="section-title">Download</div>
+                <p class="intro">Version 0.9.4 &mdash; pre-built, signed binaries. Every archive also carries the README, the licence and both CP/M terminals.</p>
+
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3>Linux</h3>
+                        <ul>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-x86_64-unknown-linux-gnu.tar.gz"><strong>x86-64</strong> &mdash; tar.gz</a></li>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-aarch64-unknown-linux-gnu.tar.gz"><strong>ARM64</strong> (Raspberry&nbsp;Pi&nbsp;4+) &mdash; tar.gz</a></li>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/latest/download/Ethernet_Gateway-x86_64.AppImage"><strong>AppImage</strong>, x86-64 &mdash; download, allow to execute, and run</a></li>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/latest/download/Ethernet_Gateway-aarch64.AppImage"><strong>AppImage</strong>, ARM64 &mdash; the same, for a Raspberry&nbsp;Pi</a></li>
+                            <li>A downloaded AppImage is not executable yet. Give it the bit with <code>chmod&nbsp;+x</code>, or tick <em>Allow executing file as program</em> in your file manager's properties, then run it.</li>
+                        </ul>
+                    </div>
+                    <div class="compat-card">
+                        <h3>macOS</h3>
+                        <ul>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-aarch64-apple-darwin.tar.gz"><strong>Apple Silicon</strong> &mdash; tar.gz</a></li>
+                            <li>Unsigned by Apple, so the first launch is <em>right-click &rarr; Open</em>, or clear the quarantine flag with <code>xattr -d com.apple.quarantine</code>.</li>
+                        </ul>
+                    </div>
+                    <div class="compat-card">
+                        <h3>Windows</h3>
+                        <ul>
+                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-x86_64-pc-windows-msvc.zip"><strong>x86-64</strong> &mdash; zip</a></li>
+                            <li>Unpack anywhere and run <code>ethernetgateway.exe</code>; it creates its data folder beside itself on first launch.</li>
+                        </ul>
+                    </div>
                 </div>
-                <p class="intro" style="margin-top: 10px;">The desktop console &mdash; every setting is also reachable over telnet and from a browser.</p>
+
+                <p>
+                    Every file is published with a SHA-256 sum and a keyless
+                    <a href="https://www.sigstore.dev/">Sigstore</a> signature
+                    (<code>.sha256</code>, <code>.sig</code>, <code>.pem</code>) so a download can be
+                    verified. Older versions, the checksums and the full release notes are on the
+                    <a href="https://github.com/rickybryce/ethernetgateway/releases">releases page</a>;
+                    the source is on <a href="https://github.com/rickybryce/ethernetgateway">GitHub</a>
+                    and builds with <code>cargo build --release</code> on rustc 1.92 or newer.
+                </p>
+                <p class="dim-text">
+                    New here? The <a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">user manual</a> (PDF) walks through the
+                    first launch, the terminal types and every setting.
+                </p>
             </div>
 
             <hr class="divider">
@@ -671,56 +711,6 @@
             <hr class="divider">
 
             <!-- ══════════════════════════════════════════════ -->
-            <!-- DOWNLOAD                                      -->
-            <!-- ══════════════════════════════════════════════ -->
-            <div class="section" id="download">
-                <div class="section-title">Download</div>
-                <p class="intro">Version 0.9.4 &mdash; pre-built, signed binaries. Every archive also carries the README, the licence and both CP/M terminals.</p>
-
-                <div class="compat-grid">
-                    <div class="compat-card">
-                        <h3>Linux</h3>
-                        <ul>
-                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-x86_64-unknown-linux-gnu.tar.gz"><strong>x86-64</strong> &mdash; tar.gz</a></li>
-                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-aarch64-unknown-linux-gnu.tar.gz"><strong>ARM64</strong> (Raspberry&nbsp;Pi&nbsp;4+) &mdash; tar.gz</a></li>
-                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/latest/download/Ethernet_Gateway-x86_64.AppImage"><strong>AppImage</strong>, x86-64 &mdash; download and run</a></li>
-                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/latest/download/Ethernet_Gateway-aarch64.AppImage"><strong>AppImage</strong>, ARM64</a></li>
-                        </ul>
-                    </div>
-                    <div class="compat-card">
-                        <h3>macOS</h3>
-                        <ul>
-                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-aarch64-apple-darwin.tar.gz"><strong>Apple Silicon</strong> &mdash; tar.gz</a></li>
-                            <li>Unsigned by Apple, so the first launch is <em>right-click &rarr; Open</em>, or clear the quarantine flag with <code>xattr -d com.apple.quarantine</code>.</li>
-                        </ul>
-                    </div>
-                    <div class="compat-card">
-                        <h3>Windows</h3>
-                        <ul>
-                            <li><a href="https://github.com/rickybryce/ethernetgateway/releases/download/v0.9.4/ethernetgateway-v0.9.4-x86_64-pc-windows-msvc.zip"><strong>x86-64</strong> &mdash; zip</a></li>
-                            <li>Unpack anywhere and run <code>ethernetgateway.exe</code>; it creates its data folder beside itself on first launch.</li>
-                        </ul>
-                    </div>
-                </div>
-
-                <p>
-                    Every file is published with a SHA-256 sum and a keyless
-                    <a href="https://www.sigstore.dev/">Sigstore</a> signature
-                    (<code>.sha256</code>, <code>.sig</code>, <code>.pem</code>) so a download can be
-                    verified. Older versions, the checksums and the full release notes are on the
-                    <a href="https://github.com/rickybryce/ethernetgateway/releases">releases page</a>;
-                    the source is on <a href="https://github.com/rickybryce/ethernetgateway">GitHub</a>
-                    and builds with <code>cargo build --release</code> on rustc 1.92 or newer.
-                </p>
-                <p class="dim-text">
-                    New here? The <a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">user manual</a> (PDF) walks through the
-                    first launch, the terminal types and every setting.
-                </p>
-            </div>
-
-            <hr class="divider">
-
-            <!-- ══════════════════════════════════════════════ -->
             <!-- AUTHOR                                        -->
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="author">
@@ -755,6 +745,19 @@
                         </p>
                     </div>
                 </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SCREENSHOT                                    -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="screenshot">
+                <div class="section-title">Screenshot</div>
+                <div style="text-align: center;">
+                    <img src="screenshot.png" alt="Ethernet Gateway GUI console" style="max-width: 100%; height: auto; border: 1px solid var(--cyan); box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);">
+                </div>
+                <p class="intro" style="margin-top: 10px;">The desktop console &mdash; every setting is also reachable over telnet and from a browser.</p>
             </div>
 
             <hr class="divider">

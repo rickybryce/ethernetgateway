@@ -6115,6 +6115,106 @@ mod tests {
     }
 
 
+    /// The landing page names *this* version, and sends people to the same
+    /// manual the other two surfaces do.
+    ///
+    /// `web/index.html` stopped being the manual in 0.9.5 and became the page a
+    /// first visitor lands on. That cost it the only cover it had: no test
+    /// includes it any more. It also gained something that rots -- **four
+    /// download links that name the tag twice over**
+    /// (`releases/download/vX.Y.Z/ethernetgateway-vX.Y.Z-<target>.<ext>`), which
+    /// 404 until the tag exists and go on 404ing for ever if the version is
+    /// bumped and they are not. `versionchange.txt` says to bump them; this is
+    /// the part that notices when nobody did.
+    ///
+    /// The two AppImage links are asserted to be **latest/download** rather than
+    /// version-pinned, which is not a style rule: those two assets are the only
+    /// ones whose filename carries no version, so they are the only ones that
+    /// can be linked that way. Pinning them would be a bump nobody needs, and
+    /// un-pinning any of the other four would be a link that never resolves.
+    ///
+    /// The manual URL is pinned against [`crate::webserver::MANUAL_URL`], whose
+    /// own comment says why one constant rather than two literals: the web UI
+    /// and the desktop button already share it, and this page is the third
+    /// surface making the same promise.
+    #[test]
+    fn test_the_landing_page_names_this_version_and_the_same_manual() {
+        let page = include_str!("../web/index.html").replace("\r\n", "\n");
+        let version = env!("CARGO_PKG_VERSION");
+
+        for expected in [
+            format!("<div class=\"hdr-version\">v{version}</div>"),
+            format!("Ethernet Gateway v{version} &mdash;"),
+            format!("Version {version} &mdash;"),
+        ] {
+            assert!(page.contains(&expected), "the landing page is missing {expected:?}");
+        }
+
+        // The archives, whose filenames carry the version.
+        for (target, ext) in [
+            ("x86_64-unknown-linux-gnu", "tar.gz"),
+            ("aarch64-unknown-linux-gnu", "tar.gz"),
+            ("aarch64-apple-darwin", "tar.gz"),
+            ("x86_64-pc-windows-msvc", "zip"),
+        ] {
+            let url = format!(
+                "https://github.com/rickybryce/ethernetgateway/releases/download/\
+                 v{version}/ethernetgateway-v{version}-{target}.{ext}"
+            );
+            assert!(page.contains(&url), "the landing page does not offer {url}");
+        }
+
+        // The AppImages, whose filenames do not -- so they are linked at the
+        // release that is current, and never need bumping.
+        for arch in ["x86_64", "aarch64"] {
+            let url = format!(
+                "https://github.com/rickybryce/ethernetgateway/releases/latest/\
+                 download/Ethernet_Gateway-{arch}.AppImage"
+            );
+            assert!(page.contains(&url), "the landing page does not offer {url}");
+        }
+
+        // The manual, at the one URL the other two surfaces already use.
+        assert!(
+            page.contains(crate::webserver::MANUAL_URL),
+            "the landing page's manual link disagrees with webserver::MANUAL_URL ({})",
+            crate::webserver::MANUAL_URL
+        );
+
+        // And no other version anywhere on the page: a half-done bump leaves
+        // one `v0.9.4` behind in a place nobody looked, which is the failure
+        // this catches that the checks above cannot.  Unlike the manual, this
+        // page carries no historical references -- "removed in v0.6.0" belongs
+        // in a manual, not on a front door -- so any version but ours is a
+        // miss, and the message names the string it found.
+        let mut stale = Vec::new();
+        let bytes: Vec<char> = page.chars().collect();
+        for (i, w) in bytes.windows(2).enumerate() {
+            if w[0] != 'v' || !w[1].is_ascii_digit() {
+                continue;
+            }
+            // `v` must start a word -- `Ethernet_Gateway-x86_64` has none, but
+            // a stray `rev1.2.3` would.
+            if i > 0 && (bytes[i - 1].is_alphanumeric() || bytes[i - 1] == '.') {
+                continue;
+            }
+            let found: String = bytes[i + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit() || **c == '.')
+                .collect();
+            if found.matches('.').count() == 2 && found != version {
+                stale.push(format!("v{found}"));
+            }
+        }
+        stale.sort();
+        stale.dedup();
+        assert!(
+            stale.is_empty(),
+            "the landing page still names {stale:?} -- this build is v{version}"
+        );
+    }
+
+
     /// A failed file write is reported (not silently swallowed), so an
     /// explicit Save can tell the user persistence did not happen.
     ///
