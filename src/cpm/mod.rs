@@ -49,6 +49,7 @@ pub mod d7a;
 pub mod dazzler;
 pub mod fetch;
 pub mod printer;
+pub mod rom;
 pub mod screen;
 pub mod speed;
 pub mod tarbell;

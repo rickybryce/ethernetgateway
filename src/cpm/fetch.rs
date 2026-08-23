@@ -255,7 +255,7 @@ impl Report {
 /// Written out rather than pulled in: this is the only hash this crate needs,
 /// a dependency for it would be a supply-chain decision taken for one function,
 /// and the algorithm is fixed for ever by its own specification.
-fn sha256(data: &[u8]) -> String {
+pub(in crate::cpm) fn sha256(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -329,26 +329,28 @@ fn sha256(data: &[u8]) -> String {
 /// these exact bytes were booted, so a file that arrives different is refused
 /// rather than written. A truncated download and a changed upstream both land
 /// here, and both should stop.
-fn fetch_one(disk: &Disk) -> Result<Vec<u8>, String> {
+/// GET a pinned URL and return its body.
+///
+/// One copy, because the sample disks and the monitor ROMs
+/// ([`super::rom`]) fetch from the same place on the same terms and a second
+/// agent would be a second set of timeouts to keep in step. The caller owns
+/// verification: this says only what arrived.
+pub(in crate::cpm) fn get(url: &str, user_agent: &str, limit: u64) -> Result<Vec<u8>, String> {
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(120)))
             .build(),
     );
-    let mut resp = agent
-        .get(&disk.url())
-        .header("User-Agent", "EthernetGateway (CP/M sample disks)")
-        .call()
-        .map_err(|e| format!("{e}"))?;
+    let mut resp =
+        agent.get(url).header("User-Agent", user_agent).call().map_err(|e| format!("{e}"))?;
     if resp.status().as_u16() != 200 {
         return Err(format!("HTTP {}", resp.status().as_u16()));
     }
-    let body = resp
-        .body_mut()
-        .with_config()
-        .limit(64 << 20)
-        .read_to_vec()
-        .map_err(|e| format!("{e}"))?;
+    resp.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| format!("{e}"))
+}
+
+fn fetch_one(disk: &Disk) -> Result<Vec<u8>, String> {
+    let body = get(&disk.url(), "EthernetGateway (CP/M sample disks)", 64 << 20)?;
     if body.len() as u64 != disk.bytes {
         return Err(format!("expected {} bytes, got {}", disk.bytes, body.len()));
     }

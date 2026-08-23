@@ -11,6 +11,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A booted disk can be given a monitor ROM, and `DISK11.DSK` runs.**  Some
+  disks are not self-contained: they carry an operating system and a BIOS and
+  then print through a routine that was never on the disk, because on the
+  machine they were built for it was already in memory.  `cpm_boot_rom` (default
+  `off`, on all three configuration screens) loads one into a *booted* machine
+  before it starts, and leaves it **writable** — these monitors were RAM-resident
+  on the real machines too, and their callers patch them.
+
+  `DISK11.DSK` is the case, and it was more forthcoming than expected: it does
+  not merely go quiet, it *tests* for the monitor — `LDA C000 / CPI 7Fh / RZ` —
+  and prints "This version of CP/M requires CUTER for VDM-1 to be present at
+  C000h." before stopping for ever.  Four things were measured before anything
+  was built, and the first three each ruled out a cheaper fix:
+
+  * **The signature byte alone is worthless.**  Poking `7F` into `C000` gets past
+    the gate, and the guest then goes quiet with no output and a blank screen.
+  * It calls **three** of the monitor's entries, not one — `C019` (character
+    out), `C0F9` and `C1D7` — so the six-byte synthesised entry behind
+    `console_04_cuter` could never have served it.
+  * It **patches six bytes inside the monitor's own image** before printing a
+    character (`C03F`, `C040`, `C042`, `C045`, `C1EE`, `C215`), every one inside
+    the real file.  A stub cannot be patched: the disk depends on the original's
+    instruction layout.
+  * `C0F9` in the real ROM is `LXI H,CC00 / MVI M,A0h` — the VDM-1 screen clear.
+    So the picture lands in the window the gateway already renders, and the disk
+    comes up in a browser at `/vdm` with no new display work at all.
+
+  Verified end to end through the shipped publish path: with the monitor loaded
+  the disk signs on as `47K CP/M Version 2.2mits (07/28/80)` on the card, has
+  driven the scroll register, reaches `A>` and answers `DIR`.  The negative
+  control is asserted in the same gate, because a test that only checks the good
+  case cannot tell a working ROM from a disk that would have run anyway.
+
+  The ROM files are **not shipped** — they are not ours.  Each catalogue entry is
+  pinned to an upstream commit and verified by SHA-256, fetched on the operator's
+  behalf from every CP/M settings screen, and a file already in `CPM/roms/` is
+  never overwritten.  Intel HEX and raw binary are both accepted, and bytes
+  falling outside the entry's declared window are refused: a monitor assembled
+  for a different address would be written over the guest's own memory, which
+  presents as a disk that boots and then behaves impossibly.
+
 - **A booted guest now runs at its processor's speed, and `cpm_boot_speed`
   decides.** Nothing paced the CPU before: the pump naps when a guest is *idle*,
   but one that is working ran at whatever the host could manage. Measured, that

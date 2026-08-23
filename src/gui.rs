@@ -1803,6 +1803,62 @@ impl App {
         });
     }
 
+    /// Offer to fetch the monitor ROM the CP/M settings name, while it is not
+    /// there.
+    ///
+    /// Shares the download slot and the note with the sample disks, because both
+    /// are "a CP/M download is running" and two independent in-flight flags
+    /// would let one overwrite the other's message.  Absent whenever there is
+    /// nothing to fetch, so the ordinary case gains no button.
+    fn draw_cpm_rom_fetch_button(&mut self, ui: &mut egui::Ui) {
+        if self.cpm_fetch.is_some() {
+            return;
+        }
+        let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+        let Some(f) = crate::cpm::rom::file_for(&self.cfg.cpm_boot_rom) else { return };
+        if !crate::cpm::rom::missing(&base, &self.cfg.cpm_boot_rom) {
+            return;
+        }
+        if ui
+            .add(egui::Button::new(
+                egui::RichText::new("Fetch monitor ROM").color(AMBER_BRIGHT),
+            ))
+            .on_hover_text(format!(
+                "Fetch {} ({} bytes) from its author's own repository, pinned to one commit and \
+                 checked against a SHA-256 recorded from a copy we tested.  It is not ours; this \
+                 fetches it for you, and a file already in CPM/roms/ is left alone.",
+                f.file, f.bytes,
+            ))
+            .clicked()
+        {
+            self.start_rom_fetch(ui.ctx());
+        }
+    }
+
+    /// Start the monitor-ROM download on its own thread.
+    fn start_rom_fetch(&mut self, ctx: &egui::Context) {
+        if self.cpm_fetch.is_some() {
+            return;
+        }
+        let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+        let want = self.cfg.cpm_boot_rom.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cpm_fetch = Some(rx);
+        self.cpm_fetch_note = String::new();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let msg = match crate::cpm::rom::download(&base, &want) {
+                Ok(note) => note,
+                Err(e) => e,
+            };
+            logger::log(format!("CP/M monitor ROM: {}", msg.trim()));
+            let _ = tx.send(msg);
+            // Wake the UI, exactly as the disk download does: without this the
+            // result sits in the channel until something else causes a repaint.
+            ctx.request_repaint();
+        });
+    }
+
     fn draw_cpm_mounts(&mut self, ui: &mut egui::Ui) {
         let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
         // What will actually run, not what the key says: a `cpm_boot_image`
@@ -2376,6 +2432,9 @@ impl App {
         // are there, so the ordinary case is unchanged.
         ui.horizontal(|ui| {
             self.draw_cpm_fetch_button(ui);
+            // Beside it, and on this window only: the ROM is chosen here, and
+            // the mount window neither shows nor changes that choice.
+            self.draw_cpm_rom_fetch_button(ui);
         });
         if !self.cpm_fetch_note.is_empty() {
             ui.label(egui::RichText::new(&self.cpm_fetch_note).small().color(AMBER_DIM));
@@ -2543,6 +2602,37 @@ impl App {
         .response
         .on_hover_text(
             "Where a BOOTED disk finds its console.  Ignored by the CP/M emulator, which has no console to place.  A disk that loads its operating system and then goes quiet is usually looking for a console that is not there, and will sit polling a keyboard port for ever.  Not autodetected: what a guest polls cannot tell the machine it wants from another machine's keyboard at the same address.",
+        );
+        // The monitor ROM a BOOTED disk's machine is given, from the same
+        // `ROM_CHOICES` list the telnet and web screens render.  The row says
+        // whether the *file* is there, not only what is selected: choosing a ROM
+        // whose file was never fetched is a boot that goes quiet, and a setting
+        // is not an outcome.
+        cpm_choice_row(ui, "Booted disk's monitor ROM:", |ui| {
+            let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
+            cpm_combo(ui, "cpm_boot_rom_combo")
+                .selected_text(crate::cpm::rom::choice_for(&self.cfg.cpm_boot_rom).map_or(
+                    "Off - no monitor ROM",
+                    |c| c.description,
+                ))
+                .show_ui(ui, |ui| {
+                    for c in crate::cpm::rom::ROM_CHOICES {
+                        let absent = c.rom.is_some() && crate::cpm::rom::missing(&base, c.key);
+                        ui.selectable_value(
+                            &mut self.cfg.cpm_boot_rom,
+                            c.key.to_string(),
+                            if absent {
+                                format!("{} \u{2014} file not here yet", c.description)
+                            } else {
+                                c.description.to_string()
+                            },
+                        );
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "Some disks print through a routine that was never on the disk, because on the machine they were built for it was already in memory \u{2014} a monitor in ROM, or loaded from tape before the disk went in.  Such a disk boots into silence, and neither it nor the gateway is at fault.  DISK11.DSK is one: it checks for CUTER at 0xC000 and prints \"This version of CP/M requires CUTER for VDM-1 to be present at C000h.\" without it.  With the ROM loaded it comes up on the VDM-1 screen, which the web UI serves.  The files are not shipped \u{2014} they are not ours \u{2014} so put one in CPM/roms/ or press Fetch monitor ROM.  Ignored by the CP/M emulator, which has no console to place.",
         );
         // What a BOOTED disk is handed for the Backspace key.  The same
         // `BACKSPACE_CHOICES` list the telnet and web screens render -- and the

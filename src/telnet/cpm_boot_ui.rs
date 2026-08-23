@@ -846,6 +846,28 @@ impl TelnetSession {
         // Read once and used twice — to build the CPU and to say which one the
         // guest got.  Two reads could straddle another session's save and put a
         // notice on the screen that the machine disagrees with.
+        // The monitor ROM, if the operator asked for one.  Read here rather than
+        // inside the machine so a file that cannot be used is reported on this
+        // banner: a disk that needs a monitor and does not get one goes quiet,
+        // and quiet is the one outcome that must never be left looking like a
+        // bad disk.  A failure does not refuse the boot — the ROM is 2 KB of
+        // high memory and most disks neither want nor notice it, so refusing
+        // every boot over a missing file would be a worse trade than a warning
+        // and a guest that behaves exactly as it did before.
+        let rom_setting = config::get_config().cpm_boot_rom.clone();
+        let rom_note = match crate::cpm::rom::load(&self.cpmmount_base(), &rom_setting) {
+            Ok(Some(image)) => {
+                let at = image.chunks.iter().map(|(a, _)| *a).min().unwrap_or(0);
+                let note = crate::cpm::rom::choice_for(&rom_setting)
+                    .map(|c| c.description.to_string())
+                    .unwrap_or_else(|| rom_setting.clone());
+                machine.set_rom(Some(image));
+                Some(Ok(format!("Monitor ROM at {at:#06x}: {note}")))
+            }
+            Ok(None) => None,
+            Err(why) => Some(Err(why)),
+        };
+
         let cpu_setting = config::get_config().cpm_cpu.clone();
         let mut cpu = BootMachine::new_cpu_for(&cpu_setting);
         if let Err(e) = machine.boot(&mut cpu, 0) {
@@ -900,6 +922,23 @@ impl TelnetSession {
             ) {
                 self.send_line(&format!("  {}", self.dim(&line))).await?;
             }
+        }
+        // The monitor ROM, on the same rule as the console below: a guest that
+        // was given one, or asked for one and could not have it, is exactly the
+        // guest whose silence needs explaining.
+        match &rom_note {
+            Some(Ok(note)) => {
+                let width = if self.terminal_type == TerminalType::Petscii { 38 } else { 76 };
+                self.send_line(&format!("  {}", self.dim(&truncate_to_width(note, width))))
+                    .await?;
+            }
+            Some(Err(why)) => {
+                self.send_line(&format!("  {}", self.red("No monitor ROM:"))).await?;
+                let width = if self.terminal_type == TerminalType::Petscii { 38 } else { 76 };
+                self.send_line(&format!("  {}", self.red(&truncate_to_width(why, width))))
+                    .await?;
+            }
+            None => {}
         }
         // Which console the guest has been given.  Said rather than left
         // implicit, because a disk that goes quiet at this point is almost

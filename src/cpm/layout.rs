@@ -56,7 +56,109 @@ pub fn ensure_cpm_tree(transfer_dir: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(&images)?;
     write_images_readme(&images);
     write_repo_disks(&images);
+    // The ROMs folder, on the same terms: an empty folder that does not say what
+    // it is for is the `(drive folder)` mistake one level down, so it arrives
+    // with its readme.
+    let roms = base.join(super::rom::ROMS_DIR);
+    std::fs::create_dir_all(&roms)?;
+    write_roms_readme(&roms);
     Ok(())
+}
+
+/// Put `readme.txt` in the ROMs folder, refreshing a stale copy of ours.
+///
+/// Same rule as the images readme, including why it may be overwritten: it is
+/// instructions, and an operator otherwise keeps whichever version they first
+/// ran for ever.
+fn write_roms_readme(roms: &Path) {
+    let path = roms.join("readme.txt");
+    let current = roms_readme();
+    match std::fs::read_to_string(&path) {
+        Ok(existing) if existing != current && existing.starts_with(ROMS_README_HEADER) => {
+            if let Err(e) = std::fs::write(&path, &current) {
+                crate::glog!("CP/M: could not refresh {}: {}", path.display(), e);
+            }
+        }
+        Ok(_) => {}
+        Err(_) => {
+            if let Err(e) = std::fs::write(&path, &current) {
+                crate::glog!("CP/M: could not write {}: {}", path.display(), e);
+            }
+        }
+    }
+}
+
+/// The marker for "this ROMs readme is ours to update".
+const ROMS_README_HEADER: &str = "CP/M MONITOR ROMS\n=================";
+
+/// The text of the ROMs-folder readme.
+///
+/// The table is rendered from [`super::rom::ROM_CHOICES`] rather than typed out,
+/// so a ROM added to the code cannot go missing from the file an operator reads
+/// — the same rule as the format table above.
+pub fn roms_readme() -> String {
+    let mut s = String::new();
+    s.push_str(
+        "\
+CP/M MONITOR ROMS
+=================
+
+Some disks are not self-contained.  They carry an operating system and a
+BIOS, and then print through a routine that was never on the disk, because
+on the machine they were built for it was already in memory -- a monitor in
+ROM, or loaded from tape before the disk went in.  Such a disk boots into
+silence, and neither the disk nor the gateway is at fault.
+
+This folder is where those monitors go.  Put the file here, then choose it
+with `cpm_boot_rom` from the gateway's CP/M settings (telnet), the CP/M
+settings page (web), or the CP/M window (desktop).  Every one of those
+screens will also offer to FETCH the file for you.
+
+The gateway ships no ROMs.  They are not ours to distribute; the file is
+fetched from its author's own repository, pinned to one commit and checked
+against a SHA-256 we recorded from a copy we tested.  A file already in
+this folder is never overwritten -- it may be yours, and a monitor is
+exactly the sort of thing a hobbyist patches.  To re-fetch one, delete it
+first.
+
+Intel HEX (.hex) and raw binary are both accepted.  A HEX file says where
+its own bytes belong; a raw binary is loaded at the start of the window
+below.  Either way the gateway refuses a file whose bytes fall outside that
+window, because a monitor assembled for a different address would be
+written over the guest's own memory -- which looks like a disk that boots
+and then behaves impossibly.
+
+WHAT IS ON OFFER
+----------------
+",
+    );
+    for c in super::rom::ROM_CHOICES {
+        let Some(f) = c.rom.as_ref() else { continue };
+        s.push_str(&format!(
+            "  {}\n    file    {}\n    window  {:04X}-{:04X}\n    setting cpm_boot_rom = {}\n\n",
+            c.description, f.file, f.span.0, f.span.1, c.key
+        ));
+    }
+    s.push_str(
+        "\
+A ROM is only loaded for a BOOTED disk (`cpm_boot_image`).  The CP/M
+emulator has no console to place -- it services BDOS calls instead -- so
+the setting is ignored there.
+
+WHY YOU MIGHT WANT ONE
+----------------------
+DISK11.DSK in the Altair collection is a CP/M built for a Processor
+Technology VDM-1 with the CUTER monitor at C000h.  It checks for it, and
+without it prints
+
+  This version of CP/M requires CUTER for VDM-1 to be present at C000h.
+
+and then stops.  With the ROM in place it comes up on the VDM-1 screen,
+which the gateway serves in a browser -- see the images folder readme for
+how to reach it.
+",
+    );
+    s
 }
 
 /// Put `readme.txt` in the images folder if it is not already there.
@@ -1664,6 +1766,48 @@ mod tests {
     /// than the one that runs. What is asserted here is the part prose still
     /// owns — that the section names the offer at all, and names the surfaces
     /// it is on.
+    #[test]
+    fn test_the_roms_readme_lists_every_rom_the_gateway_offers() {
+        let text = roms_readme();
+        assert!(text.starts_with(ROMS_README_HEADER), "the header is the marker for refreshing it");
+
+        // **Scoped to the section, not the file** — the images-readme test's own
+        // lesson. "cpm_boot_rom" and the folder name appear in the prose above,
+        // so a whole-file `contains` would pass with the table gutted.
+        let table = text
+            .split_once("WHAT IS ON OFFER")
+            .map(|(_, rest)| rest.split_once("A ROM is only loaded").map_or(rest, |(t, _)| t))
+            .expect("the offer must be a findable section");
+
+        // Rendered from the catalogue rather than typed, so a ROM added to the
+        // code cannot go missing from the file an operator reads.
+        let mut listed = 0;
+        for c in super::super::rom::ROM_CHOICES {
+            let Some(f) = c.rom.as_ref() else { continue };
+            listed += 1;
+            assert!(table.contains(f.file), "{} is not in the table: {table:?}", f.file);
+            assert!(table.contains(c.key), "{} is not named as a setting: {table:?}", c.key);
+            assert!(
+                table.contains(&format!("{:04X}-{:04X}", f.span.0, f.span.1)),
+                "{}'s window is not stated: {table:?}",
+                f.file
+            );
+        }
+        assert!(listed > 0, "a readme offering nothing would make the folder a mystery");
+
+        // The two rules an operator has to know before they put a file here, and
+        // the reason the folder exists at all.  Checked against the text with
+        // its whitespace flattened, because where a sentence happens to wrap is
+        // not one of its claims — the first version of this test failed on
+        // "boots into silence" purely because the line broke between the words.
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        for claim in ["never overwritten", "fetched from its author", "boots into silence"] {
+            assert!(flat.contains(claim), "the readme must say {claim:?}");
+        }
+        // Named by the setting, not by a path we might move.
+        assert!(text.contains("cpm_boot_rom"), "the readme must name the setting");
+    }
+
     #[test]
     fn test_readme_offers_the_download_the_gateway_has() {
         let text = images_readme();

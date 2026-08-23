@@ -294,6 +294,12 @@ pub struct BootMachine {
     /// Diagnostic: how many times each port was touched.
     #[cfg(test)]
     port_hits: std::collections::BTreeMap<u8, u64>,
+    /// A monitor ROM the operator supplied, placed on every boot.
+    ///
+    /// Kept as the parsed image rather than a path: the file is read once, by
+    /// the caller, so a boot cannot half-happen because a folder went away
+    /// between the banner and the bootstrap.
+    extra_rom: Option<super::console::RomImage>,
     /// Diagnostic: the writes to each port, with their values.
     ///
     /// A count says a program drove a board; the *value* says how it was
@@ -397,6 +403,7 @@ impl BootMachine {
             disk_accesses: 0,
             #[cfg(test)]
             port_hits: std::collections::BTreeMap::new(),
+            extra_rom: None,
             #[cfg(test)]
             port_writes: Vec::new(),
         }
@@ -605,14 +612,43 @@ impl BootMachine {
     /// the ordering costs nothing and the failure it prevents would present as a
     /// disk that signs on and then goes silent.
     fn place_rom(&mut self) {
-        let Some(image) = self.console.rom.image(self.console.data_port) else {
-            return;
-        };
-        for (at, bytes) in image.chunks {
-            let start = at as usize;
+        // The console's own synthesised entry first, then the operator's real
+        // ROM over the top of it — so where the two overlap, the real bytes
+        // win. That is the right way round and not an accident of ordering: an
+        // operator who has the genuine monitor does not want our six-byte stub
+        // sending characters to a serial port from inside it.
+        if let Some(image) = self.console.rom.image(self.console.data_port) {
+            self.place_rom_image(&image);
+        }
+        if let Some(image) = self.extra_rom.take() {
+            self.place_rom_image(&image);
+            self.extra_rom = Some(image);
+        }
+    }
+
+    /// Copy one ROM image into memory, clipped to it.
+    fn place_rom_image(&mut self, image: &super::console::RomImage) {
+        for (at, bytes) in &image.chunks {
+            let start = *at as usize;
             let end = (start + bytes.len()).min(self.mem.len());
             self.mem[start..end].copy_from_slice(&bytes[..end - start]);
         }
+    }
+
+    /// Give this machine a monitor ROM the operator supplied.
+    ///
+    /// Held rather than written, because [`Self::place_rom`] runs on *every*
+    /// boot and after the boot program loads — a ROM written here would be
+    /// overwritten by a bootstrap that reached this high, and would be missing
+    /// entirely from the second boot of a rewritten image. That is the same
+    /// ordering rule the synthesised stub already has, and the same failure it
+    /// prevents: a disk that works once and then goes silent.
+    ///
+    /// **Left writable.** These monitors are loaded into RAM on the real
+    /// machines too, and their callers patch them: DISK11 stores six bytes
+    /// inside CUTER's image before it prints a character. See [`super::rom`].
+    pub fn set_rom(&mut self, rom: Option<super::console::RomImage>) {
+        self.extra_rom = rom;
     }
 
 
@@ -4602,6 +4638,186 @@ mod tests {
         assert!(
             screen.contains(&want),
             "the guest never painted {want:?} into screen memory; it holds:\n{screen}"
+        );
+    }
+
+    /// **An operator's real ROM wins over the synthesised stub, on every boot.**
+    ///
+    /// Two claims in one test because they fail together: the stub is placed
+    /// first and the real bytes go over it, and `place_rom` runs on every boot
+    /// rather than once — a one-shot placement presents as a disk that works and
+    /// then goes silent on the second boot of a rewritten image, which is
+    /// precisely the failure the stub's own test was written for.
+    #[test]
+    fn test_an_operator_rom_is_placed_over_the_synthesised_stub() {
+        use crate::cpm::console::{RomImage, CUTER_CHAR_OUT};
+        let mut m = BootMachine::new();
+        m.set_machine("console_04_cuter");
+        // The first byte of the real CUTER is the signature `DISK11` tests for,
+        // and `C019` is where our six-byte stub goes: one image covering both is
+        // the whole question.
+        let real = RomImage {
+            chunks: vec![(0xC000, vec![0x7F]), (CUTER_CHAR_OUT, vec![0x11, 0x22, 0x33])],
+        };
+        m.set_rom(Some(real));
+        let mut cpu = BootMachine::new_cpu();
+        // A *bootable* fixture, and the boot asserted rather than ignored.
+        // `boot` places the ROM only after `load_boot_program` succeeds, so a
+        // zero-filled image of the right size — which is what this test used at
+        // first — is refused by `looks_bootable` and `place_rom` never runs:
+        // the test then reads zeros and fails for a reason that has nothing to
+        // do with ROMs.
+        m.insert(0, bootable_image(Geometry::EIGHT_INCH), true).expect("a floppy-sized image");
+        m.boot(&mut cpu, 0).expect("the fixture boots");
+        assert_eq!(m.peek(0xC000), 0x7F, "the signature byte the disks check is not there");
+        assert_eq!(
+            (0..3).map(|i| m.peek(CUTER_CHAR_OUT + i)).collect::<Vec<_>>(),
+            vec![0x11, 0x22, 0x33],
+            "the synthesised stub overwrote the operator's real ROM"
+        );
+
+        // And again: a second boot must lay it down afresh.
+        for a in [0xC000, CUTER_CHAR_OUT] {
+            m.poke(a, 0x00);
+        }
+        m.boot(&mut cpu, 0).expect("boots again");
+        assert_eq!(m.peek(0xC000), 0x7F, "the ROM was placed once and not on the second boot");
+        assert_eq!(m.peek(CUTER_CHAR_OUT), 0x11, "same, at the stub's address");
+    }
+
+    /// **A machine with no operator ROM is exactly the machine it was.**
+    ///
+    /// The regression that matters to everybody who does not use this: the stub
+    /// still gets placed, and nothing else in `C000` changes.
+    #[test]
+    fn test_no_operator_rom_leaves_the_stub_alone() {
+        use crate::cpm::console::CUTER_CHAR_OUT;
+        let mut m = BootMachine::new();
+        m.set_machine("console_04_cuter");
+        m.set_rom(None);
+        let mut cpu = BootMachine::new_cpu();
+        m.insert(0, bootable_image(Geometry::EIGHT_INCH), true).expect("a floppy-sized image");
+        m.boot(&mut cpu, 0).expect("the fixture boots");
+        // `PUSH AF / MOV A,B / OUT (05h),A / POP AF / RET` — the stub, unchanged.
+        assert_eq!(
+            (0..6).map(|i| m.peek(CUTER_CHAR_OUT + i)).collect::<Vec<_>>(),
+            vec![0xF5, 0x78, 0xD3, 0x05, 0xF1, 0xC9]
+        );
+        assert_eq!(m.peek(0xC000), 0x00, "nothing should have been written below the stub");
+    }
+
+    /// **A guest whose console lives in a monitor ROM paints its sign-on on the
+    /// VDM-1 screen.**
+    ///
+    /// The gate for the whole `cpm_boot_rom` path, and the strong kind: not "did
+    /// the ROM get placed" but "did a disk that refuses to run without it come
+    /// up, on the card, through the shipped publish path".  Every part has to
+    /// work — the Intel HEX parse, the window guard, the placement order, the
+    /// guest's own patching of the ROM image, and the VDM-1 renderer.
+    ///
+    /// `DISK11.DSK` is the case, and it is a disk that *says* what it needs:
+    /// without the monitor it prints "This version of CP/M requires CUTER for
+    /// VDM-1 to be present at C000h." and stops.  So the negative control is
+    /// free and is asserted too — with no ROM, that message and nothing on the
+    /// screen; with it, silence on the port and the sign-on on the card.
+    ///
+    /// Ignored: set `CPM_DISK11` to DISK11.DSK and `CPM_CUTER_HEX` to
+    /// `vdmcuter.hex`.
+    #[test]
+    #[ignore]
+    fn test_a_monitor_rom_guest_paints_its_signon_on_the_card() {
+        use crate::cpm::{rom, screen, vdm};
+        let (Ok(disk), Ok(hex)) =
+            (std::env::var("CPM_DISK11"), std::env::var("CPM_CUTER_HEX"))
+        else {
+            eprintln!("set CPM_DISK11 and CPM_CUTER_HEX to run this");
+            return;
+        };
+        let bytes = std::fs::read(&disk).unwrap();
+        let f = rom::file_for("cuter_vdm").expect("the catalogue names it");
+        let image = rom::image_from_bytes(f, &std::fs::read(&hex).unwrap())
+            .expect("the shipped parser must accept the shipped ROM");
+
+        // The negative control first, because it is the disk's own diagnosis and
+        // a test that only checks the good case cannot tell a working ROM from a
+        // disk that would have run anyway.
+        let mut bare = BootMachine::new();
+        bare.set_machine("altair_2sio");
+        bare.insert(0, bytes.clone(), true).expect("a bootable image");
+        let mut bare_cpu = BootMachine::new_cpu();
+        bare.boot(&mut bare_cpu, 0).expect("boots");
+        let refusal = printable(&run_until_quiet(&mut bare, &mut bare_cpu, 60_000_000));
+        println!("--- with no ROM ---\n{refusal}");
+        assert!(
+            refusal.contains("requires CUTER"),
+            "without the ROM this disk is supposed to say so: {refusal:?}"
+        );
+
+        // And now with it.
+        let mut m = BootMachine::new();
+        m.set_machine("altair_2sio");
+        m.set_rom(Some(image));
+        m.insert(0, bytes, true).expect("a bootable image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let printed = printable(&run_until_quiet(&mut m, &mut cpu, 200_000_000));
+        println!("--- console port ---\n{printed}");
+        assert!(
+            !printed.contains("requires CUTER"),
+            "the ROM was placed and the disk still refused it: {printed:?}"
+        );
+
+        // Through the shipped path, exactly as the VDM gate above does it — and
+        // the first `look` is not decoration: a viewer's *request* is what
+        // causes a snapshot, so publishing without one copies nothing and the
+        // frame never arrives.  An unwatched session sampling nothing is the
+        // whole design.
+        let live = screen::register("monitor rom gate");
+        let screen::Look::Waiting { .. } = screen::look(live.id()) else {
+            panic!("nothing has been published yet")
+        };
+        m.publish_screen(&live);
+        let screen::Look::Frame(snap) = screen::look(live.id()) else {
+            panic!("the seam published the frame the viewer asked for")
+        };
+        let render = |snap: &screen::Snapshot| -> String {
+            vdm::frame_text(&vdm::frame(&snap.vdm.window, snap.vdm.scroll))
+                .iter()
+                .map(|l| format!("{}\n", l.trim_end()))
+                .collect()
+        };
+        let painted = render(&snap);
+        println!("--- VDM-1 screen ---\n{painted}");
+        println!("scroll={:#04x}, driven={}", snap.vdm.scroll, snap.vdm.active);
+        let want = std::env::var("CPM_DISK11_EXPECT").unwrap_or_else(|_| "CP/M".into());
+        assert!(
+            painted.contains(&want),
+            "the guest never painted {want:?} on the card; it holds:\n{painted}"
+        );
+        assert!(painted.contains("A>"), "it signed on but never reached its prompt:\n{painted}");
+        // The guest has *addressed* the card, not merely been sampled: it wrote
+        // the scroll register, which is the only thing on a VDM-1 that can be
+        // written to and is the honest signal that a driver is running.
+        assert!(snap.vdm.active, "nothing has driven the VDM-1's scroll register");
+
+        // And a command, so this cannot pass on a sign-on alone: `DIR` is the
+        // CCP's own and has to read the directory off the disk to answer.  It
+        // also proves the *keyboard* half — a console that only prints is half a
+        // console, and this disk's keyboard is CUTER's too.
+        for &b in b"DIR\r" {
+            m.send_key(b);
+        }
+        let _ = run_until_quiet(&mut m, &mut cpu, 400_000_000);
+        let _ = screen::look(live.id());
+        m.publish_screen(&live);
+        let screen::Look::Frame(after) = screen::look(live.id()) else {
+            panic!("the seam published the second frame")
+        };
+        let listing = render(&after);
+        println!("--- after DIR ---\n{listing}");
+        assert!(
+            listing.contains("COM"),
+            "DIR listed no programs, so the keyboard half is not working:\n{listing}"
         );
     }
 

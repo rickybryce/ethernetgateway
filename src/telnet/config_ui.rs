@@ -1512,7 +1512,19 @@ impl TelnetSession {
             self.send_line("").await?;
             self.send_line(&format!("  {}  Choose what CP/M runs", self.cyan("R"))).await?;
             self.send_line(&format!("  {}  Cycle the machine", self.cyan("M"))).await?;
-            self.send_line(&format!("  {}  Cycle the backspace key", self.cyan("B"))).await?;
+            // Two keys on one row, and this screen's row budget is why: it is
+            // pinned at exactly 22 (`test_cpm_boot_screen_row_count`), so a new
+            // setting shares a row or takes somebody's.  The ROM's *state* is
+            // here rather than only on its own screen, because it changes what
+            // a boot does; whether its file is actually present is said there
+            // and on the boot banner, which is where it can be acted on.
+            self.send_line(&format!(
+                "  {}  Backspace key    {}  ROM: {}",
+                self.cyan("B"),
+                self.cyan("O"),
+                self.amber(crate::cpm::rom::short_label(&cfg.cpm_boot_rom))
+            ))
+            .await?;
             // Two keys on one row, the same 22-row squeeze as the browser row
             // below: the CPU and its clock belong together, and the current
             // value of both is on the `CPU:` line above.
@@ -1611,6 +1623,13 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "o" => {
+                    // A screen of its own rather than a cycling key, because
+                    // choosing is only half of it: the file has to be *there*,
+                    // and the operator needs to be told where and offered the
+                    // download.  A one-key cycle could say none of that.
+                    self.cpm_monitor_rom_settings().await?;
+                }
                 "z" => {
                     // The clock the guest is held to.  Cycled through the same
                     // list the web UI and the desktop offer, so the three
@@ -1689,9 +1708,147 @@ impl TelnetSession {
                     // which is the whole reason a wrong-key message exists.
                     self.send_line(&format!(
                         "  {}",
-                        self.red("Press R, M, B, C, Z, W, S, J, or Q.")
+                        self.red("Press R, M, B, O, C, Z, W, S, J, or Q.")
                     ))
                     .await?;
+                    self.flush().await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                }
+            }
+        }
+    }
+
+    /// The monitor ROM a booted disk's machine is given.
+    ///
+    /// Its own screen because the setting alone is not the whole answer: the
+    /// file has to be in the ROMs folder, it is not shipped, and the operator
+    /// needs to be told where it goes and offered the download.  That is three
+    /// things a cycling key on the boot screen cannot say.
+    pub(in crate::telnet) async fn cpm_monitor_rom_settings(
+        &mut self,
+    ) -> Result<(), std::io::Error> {
+        loop {
+            let cfg = config::get_config();
+            let base = self.cpmmount_base();
+            let key = cfg.cpm_boot_rom.clone();
+            let file = crate::cpm::rom::file_for(&key);
+            let absent = crate::cpm::rom::missing(&base, &key);
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("MONITOR ROM"))).await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            let w = if self.terminal_type == TerminalType::Petscii { 32 } else { 70 };
+            let label = crate::cpm::rom::choice_for(&key)
+                .map(|c| c.description)
+                .unwrap_or("Off - no monitor ROM");
+            self.send_line(&format!("  {}", self.amber(&truncate_to_width(label, w)))).await?;
+            self.send_line("").await?;
+            match file {
+                Some(f) => {
+                    // The folder, tail-first: a path row's answer is its end,
+                    // and the head is the same constant three levels down.
+                    self.send_line(&format!(
+                        "  File: {}",
+                        self.dim(&truncate_path_to_width(
+                            &crate::cpm::rom::roms_dir(&base).join(f.file).display().to_string(),
+                            w
+                        ))
+                    ))
+                    .await?;
+                    if absent {
+                        self.send_line(&format!("  {}", self.red("It is not there yet."))).await?;
+                    } else {
+                        self.send_line(&format!("  {}", self.green("It is there."))).await?;
+                    }
+                }
+                None => {
+                    self.send_line(&format!("  {}", self.dim("A booted disk gets the machine"))).await?;
+                    self.send_line(&format!("  {}", self.dim("as it always was."))).await?;
+                }
+            }
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.dim("Some disks print through a routine"))).await?;
+            self.send_line(&format!("  {}", self.dim("that was never on the disk. They"))).await?;
+            self.send_line(&format!("  {}", self.dim("boot into silence without it."))).await?;
+            self.send_line(&format!("  {}", self.dim("Ignored by the CP/M emulator."))).await?;
+            self.send_line("").await?;
+            self.send_line(&format!("  {}  Cycle the ROM", self.cyan("C"))).await?;
+            if file.is_some() {
+                self.send_line(&format!(
+                    "  {}  {}",
+                    self.cyan("F"),
+                    if absent { "Fetch the file" } else { "Fetch it (already here)" }
+                ))
+                .await?;
+            }
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm/rom"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+            match input.as_str() {
+                "q" => return Ok(()),
+                "c" => {
+                    // Cycled in the catalogue's own order, the same order the
+                    // web select and the desktop combo are built in.  A
+                    // hand-edited value lands on the first choice next, which is
+                    // `off` — the end that changes nothing.
+                    let choices = crate::cpm::rom::ROM_CHOICES;
+                    let idx = choices
+                        .iter()
+                        .position(|c| c.key == key)
+                        .map(|i| (i + 1) % choices.len())
+                        .unwrap_or(0);
+                    let next = choices[idx].key.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("cpm_boot_rom", &next);
+                    })
+                    .await
+                    .ok();
+                }
+                "f" if file.is_some() => {
+                    self.send_line("").await?;
+                    self.send_line(&format!("  {}", self.dim("Fetching."))).await?;
+                    self.flush().await?;
+                    // Off the async runtime, exactly as the disk download is:
+                    // blocking network and file I/O on the session's own task
+                    // would stall every other session's timers with it.
+                    let (dir, want) = (base.clone(), key.clone());
+                    let result =
+                        tokio::task::spawn_blocking(move || crate::cpm::rom::download(&dir, &want))
+                            .await
+                            .map_err(std::io::Error::other)?;
+                    let w = if self.terminal_type == TerminalType::Petscii { 34 } else { 70 };
+                    match result {
+                        Ok(note) => {
+                            self.send_line(&format!(
+                                "  {}",
+                                self.green(&truncate_to_width(&note, w))
+                            ))
+                            .await?
+                        }
+                        Err(why) => {
+                            self.send_line(&format!("  {}", self.red(&truncate_to_width(&why, w))))
+                                .await?
+                        }
+                    }
+                    self.send_line("").await?;
+                    self.send("  Press any key to continue.").await?;
+                    self.flush().await?;
+                    self.wait_for_key().await?;
+                }
+                _ => {
+                    self.send_line(&format!("  {}", self.red("Press C, F, or Q."))).await?;
                     self.flush().await?;
                     tokio::time::sleep(std::time::Duration::from_millis(900)).await;
                 }

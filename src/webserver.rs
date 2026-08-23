@@ -1010,6 +1010,25 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
         notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
     }
 
+    // Fetching the monitor ROM the CP/M settings name.  An action rather than a
+    // field for the same reason as the disks above: nothing is saved, a file
+    // arrives in the ROMs folder, and the banner says what happened.  It takes
+    // the ROM from the *submitted* form rather than the saved config, so
+    // choosing one and pressing Fetch in the same visit does what it looks like.
+    if fields.get("action").map(String::as_str) == Some("getrom") {
+        let base = crate::cpm::layout::cpm_dir(&old_cfg.transfer_dir);
+        let want = fields
+            .get("cpm_boot_rom")
+            .filter(|v| crate::cpm::rom::is_valid_rom_key(v))
+            .cloned()
+            .unwrap_or_else(|| old_cfg.cpm_boot_rom.clone());
+        let msg = match crate::cpm::rom::download(&base, &want) {
+            Ok(note) => format!("Monitor ROM: {note}."),
+            Err(e) => format!("Monitor ROM: {e}"),
+        };
+        notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
+    }
+
     // The port check, on the same synchronous footing as the download above and
     // for the same reason: there is no job queue, and returning immediately
     // would leave the operator refreshing to guess whether it ran.  Four
@@ -1234,7 +1253,7 @@ fn collect_form_updates(
         "punter_block_timeout", "punter_max_retries",
         "punter_max_bad_rounds", "punter_negotiation_retry_interval",
         "cpm_emu_max_minstr", "cpm_emu_uart", "cpm_boot_image", "cpm_boot_machine",
-        "cpm_boot_backspace", "cpm_cpu", "cpm_boot_speed",
+        "cpm_boot_rom", "cpm_boot_backspace", "cpm_cpu", "cpm_boot_speed",
         "cpm_printer", "cpm_printer_port", "cpm_printer_autolf",
         // The CP/M virtual modem's saved AT profile (what AT&W writes), the
         // same fields the serial ports expose for theirs.
@@ -3384,6 +3403,27 @@ fn render_more_popups(cfg: &Config) -> String {
         )
     })
     .collect();
+    // The monitor ROM, with the state of its *file* in the option text. A
+    // select that only names the setting would let an operator choose a ROM,
+    // save, and find out at boot time that the file was never fetched -- so the
+    // row that needs a download says so where the choice is made.
+    let cpm_rom_options: String = crate::cpm::rom::ROM_CHOICES
+        .iter()
+        .map(|c| {
+            let absent = c.rom.is_some()
+                && crate::cpm::rom::missing(
+                    &crate::cpm::layout::cpm_dir(&cfg.transfer_dir),
+                    c.key,
+                );
+            format!(
+                "<option value=\"{}\"{}>{}{}</option>",
+                c.key,
+                if c.key == cfg.cpm_boot_rom { " selected" } else { "" },
+                html_escape(c.description),
+                if absent { " \u{2014} file not here yet" } else { "" },
+            )
+        })
+        .collect();
     let cpm_backspace_options: String = crate::cpm::boot::BACKSPACE_CHOICES
         .iter()
         .map(|(value, label)| {
@@ -3588,6 +3628,14 @@ fn render_more_popups(cfg: &Config) -> String {
              Ignored by the emulator, which has no console to place. A disk that \
              loads and then goes quiet is usually looking for a console that is \
              not there.</span>\
+             <span class=\"label\">Booted disk's monitor ROM:</span>\
+             <select name=\"cpm_boot_rom\">{cpm_rom_options}</select> {romget}\
+             <span class=\"hint\">Some disks print through a routine that was \
+             never on the disk, because on the machine they were built for it was \
+             already in memory \u{2014} they boot into silence without it. \
+             DISK11.DSK is one: it checks for CUTER at 0xC000 and says so. The \
+             ROM files are not shipped; put one in CPM/roms/ or press \
+             <em>Fetch monitor ROM</em>. Ignored by the emulator.</span>\
              <span class=\"label\">Booted disk's backspace key:</span>\
              <select name=\"cpm_boot_backspace\">{cpm_backspace_options}</select>\
              <span class=\"hint\">Most of these operating systems erase on BS and \
@@ -3642,6 +3690,12 @@ fn render_more_popups(cfg: &Config) -> String {
              the CPU from DCR A expect. <b>EGT8080.COM</b> is placed on drive \
              A:: built to the 8080's instruction set, so it runs on either \
              setting.</span>",
+            // Offered beside the select rather than only where the disks are
+            // fetched, because a ROM is chosen here: an operator who picks one
+            // and saves would otherwise learn at boot time that the file was
+            // never downloaded.  The action reads the ROM out of the submitted
+            // form, so choosing and fetching in one visit works.
+            romget = save_button("getrom", "Fetch monitor ROM", "secondary"),
         ),
         cpmdisks = {
             // Before the mount button, and only while there is something to

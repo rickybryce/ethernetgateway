@@ -1168,6 +1168,21 @@ pub struct Config {
     /// difference is not something to guess at — see
     /// [`crate::cpm::console`].
     pub cpm_boot_machine: String,
+    /// A monitor ROM loaded into a booted machine before it starts: `off`, or a
+    /// key from [`crate::cpm::rom::ROM_CHOICES`].
+    ///
+    /// Only meaningful alongside `cpm_boot_image`, like the machine above and
+    /// for the same reason: the emulator has no console to place.  Defaults to
+    /// `off`, because a ROM occupies memory the guest may want — 2 KB at
+    /// `C000` for the one on offer — so it must be asked for.
+    ///
+    /// It exists because a disk can depend on software that was never on it.
+    /// `DISK11.DSK` says so out loud ("requires CUTER for VDM-1 to be present at
+    /// C000h") and then stops; the synthesised entry in
+    /// [`crate::cpm::console::MonitorRom`] cannot serve it, because that disk
+    /// calls three of the monitor's routines and patches six bytes inside its
+    /// image.  See [`crate::cpm::rom::ROM_CHOICES`] for the measurements.
+    pub cpm_boot_rom: String,
     /// What a booted disk is handed when the operator presses Backspace:
     /// `backspace` (BS, 0x08) or `rubout` (the key as the terminal sent it).
     ///
@@ -1360,6 +1375,7 @@ impl Default for Config {
             cpm_mounts: String::new(),
             cpm_boot_image: String::new(),
             cpm_boot_machine: crate::cpm::console::AUTO_MACHINE.to_string(),
+            cpm_boot_rom: crate::cpm::rom::ROM_OFF.to_string(),
             cpm_boot_backspace: crate::cpm::boot::DEFAULT_BACKSPACE.to_string(),
             cpm_printer: crate::cpm::printer::DEFAULT_PRINTER.to_string(),
             cpm_printer_port: crate::cpm::printer::DEFAULT_PRINTER_PORT.to_string(),
@@ -2326,6 +2342,13 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("cpm_boot_machine")
             .cloned()
             .unwrap_or_else(|| crate::cpm::console::AUTO_MACHINE.to_string()),
+        // Missing means `off`, which is also the default: a config written
+        // before this key existed asked for no ROM, and loading one into an
+        // upgrade's booted guest would move 2 KB of its memory under it.
+        cpm_boot_rom: map
+            .get("cpm_boot_rom")
+            .cloned()
+            .unwrap_or_else(|| crate::cpm::rom::ROM_OFF.to_string()),
         // Missing means the modern behaviour, which is a change for a config
         // written before this key existed -- deliberately, because that config
         // predates the fix and its owner is the person who reported the
@@ -3242,6 +3265,21 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 ");
     write_kv(&mut content, "cpm_boot_machine", &cfg.cpm_boot_machine);
     content.push_str("\
+# cpm_boot_rom: a monitor ROM loaded into a BOOTED disk's machine before it
+#   starts.  Ignored by the CP/M emulator, which has no console to place.
+#     off        DEFAULT - no monitor ROM
+#     cuter_vdm  Processor Technology CUTER for the VDM-1, at 0xC000
+#   Some disks print through a routine that was never on the disk, because on
+#   the machine they were built for it was already in memory.  DISK11.DSK is
+#   one: it checks for CUTER, and without it prints `This version of CP/M
+#   requires CUTER for VDM-1 to be present at C000h.` and stops.  With the ROM
+#   loaded it comes up on the VDM-1 screen, which the web UI serves at /vdm.
+#   The file itself is not shipped - put it in CPM/roms/, or let any of the
+#   three CP/M settings screens fetch it for you.  Off by default because a
+#   ROM occupies memory the guest may want (2 KB at 0xC000 for this one).
+");
+    write_kv(&mut content, "cpm_boot_rom", &cfg.cpm_boot_rom);
+    content.push_str("\
 # cpm_boot_backspace: what a BOOTED disk (above) is handed when you press
 #   Backspace.  Ignored by the CP/M emulator, which reads its own console line
 #   and already accepts either.  This is the ruling, not a default: the boot
@@ -3919,6 +3957,15 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             // that is another.
             if crate::cpm::console::is_valid_machine_key(value) {
                 cfg.cpm_boot_machine = value.to_string();
+            }
+        }
+        "cpm_boot_rom" => {
+            // Only a ROM we have a catalogue entry for, for the same reason as
+            // the machine above: `rom::load` treats anything it does not
+            // recognise as `off`, so an unchecked write would leave the file
+            // naming a ROM the gateway is not loading.
+            if crate::cpm::rom::is_valid_rom_key(value) {
+                cfg.cpm_boot_rom = value.to_string();
             }
         }
         "cpm_boot_backspace" => {
@@ -5292,6 +5339,9 @@ mod tests {
             place_bundled_terminals: false,
             cpm_mounts: "A=DISK01.DSK,C=CDISK02.DSK".to_string(),
             cpm_boot_image: "HDSK04.DSK".to_string(),
+            // Not the default (`off`), so the roundtrip proves this key is
+            // written and read back rather than defaulting twice at both ends.
+            cpm_boot_rom: "cuter_vdm".to_string(),
             // Deliberately not the default, so the roundtrip proves the key is
             // written and read back rather than merely defaulting twice.  It
             // was `true` while the default was `false`; both have to move
@@ -6846,6 +6896,52 @@ mod tests {
             apply_config_key(&mut cfg, "cpm_boot_machine", bad);
             assert_eq!(cfg.cpm_boot_machine, "console_04", "{bad:?} must be refused");
         }
+    }
+
+    /// `cpm_boot_rom` takes every ROM in the shared catalogue and nothing else,
+    /// and an upgrade with no such key asks for no ROM.
+    ///
+    /// Iterated over [`crate::cpm::rom::ROM_CHOICES`] rather than typed out, so a
+    /// ROM added to the code cannot be added without being settable here — and
+    /// the refusals matter as much: an unchecked value would leave the file
+    /// naming a ROM the gateway silently is not loading.
+    #[test]
+    fn test_apply_config_key_cpm_boot_rom() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.cpm_boot_rom, crate::cpm::rom::ROM_OFF, "a fresh install asks for no ROM");
+        for c in crate::cpm::rom::ROM_CHOICES {
+            apply_config_key(&mut cfg, "cpm_boot_rom", c.key);
+            assert_eq!(cfg.cpm_boot_rom, c.key, "{} must be settable", c.key);
+        }
+
+        cfg.cpm_boot_rom = "cuter_vdm".to_string();
+        for bad in ["", "cuter", "CUTER_VDM", "vdmcuter.hex", "on", "true", "../../etc/passwd"] {
+            apply_config_key(&mut cfg, "cpm_boot_rom", bad);
+            assert_eq!(cfg.cpm_boot_rom, "cuter_vdm", "{bad:?} must be refused");
+        }
+
+        // A config file written before this key existed must ask for nothing:
+        // loading a ROM into an upgrade's booted guest would move 2 KB of its
+        // memory under it.
+        let dir = std::env::temp_dir().join(format!("egw_rom_absent_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("norom.conf");
+        let path = file.to_str().unwrap();
+        write_config_file(path, &Config::default()).unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("cpm_boot_rom"), "the writer must emit the key");
+        let stripped: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("cpm_boot_rom"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(path, stripped).unwrap();
+        assert_eq!(
+            read_config_file(path).cpm_boot_rom,
+            crate::cpm::rom::ROM_OFF,
+            "a config written before this key existed must ask for no ROM"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
