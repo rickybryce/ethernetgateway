@@ -89,7 +89,22 @@ impl TelnetSession {
                     } else {
                         50
                     };
-                    self.show_error(&truncate_to_width(&e, max_w)).await?;
+                    // **Wrapped, not truncated, and it names the remedy.**  Groq's
+                    // model error is 80 characters and the useful part is at the
+                    // end -- `The model `x` does not exist or you do not have
+                    // access to it` -- so a C64 truncating at 30 showed the
+                    // operator the word "model" and nothing they could act on.
+                    // That is exactly the failure this feature hit in the field:
+                    // Groq retired the shipped default and the error said so, off
+                    // the right-hand edge of the screen.
+                    let mut lines = crate::aichat::wrap_line(&e, max_w);
+                    if e.to_lowercase().contains("model") {
+                        lines.push(String::new());
+                        lines.push("Change it: Configuration >".to_string());
+                        lines.push("Other Settings, key M.".to_string());
+                    }
+                    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+                    self.show_error_lines(&refs).await?;
                     return Ok(());
                 }
             }

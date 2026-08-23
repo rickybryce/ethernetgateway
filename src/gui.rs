@@ -2272,9 +2272,27 @@ impl App {
         // The same label column and control width as the CP/M rows below, so
         // one popup reads as one form rather than two lists that happen to
         // share a window.
+        // **Where the key comes from, on this surface too.** Every other
+        // surface says it -- the telnet no-key screen, the telnet help, the
+        // config file's own comment and the web hint -- and the desktop, the one
+        // an operator is most likely to meet first, said nothing at all.
         cpm_choice_row(ui, "Groq API Key (optional):", |ui| {
             singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, Some(CPM_CONTROL_W));
-        });
+        })
+        .response
+        .on_hover_text(
+            "A free key from console.groq.com/keys -- create an account, generate a key, paste it here.  It starts with `gsk_`.  Stored in plain text in egateway.conf, so protect that file.  Empty disables AI Chat; nothing else needs it.",
+        );
+        // The model beside the key, because they are the two halves of "why is
+        // AI Chat not answering": Groq RETIRES models, and the one this program
+        // shipped with before 0.9.5 now answers `model_not_found`.
+        cpm_choice_row(ui, "AI model:", |ui| {
+            singleline_with_menu(ui, &mut self.cfg.ai_model, false, Some(CPM_CONTROL_W));
+        })
+        .response
+        .on_hover_text(
+            "Which Groq model AI Chat asks; blank uses the shipped default.  Groq RETIRES models -- llama-3.3-70b-versatile was this program's default until 0.9.5 and now answers `model_not_found`, which stopped AI Chat dead -- so this is how you move on without waiting for a new build.  console.groq.com/docs/models lists what is served now; a name Groq does not know comes back as its own error on the chat screen rather than as silence.",
+        );
         ui.label(
             egui::RichText::new("AI Chat only — everything else works without one.")
                 .small()

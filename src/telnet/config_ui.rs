@@ -600,6 +600,8 @@ impl TelnetSession {
             &[
                 "  A  Groq API key for AI Chat (get one",
                 "     free at console.groq.com)",
+                "  M  Groq model AI Chat asks (blank =",
+                "     default; they retire old ones)",
                 "  B  Default homepage URL for the",
                 "     built-in web browser",
                 "  W  Weather location (city or postal code)",
