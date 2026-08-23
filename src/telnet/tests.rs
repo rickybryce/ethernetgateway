@@ -9042,6 +9042,44 @@ fn test_cpm_banner_lines_fit_petscii() {
     assert!(crate::telnet::cpm_emu::CPM_NOTE_8080.contains("EGT8080"));
 }
 
+/// **Forgetting one pinned key must not touch another's**, and the traps are
+/// textual: a host that is a *prefix* of another, a comment that begins with the
+/// host, and a file with no trailing newline.
+#[test]
+fn test_forgetting_a_pinned_key_takes_only_that_host() {
+    use crate::telnet::without_known_host;
+
+    // The prefix trap: `10.0.0.1:22` must not match `10.0.0.1:2222`.
+    let content = "10.0.0.1:22 ssh-ed25519 AAAA\n10.0.0.1:2222 ssh-ed25519 BBBB\n";
+    let (kept, n) = without_known_host(content, "10.0.0.1:22");
+    assert_eq!(n, 1, "exactly one entry should go");
+    assert_eq!(kept, "10.0.0.1:2222 ssh-ed25519 BBBB\n", "the longer port survived");
+
+    // A comment mentioning the host is prose, not an entry.
+    let content = "# 10.0.0.1:22 was reinstalled\n10.0.0.1:22 ssh-rsa CCCC\n";
+    let (kept, n) = without_known_host(content, "10.0.0.1:22");
+    assert_eq!(n, 1);
+    assert_eq!(kept, "# 10.0.0.1:22 was reinstalled\n", "the comment stays");
+
+    // Nothing for that host: unchanged, and reported as unchanged.
+    let content = "192.168.1.5:2222 ssh-ed25519 DDDD\n";
+    let (kept, n) = without_known_host(content, "10.0.0.1:22");
+    assert_eq!(n, 0);
+    assert_eq!(kept, content);
+
+    // No trailing newline in, none invented out.
+    let (kept, n) = without_known_host("a:1 K\nb:2 K", "a:1");
+    assert_eq!((kept.as_str(), n), ("b:2 K", 1));
+
+    // Removing the only entry leaves an empty file, not a blank line.
+    let (kept, n) = without_known_host("a:1 K\n", "a:1");
+    assert_eq!((kept.as_str(), n), ("", 1));
+
+    // Two entries for one host (a file edited by hand) both go.
+    let (kept, n) = without_known_host("a:1 K1\na:1 K2\nb:2 K\n", "a:1");
+    assert_eq!((kept.as_str(), n), ("b:2 K\n", 2));
+}
+
 /// The emulator's out-of-band drain probes the wire once per CPU batch — and a
 /// batch ends at every BDOS/BIOS trap, so this runs once per console character
 /// a guest writes.  It must therefore be a *poll*, not a timed wait.

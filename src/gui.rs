@@ -5046,6 +5046,57 @@ impl eframe::App for App {
                     ui.add_space(4.0);
                 }
 
+                // Problems needing the operator's decision, above the settings
+                // and only while there are any -- same placement and same
+                // reasoning as the bind banner: this is about something being
+                // wrong, and a panel that is always present is one nobody reads.
+                //
+                // **No Dismiss.** The bind banner has one because its warning is
+                // advisory; these carry an action, and dismissing an action
+                // leaves the problem in place with nothing on screen about it.
+                // They leave when they are resolved or when they stop applying.
+                for problem in crate::resolve::list() {
+                    let resolved = egui::Frame::group(ui.style())
+                        .fill(WARN_BG)
+                        .stroke(Stroke::new(1.5_f32, WARN_BORDER))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new(problem.title()).strong().color(RED_ALERT),
+                            );
+                            // The narrow lines are written for a 40-column
+                            // screen; joined they read as prose here.
+                            let mut para = String::new();
+                            for line in problem.explain() {
+                                if line.is_empty() {
+                                    para.push_str("\n\n");
+                                } else {
+                                    if !para.is_empty() && !para.ends_with('\n') {
+                                        para.push(' ');
+                                    }
+                                    para.push_str(&line);
+                                }
+                            }
+                            ui.label(egui::RichText::new(para).color(AMBER));
+                            ui.add(egui::Button::new(
+                                egui::RichText::new(problem.action()).color(AMBER_BRIGHT),
+                            ))
+                            .clicked()
+                        })
+                        .inner;
+                    if resolved {
+                        // On the UI thread deliberately: the remedy is one small
+                        // file rewrite, not a network call, and a background
+                        // thread would need its own result channel to say what
+                        // happened.
+                        match crate::resolve::resolve(&problem.id()) {
+                            Ok(note) => logger::log(format!("Resolved: {note}")),
+                            Err(why) => logger::log(format!("Could not resolve: {why}")),
+                        }
+                    }
+                    ui.add_space(4.0);
+                }
+
                 // ── Row 1: Server + Security ──────────────────
                 // Each frame is padded out to the taller of the row's two
                 // columns, measured last repaint (see `config_row_h`).

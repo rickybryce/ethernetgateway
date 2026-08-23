@@ -133,6 +133,22 @@ impl TelnetSession {
 
             // Per-port mode/status is shown under Serial Configuration (M),
             // so the top-level menu no longer duplicates it here.
+            // **Only while there is something to resolve.** A row that is
+            // always there teaches an operator to ignore it; a row that appears
+            // is a row that means something. Drawn first because it is the one
+            // item on this screen that is about something being *wrong*.
+            if crate::resolve::any() {
+                let n = crate::resolve::list().len();
+                self.send_line(&format!(
+                    "  {}  {}",
+                    self.cyan("X"),
+                    self.red(&format!(
+                        "Resolve Errors ({} waiting)",
+                        n
+                    ))
+                ))
+                .await?;
+            }
             self.send_line(&format!(
                 "  {}  Security",
                 self.cyan("E")
@@ -198,6 +214,12 @@ impl TelnetSession {
             };
 
             match input.as_str() {
+                // Gated on there being something to resolve, so the key does
+                // nothing when the row is not drawn -- an operator who
+                // remembers `X` from last time must not land on an empty screen.
+                "x" if crate::resolve::any() => {
+                    self.resolve_errors().await?;
+                }
                 "e" => {
                     self.security_settings().await?;
                 }
@@ -1883,6 +1905,118 @@ impl TelnetSession {
                     tokio::time::sleep(std::time::Duration::from_millis(900)).await;
                 }
             }
+        }
+    }
+
+    /// The problems an operator can fix, and the offer to fix them.
+    ///
+    /// Reached from the Configuration menu's `X`, which is drawn only while
+    /// [`crate::resolve::any`] is true. Each problem is shown with what it means
+    /// before the remedy is offered -- for a changed host key that includes
+    /// saying it is what a man-in-the-middle looks like, because the operator is
+    /// about to discard the evidence.
+    pub(in crate::telnet) async fn resolve_errors(&mut self) -> Result<(), std::io::Error> {
+        loop {
+            let problems = crate::resolve::list();
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("RESOLVE ERRORS"))).await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            if problems.is_empty() {
+                // Reachable: another surface may have fixed it, or the slave
+                // reconnected while this screen was open.
+                self.send_line(&format!("  {}", self.green("Nothing to resolve."))).await?;
+                self.send_line("").await?;
+                self.send("  Press any key to continue.").await?;
+                self.flush().await?;
+                self.wait_for_key().await?;
+                return Ok(());
+            }
+
+            for (i, p) in problems.iter().enumerate() {
+                self.send_line(&format!(
+                    "  {} {}",
+                    self.cyan(&format!("[{}]", i + 1)),
+                    self.red(&p.title())
+                ))
+                .await?;
+            }
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.dim("Pick a number to see what it means"))).await?;
+            self.send_line(&format!("  {}", self.dim("and how to fix it."))).await?;
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
+
+            let prompt = format!("{}> ", self.cyan("ethernet/config/resolve"));
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(false).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+            if input == "q" {
+                return Ok(());
+            }
+            let Some(pick) = input.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= problems.len())
+            else {
+                continue;
+            };
+            let problem = problems[pick - 1].clone();
+
+            // What it means, then the offer -- in that order, and the offer
+            // defaults to No.
+            self.clear_screen().await?;
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow(&problem.title()))).await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+            for line in problem.explain() {
+                if line.is_empty() {
+                    self.send_line("").await?;
+                } else {
+                    self.send_line(&format!("  {}", self.dim(&line))).await?;
+                }
+            }
+            self.send_line("").await?;
+            let w = if self.terminal_type == TerminalType::Petscii { 36 } else { 74 };
+            self.send_line(&format!(
+                "  {}",
+                self.amber(&truncate_to_width(&problem.action(), w))
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send(&format!("  Do it? {}: ", self.cyan("y/N"))).await?;
+            self.flush().await?;
+            let answer = self.get_line_input().await?.unwrap_or_default();
+            if !answer.trim().eq_ignore_ascii_case("y") {
+                continue;
+            }
+
+            let id = problem.id();
+            let outcome = tokio::task::spawn_blocking(move || crate::resolve::resolve(&id))
+                .await
+                .map_err(std::io::Error::other)?;
+            self.send_line("").await?;
+            match outcome {
+                Ok(note) => {
+                    for line in crate::aichat::wrap_line(&note, w) {
+                        self.send_line(&format!("  {}", self.green(&line))).await?;
+                    }
+                }
+                Err(why) => {
+                    for line in crate::aichat::wrap_line(&why, w) {
+                        self.send_line(&format!("  {}", self.red(&line))).await?;
+                    }
+                }
+            }
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            self.wait_for_key().await?;
         }
     }
 

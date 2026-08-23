@@ -63,6 +63,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a different address would be written over the guest's own memory, which
   presents as a disk that boots and then behaves impossibly.
 
+- **A changed master host key can now be fixed from any configuration surface,
+  with the operator's consent.**  A slave pins its master's SSH host key on first
+  contact and refuses a changed one &mdash; correctly, because a reinstalled
+  master and a man-in-the-middle look identical from there.  Until now the only
+  remedy was a log line telling somebody to hand-edit `gateway_hosts`, which is
+  no remedy at all on a headless slave reached over telnet from a C64.
+
+  `src/resolve.rs` holds a registry of *pending, resolvable* problems: something
+  that hits one reports it, the three configuration surfaces show it and offer
+  the fix, and taking the fix runs it and withdraws the entry.  The web UI and
+  the desktop editor grow a red panel above the settings; telnet grows an
+  **`X  Resolve Errors`** row on the Configuration menu that **appears only while
+  there is something to resolve**, because a row that is always there is a row
+  nobody reads.
+
+  **Nothing is fixed automatically, and the explanation says why.**  Every entry
+  needs a human to say yes, and the host-key one states plainly that clearing it
+  discards the evidence &mdash; "It is also what a man-in-the-middle looks like,
+  and nothing here can tell the two apart".  The entry is also *withdrawn* when
+  the problem stops applying (a relay that connects clears it), which is what
+  keeps the list worth reading.
+
+  Verified end to end against a real master: a deliberately wrong pinned key
+  raised the problem, the web panel and the telnet screen both showed it with the
+  warning, confirming the fix removed the stale entry, and the next connection
+  pinned the master's real key with no problem left listed and the telnet row
+  gone.
+
 - **Fixed: AI Chat and the weather service printed typographic Unicode raw,
   which garbled dashes and broke the wrapping.**  One defect, two symptoms, and
   the second looked like a separate bug: asking about a `PLC-5` came back with

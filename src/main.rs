@@ -51,6 +51,7 @@ mod logger;
 mod portcheck;
 mod punter;
 mod relay;
+mod resolve;
 mod router;
 mod serial;
 mod ssh;

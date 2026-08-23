@@ -669,6 +669,66 @@ pub(crate) fn check_known_host(
     )
 }
 
+/// Forget the pinned key for one host, so the next connection pins afresh.
+///
+/// **The remedy for a changed host key, and it is deliberately an action an
+/// operator takes rather than something the gateway does for itself.** A key
+/// that changed because a master was reinstalled and a key that changed because
+/// somebody is sitting in the middle are indistinguishable from here -- that is
+/// what pinning is *for* -- so the gateway reports the problem and offers the
+/// fix, and a human decides. See [`crate::resolve`].
+///
+/// Returns whether anything was removed, so a caller can tell "fixed" from
+/// "there was nothing pinned" without reading the file itself.
+pub(crate) fn forget_known_host(host: &str, port: u16) -> std::io::Result<bool> {
+    let lookup = format!("{}:{}", host, port);
+    let content = match std::fs::read_to_string(GATEWAY_HOSTS_FILE) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let (kept, removed) = without_known_host(&content, &lookup);
+    if removed == 0 {
+        return Ok(false);
+    }
+    crate::config::ensure_parent_dir(GATEWAY_HOSTS_FILE);
+    std::fs::write(GATEWAY_HOSTS_FILE, kept)?;
+    Ok(true)
+}
+
+/// Drop every entry for `lookup`, returning the new text and how many went.
+///
+/// Pure, because the interesting cases are textual: a comment that happens to
+/// begin with the host, a host that is a *prefix* of another (`10.0.0.1:22`
+/// must not match `10.0.0.1:2222`), and a file whose last line has no newline.
+/// The prefix case is why this matches on the whole first field rather than
+/// with `starts_with`.
+pub(in crate::telnet) fn without_known_host(content: &str, lookup: &str) -> (String, usize) {
+    let mut removed = 0;
+    let kept: Vec<&str> = content
+        .lines()
+        .filter(|line| {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                return true;
+            }
+            // The first whitespace-separated field is the host:port.
+            if t.split_whitespace().next() == Some(lookup) {
+                removed += 1;
+                return false;
+            }
+            true
+        })
+        .collect();
+    let mut out = kept.join("\n");
+    // A file that had a trailing newline keeps one; an empty result is empty
+    // rather than a lone newline.
+    if !out.is_empty() && content.ends_with('\n') {
+        out.push('\n');
+    }
+    (out, removed)
+}
+
 /// The decision half of [`check_known_host`], split out so the
 /// file-read outcome can be supplied directly.
 ///

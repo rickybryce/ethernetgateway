@@ -1028,6 +1028,18 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
         notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
     }
 
+    // Resolving a reported problem.  An action rather than a setting: it changes
+    // a file (`gateway_hosts`), not the config, and it must be an explicit press
+    // -- the gateway will not re-pin a changed host key on its own, because a
+    // reinstalled master and a man-in-the-middle look identical from here.
+    if let Some(id) = fields.get("resolve_id").filter(|v| !v.is_empty()) {
+        let msg = match crate::resolve::resolve(id) {
+            Ok(note) => note,
+            Err(e) => e,
+        };
+        notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
+    }
+
     // The port check, on the same synchronous footing as the download above and
     // for the same reason: there is no job queue, and returning immediately
     // would leave the operator refreshing to guess whether it ran.  Four
@@ -2146,6 +2158,48 @@ setInterval(vdmPoll, VDM_POLL_MS);
 /// shown above the form (used to confirm a save).
 /// `show_port_check` opens the result modal on load -- set only by the redirect
 /// a port check makes, so the modal belongs to the page that asked for it.
+/// The resolvable-problems panel, empty when there is nothing to resolve.
+///
+/// Each problem states what it means *before* its button, and for a changed host
+/// key that includes saying it is indistinguishable from a man-in-the-middle --
+/// the operator is about to discard the evidence, so the page says so rather
+/// than offering a friendly one-click fix. The button carries the problem's id
+/// in a hidden field, so two problems cannot be confused by position.
+fn render_resolve_panel() -> String {
+    let problems = crate::resolve::list();
+    if problems.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str("<div class=\"notice\" style=\"border-color:#c33\">");
+    out.push_str("<strong>Problems needing your decision</strong>");
+    for p in &problems {
+        out.push_str(&format!("<div style=\"margin-top:.6em\"><strong>{}</strong><br>", html_escape(&p.title())));
+        // The explanation is written as narrow lines for the C64 screens; joined
+        // with spaces it reads as prose here, and the blank lines become breaks.
+        let mut para = String::new();
+        for line in p.explain() {
+            if line.is_empty() {
+                para.push_str("<br><br>");
+            } else {
+                if !para.is_empty() && !para.ends_with("<br><br>") {
+                    para.push(' ');
+                }
+                para.push_str(&html_escape(&line));
+            }
+        }
+        out.push_str(&para);
+        out.push_str(&format!(
+            "<br><button type=\"submit\" name=\"resolve_id\" value=\"{}\" class=\"secondary\">{}</button>",
+            html_escape(&p.id()),
+            html_escape(&p.action()),
+        ));
+        out.push_str("</div>");
+    }
+    out.push_str("</div>");
+    out
+}
+
 fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool) -> String {
     let mut out = String::with_capacity(32 * 1024);
     out.push_str("<!doctype html><html lang=\"en\"><head>");
@@ -2168,6 +2222,12 @@ fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool)
     // submit buttons inside one form is the canonical HTML way to
     // model "same data, different intent."
     out.push_str("<form method=\"post\" action=\"/save\" id=\"cfg-form\">");
+    // Problems an operator can fix: first inside the form, and *inside* is the
+    // point -- its buttons are `submit`s carrying the problem's id, so a panel
+    // drawn before the form opens would render perfectly and do nothing.  Only
+    // while there are any, because a panel that is always there is a panel
+    // nobody reads.  See `crate::resolve`.
+    out.push_str(&render_resolve_panel());
     out.push_str(&render_grid(cfg));
     out.push_str(&render_more_popups(cfg));
     if show_port_check {

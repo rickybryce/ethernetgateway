@@ -834,6 +834,17 @@ async fn connect_master_relay_inner(
                 let _ = session
                     .disconnect(russh::Disconnect::ByApplication, "host key changed", "")
                     .await;
+                // **Offer the fix, do not take it.** A changed key is either a
+                // reinstalled master or a man in the middle and nothing here can
+                // tell which, so it goes on the resolvable-problems list where an
+                // operator can act on it from any of the three configuration
+                // surfaces. Before this, the only remedy was a log line telling
+                // somebody to hand-edit `gateway_hosts` -- which is no remedy at
+                // all on a headless slave reached from a C64.
+                crate::resolve::report(crate::resolve::Problem::MasterHostKeyChanged {
+                    host: host.to_string(),
+                    port,
+                });
                 // A changed key won't fix itself and may be a MITM — back
                 // off hard (Auth class) rather than hammer.
                 return Err(RelayConnectError::Auth(format!(
@@ -878,6 +889,16 @@ async fn connect_master_relay_inner(
         .exec(true, exec_command.as_bytes())
         .await
         .map_err(|e| RelayConnectError::Refused(format!("relay declined by master: {}", e)))?;
+
+    // The key verified and the channel opened, so any pinned-key problem for
+    // this master no longer applies. Withdrawing it here rather than leaving it
+    // for the operator to dismiss is what stops the list becoming a place stale
+    // warnings accumulate.
+    crate::resolve::clear(&crate::resolve::Problem::MasterHostKeyChanged {
+        host: host.to_string(),
+        port,
+    }
+    .id());
 
     let mut stream = channel.into_stream();
     // §9 handshake: read the master's relay hello before handing the
