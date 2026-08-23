@@ -1761,6 +1761,14 @@ impl TelnetSession {
                     .await?;
                     if absent {
                         self.send_line(&format!("  {}", self.red("It is not there yet."))).await?;
+                        // Where it would come from, before the operator agrees to
+                        // fetch it -- the same rule the sample-disk screen follows,
+                        // and for the same reason: it is not ours.
+                        self.send_line(&format!(
+                            "  From: {}",
+                            self.dim(&truncate_to_width(&f.source(), w))
+                        ))
+                        .await?;
                     } else {
                         self.send_line(&format!("  {}", self.green("It is there."))).await?;
                     }

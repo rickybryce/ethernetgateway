@@ -939,6 +939,14 @@ mod generate {
         /// this machine merely has no *board* for still counts as bootable
         /// here, which is what makes the answer safe to ship in a file.
         boots: bool,
+        /// Does the disk *test* for a monitor ROM it does not carry?
+        ///
+        /// From the product's own [`crate::cpm::detect::image_needs_monitor_rom`],
+        /// so the catalogue and the boot path cannot disagree -- the same rule as
+        /// `boots` above.  A reader choosing a disk needs this more than most of
+        /// the summary: without the ROM the disk prints one line and stops, and
+        /// nothing about "boots -- BASIC, games, 23 files" hints at it.
+        needs_rom: bool,
     }
 
 
@@ -981,6 +989,19 @@ mod generate {
             (false, true) => "mount only",
             (false, false) => "neither",
         };
+        // Named as the *setting*, because that is the action: the file arriving
+        // in the ROMs folder does nothing on its own, and an operator told only
+        // "needs a monitor ROM" would fetch it, see no change and be right to
+        // think the catalogue had misled them.
+        if e.needs_rom {
+            // Two lines, and both inside 80 columns -- the catalogue's own width
+            // guard caught the first version of this at 91.
+            return format!(
+                "{mark} -- {what}\n      \
+                 needs cpm_boot_rom = cuter_vdm: it tests for a monitor\n      \
+                 at C000 and stops without one"
+            );
+        }
         format!("{mark} -- {what}")
     }
 
@@ -1048,7 +1069,13 @@ mod generate {
             for image in images {
                 let disk = image.file_name().unwrap().to_string_lossy().to_string();
                 let boots = crate::cpm::boot::image_can_boot(&image);
-                entries.push(Entry { disk, tag, order, files: files_on(&image), boots });
+                // Read from the bytes, like everything else in an entry: the
+                // disk says what it needs and we write it down.
+                let needs_rom = std::fs::read(&image)
+                    .map(|b| crate::cpm::detect::image_needs_monitor_rom(&b))
+                    .unwrap_or(false);
+                entries
+                    .push(Entry { disk, tag, order, files: files_on(&image), boots, needs_rom });
             }
         }
         let found = entries.len();
@@ -1194,6 +1221,7 @@ mod generate {
                 order: 0,
                 files,
                 boots,
+                needs_rom: false,
             };
             let some = |names: &[&str]| Some(files(names));
 
@@ -1230,6 +1258,35 @@ mod generate {
 
         /// A system disk that does not boot is a real disk, not a contradiction
         /// -- `cpm22-2.dsk` carries `CPM64.SYS` beside the BIOS and BOOT
+        /// **A disk that needs a monitor ROM says so, and names the setting.**
+        ///
+        /// The note is the action, not the fact: the file arriving in the ROMs
+        /// folder does nothing on its own, so an entry reading only "needs a
+        /// monitor ROM" would send an operator to fetch it, see no change, and be
+        /// right to think the catalogue had misled them.  It also has to leave
+        /// the verdict first, because that is what the file is scanned down for.
+        #[test]
+        fn test_a_disk_needing_a_monitor_rom_names_the_setting() {
+            let base = super::Entry {
+                disk: "DISK11.DSK".into(),
+                tag: "hansel",
+                order: 0,
+                files: Some(files(&["BASIC5.COM", "CHESS.COM"])),
+                boots: true,
+                needs_rom: false,
+            };
+            let plain = super::summary(&base);
+            assert!(!plain.contains("cpm_boot_rom"), "an ordinary disk gains nothing: {plain}");
+
+            let needy = super::Entry { needs_rom: true, ..base };
+            let s = super::summary(&needy);
+            assert!(s.starts_with("boots -- "), "the verdict still leads: {s}");
+            assert!(s.contains("cpm_boot_rom = cuter_vdm"), "it must name the setting: {s}");
+            assert!(s.contains("C000"), "and where the disk looks: {s}");
+            // On its own line, so the verdict line stays scannable.
+            assert!(s.contains('\n'), "the note must not run into the summary: {s}");
+        }
+
         /// sources and is for *building* a system. So the summary may name the
         /// system, and must not call the disk a system disk.
         #[test]
@@ -1240,6 +1297,7 @@ mod generate {
                 order: 0,
                 files: Some(files(&["CPM64.SYS", "BIOS.Z80", "BOOT.Z80", "SYSGEN.SUB"])),
                 boots: false,
+                needs_rom: false,
             };
             let s = super::summary(&e);
             assert!(s.starts_with("mount only -- "), "{s}");

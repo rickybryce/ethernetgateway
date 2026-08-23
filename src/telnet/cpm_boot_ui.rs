@@ -101,6 +101,31 @@ fn vdm_notice(web_enabled: bool, ip: &str, port: u16) -> Vec<String> {
     lines
 }
 
+/// What to say when a disk asks for a monitor ROM and is not getting one.
+///
+/// A function rather than lines typed into the banner, for the reason the help
+/// screens are: a literal in the middle of an `async` draw cannot be measured
+/// against the 40 columns a C64 has, and this is drawn for the operator whose
+/// disk is about to stop -- the worst possible place for a wrapped line.
+///
+/// `loaded_but_bad` distinguishes the two ways of not getting one, because the
+/// remedies differ: a setting that is off needs choosing, a file that would not
+/// load needs replacing, and telling the second operator to go and pick a
+/// setting they have already picked is how a message loses their trust.
+fn monitor_rom_notice(loaded_but_bad: bool) -> Vec<String> {
+    let mut lines = vec![
+        "This disk tests for a monitor ROM".to_string(),
+        "and is not getting one. It will".to_string(),
+        "print one line and stop.".to_string(),
+    ];
+    lines.push(if loaded_but_bad {
+        "Fix or replace the ROM file above.".to_string()
+    } else {
+        "Set one: CP/M boot settings, O.".to_string()
+    });
+    lines
+}
+
 /// Claims an image for one session and releases it however the session ends.
 ///
 /// RAII rather than a matched pair of calls: a boot can leave through an error,
@@ -742,6 +767,12 @@ impl TelnetSession {
         // answered on the banner below — a disk that never boots needs no
         // advice about where to watch it.
         let drives_vdm = crate::cpm::detect::image_drives_vdm(&bytes);
+        // Asked here for the same reason and on the same terms: the disk's own
+        // declaration, read before the bytes are handed over, and used to warn
+        // rather than to gate.  A disk that tests for a monitor it does not find
+        // prints one line and stops for ever, and "it stopped" is indistinguishable
+        // from a disk we cannot read unless somebody says so first.
+        let needs_rom = crate::cpm::detect::image_needs_monitor_rom(&bytes);
         machine.set_machine(&machine_key);
         // Unit 0 is the disk being booted, and it has to be: the bootstrap can
         // load a system from any unit — that was measured — but the operating
@@ -913,7 +944,12 @@ impl TelnetSession {
         // Where this guest's screen went, for the disks that have one.  Said
         // before the guest starts painting, because after that the session is
         // the guest's and anything we print lands in the middle of its display.
-        if drives_vdm {
+        // `drives_vdm` **or** a disk that asks for a monitor: the scan looks for
+        // an `OUT C8h` on the disk, and the whole point of a monitor ROM is that
+        // the driver is not on the disk -- so DISK11, the one disk that most
+        // needs to be told where its screen went, is exactly the one the scan
+        // cannot see.  Reported by Ricky 2026-08-23.
+        if drives_vdm || needs_rom {
             let webcfg = config::get_config();
             for line in vdm_notice(
                 webcfg.web_enabled,
@@ -939,6 +975,14 @@ impl TelnetSession {
                     .await?;
             }
             None => {}
+        }
+        // The advance warning: this disk asks for a monitor and is not getting
+        // one.  Said whether the setting is off or its file could not be loaded,
+        // because in both cases what happens next is the disk stopping.
+        if needs_rom && !matches!(rom_note, Some(Ok(_))) {
+            for line in monitor_rom_notice(matches!(rom_note, Some(Err(_)))) {
+                self.send_line(&format!("  {}", self.amber(&line))).await?;
+            }
         }
         // Which console the guest has been given.  Said rather than left
         // implicit, because a disk that goes quiet at this point is almost
@@ -1485,6 +1529,30 @@ impl TelnetSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The monitor-ROM warning fits a C64 and says what to do about it.**
+    ///
+    /// Drawn for the operator whose disk is about to print one line and stop,
+    /// which is the worst place for a wrapped line — and the two branches must
+    /// not give the same advice, because "go and choose a setting" is wrong for
+    /// somebody who already chose one and has a file that will not load.
+    #[test]
+    fn test_the_monitor_rom_warning_fits_and_advises() {
+        for bad in [false, true] {
+            let lines = monitor_rom_notice(bad);
+            for line in &lines {
+                assert!(line.chars().count() <= 38, "{line:?} does not fit a PETSCII screen");
+            }
+            let all = lines.join(" ");
+            assert!(all.contains("monitor ROM"), "it must name what is missing: {all}");
+            assert!(all.contains("stop"), "and what happens next: {all}");
+        }
+        let off = monitor_rom_notice(false).join(" ");
+        let bad = monitor_rom_notice(true).join(" ");
+        assert_ne!(off, bad, "a bad file and no setting need different advice");
+        assert!(off.contains("boot settings"), "with none set, say where to set one: {off}");
+        assert!(bad.contains("file"), "with a bad file, say that: {bad}");
+    }
 
     /// A VDM-1 disk is told where its screen went, and told the truth when
     /// there is nowhere for it to go — the same say-why rule the rest of this

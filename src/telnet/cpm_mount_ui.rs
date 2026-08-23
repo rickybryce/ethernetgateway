@@ -53,9 +53,10 @@ impl TelnetSession {
     pub(in crate::telnet) async fn cpmmount_download(&mut self) -> Result<(), std::io::Error> {
         use crate::cpm::fetch;
         let base = self.cpmmount_base();
-        let images = base.join(crate::cpm::image::IMAGES_DIR);
-        let all = fetch::catalogue();
-        let wanted = fetch::missing(&images, &all);
+        // What a run would really do, disks *and* monitor ROMs.  Asked of the
+        // downloader rather than worked out here, so the offer and the run cannot
+        // disagree about whether there is anything to fetch.
+        let (wanted, wanted_roms) = fetch::outstanding(&base);
 
         self.clear_screen().await?;
         let sep = self.separator();
@@ -64,7 +65,7 @@ impl TelnetSession {
         self.send_line(&sep).await?;
         self.send_line("").await?;
 
-        if wanted.is_empty() {
+        if wanted.is_empty() && wanted_roms.is_empty() {
             self.send_line(&format!("  {}", self.green("All of them are already here."))).await?;
             self.send_line("").await?;
             self.send("  Press any key to continue.").await?;
@@ -74,12 +75,25 @@ impl TelnetSession {
         }
 
         let megabytes = wanted.iter().map(|d| d.bytes).sum::<u64>() as f64 / (1024.0 * 1024.0);
-        self.send_line(&format!(
-            "  {} disks, {:.0} MB, from",
-            self.amber(&wanted.len().to_string()),
-            megabytes
-        ))
-        .await?;
+        // Only the part that is really outstanding: "0 disks, 0 MB" on a screen
+        // that is about to fetch a ROM is a screen contradicting itself.
+        if !wanted.is_empty() {
+            self.send_line(&format!(
+                "  {} disks, {:.0} MB, from",
+                self.amber(&wanted.len().to_string()),
+                megabytes
+            ))
+            .await?;
+        } else {
+            self.send_line(&format!("  {}", self.green("The disks are all here."))).await?;
+        }
+        if !wanted_roms.is_empty() {
+            self.send_line(&format!(
+                "  {} monitor ROM(s), from",
+                self.amber(&wanted_roms.len().to_string())
+            ))
+            .await?;
+        }
         // One line per repository, not one line joined: the widest is
         // `github.com/jpmcneely/AltairDuino-Disks` at 38 characters, which with
         // the two-space indent is exactly the 40 a PETSCII C64 has.  Joined with

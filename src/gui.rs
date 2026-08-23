@@ -1740,10 +1740,11 @@ impl App {
         }
 
         let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
-        let images = base.join(crate::cpm::image::IMAGES_DIR);
-        let all = crate::cpm::fetch::catalogue();
-        let wanted = crate::cpm::fetch::missing(&images, &all);
-        if wanted.is_empty() {
+        // Disks *and* monitor ROMs: gating on the disks alone hid this button
+        // from everybody who already had the collection, which is everybody who
+        // downloaded it before the ROMs were part of the offer.
+        let (wanted, wanted_roms) = crate::cpm::fetch::outstanding(&base);
+        if wanted.is_empty() && wanted_roms.is_empty() {
             return;
         }
         let mb = wanted.iter().map(|d| d.bytes).sum::<u64>() as f64 / (1024.0 * 1024.0);
@@ -1752,12 +1753,13 @@ impl App {
                 egui::RichText::new("Download sample disks").color(AMBER_BRIGHT),
             ))
             .on_hover_text(format!(
-                "Fetch {} disks ({:.0} MB) from {} — only the ones this gateway is known to run. \
-                 They are not ours; this fetches them for you, and anything already in the images \
-                 folder is left alone.  Brings the CP/M monitor ROMs too, which one of the sample \
-                 disks needs to run at all; arriving does not switch one on.",
+                "Fetch {} disks ({:.0} MB) and {} monitor ROM(s) from {} — only the ones this \
+                 gateway is known to run. They are not ours; this fetches them for you, and \
+                 anything already there is left alone. One of the sample disks cannot run without \
+                 a monitor ROM; a ROM arriving does not switch one on.",
                 wanted.len(),
                 mb,
+                wanted_roms.len(),
                 crate::cpm::fetch::source_repos().join(" and "),
             ))
             .clicked()
@@ -1824,10 +1826,12 @@ impl App {
                 egui::RichText::new("Fetch monitor ROM").color(AMBER_BRIGHT),
             ))
             .on_hover_text(format!(
-                "Fetch {} ({} bytes) from its author's own repository, pinned to one commit and \
-                 checked against a SHA-256 recorded from a copy we tested.  It is not ours; this \
-                 fetches it for you, and a file already in CPM/roms/ is left alone.",
-                f.file, f.bytes,
+                "Fetch {} ({} bytes) from {}, pinned to one commit and checked against a \
+                 SHA-256 recorded from a copy we tested.  It is not ours; this fetches it for \
+                 you, and a file already in CPM/roms/ is left alone.",
+                f.file,
+                f.bytes,
+                f.source(),
             ))
             .clicked()
         {

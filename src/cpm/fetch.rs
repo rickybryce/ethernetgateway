@@ -187,6 +187,26 @@ pub fn missing(images: &Path, all: &[Disk]) -> Vec<Disk> {
     all.iter().filter(|d| !images.join(&d.name).exists()).cloned().collect()
 }
 
+/// What a download run would actually do: the disks and the monitor ROMs that
+/// are not here yet.
+///
+/// **One function because four screens ask it**, and the first version of the
+/// ROM feature is why it exists: each surface asked "are any *disks* missing?"
+/// and hid the offer when the answer was no — so an operator who already had the
+/// whole collection (which is everyone who downloaded before the ROMs were part
+/// of it) was told "all of them are already here" and never got the ROM by that
+/// route.  A rule written in three places held in none of them.
+pub fn outstanding(cpm_base: &Path) -> (Vec<Disk>, Vec<&'static super::rom::RomFile>) {
+    let images = super::image::images_dir(cpm_base);
+    let disks = missing(&images, &catalogue());
+    let roms = super::rom::ROM_CHOICES
+        .iter()
+        .filter(|c| c.rom.is_some() && super::rom::missing(cpm_base, c.key))
+        .filter_map(|c| c.rom.as_ref())
+        .collect();
+    (disks, roms)
+}
+
 /// How a download ended.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Report {
@@ -244,7 +264,11 @@ impl Report {
             .take(max)
             .map(|(reason, names)| match names.as_slice() {
                 [one] => format!("{one}: {reason}"),
-                many => format!("{} disks: {reason}", many.len()),
+                // "files", not "disks": a run fetches the monitor ROMs too, and
+                // with no network every one of them fails for the same reason
+                // and lands in the same group -- which used to report a ROM as
+                // a disk.
+                many => format!("{} files: {reason}", many.len()),
             })
             .collect()
     }
@@ -379,7 +403,7 @@ mod report_tests {
         };
         let lines = report.failure_lines(3);
         assert_eq!(lines.len(), 1, "one reason should be one line, got {lines:?}");
-        assert_eq!(lines[0], format!("34 disks: {why}"));
+        assert_eq!(lines[0], format!("34 files: {why}"));
     }
 
     /// A lone odd failure keeps its own name rather than being buried in the
@@ -395,7 +419,7 @@ mod report_tests {
             ..Default::default()
         };
         let lines = report.failure_lines(4);
-        assert_eq!(lines, vec!["ODD.DSK: checksum mismatch", "2 disks: HTTP 404"]);
+        assert_eq!(lines, vec!["ODD.DSK: checksum mismatch", "2 files: HTTP 404"]);
     }
 
     /// `max` bounds groups, and an empty report says nothing at all.
@@ -425,7 +449,7 @@ pub fn download_missing(
     std::fs::create_dir_all(images).map_err(|e| format!("{}: {e}", images.display()))?;
     let all = catalogue();
     let mut report = Report::default();
-    let wanted = missing(images, &all);
+    let (wanted, wanted_roms) = outstanding(cpm_base);
     for d in &all {
         if !wanted.iter().any(|w| w.name == d.name) {
             report.skipped.push(d.name.clone());
@@ -434,11 +458,6 @@ pub fn download_missing(
     // The ROMs are part of this run, so they are part of its count: a progress
     // line reading `34/34` twice tells the operator the run has finished and
     // then keeps going.
-    let wanted_roms: Vec<&'static super::rom::RomFile> = super::rom::ROM_CHOICES
-        .iter()
-        .filter(|c| c.rom.is_some() && super::rom::missing(cpm_base, c.key))
-        .filter_map(|c| c.rom.as_ref())
-        .collect();
     let total = wanted.len() + wanted_roms.len();
     for (i, disk) in wanted.iter().enumerate() {
         progress(&disk.name, i + 1, total);

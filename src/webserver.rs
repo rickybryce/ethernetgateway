@@ -3634,7 +3634,9 @@ fn render_more_popups(cfg: &Config) -> String {
              already in memory \u{2014} they boot into silence without it. \
              DISK11.DSK is one: it checks for CUTER at 0xC000 and says so. The \
              ROM files are not shipped; put one in CPM/roms/ or press \
-             <em>Fetch monitor ROM</em>. Ignored by the emulator.</span>\
+             <em>Fetch monitor ROM</em>, which takes it from {cpm_rom_source} \
+             pinned to one commit and checked against a recorded SHA-256. \
+             Ignored by the emulator.</span>\
              <span class=\"label\">Booted disk's backspace key:</span>\
              <select name=\"cpm_boot_backspace\">{cpm_backspace_options}</select>\
              <span class=\"hint\">Most of these operating systems erase on BS and \
@@ -3695,6 +3697,17 @@ fn render_more_popups(cfg: &Config) -> String {
             // never downloaded.  The action reads the ROM out of the submitted
             // form, so choosing and fetching in one visit works.
             romget = save_button("getrom", "Fetch monitor ROM", "secondary"),
+            // Named rather than "its author's repository": an operator deciding
+            // whether to trust a download needs the name, and it is derived from
+            // the pinned URL so the page cannot name the wrong one.
+            cpm_rom_source = crate::cpm::rom::ROM_CHOICES
+                .iter()
+                .filter_map(|c| c.rom.as_ref())
+                .map(|f| f.source())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(" and "),
         ),
         cpmdisks = {
             // Before the mount button, and only while there is something to
@@ -3702,19 +3715,22 @@ fn render_more_popups(cfg: &Config) -> String {
             // without ever opening the mount screen, so this is the one place
             // they are certain to pass through.
             let base = crate::cpm::layout::cpm_dir(&cfg.transfer_dir);
-            let images = crate::cpm::image::available_images(&base);
-            let here: std::collections::HashSet<&str> =
-                images.iter().map(|s| s.as_str()).collect();
-            let missing = crate::cpm::fetch::catalogue()
-                .into_iter()
-                .filter(|d| !here.contains(d.name.as_str()))
-                .count();
-            let get = if missing == 0 {
+            // Disks *and* monitor ROMs, from the downloader itself: gating on the
+            // disks alone hid this button from everybody who already had the
+            // collection, and the ROM would then never arrive by this route.
+            let (disks, roms) = crate::cpm::fetch::outstanding(&base);
+            let get = if disks.is_empty() && roms.is_empty() {
                 String::new()
             } else {
+                // Says what is really outstanding: "0 sample disks not here yet"
+                // beside a button that is about to fetch a ROM reads as a bug.
+                let what = match (disks.len(), roms.len()) {
+                    (0, r) => format!("{r} monitor ROM(s) not here yet"),
+                    (d, 0) => format!("{d} sample disks not here yet"),
+                    (d, r) => format!("{d} sample disks and {r} monitor ROM(s) not here yet"),
+                };
                 format!(
-                    "{} <span class=\"sub\">{missing} sample disks not here yet \u{2014} \
-                     brings the monitor ROMs too</span> ",
+                    "{} <span class=\"sub\">{what}</span> ",
                     save_button("getdisks", "Download sample disks", "secondary"),
                 )
             };

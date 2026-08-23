@@ -155,6 +155,29 @@ pub fn file_for(key: &str) -> Option<&'static RomFile> {
     choice_for(key).and_then(|c| c.rom.as_ref())
 }
 
+impl RomFile {
+    /// Where this comes from, in a few columns, for a screen to show before the
+    /// operator agrees to fetch it.
+    ///
+    /// Derived from the pinned URL rather than stored beside it: two fields that
+    /// must name the same repository are two fields that can disagree, and the
+    /// disk screens' own rule is that an operator is told **where it comes
+    /// from** before agreeing.  The commit is deliberately not shown -- it is
+    /// forty characters of no use to a reader deciding whether to trust the
+    /// source.
+    pub fn source(&self) -> String {
+        self.url
+            .strip_prefix("https://raw.githubusercontent.com/")
+            .and_then(|rest| {
+                let mut parts = rest.splitn(3, '/');
+                let owner = parts.next()?;
+                let repo = parts.next()?;
+                Some(format!("github.com/{owner}/{repo}"))
+            })
+            .unwrap_or_else(|| self.url.to_string())
+    }
+}
+
 /// The narrow label for a setting, for a status row.
 pub fn short_label(key: &str) -> &'static str {
     choice_for(key).map(|c| c.short).unwrap_or("off")
@@ -508,6 +531,21 @@ mod tests {
             path_for(&dir, "cuter_vdm").unwrap(),
             dir.join(ROMS_DIR).join("vdmcuter.hex")
         );
+    }
+
+    /// Every ROM names a source a reader can judge, derived from the URL so the
+    /// two cannot disagree.
+    #[test]
+    fn test_every_rom_names_where_it_comes_from() {
+        for f in ROM_CHOICES.iter().filter_map(|c| c.rom.as_ref()) {
+            let src = f.source();
+            assert_eq!(src, "github.com/dhansel/VDM1", "{}: {src}", f.file);
+            assert!(!src.contains(' '), "a line-continued URL kept its indentation: {src}");
+            assert!(src.len() <= 34, "{src} must fit a 40-column screen with an indent");
+            // The commit is not in it: forty characters of hash help nobody
+            // decide whether to trust a repository.
+            assert!(!src.contains("1adf9fd9"), "{src}");
+        }
     }
 
     /// The signature byte the disks check is the first byte of the file, so a

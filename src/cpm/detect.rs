@@ -187,6 +187,39 @@ pub fn image_drives_vdm(image: &[u8]) -> bool {
     outs.contains(&super::vdm::SCROLL_PORT)
 }
 
+/// Does this disk require a monitor ROM it does not carry?
+///
+/// The signal is the disk **testing for one**, which is a declaration rather
+/// than an inference: `LDA C000` — `3A 00 C0` — in the system tracks.  A disk
+/// that reads the first byte of the monitor window is checking whether the
+/// monitor is there, and the two that do it here both go on to print that they
+/// need CUTER and stop.  See [`super::rom::ROM_CHOICES`] for the disassembly.
+///
+/// **Measured across all 74 images reachable in the two Altair collections**:
+/// this fires on `DISK11.DSK` and on the Altair-Duino collection's
+/// `DISK16.DSK`, which is Hansel's `DISK11` byte for byte — one disk under two
+/// numbers, the same pattern already documented for `DISK17`/`DISK12`.  Zero
+/// other hits.
+///
+/// **A call into the window would not do.**  Scanning for `CALL C0xx`–`C7xx`
+/// instead fires on **45** of the 74 — every disk with a BIOS jump table up
+/// there — and it cannot tell the case that needs a *file* from the case the
+/// six-byte synthesised entry already serves: `TDISK05` calls `C019` and works
+/// today with no ROM at all.  The signature test separates them exactly,
+/// because only a disk that will refuse to run bothers to look.
+///
+/// Used to *describe* a disk, never to gate one: nothing is loaded or refused on
+/// the strength of it, for the same reason [`image_drives_vdm`] only warns —
+/// what a disk needs is the disk's business, and a scan of an image cannot find
+/// what is not in it.
+pub fn image_needs_monitor_rom(image: &[u8]) -> bool {
+    let end = image.len().min(SYSTEM_SCAN_BYTES);
+    image
+        .get(..end)
+        .map(|w| w.windows(3).any(|t| t == [0x3A, 0x00, 0xC0]))
+        .unwrap_or(false)
+}
+
 /// Which machine this image is for, if it says so plainly.
 pub fn detect_machine(image: &[u8]) -> Detected {
     // The controller from the boot sector alone, the console from the system
@@ -380,6 +413,36 @@ mod tests {
 
     /// The advance warning is bounded by the system tracks, and beyond them it
     /// says nothing rather than guessing.
+    #[test]
+    fn test_a_disk_that_tests_for_a_monitor_rom_is_recognised() {
+        // `LDA C000` in the system tracks, which is the disk asking whether the
+        // monitor is there.
+        let mut img = vec![0u8; SYSTEM_SCAN_BYTES];
+        img[500..503].copy_from_slice(&[0x3A, 0x00, 0xC0]);
+        assert!(image_needs_monitor_rom(&img));
+
+        // Not a read of some other address, and not a *write* there -- `STA
+        // C000` is a guest using the memory, not asking about it.
+        for other in [[0x3A, 0x01, 0xC0], [0x3A, 0x00, 0xC1], [0x32, 0x00, 0xC0]] {
+            let mut img = vec![0u8; SYSTEM_SCAN_BYTES];
+            img[500..503].copy_from_slice(&other);
+            assert!(!image_needs_monitor_rom(&img), "{other:02X?} is not the signature test");
+        }
+        assert!(!image_needs_monitor_rom(&[]), "an empty file asks for nothing");
+        assert!(!image_needs_monitor_rom(&[0x3A, 0x00]), "a truncated file cannot match");
+    }
+
+    /// The same bound as the VDM scan, and for the same reason: three bytes that
+    /// spell an instruction turn up in file data constantly, so the window is
+    /// the system tracks and nothing beyond them.
+    #[test]
+    fn test_the_monitor_rom_scan_stops_where_the_system_tracks_do() {
+        let mut img = vec![0u8; SYSTEM_SCAN_BYTES + 4096];
+        let at = SYSTEM_SCAN_BYTES + 100;
+        img[at..at + 3].copy_from_slice(&[0x3A, 0x00, 0xC0]);
+        assert!(!image_needs_monitor_rom(&img), "a byte triple in a data file is not a request");
+    }
+
     #[test]
     fn test_the_vdm_scan_stops_where_the_system_tracks_do() {
         let mut img = vec![0u8; SYSTEM_SCAN_BYTES + 64];

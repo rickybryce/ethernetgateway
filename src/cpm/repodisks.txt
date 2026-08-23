@@ -207,6 +207,8 @@ THE DISKS, A TO Z
 
   DISK11.DSK  (hansel)
       boots -- BASIC, games, 23 files
+      needs cpm_boot_rom = cuter_vdm: it tests for a monitor
+      at C000 and stops without one
 
   DISK12.DSK  (hansel)
       boots -- assorted CP/M files, 12 files
@@ -1412,6 +1414,8 @@ XLIFE.COM
 
 >> DISK11.DSK
    (hansel)  boots -- BASIC, games, 23 files
+      needs cpm_boot_rom = cuter_vdm: it tests for a monitor
+      at C000 and stops without one
 BASIC5.COM
 BIOS.ASM
 CHASE.COM

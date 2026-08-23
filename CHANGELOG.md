@@ -53,10 +53,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to do unasked for one reason worth stating — it does not turn anything *on*.
   `cpm_boot_rom` stays `off`, so the file being present changes nothing about how
   any machine behaves; it puts it in place so the setting *can* be chosen, exactly
-  as fetching a disk puts an image in place so it can be booted.  Intel HEX and raw binary are both accepted, and bytes
+  as fetching a disk puts an image in place so it can be booted.  Every screen
+  that offers the download now names **where the ROM comes from** before you
+  agree, derived from the pinned URL so it cannot name the wrong repository, and
+  a grouped download failure says "N files" rather than "N disks" -- with no
+  network every item fails for the same reason and lands in one group, which used
+  to report a monitor ROM as a disk.  Intel HEX and raw binary are both accepted, and bytes
   falling outside the entry's declared window are refused: a monitor assembled
   for a different address would be written over the guest's own memory, which
   presents as a disk that boots and then behaves impossibly.
+
+- **A disk that needs a monitor ROM now says so in three places before it
+  disappoints you.**  `repodisks.txt` carries the note on `DISK11.DSK` --
+  generated from the disk's own bytes, not a hard-coded filename, so it cannot
+  drift -- the boot banner warns when such a disk is starting without one, and
+  the note names the **setting** rather than the fact, because the file arriving
+  in `CPM/roms/` does nothing until `cpm_boot_rom` selects it.
+
+  The signal is the disk *testing* for the monitor: `LDA C000` in the system
+  tracks.  **Measured across 140 images in all four collections (106 distinct
+  byte-images): exactly one disk does it** -- `DISK11.DSK`, which also appears in
+  the Altair-Duino collection as `DISK16.DSK`, byte for byte, one disk under two
+  numbers.  A call into the monitor window would have been the obvious signal and
+  is useless: it fires on 45 of 140, every disk with a jump table up there, and it
+  cannot separate the disk that needs a *file* from `TDISK05`, which calls `C019`
+  and works today on the six-byte synthesised entry.  Only a disk that will refuse
+  to run bothers to look.
 
 - **A booted guest now runs at its processor's speed, and `cpm_boot_speed`
   decides.** Nothing paced the CPU before: the pump naps when a guest is *idle*,
