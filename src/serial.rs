@@ -722,6 +722,13 @@ struct ModemState {
     /// `AT+PETSCII=0` (or the X key in the serial port menu) before
     /// starting a file transfer; re-enable it after.
     petscii_translate: bool,
+    /// The byte the far end is handed for this port's erase key, or `None` to
+    /// forward whatever the terminal sent.
+    ///
+    /// Cached like `petscii_translate` rather than read per byte: this is the
+    /// online path, and a config lock per keystroke would be a lock on the hot
+    /// path. Reloaded by ATZ and reset by AT&F, exactly as that one is.
+    erase_target: Option<u8>,
     /// Drive DTR as a hardware carrier proxy (config `serial_X_drive_carrier`,
     /// default false).  When false, `apply_carrier` makes **zero**
     /// serialport modem-line calls, so a port without DCD wiring behaves
@@ -2524,6 +2531,25 @@ pub fn backspace_target(value: &str) -> Option<u8> {
     }
 }
 
+/// One byte, folded to the erase key this port sends onward.
+///
+/// The single-byte form, because the online modem path folds as it forwards a
+/// byte at a time and must not build a second buffer to do it. `None` is
+/// `passthrough`.
+///
+/// **Extracted so it can be tested for real.** The existing
+/// `test_process_bytes` helper reimplements the escape state machine inline
+/// ("we test the logic inline using the same algorithm"), which means a test
+/// written against it compares this file with a copy of itself. A pure function
+/// both the production path and a test can call is the only version that
+/// actually holds.
+pub fn fold_erase_byte(byte: u8, target: Option<u8>) -> u8 {
+    match (target, byte) {
+        (Some(to), 0x08 | 0x7F | 0x14) => to,
+        _ => byte,
+    }
+}
+
 /// Fold a session's erase key to the byte this port's device edits with.
 ///
 /// **Both spellings fold, not just one.** The operator's terminal decides which
@@ -2540,12 +2566,7 @@ pub fn fold_backspace(bytes: &[u8], setting: &str) -> Option<Vec<u8>> {
     if !bytes.iter().any(|b| matches!(b, 0x08 | 0x7F | 0x14)) {
         return None;
     }
-    Some(
-        bytes
-            .iter()
-            .map(|b| if matches!(b, 0x08 | 0x7F | 0x14) { target } else { *b })
-            .collect(),
-    )
+    Some(bytes.iter().map(|b| fold_erase_byte(*b, Some(target))).collect())
 }
 
 #[cfg(test)]
@@ -2614,6 +2635,46 @@ mod backspace_tests {
                 assert_eq!(a, b, "byte {i} changed");
             }
         }
+    }
+
+    /// **The single-byte fold is what the online modem path uses**, so it is
+    /// tested directly rather than through a helper that reimplements the loop
+    /// around it.
+    #[test]
+    fn test_the_single_byte_fold_is_the_same_rule_as_the_chunk_fold() {
+        for target in [None, Some(0x08u8), Some(0x7F)] {
+            for byte in 0u8..=255 {
+                let one = fold_erase_byte(byte, target);
+                // The chunk form must agree with it byte for byte -- they are
+                // one rule, and two implementations of one rule is how they
+                // drift.
+                let setting = match target {
+                    None => BACKSPACE_PASSTHROUGH,
+                    Some(0x08) => BACKSPACE_BS,
+                    Some(_) => BACKSPACE_DEL,
+                };
+                let chunk = fold_backspace(&[byte], setting)
+                    .map(|v| v[0])
+                    .unwrap_or(byte);
+                assert_eq!(one, chunk, "byte {byte:#04x} with {setting}");
+            }
+        }
+    }
+
+    /// Direction is the thing to get right: on the modem path the byte being
+    /// folded is one the *wire* typed and the *peer* receives, the opposite of a
+    /// console bridge.  The transform is the same either way, which is why one
+    /// setting can mean "the erase key this port sends onward".
+    #[test]
+    fn test_the_fold_is_direction_agnostic() {
+        // Whatever the terminal sent, the receiver gets the chosen byte.
+        for sent in [0x08u8, 0x7F, 0x14] {
+            assert_eq!(fold_erase_byte(sent, Some(0x08)), 0x08);
+            assert_eq!(fold_erase_byte(sent, Some(0x7F)), 0x7F);
+            assert_eq!(fold_erase_byte(sent, None), sent, "passthrough is untouched");
+        }
+        // And a CR is a CR in either direction.
+        assert_eq!(fold_erase_byte(0x0D, Some(0x08)), 0x0D);
     }
 
     /// The label is resolved through the behaviour, so a typo is displayed as
@@ -3155,6 +3216,7 @@ fn serial_thread(
         last_command: String::new(),
         stored_numbers: port_cfg.stored_numbers.clone(),
         petscii_translate: port_cfg.petscii_translate,
+        erase_target: backspace_target(&port_cfg.backspace),
         drive_carrier: port_cfg.drive_carrier,
         // Subscribe before the command loop so no broadcast issued once this
         // port is up is missed.  A fresh subscription per port-open means
@@ -4107,6 +4169,9 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.flow_mode = DEFAULT_FLOW_MODE;
                 state.dcd_mode = DEFAULT_DCD_MODE;
                 state.petscii_translate = DEFAULT_PETSCII_TRANSLATE;
+                // AT&F is factory settings, and the factory does not rewrite
+                // anybody's keystrokes.
+                state.erase_target = None;
                 pending_ok = true;
             }
             AtResult::ResetStored => {
@@ -4126,6 +4191,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.dcd_mode = port.dcd_mode;
                 state.stored_numbers = port.stored_numbers.clone();
                 state.petscii_translate = port.petscii_translate;
+                state.erase_target = backspace_target(&port.backspace);
                 clear_active_connection(state);
                 apply_carrier(state, false); // carrier follows the connection
                 pending_ok = true;
@@ -6107,7 +6173,15 @@ fn process_online_bytes(
             state.plus_count = 0;
         }
 
-        forward.push(byte);
+        // **The erase key, folded to what the far end expects -- and note the
+        // direction.** On a console bridge the operator is on the network side
+        // and the device is on the wire; here it is the other way round, so the
+        // byte being normalised is one the *wire* typed and the *peer* receives.
+        // One setting, one meaning either way: "the erase key this port sends
+        // onward is this byte."
+        //
+        // Cached on the state, so this costs a compare per byte and no lock.
+        forward.push(fold_erase_byte(byte, state.erase_target));
         state.last_data_time = now;
     }
 }

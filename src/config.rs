@@ -2740,18 +2740,23 @@ fn write_serial_port_section(
     write_kv(out, &format!("{}_petscii_translate", prefix), port.petscii_translate);
     write_kv(out, &format!("{}_drive_carrier", prefix), port.drive_carrier);
     out.push_str("\
-#   backspace: which byte the device is handed when you press Backspace or
-#     Delete on a CONSOLE-mode bridge.
+#   backspace: which byte the erase key becomes on its way out of this port.
 #       passthrough  DEFAULT - send whatever your terminal sent
 #       backspace    always send BS, 0x08 (most CP/M, RomWBW)
 #       rubout       always send DEL, 0x7F (Unix, CP/M 1.x)
-#     Your terminal decides which of the two it sends and cannot be asked
-#     to change it, while a lot of period hardware edits with 0x08 and a
-#     modern client sends 0x7F - neither end is wrong, which is why this
-#     is a setting.  Console mode ONLY: on a Kermit-server port those
-#     bytes are packet data and rewriting them would corrupt transfers.
-#     It rewrites what you TYPE, so set it back to passthrough before
-#     sending a binary up the same bridge.
+#     Whoever is typing decides which of the two their terminal sends and
+#     cannot be asked to change it, while a lot of period hardware edits
+#     with 0x08 and a modern client sends 0x7F - neither end is wrong,
+#     which is why this is a setting.  Note which way it runs in each
+#     mode: on a CONSOLE bridge you are on the network side and the byte
+#     goes out to the device on the wire; in MODEM mode the device on the
+#     wire is typing and the byte goes out to whatever it dialled.  One
+#     meaning either way - the erase key this port sends onward.
+#     NOT applied in Kermit-server mode: there those bytes are packet
+#     data and rewriting one would corrupt the transfer.
+#     It rewrites keystrokes, so set it back to passthrough before
+#     sending a BINARY through the same connection - the same caveat the
+#     PETSCII translator carries, for the same reason.
 ");
     write_kv_str(out, &format!("{}_backspace", prefix), &port.backspace);
     out.push('\n');

@@ -3990,9 +3990,9 @@ fn serial_more_popup(
             "title=\"Text only — disable before XMODEM/YMODEM/ZMODEM/Kermit/Punter transfers over the same TCP session, or the binary payload will be corrupted.\"",
         ),
         erase = {
-            // Console mode only, and the hint says why rather than greying it
-            // out silently: on a Kermit-server port 0x08 and 0x7F are packet
-            // data, and rewriting them would corrupt transfers.
+            // Every mode but Kermit-server, and the hint says which way it runs
+            // in each: on a Kermit wire 0x08 and 0x7F are packet data, and
+            // rewriting them would corrupt transfers.
             let opts: String = crate::serial::BACKSPACE_CHOICES
                 .iter()
                 .map(|(value, label)| {
@@ -4010,14 +4010,18 @@ fn serial_more_popup(
                 .collect();
             format!(
                 "<select name=\"{}_backspace\">{}</select>\
-                 <span class=\"hint\">Which byte the device is handed when you press \
-                 Backspace or Delete on a <em>console-mode</em> bridge. Your terminal picks \
-                 one and cannot be asked to change it, and a lot of period hardware edits \
-                 with 0x08 while a modern client sends 0x7F &mdash; neither end is wrong. \
-                 <strong>Console mode only</strong>: on a Kermit-server port those bytes are \
-                 packet data and rewriting them would corrupt transfers. It rewrites what you \
-                 type, so switch it back to <em>pass through</em> before sending a binary \
-                 up the same bridge.</span>",
+                 <span class=\"hint\">Which byte the erase key becomes on its way out of \
+                 this port. Whoever is typing picks one and cannot be asked to change it, and \
+                 a lot of period hardware edits with 0x08 while a modern client sends 0x7F \
+                 &mdash; neither end is wrong. <strong>Note which way it runs:</strong> on a \
+                 <em>console</em> bridge you are on the network side and the byte goes out to \
+                 the device on the wire; in <em>modem</em> mode the device on the wire is \
+                 typing and the byte goes out to whatever it dialled. One meaning either way. \
+                 <strong>Never in Kermit-server mode</strong>, where those bytes are packet \
+                 data and rewriting one would corrupt the transfer. It rewrites keystrokes, so \
+                 switch it back to <em>pass through</em> before sending a binary through the \
+                 same connection &mdash; the same caveat PETSCII carries. <code>ATZ</code> \
+                 reloads it, <code>AT&amp;F</code> clears it.</span>",
                 prefix, opts,
             )
         },

@@ -3373,7 +3373,7 @@ impl App {
         })
         .response
         .on_hover_text(
-            "Which byte the device is handed when you press Backspace or Delete on a CONSOLE-MODE bridge.  Your terminal decides which of 0x08 and 0x7F it sends and cannot be asked to change it, while a lot of period hardware edits with 0x08 and a modern client sends 0x7F -- neither end is wrong, which is why this exists.  Console mode only: on a Kermit-server port those bytes are packet data and rewriting them would corrupt every transfer containing one.  It rewrites what you TYPE, so set it back to pass-through before sending a binary up the same bridge.",
+            "Which byte the erase key becomes on its way out of this port.  Whoever is typing decides which of 0x08 and 0x7F their terminal sends and cannot be asked to change it, while a lot of period hardware edits with 0x08 and a modern client sends 0x7F -- neither end is wrong, which is why this exists.  Note which way it runs: on a CONSOLE bridge you are on the network side and the byte goes out to the device on the wire; in MODEM mode the device on the wire is typing and the byte goes out to whatever it dialled.  One meaning either way.  Never in Kermit-server mode: there those bytes are packet data and rewriting one would corrupt the transfer.  It rewrites keystrokes, so set it back to pass-through before sending a binary through the same connection -- the same caveat PETSCII carries.  ATZ reloads it, AT&F clears it.",
         );
         ui.horizontal(|ui| {
             ui.checkbox(

@@ -76,13 +76,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Commodore&rsquo;s 0x14 folds too &mdash; passing it through leaves a C64 with no
   editing key at all rather than the wrong one.
 
-  **Console mode only, and that is correctness rather than scope.**  The same
-  pump carries the always-on Kermit server&rsquo;s wire, where 0x08, 0x7F and
-  0x14 are ordinary bytes inside a packet; rewriting them there would corrupt
-  every transfer that happened to contain one.  It also rewrites what you
-  <em>type</em>, so sending a binary up the same bridge wants
+  **It applies to the modem path too, and the direction reverses.**  On a console
+  bridge the operator is on the network side and the byte travels out to the
+  device on the wire; in modem mode the device on the wire is typing and the byte
+  travels out to whatever it dialled.  One setting either way &mdash; <em>the
+  erase key this port sends onward is this byte</em> &mdash; folded at the one
+  seam each path has: `run_console_bridge`&rsquo;s session&rarr;wire drain, and
+  `process_online_bytes`, which both online loops share.  <code>ATZ</code>
+  reloads it and <code>AT&amp;F</code> clears it, like every other saved modem
+  setting.
+
+  **Never in Kermit-server mode, and that is correctness rather than scope.**
+  That wire carries 0x08, 0x7F and 0x14 as ordinary bytes inside a packet, and
+  rewriting one would corrupt any transfer containing it.  It rewrites keystrokes
+  generally, so sending a binary through the same connection wants
   <code>passthrough</code> &mdash; the same trade the PETSCII translator carries,
   and said in the same place.
+
+  Verified on the operator&rsquo;s own hardware, as a controlled experiment
+  rather than an observation: an Altair on a slave&rsquo;s console port, picked
+  from the master, sent the same keystrokes under both settings.  With
+  <code>backspace</code> the DEL arrived as a destructive erase
+  (<code>\x08 \x08</code> echoed, the character gone); with
+  <code>passthrough</code> the same DEL arrived as a Teletype rubout and the
+  Altair <em>reprinted</em> the deleted character &mdash; which is what "the
+  backspace key is broken" looked like.
 
 - **A changed master host key can now be fixed from any configuration surface,
   with the operator's consent.**  A slave pins its master's SSH host key on first
