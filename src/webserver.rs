@@ -1238,7 +1238,7 @@ fn collect_form_updates(
         "username", "password",
         "transfer_dir", "max_sessions", "idle_timeout_secs", "gui_zoom",
         "log_file", "log_max_size_kb", "log_max_files",
-        "groq_api_key", "browser_homepage", "weather_location", "weather_units",
+        "groq_api_key", "ai_model", "browser_homepage", "weather_location", "weather_units",
         "xmodem_negotiation_timeout", "xmodem_block_timeout",
         "xmodem_max_retries", "xmodem_negotiation_retry_interval",
         "zmodem_negotiation_timeout", "zmodem_frame_timeout",
@@ -3519,6 +3519,14 @@ fn render_more_popups(cfg: &Config) -> String {
          <button type=\"button\" class=\"close\" data-close=\"more-ai\">\u{00d7}</button></div>\
          <div class=\"row\"><span class=\"label\">Groq API Key (optional):</span>\
          <input type=\"password\" name=\"groq_api_key\" value=\"{key}\">\
+         <span class=\"label\">AI model:</span>\
+         <input type=\"text\" name=\"ai_model\" value=\"{aimodel}\">\
+         <span class=\"hint\">Which Groq model AI Chat asks; blank uses the \
+         shipped default. Groq <em>retires</em> models &mdash; the previous \
+         default stopped existing and took AI Chat with it &mdash; so this is \
+         how you move on without a new build. See \
+         console.groq.com/docs/models for what is served now; if a model is \
+         gone, the chat screen shows Groq&rsquo;s own error.</span>\
          <span class=\"hint\">AI Chat only. Everything else on this gateway \
          works without one; free at console.groq.com.</span></div>\
          <div class=\"row\"><span class=\"label\">Weather units:</span>\
@@ -3552,6 +3560,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         key = html_escape(&cfg.groq_api_key),
+        aimodel = html_escape(&cfg.ai_model),
         u_auto = if cfg.weather_units == "auto" { "selected" } else { "" },
         u_us = if cfg.weather_units == "us" { "selected" } else { "" },
         u_metric = if cfg.weather_units == "metric" { "selected" } else { "" },

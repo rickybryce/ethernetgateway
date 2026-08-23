@@ -937,6 +937,16 @@ pub struct Config {
     pub idle_timeout_secs: u64,
     /// Groq API key. If empty, AI chat is disabled.
     pub groq_api_key: String,
+    /// Which Groq model AI Chat asks.  Blank means
+    /// [`crate::aichat::GROQ_MODEL`].
+    ///
+    /// **It exists because a retired model kills the feature outright.** Groq
+    /// dropped `llama-3.3-70b-versatile` -- the hard-coded default until
+    /// 2026-08-23 -- and AI Chat answered `404 model_not_found` from then on,
+    /// with no way out but a new build. Not validated against a list: the list
+    /// lives at Groq and changes without us, so the only honest check is the
+    /// answer the API gives, which the chat screen shows verbatim.
+    pub ai_model: String,
     /// Browser homepage URL. If empty, browser opens to a blank prompt.
     pub browser_homepage: String,
     /// Last-used weather location — a city name or postal code, worldwide
@@ -1317,6 +1327,7 @@ impl Default for Config {
             max_sessions: DEFAULT_MAX_SESSIONS,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             groq_api_key: DEFAULT_GROQ_API_KEY.into(),
+            ai_model: crate::aichat::GROQ_MODEL.to_string(),
             browser_homepage: DEFAULT_BROWSER_HOMEPAGE.into(),
             weather_location: DEFAULT_WEATHER_LOCATION.into(),
             weather_units: DEFAULT_WEATHER_UNITS.into(),
@@ -2066,6 +2077,14 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("idle_timeout_secs")
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
+        // Missing or blank means the shipped default, which is what an upgrade
+        // wants: the config it was written from named no model, and the model it
+        // used has since been retired.
+        ai_model: map
+            .get("ai_model")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| crate::aichat::GROQ_MODEL.to_string()),
         groq_api_key: map
             .get("groq_api_key")
             .cloned()
@@ -2901,6 +2920,18 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # Leave empty to disable AI Chat.
 ");
     write_kv_str(&mut content, "groq_api_key", &cfg.groq_api_key);
+    content.push_str("\
+# Which Groq model AI Chat asks.  Blank uses the shipped default.
+#   Groq RETIRES models: llama-3.3-70b-versatile was the default until
+#   0.9.5 and now answers `model_not_found`, which stops AI Chat dead.
+#   This key is how you move on without waiting for a new build.  See
+#   https://console.groq.com/docs/models for what is currently served;
+#   the chat screen shows Groq's own error if a model is not available.
+#   Models that reason in the reply are handled: a `<think>` block is
+#   stripped, and an answer that arrives only as `reasoning` is shown
+#   rather than left blank.
+");
+    write_kv_str(&mut content, "ai_model", &cfg.ai_model);
     content.push('\n');
 
     content.push_str("\
@@ -3742,6 +3773,10 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             }
         }
         "groq_api_key" => cfg.groq_api_key = value.to_string(),
+        // Not checked against a list of models: the list is Groq's and changes
+        // without us, so a guard here could only be wrong later.  Blank is
+        // allowed and means the shipped default.
+        "ai_model" => cfg.ai_model = value.trim().to_string(),
         "browser_homepage" => cfg.browser_homepage = value.to_string(),
         // Accept the legacy key name too so a live update via the old name
         // still lands (mirrors the reader's fallback).
@@ -5382,6 +5417,8 @@ mod tests {
             max_sessions: 5,
             idle_timeout_secs: 60,
             groq_api_key: "gsk_test123".into(),
+            // Not the shipped default, so the roundtrip proves the key travels.
+            ai_model: "openai/gpt-oss-20b".into(),
             browser_homepage: "https://example.com".into(),
             weather_location: "90210".into(),
             weather_units: "metric".into(),

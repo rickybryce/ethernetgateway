@@ -260,6 +260,15 @@ impl TelnetSession {
             };
             self.send_line(&format!("  Groq API key: {}", key_display))
                 .await?;
+            // The model beside the key, because they are the two halves of "why
+            // is AI Chat not answering": Groq retires models, and the one this
+            // program shipped with before 0.9.5 now returns `model_not_found`.
+            let w = if self.terminal_type == TerminalType::Petscii { 24 } else { 60 };
+            self.send_line(&format!(
+                "  AI model:     {}",
+                self.amber(&truncate_to_width(&cfg.ai_model, w))
+            ))
+            .await?;
             self.send_line(&format!(
                 "  Homepage:     {}",
                 self.amber(&cfg.browser_homepage)
@@ -325,6 +334,11 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Set Groq API key (optional)",
                 self.cyan("A")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Set AI model (blank = default)",
+                self.cyan("M")
             ))
             .await?;
             self.send_line(&format!(
@@ -399,6 +413,12 @@ impl TelnetSession {
                         true,
                     )
                     .await?;
+                }
+                "m" => {
+                    // Free text, not a cycle: the list of models lives at Groq
+                    // and changes without us, so there is nothing to cycle
+                    // through that would not be out of date.
+                    self.other_set_field("AI model", "ai_model", &cfg.ai_model, false).await?;
                 }
                 "b" => {
                     self.other_set_field(

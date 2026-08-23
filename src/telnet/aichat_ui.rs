@@ -51,8 +51,11 @@ impl TelnetSession {
 
             let key = api_key.to_string();
             let q = question.clone();
+            // Read here rather than baked in: an operator who moves to a new
+            // model must not have to restart the session to use it.
+            let model = config::get_config().ai_model.clone();
             let result = tokio::task::spawn_blocking(move || {
-                crate::aichat::ask(&key, &q)
+                crate::aichat::ask_model(&key, &q, &model)
             })
             .await
             .map_err(|e| {

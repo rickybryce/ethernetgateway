@@ -63,6 +63,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a different address would be written over the guest's own memory, which
   presents as a disk that boots and then behaves impossibly.
 
+- **AI Chat works again: Groq retired the model it asked for.**
+  `llama-3.3-70b-versatile` began answering `404 model_not_found` -- "the model
+  does not exist or you do not have access to it" -- and AI Chat was simply dead,
+  with every unit test still passing because none of them speak to Groq.  The
+  default is now `openai/gpt-oss-120b`, and **`ai_model` makes it a setting**, on
+  all three configuration screens: a retired model must not need a new build.
+
+  Two things were measured against a live key rather than assumed.  The candidate
+  models differ in ways that matter to a terminal: `qwen/qwen3.6-27b` returns its
+  chain-of-thought inside the answer as a literal `<think>` block, and the
+  reasoning models can put the whole reply in a `reasoning` field and leave
+  `content` **empty** -- which this client handed back verbatim, i.e. a blank
+  screen indistinguishable from a hang.  So a leading `<think>` block is stripped
+  and `reasoning` is used when `content` is empty.  (The first measurement of all
+  this was wrong and had to be redone: it capped `max_tokens` at 80, a limit the
+  product never sends, which made three usable models look broken.)
+
+  A live gate now exists (`GROQ_KEY`), asserting a reply arrives, is not empty,
+  and carries no chain-of-thought markup.
+
 - **Fixed: the "More" popups in the desktop editor slid off the left edge and
   filled the window.**  A wrapping label lays out to the width available to it,
   and inside an auto-sizing window that *is* the window's width, which is decided
@@ -76,6 +96,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   popups rather than the reported one found two more creeping the same way
   (*General — More* and *Mount CP/M Drives*); the other three were already
   stable, their labels being short enough never to wrap.
+
+  **The bound belongs on the window, not on the content.**  Bounding the content
+  with `Ui::set_max_width` stops the ratchet and widens the layout rect
+  *leftward* by the frame's inner margin, which puts the content outside the
+  window's own clip rect -- so it was moved onto the `Window` itself.
+
+- **Fixed: a label too wide for its column cut the first character off everything
+  beside it, including the Save button ("ave").**  `cpm_choice_row` allocates a
+  fixed 196&nbsp;px box and lays the label out *right-to-left* inside it, so a
+  label that does not fit neither truncates nor wraps -- it grows the container
+  **leftward**, dragging every left-aligned widget below it outside the clip
+  rect.  `Booted disk's monitor ROM:`, added earlier in this release, was two
+  characters too long.  A guard now measures **every** column label with egui's
+  own font metrics under the program's real theme; the first version of that
+  guard used egui's default 14&nbsp;px body font where this program sets
+  16.8&nbsp;px, and passed with the offending label put back.
 
 - **Fixed: a booted disk that needs a monitor ROM was told to "fix or replace"
   a file that had never been downloaded.**  Three states -- none selected, one

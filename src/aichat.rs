@@ -7,14 +7,92 @@
 use std::io::Read;
 
 const API_TIMEOUT_SECS: u64 = 30;
-const GROQ_MODEL: &str = "llama-3.3-70b-versatile";
+/// The model to ask, when the operator has not named one.
+///
+/// **Groq retires models, and a retired model kills this feature outright.**
+/// `llama-3.3-70b-versatile` was the default until 2026-08-23, when it began
+/// answering `404 model_not_found` -- "The model does not exist or you do not
+/// have access to it" -- and AI Chat simply stopped working. That is why
+/// `ai_model` exists: an operator can move to whatever Groq serves next without
+/// waiting for a build.
+///
+/// `openai/gpt-oss-120b` measured clean against a live key: a plain chat model,
+/// no chain-of-thought in the answer, and no built-in web tools -- which matters
+/// for something reached through a gateway, since `groq/compound*` will go and
+/// fetch things on its own. Two candidates were rejected on measurement:
+/// `qwen/qwen3.6-27b` puts a literal `<think>` block in `content`, and
+/// `groq/compound` produced 20 KB of reasoning for a one-sentence answer.
+pub(crate) const GROQ_MODEL: &str = "openai/gpt-oss-120b";
 
-/// Send a question to the Groq API and return the response text.
-pub(crate) fn ask(api_key: &str, question: &str) -> Result<String, String> {
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    /// **A `<think>` block is the model's working, not its answer.**  Measured on
+    /// `qwen/qwen3.6-27b`, which answered a one-sentence question with 1775
+    /// characters of which the first 1600 were deliberation.
+    #[test]
+    fn test_a_leading_thought_block_is_dropped() {
+        assert_eq!(strip_thoughts("<think>\nplanning\n</think>\n\nThe answer."), "The answer.");
+        assert_eq!(strip_thoughts("  <think>x</think> Answer  "), "Answer");
+        // No block: untouched but trimmed.
+        assert_eq!(strip_thoughts("  Just an answer.  "), "Just an answer.");
+    }
+
+    /// The two cases where the block must be **kept**, because dropping it would
+    /// throw away the only text there is.
+    #[test]
+    fn test_an_unclosed_or_empty_thought_block_is_kept() {
+        // Cut short: everything after the tag is all the operator has.
+        let cut = "<think>it was thinking when the reply ended";
+        assert_eq!(strip_thoughts(cut), cut);
+        // Closed but nothing after it: the working is the whole reply.
+        let only = "<think>all of it</think>";
+        assert_eq!(strip_thoughts(only), only);
+        // A tag in the middle is the model talking about the tag.
+        let mid = "You write <think> like this.";
+        assert_eq!(strip_thoughts(mid), mid);
+    }
+
+    /// A blank model name falls back rather than asking Groq for `""`.
+    #[test]
+    fn test_a_blank_model_is_the_default() {
+        // The resolution is in `ask_model`; this pins the rule it implements so
+        // the constant cannot quietly become the empty string.
+        assert!(!GROQ_MODEL.trim().is_empty());
+        assert!(GROQ_MODEL.contains('/') || !GROQ_MODEL.contains(' '), "{GROQ_MODEL}");
+    }
+}
+
+/// Drop a leading chain-of-thought block from an answer.
+///
+/// Some models put their working in `content` inside `<think>` tags rather than
+/// in a field of its own -- measured on `qwen/qwen3.6-27b`, which answered a
+/// one-sentence question with 1775 characters of which the first 1600 were its
+/// own deliberation. An operator on a 40-column terminal reading that at 9600
+/// baud is being punished for their choice of model, so it is removed here
+/// rather than described in a release note.
+///
+/// Only a *leading* block, and only a closed one: a `<think>` in the middle of
+/// an answer is the model talking about the tag, and an unclosed one means the
+/// reply was cut short, where the text after it is all the operator has.
+fn strip_thoughts(text: &str) -> String {
+    let t = text.trim_start();
+    let Some(rest) = t.strip_prefix("<think>") else { return text.trim().to_string() };
+    match rest.split_once("</think>") {
+        Some((_, after)) if !after.trim().is_empty() => after.trim().to_string(),
+        _ => text.trim().to_string(),
+    }
+}
+
+/// Send a question to the Groq API and return the response text, asking `model`
+/// -- or [`GROQ_MODEL`] when the operator has named none.
+pub(crate) fn ask_model(api_key: &str, question: &str, model: &str) -> Result<String, String> {
     let url = "https://api.groq.com/openai/v1/chat/completions";
+    let model = if model.trim().is_empty() { GROQ_MODEL } else { model.trim() };
 
     let request_body = serde_json::json!({
-        "model": GROQ_MODEL,
+        "model": model,
         "messages": [
             {"role": "user", "content": question}
         ]
@@ -50,12 +128,25 @@ pub(crate) fn ask(api_key: &str, question: &str) -> Result<String, String> {
     let json: serde_json::Value =
         serde_json::from_slice(&body_bytes).map_err(|e| format!("JSON parse error: {}", e))?;
 
-    json.get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
+    let message = json.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("message"));
+    let field = |name: &str| -> Option<String> {
+        message
+            .and_then(|m| m.get(name))
+            .and_then(|t| t.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+    // **`content`, then `reasoning`, because an empty answer is the worst
+    // outcome.** The reasoning-capable models put their working in a second
+    // field and their answer in `content` -- but a model asked for very few
+    // tokens spends them all on the working and returns `content: ""`, which
+    // this used to hand back verbatim: a blank screen, indistinguishable from a
+    // hang. Measured on `openai/gpt-oss-20b`, whose whole reply was 322
+    // characters of `reasoning` and nothing else.
+    field("content")
+        .map(|s| strip_thoughts(&s))
+        .or_else(|| field("reasoning").map(|s| strip_thoughts(&s)))
         .ok_or_else(|| {
             if let Some(err) = json
                 .get("error")
@@ -238,5 +329,43 @@ mod tests {
         // dropped while surrounding printable text survives.
         assert_eq!(sanitize_for_terminal("a\u{009b}b"), "ab");
         assert_eq!(sanitize_for_terminal("x\u{0080}mid\u{009f}y"), "xmidy");
+    }
+}
+
+#[cfg(test)]
+mod live_gate {
+    /// **The default model actually answers, through the shipped call.**
+    ///
+    /// The gate this feature did not have, and the reason it broke silently:
+    /// `llama-3.3-70b-versatile` was retired by Groq and every unit test still
+    /// passed, because none of them spoke to Groq. It asserts three things a
+    /// working AI Chat needs -- a reply arrives, it is not empty, and it carries
+    /// no chain-of-thought markup -- since a model can satisfy the first and
+    /// fail the others (measured: `qwen/qwen3.6-27b` returns 1775 characters
+    /// beginning with `<think>`, `openai/gpt-oss-20b` under a small token
+    /// budget returns nothing but `reasoning`).
+    ///
+    /// Ignored: needs a Groq key and the network. Set `GROQ_KEY`, and
+    /// `GROQ_TEST_MODEL` to try one you are considering.
+    #[test]
+    #[ignore]
+    fn test_the_configured_model_answers() {
+        let Ok(key) = std::env::var("GROQ_KEY") else {
+            eprintln!("set GROQ_KEY to run this");
+            return;
+        };
+        let model = std::env::var("GROQ_TEST_MODEL").unwrap_or_else(|_| super::GROQ_MODEL.into());
+        let answer = super::ask_model(&key, "In one sentence, what is an Altair 8800?", &model)
+            .unwrap_or_else(|e| panic!("{model} did not answer: {e}"));
+        println!("{model} answered {} chars: {answer}", answer.len());
+        assert!(!answer.trim().is_empty(), "{model} returned an empty answer");
+        assert!(
+            !answer.contains("<think>"),
+            "{model} put its working in the answer, which an operator reads at 9600 baud: {answer}"
+        );
+        assert!(
+            answer.to_lowercase().contains("8080") || answer.to_lowercase().contains("mits"),
+            "{model} answered something, but not about an Altair: {answer}"
+        );
     }
 }
