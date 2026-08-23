@@ -417,9 +417,11 @@ mod report_tests {
 /// for a minute. Failures do not stop the run: one unavailable disk should not
 /// cost the operator the other twenty-nine.
 pub fn download_missing(
-    images: &Path,
+    cpm_base: &Path,
     mut progress: impl FnMut(&str, usize, usize),
 ) -> Result<Report, String> {
+    let images = super::image::images_dir(cpm_base);
+    let images = images.as_path();
     std::fs::create_dir_all(images).map_err(|e| format!("{}: {e}", images.display()))?;
     let all = catalogue();
     let mut report = Report::default();
@@ -429,7 +431,15 @@ pub fn download_missing(
             report.skipped.push(d.name.clone());
         }
     }
-    let total = wanted.len();
+    // The ROMs are part of this run, so they are part of its count: a progress
+    // line reading `34/34` twice tells the operator the run has finished and
+    // then keeps going.
+    let wanted_roms: Vec<&'static super::rom::RomFile> = super::rom::ROM_CHOICES
+        .iter()
+        .filter(|c| c.rom.is_some() && super::rom::missing(cpm_base, c.key))
+        .filter_map(|c| c.rom.as_ref())
+        .collect();
+    let total = wanted.len() + wanted_roms.len();
     for (i, disk) in wanted.iter().enumerate() {
         progress(&disk.name, i + 1, total);
         match fetch_one(disk) {
@@ -448,6 +458,35 @@ pub fn download_missing(
                 }
             }
             Err(e) => report.failed.push((disk.name.clone(), e)),
+        }
+    }
+
+    // **And the monitor ROMs, in the same trip.**  A sample disk that cannot run
+    // without a 6 KB file is not much of a sample, and fetching the disks while
+    // leaving out the one thing that makes one of them work is the sort of gap
+    // an operator has no way to know about -- `DISK11.DSK` arrives, boots, and
+    // prints that it wants CUTER.
+    //
+    // Safe to do unasked for one reason worth stating: it does **not** turn
+    // anything on.  `cpm_boot_rom` stays `off`, so the file being present
+    // changes nothing about how any machine behaves -- it puts it in place so
+    // the setting *can* be chosen, exactly as fetching a disk puts an image in
+    // place so it can be booted.  Anything already there is left alone, on the
+    // same terms as a disk.
+    //
+    // Here rather than in the three callers, because a rule written in three
+    // places holds in one -- see the `cpm_mounts` lesson.
+    for c in super::rom::ROM_CHOICES {
+        let Some(f) = c.rom.as_ref() else { continue };
+        if !wanted_roms.iter().any(|w| w.file == f.file) {
+            report.skipped.push(f.file.to_string());
+            continue;
+        }
+        let at = wanted.len() + wanted_roms.iter().position(|w| w.file == f.file).unwrap_or(0) + 1;
+        progress(f.file, at, total);
+        match super::rom::download(cpm_base, c.key) {
+            Ok(_) => report.fetched.push(f.file.to_string()),
+            Err(e) => report.failed.push((f.file.to_string(), e)),
         }
     }
     Ok(report)
@@ -843,13 +882,23 @@ mod tests {
     #[test]
     #[ignore]
     fn test_fetch_the_collection_for_real() {
-        let dir = std::env::temp_dir().join(format!("egfetchlive{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let base = std::env::temp_dir().join(format!("egfetchlive{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // The argument is the CP/M base, not the images folder: the run brings
+        // the monitor ROMs into `roms/` in the same trip, so it has to be given
+        // the folder both live under.
+        let dir = crate::cpm::image::images_dir(&base);
+        let roms: Vec<&'static super::super::rom::RomFile> =
+            super::super::rom::ROM_CHOICES.iter().filter_map(|c| c.rom.as_ref()).collect();
 
-        let first = download_missing(&dir, |name, i, n| eprintln!("  {i}/{n} {name}"))
+        let first = download_missing(&base, |name, i, n| eprintln!("  {i}/{n} {name}"))
             .expect("the download runs");
         assert!(first.failed.is_empty(), "{:?}", first.failed);
-        assert_eq!(first.fetched.len(), catalogue().len(), "all of them");
+        assert_eq!(
+            first.fetched.len(),
+            catalogue().len() + roms.len(),
+            "every disk and every monitor ROM"
+        );
         assert!(first.skipped.is_empty(), "the folder was empty");
 
         // Every file is the size the manifest promised, on disk.
@@ -857,16 +906,33 @@ mod tests {
             let got = std::fs::metadata(dir.join(&d.name)).expect(&d.name).len();
             assert_eq!(got, d.bytes, "{}", d.name);
         }
+        // And each ROM, in its own folder and parseable by the shipped parser --
+        // a file that arrives and cannot be placed is not a successful fetch.
+        for f in &roms {
+            let path = super::super::rom::roms_dir(&base).join(f.file);
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", f.file));
+            assert_eq!(bytes.len() as u64, f.bytes, "{}", f.file);
+            super::super::rom::image_from_bytes(f, &bytes)
+                .unwrap_or_else(|e| panic!("{} arrived but will not load: {e}", f.file));
+        }
 
         // Run again: nothing is re-fetched and nothing is rewritten.
-        let before = std::fs::metadata(dir.join(&catalogue()[0].name)).unwrap().modified().unwrap();
-        let second = download_missing(&dir, |_, _, _| {}).expect("the second run");
+        let first_disk = dir.join(&catalogue()[0].name);
+        let first_rom = super::super::rom::roms_dir(&base).join(roms[0].file);
+        let before = (
+            std::fs::metadata(&first_disk).unwrap().modified().unwrap(),
+            std::fs::metadata(&first_rom).unwrap().modified().unwrap(),
+        );
+        let second = download_missing(&base, |_, _, _| {}).expect("the second run");
         assert!(second.fetched.is_empty(), "nothing left to fetch");
-        assert_eq!(second.skipped.len(), catalogue().len());
-        let after = std::fs::metadata(dir.join(&catalogue()[0].name)).unwrap().modified().unwrap();
-        assert_eq!(before, after, "an existing disk was rewritten");
+        assert_eq!(second.skipped.len(), catalogue().len() + roms.len());
+        let after = (
+            std::fs::metadata(&first_disk).unwrap().modified().unwrap(),
+            std::fs::metadata(&first_rom).unwrap().modified().unwrap(),
+        );
+        assert_eq!(before, after, "an existing disk or ROM was rewritten");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// **Every disk we offer must actually boot, from the bytes the source
@@ -886,10 +952,11 @@ mod tests {
     #[ignore]
     fn test_every_offered_disk_boots_when_downloaded() {
         use crate::cpm::boot_machine::BootMachine;
-        let dir = std::env::temp_dir().join(format!("egboots{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let report = download_missing(&dir, |_, _, _| {}).expect("the download runs");
+        let base = std::env::temp_dir().join(format!("egboots{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let report = download_missing(&base, |_, _, _| {}).expect("the download runs");
         assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let dir = crate::cpm::image::images_dir(&base);
 
         let mut silent = Vec::new();
         for disk in catalogue() {
@@ -919,7 +986,7 @@ mod tests {
             vec!["TDISK04.DSK".to_string()],
             "a disk we recommend did not boot — the manifest is promising something untrue"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

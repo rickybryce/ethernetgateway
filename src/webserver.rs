@@ -992,8 +992,7 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // one of sixteen, not the server.
     if fields.get("action").map(String::as_str) == Some("getdisks") {
         let base = crate::cpm::layout::cpm_dir(&old_cfg.transfer_dir);
-        let images = base.join(crate::cpm::image::IMAGES_DIR);
-        let msg = match crate::cpm::fetch::download_missing(&images, |_, _, _| {}) {
+        let msg = match crate::cpm::fetch::download_missing(&base, |_, _, _| {}) {
             Ok(r) => {
                 let mut m = format!("Sample disks: {}.", r.summary());
                 // Named, not just counted: "3 failed" with no names leaves the
@@ -3714,7 +3713,8 @@ fn render_more_popups(cfg: &Config) -> String {
                 String::new()
             } else {
                 format!(
-                    "{} <span class=\"sub\">{missing} sample disks not here yet</span> ",
+                    "{} <span class=\"sub\">{missing} sample disks not here yet \u{2014} \
+                     brings the monitor ROMs too</span> ",
                     save_button("getdisks", "Download sample disks", "secondary"),
                 )
             };

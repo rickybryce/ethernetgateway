@@ -92,6 +92,11 @@ impl TelnetSession {
         self.send_line(&format!("  {}", self.dim("run here. They are not ours; this"))).await?;
         self.send_line(&format!("  {}", self.dim("fetches them for you. Anything"))).await?;
         self.send_line(&format!("  {}", self.dim("already there is left alone."))).await?;
+        // Said before the operator agrees, because it is a second thing arriving
+        // from a second author -- and because a disk that needs it is in the set.
+        self.send_line(&format!("  {}", self.dim("Brings the CP/M monitor ROMs too,"))).await?;
+        self.send_line(&format!("  {}", self.dim("which one sample disk needs. They"))).await?;
+        self.send_line(&format!("  {}", self.dim("are not switched on by arriving."))).await?;
         self.send_line("").await?;
         self.send(&format!("  Download them? {}: ", self.cyan("y/N"))).await?;
         self.flush().await?;
@@ -107,7 +112,7 @@ impl TelnetSession {
         // Off the async runtime: this is a minute of blocking network and file
         // I/O, and doing it on the session's own task would stall every other
         // session's timers with it.
-        let dir = images.clone();
+        let dir = base.clone();
         let report = tokio::task::spawn_blocking(move || {
             fetch::download_missing(&dir, |_name, _i, _n| {})
         })

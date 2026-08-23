@@ -112,7 +112,9 @@ silence, and neither the disk nor the gateway is at fault.
 This folder is where those monitors go.  Put the file here, then choose it
 with `cpm_boot_rom` from the gateway's CP/M settings (telnet), the CP/M
 settings page (web), or the CP/M window (desktop).  Every one of those
-screens will also offer to FETCH the file for you.
+screens will also offer to FETCH the file for you, and the sample-disk
+download brings it along -- a file arriving here does not switch anything
+on, it only lets you choose it.
 
 The gateway ships no ROMs.  They are not ours to distribute; the file is
 fetched from its author's own repository, pinned to one commit and checked
@@ -503,6 +505,11 @@ pinned to a commit and checked against a recorded SHA-256, so what arrives
 is what was tested.  Disks carrying no boot program of their own are left
 out.  Nothing already in this folder is overwritten - a disk you have
 edited, or put here yourself under the same name, is kept.
+
+It also brings the CP/M monitor ROMs, into the roms folder next door: one
+of these disks prints through a monitor that was never on it and will not
+run without one.  See that folder's readme.  A ROM arriving does not
+switch anything on - `cpm_boot_rom` is still off until you choose it.
 
 Those are the collections marked below.  z80pack is not part of the offer
 and is still worth fetching by hand:

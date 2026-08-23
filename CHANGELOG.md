@@ -47,7 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The ROM files are **not shipped** — they are not ours.  Each catalogue entry is
   pinned to an upstream commit and verified by SHA-256, fetched on the operator's
   behalf from every CP/M settings screen, and a file already in `CPM/roms/` is
-  never overwritten.  Intel HEX and raw binary are both accepted, and bytes
+  never overwritten.  **The sample-disk download brings them along** in the same
+  trip: a disk that arrives and cannot run without a 6 KB file is not much of a
+  sample, and the gap is one an operator has no way to know about.  That is safe
+  to do unasked for one reason worth stating — it does not turn anything *on*.
+  `cpm_boot_rom` stays `off`, so the file being present changes nothing about how
+  any machine behaves; it puts it in place so the setting *can* be chosen, exactly
+  as fetching a disk puts an image in place so it can be booted.  Intel HEX and raw binary are both accepted, and bytes
   falling outside the entry's declared window are refused: a monitor assembled
   for a different address would be written over the guest's own memory, which
   presents as a disk that boots and then behaves impossibly.

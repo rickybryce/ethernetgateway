@@ -1754,7 +1754,8 @@ impl App {
             .on_hover_text(format!(
                 "Fetch {} disks ({:.0} MB) from {} — only the ones this gateway is known to run. \
                  They are not ours; this fetches them for you, and anything already in the images \
-                 folder is left alone.",
+                 folder is left alone.  Brings the CP/M monitor ROMs too, which one of the sample \
+                 disks needs to run at all; arriving does not switch one on.",
                 wanted.len(),
                 mb,
                 crate::cpm::fetch::source_repos().join(" and "),
@@ -1776,14 +1777,13 @@ impl App {
         if self.cpm_fetch.is_some() {
             return;
         }
-        let images = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir)
-            .join(crate::cpm::image::IMAGES_DIR);
+        let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
         let (tx, rx) = std::sync::mpsc::channel();
         self.cpm_fetch = Some(rx);
         self.cpm_fetch_note = String::new();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let msg = match crate::cpm::fetch::download_missing(&images, |_, _, _| {}) {
+            let msg = match crate::cpm::fetch::download_missing(&base, |_, _, _| {}) {
                 Ok(r) => {
                     let mut m = r.summary();
                     // Grouped by reason: with no internet this is one fact
