@@ -3354,6 +3354,27 @@ impl App {
                     }
                 });
         });
+        // Which byte the device edits with, on a console bridge.  Beside PETSCII
+        // because both are "translate what crosses this wire", and both carry
+        // the same caveat about binary.
+        cpm_choice_row(ui, "Erase key:", |ui| {
+            let current = crate::serial::backspace_label(&self.cfg.port(id).backspace).to_string();
+            cpm_combo(ui, &format!("serial_backspace_{}", id.label()))
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (value, label) in crate::serial::BACKSPACE_CHOICES {
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).backspace,
+                            (*value).to_string(),
+                            *label,
+                        );
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "Which byte the device is handed when you press Backspace or Delete on a CONSOLE-MODE bridge.  Your terminal decides which of 0x08 and 0x7F it sends and cannot be asked to change it, while a lot of period hardware edits with 0x08 and a modern client sends 0x7F -- neither end is wrong, which is why this exists.  Console mode only: on a Kermit-server port those bytes are packet data and rewriting them would corrupt every transfer containing one.  It rewrites what you TYPE, so set it back to pass-through before sending a binary up the same bridge.",
+        );
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut self.cfg.port_mut(id).petscii_translate,

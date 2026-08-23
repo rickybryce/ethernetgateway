@@ -1314,6 +1314,7 @@ fn collect_form_updates(
         "serial_a_echo", "serial_a_verbose", "serial_a_quiet",
         "serial_b_echo", "serial_b_verbose", "serial_b_quiet",
         "serial_a_petscii_translate", "serial_b_petscii_translate",
+        "serial_a_backspace", "serial_b_backspace",
         "serial_a_drive_carrier", "serial_b_drive_carrier",
     ];
     for key in bool_keys {
@@ -3953,6 +3954,7 @@ fn serial_more_popup(
          </div>\
          <h3>Hayes AT Saved State</h3>\
          <div class=\"row\">{echo} {verb} {quiet} {petscii}</div>\
+         <div class=\"row\"><span class=\"label\">Erase key:</span>{erase}</div>\
          <div class=\"row\">{xc} {dtr} {flw} {dcd} {carrier}</div>\
          <h3>S-Registers</h3>\
          <div class=\"row\"><span class=\"label\">S-registers:</span>\
@@ -3987,6 +3989,38 @@ fn serial_more_popup(
             port.petscii_translate,
             "title=\"Text only — disable before XMODEM/YMODEM/ZMODEM/Kermit/Punter transfers over the same TCP session, or the binary payload will be corrupted.\"",
         ),
+        erase = {
+            // Console mode only, and the hint says why rather than greying it
+            // out silently: on a Kermit-server port 0x08 and 0x7F are packet
+            // data, and rewriting them would corrupt transfers.
+            let opts: String = crate::serial::BACKSPACE_CHOICES
+                .iter()
+                .map(|(value, label)| {
+                    format!(
+                        "<option value=\"{}\"{}>{}</option>",
+                        value,
+                        if *value == port.backspace.trim().to_ascii_lowercase() {
+                            " selected"
+                        } else {
+                            ""
+                        },
+                        html_escape(label),
+                    )
+                })
+                .collect();
+            format!(
+                "<select name=\"{}_backspace\">{}</select>\
+                 <span class=\"hint\">Which byte the device is handed when you press \
+                 Backspace or Delete on a <em>console-mode</em> bridge. Your terminal picks \
+                 one and cannot be asked to change it, and a lot of period hardware edits \
+                 with 0x08 while a modern client sends 0x7F &mdash; neither end is wrong. \
+                 <strong>Console mode only</strong>: on a Kermit-server port those bytes are \
+                 packet data and rewriting them would corrupt transfers. It rewrites what you \
+                 type, so switch it back to <em>pass through</em> before sending a binary \
+                 up the same bridge.</span>",
+                prefix, opts,
+            )
+        },
         xc = numfield(&format!("{}_x_code", prefix), "X-code", port.x_code),
         dtr = numfield(&format!("{}_dtr_mode", prefix), "&D", port.dtr_mode),
         flw = numfield(&format!("{}_flow_mode", prefix), "&K", port.flow_mode),

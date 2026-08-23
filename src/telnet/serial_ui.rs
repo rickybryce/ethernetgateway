@@ -509,6 +509,17 @@ impl TelnetSession {
             // tear down their connection before they could confirm.
             // Hiding T for the OTHER port would be over-conservative:
             // restarting Port B from a Port A serial session is safe.
+            if console_mode {
+                let w = if self.terminal_type == TerminalType::Petscii { 24 } else { 58 };
+                self.send_line(&format!(
+                    "  Erase key:  {}",
+                    self.amber(&truncate_to_width(
+                        crate::serial::backspace_label(&port.backspace),
+                        w
+                    ))
+                ))
+                .await?;
+            }
             let toggling_own_port = self.is_serial && self.serial_port_id == Some(id);
             if !toggling_own_port {
                 self.send_line(&format!(
@@ -535,11 +546,26 @@ impl TelnetSession {
             // X (PETSCII xlate) shares this row in modem mode to keep the
             // menu within the 22-row PETSCII budget.
             if raw_mode {
-                self.send_line(&format!(
-                    "  {}  Set flow control",
-                    self.cyan("F")
-                ))
-                .await?;
+                // The erase key shares this row rather than taking one: this
+                // screen is at the 22-row PETSCII budget.  Offered only in
+                // console mode, because that is the only mode it applies to --
+                // the Kermit server's wire carries 0x08 and 0x7F as packet data,
+                // where rewriting them would corrupt a transfer, and a setting
+                // that does nothing is worse than no setting.
+                if console_mode {
+                    self.send_line(&format!(
+                        "  {}  Set flow control   {}  Erase key",
+                        self.cyan("F"),
+                        self.cyan("K")
+                    ))
+                    .await?;
+                } else {
+                    self.send_line(&format!(
+                        "  {}  Set flow control",
+                        self.cyan("F")
+                    ))
+                    .await?;
+                }
             } else {
                 self.send_line(&format!(
                     "  {}  Set flow control   {}  PETSCII",
@@ -608,6 +634,29 @@ impl TelnetSession {
                     })
                     .await
                     .ok();
+                }
+                "k" if console_mode => {
+                    // Cycled in the shared list's own order, like every other
+                    // choice here.  A hand-edited value lands on the first
+                    // choice next, which is `passthrough` -- the end that
+                    // changes nothing.
+                    let choices = crate::serial::BACKSPACE_CHOICES;
+                    let idx = choices
+                        .iter()
+                        .position(|(v, _)| *v == port.backspace.trim().to_ascii_lowercase())
+                        .map(|i| (i + 1) % choices.len())
+                        .unwrap_or(0);
+                    let next = choices[idx].0.to_string();
+                    let key = config::serial_key(id, "backspace");
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value(&key, &next);
+                    })
+                    .await
+                    .ok();
+                    // Takes effect on the next bridge: the pump reads the
+                    // setting once per session, so a user mid-command does not
+                    // have the wire changed under them.
+                    crate::serial::restart_serial(id);
                 }
                 "t" if !(self.is_serial && self.serial_port_id == Some(id)) => {
                     self.toggle_serial_mode(id).await?;

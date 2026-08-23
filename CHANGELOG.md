@@ -63,6 +63,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a different address would be written over the guest's own memory, which
   presents as a disk that boots and then behaves impossibly.
 
+- **Each serial port can now decide which byte its device edits with**, the way a
+  booted CP/M disk already could.  `serial_a_backspace` / `serial_b_backspace`
+  take `passthrough` (the default, and what the gateway has always done),
+  `backspace` (always send 0x08) or `rubout` (always send 0x7F), on the per-port
+  <em>More</em> screen of all three surfaces &mdash; deliberately the same two
+  words as `cpm_boot_backspace`, so an operator meets one vocabulary rather than
+  two.  It exists because the terminal decides which of the two it sends and
+  cannot be asked to change it, while a lot of period hardware edits with 0x08
+  and a modern client sends 0x7F: neither end is wrong, and the result looks like
+  a broken keyboard rather than a mismatch.  Both spellings fold, and a
+  Commodore&rsquo;s 0x14 folds too &mdash; passing it through leaves a C64 with no
+  editing key at all rather than the wrong one.
+
+  **Console mode only, and that is correctness rather than scope.**  The same
+  pump carries the always-on Kermit server&rsquo;s wire, where 0x08, 0x7F and
+  0x14 are ordinary bytes inside a packet; rewriting them there would corrupt
+  every transfer that happened to contain one.  It also rewrites what you
+  <em>type</em>, so sending a binary up the same bridge wants
+  <code>passthrough</code> &mdash; the same trade the PETSCII translator carries,
+  and said in the same place.
+
 - **A changed master host key can now be fixed from any configuration surface,
   with the operator's consent.**  A slave pins its master's SSH host key on first
   contact and refuses a changed one &mdash; correctly, because a reinstalled

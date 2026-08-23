@@ -795,6 +795,17 @@ pub struct SerialPortConfig {
     /// immediately, and it is also editable from the telnet, web, and
     /// GUI config surfaces.
     pub petscii_translate: bool,
+    /// Which byte this port's device is handed when the operator presses the
+    /// erase key: `passthrough`, `backspace` (BS, 0x08) or `rubout` (DEL, 0x7F).
+    ///
+    /// **`passthrough` is the default because it is what the gateway has always
+    /// done**, and an upgrade must not change what a working wire receives. The
+    /// two folding options exist for the same reason the CP/M one does: there is
+    /// no byte that is right for every device, and a terminal emulator's DEL
+    /// reaching a machine that edits with BS looks like a broken keyboard rather
+    /// than a mismatch. Named with the same two words as
+    /// `cpm_boot_backspace`, so an operator meets one vocabulary and not two.
+    pub backspace: String,
     /// Drive DTR as a hardware carrier proxy (default false).  When true,
     /// the modem emulator asserts/drops DTR with the connection (tied to
     /// AT&C) so a terminal wired DTR→DCD sees carrier detect.  When false
@@ -830,6 +841,7 @@ impl Default for SerialPortConfig {
                 String::new(),
             ],
             petscii_translate: DEFAULT_SERIAL_PETSCII_TRANSLATE,
+            backspace: crate::serial::BACKSPACE_PASSTHROUGH.to_string(),
             drive_carrier: DEFAULT_SERIAL_DRIVE_CARRIER,
         }
     }
@@ -2614,6 +2626,13 @@ fn read_serial_port_config(
         drive_carrier: lookup("drive_carrier", "serial_drive_carrier")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_SERIAL_DRIVE_CARRIER),
+        // Missing means `passthrough`: a config written before this key existed
+        // described a wire that was getting the bytes untouched, and it must go
+        // on getting them.
+        backspace: lookup("backspace", "serial_backspace")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| crate::serial::BACKSPACE_PASSTHROUGH.to_string()),
     }
 }
 
@@ -2720,6 +2739,21 @@ fn write_serial_port_section(
     }
     write_kv(out, &format!("{}_petscii_translate", prefix), port.petscii_translate);
     write_kv(out, &format!("{}_drive_carrier", prefix), port.drive_carrier);
+    out.push_str("\
+#   backspace: which byte the device is handed when you press Backspace or
+#     Delete on a CONSOLE-mode bridge.
+#       passthrough  DEFAULT - send whatever your terminal sent
+#       backspace    always send BS, 0x08 (most CP/M, RomWBW)
+#       rubout       always send DEL, 0x7F (Unix, CP/M 1.x)
+#     Your terminal decides which of the two it sends and cannot be asked
+#     to change it, while a lot of period hardware edits with 0x08 and a
+#     modern client sends 0x7F - neither end is wrong, which is why this
+#     is a setting.  Console mode ONLY: on a Kermit-server port those
+#     bytes are packet data and rewriting them would corrupt transfers.
+#     It rewrites what you TYPE, so set it back to passthrough before
+#     sending a binary up the same bridge.
+");
+    write_kv_str(out, &format!("{}_backspace", prefix), &port.backspace);
     out.push('\n');
 }
 
@@ -3705,6 +3739,15 @@ fn apply_serial_port_key(port: &mut SerialPortConfig, suffix: &str, value: &str)
         "stored_3" => port.stored_numbers[3] = value.to_string(),
         "petscii_translate" => port.petscii_translate = value.eq_ignore_ascii_case("true"),
         "drive_carrier" => port.drive_carrier = value.eq_ignore_ascii_case("true"),
+        // Only one of the three offered values.  An unrecognised one is treated
+        // as `passthrough` at run time, so accepting it here would leave the
+        // file claiming a behaviour the wire is not getting.
+        "backspace" => {
+            let v = value.trim().to_ascii_lowercase();
+            if crate::serial::BACKSPACE_CHOICES.iter().any(|(k, _)| *k == v) {
+                port.backspace = v;
+            }
+        }
         _ => {}
     }
 }
@@ -5508,6 +5551,9 @@ mod tests {
                     "9W,5551212".into(),
                 ],
                 petscii_translate: true,
+                // Not the default, and different from Port B's below: the
+                // roundtrip then proves the key is per-port rather than shared.
+                backspace: crate::serial::BACKSPACE_BS.to_string(),
                 drive_carrier: true,
             },
             serial_b: SerialPortConfig {
@@ -5534,6 +5580,7 @@ mod tests {
                     "B4".into(),
                 ],
                 petscii_translate: false,
+                backspace: crate::serial::BACKSPACE_DEL.to_string(),
                 drive_carrier: false,
             },
             ssh_enabled: true,
@@ -7720,6 +7767,7 @@ mod tests {
                 ],
                 petscii_translate: true,
                 drive_carrier: true,
+                backspace: crate::serial::BACKSPACE_BS.to_string(),
             },
             ..Config::default()
         };

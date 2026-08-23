@@ -2477,6 +2477,163 @@ fn open_serial_port(
 /// throughput gain at typical console baud rates.
 const CONSOLE_BRIDGE_BUFSIZE: usize = 1024;
 
+/// `serial_*_backspace`: send the wire whatever the operator's terminal sent.
+pub const BACKSPACE_PASSTHROUGH: &str = "passthrough";
+/// `serial_*_backspace`: the device edits with BS (0x08).
+pub const BACKSPACE_BS: &str = "backspace";
+/// `serial_*_backspace`: the device edits with DEL / rubout (0x7F).
+pub const BACKSPACE_DEL: &str = "rubout";
+
+/// What a port's erase key may be translated to.  Single source of truth for
+/// config validation and all three configuration screens, the way
+/// [`crate::cpm::boot::BACKSPACE_CHOICES`] serves the booted-disk setting -- and
+/// deliberately the same two words for the same two meanings, so an operator
+/// reading the CP/M screen and the serial screen learns one vocabulary.
+pub const BACKSPACE_CHOICES: &[(&str, &str)] = &[
+    (BACKSPACE_PASSTHROUGH, "Pass through - send what you typed"),
+    (BACKSPACE_BS, "Backspace 0x08 - most CP/M, RomWBW"),
+    (BACKSPACE_DEL, "Rubout 0x7F - Unix, CP/M 1.x"),
+];
+
+/// What to show for the current setting.
+///
+/// Resolved through [`backspace_target`] rather than by matching the string, so a
+/// hand-edited typo is *displayed* as the behaviour the wire is really getting --
+/// the same rule as `cpm::boot::backspace_label`, and for the same reason: a
+/// screen that agrees with the config file and disagrees with the hardware is
+/// worse than no screen.
+pub fn backspace_label(value: &str) -> &'static str {
+    let want = match backspace_target(value) {
+        None => BACKSPACE_PASSTHROUGH,
+        Some(0x08) => BACKSPACE_BS,
+        Some(_) => BACKSPACE_DEL,
+    };
+    BACKSPACE_CHOICES.iter().find(|(v, _)| *v == want).map(|(_, l)| *l).unwrap_or(want)
+}
+
+/// The byte this setting sends, or `None` to send what arrived.
+///
+/// Anything unrecognised is `None` -- the setting is hand-editable, and a typo
+/// that silently picked a *translation* would change what a working device
+/// receives. The safe reading of a value we do not understand is "do nothing".
+pub fn backspace_target(value: &str) -> Option<u8> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        BACKSPACE_BS => Some(0x08),
+        BACKSPACE_DEL => Some(0x7F),
+        _ => None,
+    }
+}
+
+/// Fold a session's erase key to the byte this port's device edits with.
+///
+/// **Both spellings fold, not just one.** The operator's terminal decides which
+/// of `0x08` and `0x7F` it sends and they cannot be asked to change it -- that
+/// is the whole reason this setting exists -- so a port set to `backspace` sends
+/// `0x08` whichever the client typed. A Commodore's `0x14` folds too, for the
+/// reason `cpm_boot_ui::boot_key_for_guest` gives: `0x14` means nothing to these
+/// devices, so passing it through would leave a C64 with no editing key at all
+/// rather than the wrong one.
+///
+/// Everything else is untouched. This is not a place to normalise a wire.
+pub fn fold_backspace(bytes: &[u8], setting: &str) -> Option<Vec<u8>> {
+    let target = backspace_target(setting)?;
+    if !bytes.iter().any(|b| matches!(b, 0x08 | 0x7F | 0x14)) {
+        return None;
+    }
+    Some(
+        bytes
+            .iter()
+            .map(|b| if matches!(b, 0x08 | 0x7F | 0x14) { target } else { *b })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod backspace_tests {
+    use super::*;
+
+    /// **Both spellings fold, because the operator's terminal picks one and
+    /// cannot be asked to change it.** That is the whole reason the setting
+    /// exists: a modern client sends DEL, a lot of period hardware edits with
+    /// BS, and neither end is wrong.
+    #[test]
+    fn test_either_erase_key_becomes_the_one_the_device_wants() {
+        for (setting, want) in [(BACKSPACE_BS, 0x08u8), (BACKSPACE_DEL, 0x7F)] {
+            for sent in [0x08u8, 0x7F, 0x14] {
+                let got = fold_backspace(&[b'D', sent, b'R'], setting)
+                    .unwrap_or_else(|| panic!("{setting} should fold {sent:#04x}"));
+                assert_eq!(got, vec![b'D', want, b'R'], "{setting} / {sent:#04x}");
+            }
+        }
+    }
+
+    /// A Commodore's `0x14` folds under *both* settings, for the reason the CP/M
+    /// path gives: it means nothing to these devices, so passing it through
+    /// leaves a C64 with no editing key at all rather than the wrong one.
+    #[test]
+    fn test_a_commodore_gets_an_editing_key_either_way() {
+        assert_eq!(fold_backspace(&[0x14], BACKSPACE_BS), Some(vec![0x08]));
+        assert_eq!(fold_backspace(&[0x14], BACKSPACE_DEL), Some(vec![0x7F]));
+    }
+
+    /// `passthrough` -- the default -- must not copy or change anything, and an
+    /// unrecognised value reads as `passthrough` rather than guessing.
+    #[test]
+    fn test_passthrough_and_nonsense_leave_the_wire_alone() {
+        for setting in [BACKSPACE_PASSTHROUGH, "", "nonsense", "0x08", "bs", "del"] {
+            assert_eq!(
+                fold_backspace(&[0x08, 0x7F, 0x14, b'x'], setting),
+                None,
+                "{setting:?} must not translate"
+            );
+        }
+        // Case and surrounding space do not stop a real value working, though --
+        // the same tolerance every other config value gets, and the first
+        // version of this test asserted both that and the opposite.
+        assert_eq!(fold_backspace(&[0x7F], " Backspace "), Some(vec![0x08]));
+        assert_eq!(fold_backspace(&[0x08], "RUBOUT"), Some(vec![0x7F]));
+    }
+
+    /// **Nothing but the erase keys is touched.** This is a keystroke fold, not
+    /// a place to normalise a wire -- CR, LF, ESC and every other byte pass
+    /// exactly as they arrived, and a chunk with no erase key in it is not even
+    /// copied.
+    #[test]
+    fn test_no_other_byte_is_disturbed() {
+        let all: Vec<u8> = (0u8..=255).filter(|b| !matches!(b, 0x08 | 0x7F | 0x14)).collect();
+        assert_eq!(fold_backspace(&all, BACKSPACE_BS), None, "no erase key, no copy");
+        // And with one in the middle, everything else survives byte for byte.
+        let mut mixed = all.clone();
+        mixed.insert(100, 0x7F);
+        let got = fold_backspace(&mixed, BACKSPACE_BS).expect("folds");
+        assert_eq!(got.len(), mixed.len());
+        for (i, (a, b)) in mixed.iter().zip(got.iter()).enumerate() {
+            if i == 100 {
+                assert_eq!(*b, 0x08);
+            } else {
+                assert_eq!(a, b, "byte {i} changed");
+            }
+        }
+    }
+
+    /// The label is resolved through the behaviour, so a typo is displayed as
+    /// what the wire is really getting rather than as what the file says.
+    #[test]
+    fn test_the_label_describes_the_behaviour_not_the_string() {
+        assert!(backspace_label("nonsense").contains("Pass through"));
+        assert!(backspace_label(BACKSPACE_BS).contains("0x08"));
+        assert!(backspace_label(BACKSPACE_DEL).contains("0x7F"));
+        // Every choice fits the 26 columns a PETSCII value row has.
+        for (value, label) in BACKSPACE_CHOICES {
+            assert!(label.len() <= 34, "{value}: {label:?} is {} columns", label.len());
+        }
+        // And the vocabulary matches the CP/M setting's, which is the point of
+        // reusing the words.
+        assert!(BACKSPACE_CHOICES.iter().any(|(v, _)| *v == crate::cpm::boot::BACKSPACE_ERASE));
+        assert!(BACKSPACE_CHOICES.iter().any(|(v, _)| *v == crate::cpm::boot::BACKSPACE_RUBOUT));
+    }
+}
+
 /// Pump bytes between an open serial port and a tokio duplex stream.
 /// Returns when either side closes, the port errors, or shutdown /
 /// restart is signalled.
@@ -2519,6 +2676,25 @@ fn run_console_bridge<S>(
     // Kermit-server-mode transfer ran far slower than a menu-launched
     // one (which online_mode_duplex pumps with a 10 ms outbound poll).
     let _ = port.set_timeout(BRIDGE_READ_TIMEOUT);
+
+    // Read once, for the life of this bridge: a config lock per keystroke would
+    // be a lock on the hot path, and a setting that changed mid-session would
+    // change the wire under a user who is mid-command.  A restart re-reads it,
+    // which is how every other per-port setting behaves.
+    // **Console mode only, and that is not a scope decision but a correctness
+    // one.** This same pump carries the always-on Kermit server's wire, where
+    // 0x08, 0x7F and 0x14 are ordinary bytes inside a packet -- rewriting them
+    // would corrupt every transfer that happened to contain one. A console
+    // bridge is a terminal session, where they are a keystroke.
+    let erase_setting = {
+        let cfg = crate::config::get_config();
+        let port_cfg = cfg.port(id);
+        if port_cfg.mode == "console" {
+            port_cfg.backspace.clone()
+        } else {
+            BACKSPACE_PASSTHROUGH.to_string()
+        }
+    };
 
     let (mut duplex_read, mut duplex_write) = tokio::io::split(stream);
     let (port_to_session_tx, mut port_to_session_rx) =
@@ -2630,7 +2806,17 @@ fn run_console_bridge<S>(
         loop {
             match session_to_port_rx.try_recv() {
                 Ok(bytes) => {
-                    if let Err(e) = port.write_all(&bytes) {
+                    // The operator's erase key, folded to the byte this device
+                    // edits with.  Here rather than in the session, because the
+                    // setting belongs to the *port*: on a slave this same pump
+                    // carries a master user's keystrokes, and the wire is the
+                    // only place that knows what it expects.  `None` means the
+                    // setting is `passthrough` or the chunk has no erase key in
+                    // it, which is almost every chunk -- so the common path does
+                    // not copy.
+                    let folded = fold_backspace(&bytes, &erase_setting);
+                    let out = folded.as_deref().unwrap_or(&bytes);
+                    if let Err(e) = port.write_all(out) {
                         glog!("{} (Port {}): write error: {}", subsystem, id.label(), e);
                         break 'outer;
                     }
