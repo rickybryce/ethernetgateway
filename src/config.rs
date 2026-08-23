@@ -2929,7 +2929,11 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   the chat screen shows Groq's own error if a model is not available.
 #   Models that reason in the reply are handled: a `<think>` block is
 #   stripped, and an answer that arrives only as `reasoning` is shown
-#   rather than left blank.
+#   rather than left blank.  The gateway also asks each model to keep its
+#   working short, using whatever setting that model accepts - measured,
+#   because three of the models on offer REFUSE the usual one.  On the
+#   default that cut the unseen reasoning from 141 characters to 25; on a
+#   qwen model it cut a reply from 589 tokens to 35.
 ");
     write_kv_str(&mut content, "ai_model", &cfg.ai_model);
     content.push('\n');

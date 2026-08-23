@@ -104,6 +104,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A live gate now exists (`GROQ_KEY`), asserting a reply arrives, is not empty,
   and carries no chain-of-thought markup.
 
+  **Each model is also asked to keep its working short**, with the setting that
+  model accepts.  Measured, not sent blindly: `low` on the `gpt-oss` family took
+  the unseen reasoning from 141 characters to 25 *and made the answer longer*
+  (132 &rarr; 186) for fewer tokens (78 &rarr; 63); `qwen` accepts only `none` or
+  `default`, and `none` took a one-sentence reply from 589 completion tokens and
+  2272 characters to **35 and 148** with no `<think>` block left to strip.  The
+  other three models on offer **refuse the parameter outright with HTTP 400**, so
+  sending it blindly would have broken three working configurations.  A model the
+  rule does not recognise that refuses it anyway is retried once without it &mdash;
+  verified by forcing the refusal, where the retry answers and its removal
+  reproduces the error exactly.
+
 - **Fixed: the "More" popups in the desktop editor slid off the left edge and
   filled the window.**  A wrapping label lays out to the width available to it,
   and inside an auto-sizing window that *is* the window's width, which is decided

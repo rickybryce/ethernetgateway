@@ -120,6 +120,47 @@ mod model_tests {
         }
     }
 
+    /// **The reasoning knob is per-model, and the wrong value is a hard 400.**
+    ///
+    /// Every case here was measured against a live key: `low` on the `gpt-oss`
+    /// family, `none` on `qwen` (which accepts only `none` or `default`), and
+    /// nothing at all for `groq/compound-mini` and `allam-2-7b`, which refuse
+    /// the parameter outright. Sending it blindly would turn three working
+    /// configurations into an error.
+    #[test]
+    fn test_the_reasoning_knob_matches_what_each_model_accepts() {
+        use super::reasoning_effort_for as effort;
+        assert_eq!(effort("openai/gpt-oss-120b"), Some("low"));
+        assert_eq!(effort("openai/gpt-oss-20b"), Some("low"));
+        assert_eq!(effort("openai/gpt-oss-safeguard-20b"), Some("low"));
+        assert_eq!(effort("qwen/qwen3.6-27b"), Some("none"), "qwen refuses `low`");
+        for refuses in ["groq/compound", "groq/compound-mini", "allam-2-7b", "whisper-large-v3"] {
+            assert_eq!(effort(refuses), None, "{refuses} refuses the parameter");
+        }
+        // The shipped default must be one we send the knob for -- that is the
+        // whole saving.
+        assert!(effort(super::GROQ_MODEL).is_some(), "the default gains nothing");
+        // Case and stray spacing must not decide it.
+        assert_eq!(effort("OpenAI/GPT-OSS-120B"), Some("low"));
+    }
+
+    /// A refusal *of the knob* is recognised, and an unrelated error is not --
+    /// retrying a bad key without the parameter would just fail twice.
+    #[test]
+    fn test_only_a_reasoning_refusal_triggers_the_retry() {
+        let refused = |m: &str| {
+            super::refused_reasoning_effort(&serde_json::json!({"error": {"message": m}}))
+        };
+        // The two messages measured from Groq.
+        assert!(refused("`reasoning_effort` is not supported with this model"));
+        assert!(refused("`reasoning_effort` must be one of `none` or `default`"));
+        // Not these.
+        assert!(!refused("Invalid API Key"));
+        assert!(!refused("The model `x` does not exist or you do not have access to it."));
+        assert!(!refused("Rate limit reached for model"));
+        assert!(!super::refused_reasoning_effort(&serde_json::json!({"choices": []})));
+    }
+
     /// A blank model name falls back rather than asking Groq for `""`.
     #[test]
     fn test_a_blank_model_is_the_default() {
@@ -154,15 +195,79 @@ fn strip_thoughts(text: &str) -> String {
 /// Send a question to the Groq API and return the response text, asking `model`
 /// -- or [`GROQ_MODEL`] when the operator has named none.
 pub(crate) fn ask_model(api_key: &str, question: &str, model: &str) -> Result<String, String> {
-    let url = "https://api.groq.com/openai/v1/chat/completions";
     let model = if model.trim().is_empty() { GROQ_MODEL } else { model.trim() };
+    let effort = reasoning_effort_for(model);
 
-    let request_body = serde_json::json!({
+    let mut json = post_question(api_key, question, model, effort)?;
+    // **Our optimisation must never cost somebody a working chat.** The knob is
+    // per-model and three of the five models this key can reach refuse it
+    // outright with HTTP 400 (measured below), so a model whose name the rule
+    // does not recognise would be broken by sending it. The rule handles the
+    // models that exist today; this handles the ones that do not yet.
+    if effort.is_some() && refused_reasoning_effort(&json) {
+        json = post_question(api_key, question, model, None)?;
+    }
+    answer_from(&json)
+}
+
+/// What to send as `reasoning_effort` for a model, if anything.
+///
+/// **Every value here was measured against a live key, and the wrong answer is a
+/// hard failure rather than a slow one.** Asking `openai/gpt-oss-120b` "what is
+/// an Altair 8800" produced 141 characters of reasoning nobody sees; with `low`
+/// that fell to 25 and the *answer* got longer (132 -> 186 characters) for fewer
+/// completion tokens (78 -> 63). On `qwen/qwen3.6-27b` the effect is dramatic --
+/// its working goes into `content` as a `<think>` block, and `none` took the
+/// reply from 589 completion tokens and 2272 characters to **35 and 148**, with
+/// no block to strip. That matters at 9600 baud, where 2272 characters is two
+/// and a half seconds of somebody's model thinking out loud.
+///
+/// And the refusals, which is why this is a list and not a default: `low` is
+/// rejected with HTTP 400 by `groq/compound-mini` and `allam-2-7b` ("not
+/// supported with this model") and by `qwen`, which insists on `none` or
+/// `default`. Sending it blindly would take a working configuration and break
+/// it.
+fn reasoning_effort_for(model: &str) -> Option<&'static str> {
+    let m = model.to_ascii_lowercase();
+    if m.starts_with("openai/gpt-oss") {
+        Some("low")
+    } else if m.starts_with("qwen/") {
+        // Not "low": this family accepts only `none` or `default`.
+        Some("none")
+    } else {
+        None
+    }
+}
+
+/// Did the API refuse the request *because of* `reasoning_effort`?
+///
+/// Matched on the parameter's name, which both refusal messages contain, rather
+/// than on the whole sentence -- the wording is Groq's to change and the
+/// parameter name is the part that identifies the cause.
+fn refused_reasoning_effort(json: &serde_json::Value) -> bool {
+    json.get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .is_some_and(|m| m.contains("reasoning_effort"))
+}
+
+/// One request, returning the parsed reply.
+fn post_question(
+    api_key: &str,
+    question: &str,
+    model: &str,
+    effort: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let url = "https://api.groq.com/openai/v1/chat/completions";
+    let mut request_body = serde_json::json!({
         "model": model,
         "messages": [
             {"role": "user", "content": question}
         ]
     });
+    if let (Some(effort), Some(map)) = (effort, request_body.as_object_mut()) {
+        map.insert("reasoning_effort".to_string(), serde_json::json!(effort));
+    }
 
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
@@ -180,7 +285,11 @@ pub(crate) fn ask_model(api_key: &str, question: &str, model: &str) -> Result<St
         .post(url)
         .header("Content-Type", "application/json")
         .header("Authorization", &format!("Bearer {}", api_key))
-        .send(serde_json::to_string(&request_body).map_err(|e| format!("JSON serialize error: {}", e))?.as_bytes())
+        .send(
+            serde_json::to_string(&request_body)
+                .map_err(|e| format!("JSON serialize error: {}", e))?
+                .as_bytes(),
+        )
         .map_err(|e| format!("API error: {}", e))?;
 
     let mut body_bytes = Vec::new();
@@ -191,9 +300,11 @@ pub(crate) fn ask_model(api_key: &str, question: &str, model: &str) -> Result<St
         .read_to_end(&mut body_bytes)
         .map_err(|e| format!("Read error: {}", e))?;
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&body_bytes).map_err(|e| format!("JSON parse error: {}", e))?;
+    serde_json::from_slice(&body_bytes).map_err(|e| format!("JSON parse error: {}", e))
+}
 
+/// The answer inside a reply, or Groq's own error.
+fn answer_from(json: &serde_json::Value) -> Result<String, String> {
     let message = json.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("message"));
     let field = |name: &str| -> Option<String> {
         message

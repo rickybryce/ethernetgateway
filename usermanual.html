@@ -4796,6 +4796,16 @@ characters, of which the first 1600 were its own deliberation), and a reply that
 arrives only in a <code>reasoning</code> field &mdash; leaving the answer field
 empty &mdash; is shown rather than printed as nothing, because a blank screen is
 indistinguishable from a hang.
+<br><br>
+The gateway also asks each model to keep its working <em>short</em>, using
+whichever setting that model accepts.  This is measured per model rather than
+sent blindly, because three of the models on offer refuse the usual parameter
+with an error: on the shipped default it cut the unseen reasoning from 141
+characters to 25 while the answer itself got <em>longer</em>, and on a
+<code>qwen</code> model it cut a one-sentence reply from 589 tokens and 2272
+characters to 35 and 148.  At 9600 baud that is the difference between an answer
+and a wait.  If a future model refuses the setting, the request is simply sent
+again without it, so a model this gateway has never heard of still answers.
 </aside>
 
 <!-- ═══════════════════ 13. Web browser ═══════════════════ -->
