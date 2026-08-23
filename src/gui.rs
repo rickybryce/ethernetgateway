@@ -1612,6 +1612,9 @@ impl App {
     /// single form, so a duplicated field name would submit twice — which is why
     /// the web's General popup carries only the log settings.
     fn draw_general_more(&mut self, ui: &mut egui::Ui) {
+        // Bound the wrap width or this popup walks off the screen (measured creeping 501 -> 520).
+        // See [`POPUP_CONTENT_W`].
+        ui.set_max_width(POPUP_CONTENT_W);
         ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
         ui.checkbox(&mut self.cfg.gateway_debug, "Gateway Debug Trace");
         ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
@@ -1864,6 +1867,9 @@ impl App {
     }
 
     fn draw_cpm_mounts(&mut self, ui: &mut egui::Ui) {
+        // Bound the wrap width or this popup walks off the screen (measured creeping 537 -> 604).
+        // See [`POPUP_CONTENT_W`].
+        ui.set_max_width(POPUP_CONTENT_W);
         let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
         // What will actually run, not what the key says: a `cpm_boot_image`
         // naming a disk that is no longer in the images folder falls back to
@@ -2267,6 +2273,9 @@ impl App {
     }
 
     fn draw_ai_browser_more(&mut self, ui: &mut egui::Ui) {
+        // Bound the wrap width or this popup walks off the screen (the panel this was reported on).
+        // See [`POPUP_CONTENT_W`].
+        ui.set_max_width(POPUP_CONTENT_W);
         // The Groq key lives here rather than on the main frame: it is optional,
         // and a key field in the first row of a frame reads as a prerequisite.
         // The same label column and control width as the CP/M rows below, so
@@ -4308,6 +4317,28 @@ impl App {
 /// right edges moved as the operator changed a setting. Boxing the control to
 /// an exact width and truncating the text inside it is what makes every row the
 /// same shape.
+/// How wide a "More" popup lays its content out.
+///
+/// **A constant, because leaving it to the content is a feedback loop.** A
+/// wrapping label lays out to `available_width`, and inside an auto-sizing
+/// `egui::Window` that *is* the window's width, which is decided by its
+/// content. It does not oscillate, it ratchets: the AI/Weather/CP/M panel was
+/// measured at 650 px on its first frame, 664 on the second, 678 on the third,
+/// +14 every frame until it reached the 1120 px of the host window and stopped
+/// only because egui clamps there. What an operator sees is a panel that slides
+/// left (egui pushes it until its right edge fits), with the first character of
+/// every label cut off, and resizing the window does not help because the
+/// content ends up wider than any window. Reported 2026-08-23.
+///
+/// Measured across all six popups: `server_advanced` (462), `server_relay`
+/// (462) and `file_transfer_advanced` (603) were already stable -- their labels
+/// are short enough to fit unwrapped -- while `general_more` and `cpm_mounts`
+/// crept too. Sized above the widest row that *cannot* wrap (the CP/M
+/// `AT&W` checkbox row) so the cure is not a clipped row instead of a sliding
+/// panel; a popup that sits exactly at this width is one whose prose is using
+/// the space, which is the intended behaviour rather than the bug.
+const POPUP_CONTENT_W: f32 = 640.0;
+
 const CPM_LABEL_W: f32 = 196.0;
 const CPM_CONTROL_W: f32 = 330.0;
 

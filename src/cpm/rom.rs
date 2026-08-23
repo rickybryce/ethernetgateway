@@ -307,7 +307,18 @@ pub fn load(cpm_base: &Path, key: &str) -> Result<Option<RomImage>, String> {
         return Ok(None);
     };
     let path = roms_dir(cpm_base).join(f.file);
-    let raw = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let raw = std::fs::read(&path).map_err(|e| {
+        // **"Not there" gets its own sentence.**  The raw `io::Error` plus an
+        // absolute path is 90-odd characters of which the useful part is the
+        // last word, and a booted-disk banner truncates to 38 columns on a C64 --
+        // so an operator on a fresh install read a cut-off path and no reason.
+        // Every other IO error keeps the path, because for those it is the clue.
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!("{} has not been downloaded yet", f.file)
+        } else {
+            format!("{}: {e}", path.display())
+        }
+    })?;
     image_from_bytes(f, &raw).map(Some).map_err(|why| format!("{}: {why}", f.file))
 }
 
@@ -527,6 +538,11 @@ mod tests {
         assert!(missing(&dir, "cuter_vdm"));
         let err = load(&dir, "cuter_vdm").expect_err("cannot load what is not there");
         assert!(err.contains("vdmcuter.hex"), "{err}");
+        // A sentence, not an `io::Error` and an absolute path: this is read on a
+        // 38-column boot banner, where the raw version arrived truncated.
+        assert!(err.contains("has not been downloaded"), "say what is wrong: {err}");
+        assert!(!err.contains("os error"), "no raw errno on a C64 screen: {err}");
+        assert!(err.len() <= 60, "{} chars is too long for the banner: {err}", err.len());
         assert_eq!(
             path_for(&dir, "cuter_vdm").unwrap(),
             dir.join(ROMS_DIR).join("vdmcuter.hex")

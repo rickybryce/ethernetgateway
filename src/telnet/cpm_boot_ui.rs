@@ -101,28 +101,51 @@ fn vdm_notice(web_enabled: bool, ip: &str, port: u16) -> Vec<String> {
     lines
 }
 
+/// Why a disk that wants a monitor ROM is not getting one.
+///
+/// **Three states, not two, and that was a real defect.** The first version had
+/// a `loaded_but_bad` flag, which put "the setting names a ROM whose file was
+/// never downloaded" in the same branch as "the file is there and will not
+/// load" -- so an operator who had selected CUTER on a fresh install was told to
+/// *fix or replace* a file that did not exist. Reported from the Pi on
+/// 2026-08-23, and it is the same lesson as `cpm_runs_row`'s `(missing)` marker:
+/// a setting is not an outcome, and "chosen", "chosen but absent" and "present
+/// but unusable" need three different sentences because they need three
+/// different actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RomGap {
+    /// No ROM is selected at all.
+    NotChosen,
+    /// One is selected and its file is not in the ROMs folder.
+    FileMissing,
+    /// The file is there and could not be used.
+    Unusable,
+}
+
 /// What to say when a disk asks for a monitor ROM and is not getting one.
 ///
 /// A function rather than lines typed into the banner, for the reason the help
 /// screens are: a literal in the middle of an `async` draw cannot be measured
 /// against the 40 columns a C64 has, and this is drawn for the operator whose
 /// disk is about to stop -- the worst possible place for a wrapped line.
-///
-/// `loaded_but_bad` distinguishes the two ways of not getting one, because the
-/// remedies differ: a setting that is off needs choosing, a file that would not
-/// load needs replacing, and telling the second operator to go and pick a
-/// setting they have already picked is how a message loses their trust.
-fn monitor_rom_notice(loaded_but_bad: bool) -> Vec<String> {
+fn monitor_rom_notice(gap: RomGap) -> Vec<String> {
     let mut lines = vec![
         "This disk tests for a monitor ROM".to_string(),
         "and is not getting one. It will".to_string(),
         "print one line and stop.".to_string(),
     ];
-    lines.push(if loaded_but_bad {
-        "Fix or replace the ROM file above.".to_string()
-    } else {
-        "Set one: CP/M boot settings, O.".to_string()
-    });
+    // The action, and only the one that applies.  Each names where to go, because
+    // "select a ROM" is no use to somebody who selected one an hour ago.
+    lines.push(
+        match gap {
+            RomGap::NotChosen => "Set one: CP/M settings, O.",
+            // A download, not a repair: the ROMs are not shipped, so a fresh
+            // install with the setting on has nothing in the folder yet.
+            RomGap::FileMissing => "Fetch it: CP/M settings, O then F.",
+            RomGap::Unusable => "Fix or replace the ROM file above.",
+        }
+        .to_string(),
+    );
     lines
 }
 
@@ -980,7 +1003,17 @@ impl TelnetSession {
         // one.  Said whether the setting is off or its file could not be loaded,
         // because in both cases what happens next is the disk stopping.
         if needs_rom && !matches!(rom_note, Some(Ok(_))) {
-            for line in monitor_rom_notice(matches!(rom_note, Some(Err(_)))) {
+            // Which gap it is, asked of the folder rather than read out of the
+            // error text: a message is not an API, and a branch that matched on
+            // one would break the next time the wording changed.
+            let gap = match &rom_note {
+                None => RomGap::NotChosen,
+                Some(_) if crate::cpm::rom::missing(&self.cpmmount_base(), &rom_setting) => {
+                    RomGap::FileMissing
+                }
+                Some(_) => RomGap::Unusable,
+            };
+            for line in monitor_rom_notice(gap) {
                 self.send_line(&format!("  {}", self.amber(&line))).await?;
             }
         }
@@ -1538,7 +1571,8 @@ mod tests {
     /// somebody who already chose one and has a file that will not load.
     #[test]
     fn test_the_monitor_rom_warning_fits_and_advises() {
-        for bad in [false, true] {
+        use super::RomGap::*;
+        for bad in [NotChosen, FileMissing, Unusable] {
             let lines = monitor_rom_notice(bad);
             for line in &lines {
                 assert!(line.chars().count() <= 38, "{line:?} does not fit a PETSCII screen");
@@ -1547,11 +1581,21 @@ mod tests {
             assert!(all.contains("monitor ROM"), "it must name what is missing: {all}");
             assert!(all.contains("stop"), "and what happens next: {all}");
         }
-        let off = monitor_rom_notice(false).join(" ");
-        let bad = monitor_rom_notice(true).join(" ");
-        assert_ne!(off, bad, "a bad file and no setting need different advice");
-        assert!(off.contains("boot settings"), "with none set, say where to set one: {off}");
-        assert!(bad.contains("file"), "with a bad file, say that: {bad}");
+        // **Three states, three different actions.**  Collapsing "never
+        // downloaded" into "will not load" told an operator on a fresh install
+        // to fix a file that did not exist -- reported from the Pi.
+        let advice = |g| monitor_rom_notice(g).last().cloned().unwrap();
+        let (none, absent, bad) = (advice(NotChosen), advice(FileMissing), advice(Unusable));
+        assert_ne!(none, absent);
+        assert_ne!(absent, bad);
+        assert_ne!(none, bad);
+        assert!(none.contains("Set"), "with none chosen, say to choose: {none}");
+        assert!(
+            absent.contains("Fetch"),
+            "a file that was never downloaded needs fetching, not fixing: {absent}"
+        );
+        assert!(!absent.contains("Fix"), "nothing to fix -- it is not there: {absent}");
+        assert!(bad.contains("Fix") || bad.contains("replace"), "a bad file: {bad}");
     }
 
     /// A VDM-1 disk is told where its screen went, and told the truth when

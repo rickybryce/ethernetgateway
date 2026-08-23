@@ -63,6 +63,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a different address would be written over the guest's own memory, which
   presents as a disk that boots and then behaves impossibly.
 
+- **Fixed: the "More" popups in the desktop editor slid off the left edge and
+  filled the window.**  A wrapping label lays out to the width available to it,
+  and inside an auto-sizing window that *is* the window's width, which is decided
+  by its content -- a feedback loop that does not oscillate but ratchets.  The
+  AI/Browser/Weather/CP/M panel was measured at 650&nbsp;px on its first frame,
+  664 on the second, 678 on the third, **+14 every frame** until it reached the
+  1120&nbsp;px of the host window and stopped only because egui clamps there.
+  What you saw was a panel sliding left with the first character of every label
+  cut off, and resizing the window did not help, because the content ended up
+  wider than any window.  One bounded wrap width fixes it, and measuring all six
+  popups rather than the reported one found two more creeping the same way
+  (*General — More* and *Mount CP/M Drives*); the other three were already
+  stable, their labels being short enough never to wrap.
+
+- **Fixed: a booted disk that needs a monitor ROM was told to "fix or replace"
+  a file that had never been downloaded.**  Three states -- none selected, one
+  selected whose file is absent, and a file present but unusable -- had been
+  collapsed into two, so an operator who selected CUTER on a fresh install was
+  sent to repair something that did not exist.  Each now names the action that
+  applies, and "not there" gets its own sentence rather than an `io::Error` and
+  an absolute path, which a 38-column boot banner delivered truncated.
+
 - **A disk that needs a monitor ROM now says so in three places before it
   disappoints you.**  `repodisks.txt` carries the note on `DISK11.DSK` --
   generated from the disk's own bytes, not a hard-coded filename, so it cannot
