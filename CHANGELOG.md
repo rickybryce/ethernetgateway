@@ -63,6 +63,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a different address would be written over the guest's own memory, which
   presents as a disk that boots and then behaves impossibly.
 
+- **Fixed: AI Chat and the weather service printed typographic Unicode raw,
+  which garbled dashes and broke the wrapping.**  One defect, two symptoms, and
+  the second looked like a separate bug: asking about a `PLC-5` came back with
+  U+2011 non-breaking hyphens, U+202F narrow spaces and U+2019 apostrophes in it,
+  each of which a PETSCII or 7-bit terminal draws as two or three pieces of
+  rubbish.  And because the word-wrap counts *characters* while such a terminal
+  draws one glyph per *byte*, a 78-character line arrived as **82 columns** on an
+  80-column screen and wrapped itself — measured on a real reply: 143 characters,
+  151 bytes.  Folded, 78 characters is 78 columns again.
+
+  **The fold already existed and had exactly one caller.**  `fold_terminal_safe`
+  was written for the web browser (an HTML table arrives as 918 bytes of
+  box-drawing characters) and lived there, so the two other surfaces that print
+  fetched text at a terminal sanitized their escapes and then printed the
+  typography as-is.  The composed rule now has a name,
+  `aichat::display_for_terminal`, and all three surfaces call it.  It is
+  deliberately *not* folded into `sanitize_for_terminal`: the browser sanitizes a
+  page's URL with that, and folding an en-dash in a URL breaks relative-link
+  resolution — which the existing
+  `test_sanitize_does_not_fold_the_url_or_form_values` caught when it was tried.
+
 - **AI Chat works again: Groq retired the model it asked for.**
   `llama-3.3-70b-versatile` began answering `404 model_not_found` -- "the model
   does not exist or you do not have access to it" -- and AI Chat was simply dead,

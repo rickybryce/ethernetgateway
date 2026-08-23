@@ -246,7 +246,7 @@ pub(crate) fn parse_geo_results(v: &serde_json::Value) -> Vec<GeoResult> {
             // (JSON can carry a control character as `\u001b`, which serde
             // decodes to the real thing, so "it is JSON" is not a defence.)
             let s = |k: &str| {
-                crate::aichat::sanitize_for_terminal(
+                crate::aichat::display_for_terminal(
                     r.get(k).and_then(|v| v.as_str()).unwrap_or(""),
                 )
             };
@@ -348,7 +348,7 @@ impl TelnetSession {
             }
             Err(e) => {
                 let max_w = if self.terminal_type == TerminalType::Petscii { 30 } else { 50 };
-                let safe = crate::aichat::sanitize_for_terminal(&e);
+                let safe = crate::aichat::display_for_terminal(&e);
                 self.show_error(&truncate_to_width(&safe, max_w)).await?;
             }
         }

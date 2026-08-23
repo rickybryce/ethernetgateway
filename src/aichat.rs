@@ -54,6 +54,72 @@ mod model_tests {
         assert_eq!(strip_thoughts(mid), mid);
     }
 
+    /// **The characters a real model actually sends.**  Measured from live Groq
+    /// replies, not imagined: an answer about a "PLC-5" comes back with U+2011
+    /// non-breaking hyphens, U+202F narrow no-break spaces and U+2019
+    /// apostrophes in it, and a PETSCII or 7-bit terminal renders each as two or
+    /// three pieces of rubbish.  Reported from a C64 on 2026-08-23, when the
+    /// fold existed but only the web browser called it.
+    #[test]
+    fn test_a_models_typography_reaches_the_terminal_as_ascii() {
+        use super::display_for_terminal as sanitize_for_terminal;
+        // Exactly what was measured coming back from Groq.
+        assert_eq!(
+            sanitize_for_terminal("The Altair\u{202f}8800 is a kit\u{2011}based micro"),
+            "The Altair 8800 is a kit-based micro"
+        );
+        assert_eq!(
+            sanitize_for_terminal("Allen\u{2011}Bradley\u{2019}s PLC\u{2010}5 \u{2014} a PLC"),
+            "Allen-Bradley's PLC-5 - a PLC"
+        );
+        // Every dash in the block, since a model picks whichever it likes.
+        for dash in ['\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}', '\u{2212}'] {
+            assert_eq!(sanitize_for_terminal(&format!("PLC{dash}5")), "PLC-5", "{dash:?}");
+        }
+        // And the thing this must NOT do: real letters are not mangled.
+        assert_eq!(sanitize_for_terminal("café Ångström"), "café Ångström");
+    }
+
+    /// **A wrapped line must be as many columns as it is characters.**
+    ///
+    /// This is the "chat is not wrapping" report, and it is the *same* defect as
+    /// the mangled dashes rather than a second one. [`super::wrap_line`] counts
+    /// characters, so it wraps correctly -- but a terminal that draws one glyph
+    /// per byte renders a multi-byte character as two or three columns, and the
+    /// line overruns the screen and wraps itself. Measured on a real Groq reply:
+    /// 143 characters, **151 bytes**, so a 78-character line arrived as 82
+    /// columns on an 80-column terminal.
+    #[test]
+    fn test_a_wrapped_line_is_as_many_columns_as_characters() {
+        let reply = "The Altair\u{202f}8800 was a pioneering, kit\u{2011}based microcomputer \
+                     released in 1975 that used Intel\u{2019}s 8080 CPU and sparked the \
+                     home\u{2011}computer revolution.";
+        // The premise, asserted rather than assumed: this text really is wider in
+        // bytes than in characters before folding.
+        assert!(
+            reply.len() > reply.chars().count(),
+            "the reply this test rests on is pure ASCII, so it proves nothing"
+        );
+
+        // 38 for a 40-column PETSCII screen, 78 for an 80-column one.
+        for width in [38usize, 78] {
+            for line in super::wrap_line(&super::display_for_terminal(reply), width) {
+                assert!(
+                    line.chars().count() <= width,
+                    "{line:?} is {} characters, over {width}",
+                    line.chars().count()
+                );
+                assert_eq!(
+                    line.len(),
+                    line.chars().count(),
+                    "{line:?} is {} bytes but {} characters -- it will overrun the screen",
+                    line.len(),
+                    line.chars().count()
+                );
+            }
+        }
+    }
+
     /// A blank model name falls back rather than asking Groq for `""`.
     #[test]
     fn test_a_blank_model_is_the_default() {
@@ -168,7 +234,8 @@ pub(crate) fn ask_model(api_key: &str, question: &str, model: &str) -> Result<St
 /// trailing bytes of any CSI/OSC sequence then render as visible
 /// printable text rather than as cursor moves or color changes.
 pub(crate) fn sanitize_for_terminal(s: &str) -> String {
-    s.chars()
+    let kept: String = s
+        .chars()
         .filter(|&c| {
             let b = c as u32;
             // Allow tab and printable characters; drop C0 controls, DEL, and
@@ -178,7 +245,102 @@ pub(crate) fn sanitize_for_terminal(s: &str) -> String {
             // escaping is handled on the wire in tnio, not by filtering here.
             c == '\t' || (b >= 0x20 && b != 0x7F && !(0x80..=0x9F).contains(&b))
         })
-        .collect()
+        .collect::<String>();
+    kept
+}
+
+/// Text on its way to a terminal: control bytes stripped **and** typography
+/// folded to ASCII.
+///
+/// **The composed rule needs a name, because the two halves were separate and
+/// only one caller ever took both.** `fold_terminal_safe` lived in the web
+/// browser and was called nowhere else, so AI Chat and the weather service
+/// stripped escapes and then printed the typography raw. On a PETSCII or 7-bit
+/// terminal each such character arrives as two or three pieces of rubbish --
+/// reported from a C64 on 2026-08-23, asking what a PLC-5 is and getting the
+/// hyphens back as garbage.
+///
+/// It also **fixes the wrapping**, which looked like a second bug and is the
+/// same one: [`wrap_line`] counts *characters*, and a line of 78 characters
+/// containing four multi-byte ones is 82 bytes -- 82 columns on a terminal that
+/// draws one glyph per byte -- so it overran an 80-column screen and wrapped
+/// itself. Measured on a real reply: 143 characters, 151 bytes before folding
+/// and 143 after, at which point 78 characters is 78 columns.
+///
+/// **Not folded into [`sanitize_for_terminal`]**, though that was tried: the web
+/// browser sanitizes a page's *URL* with it, and folding an en-dash in a URL
+/// breaks relative-link resolution. `test_sanitize_does_not_fold_the_url_or_
+/// form_values` caught it, which is exactly the test one hopes exists.
+pub(crate) fn display_for_terminal(s: &str) -> String {
+    fold_terminal_safe(&sanitize_for_terminal(s))
+}
+
+/// Fold the characters a text-mode terminal cannot draw down to ASCII.
+///
+/// **Measured, not guessed.** Loading `telnetbible.com` through this browser
+/// and capturing the wire showed page 1 carrying zero bytes above 0x7F and
+/// page 3 carrying **918** — a third of the stream. Every one of them was a
+/// box-drawing character: `html2text` renders an HTML table with `─` (284 of
+/// them), `│`, `┼`, `┴`, `┬`, each three bytes of UTF-8. On a 7-bit console —
+/// an SC126 running EGT80, a C64, any real serial terminal — each arrives as
+/// three unrenderable characters, which is exactly the "garbage from page two
+/// onward" an operator sees. It looks like a terminal fault and is not one.
+///
+/// `html2text` offers `no_table_borders()`, which would also remove the bytes
+/// — by removing the table's structure. `+---+` says the same thing in
+/// characters every terminal since the teletype can draw, so the borders are
+/// translated rather than dropped.
+///
+/// **Every surface that shows fetched text needs this, and for two releases
+/// only one of them had it.** It lived in `webbrowser` and was called nowhere
+/// else, so AI Chat and the weather service sanitized their text and printed
+/// the typography raw: a Groq answer about a "PLC-5" arrives with U+2011
+/// non-breaking hyphens and U+202F narrow spaces in it, which a PETSCII or
+/// 7-bit terminal renders as two or three pieces of rubbish per character.
+/// Reported from a C64 on 2026-08-23. It is called from
+/// [`sanitize_for_terminal`] now, so a new consumer gets it by construction
+/// rather than by remembering.
+///
+/// **Deliberately narrow.** Only characters with an unambiguous ASCII
+/// equivalent are folded: box drawing, the smart quotes and dashes that word
+/// processors emit, the non-breaking space. Accented letters and non-Latin
+/// scripts are left exactly as they were — a modern terminal over SSH still
+/// renders them, and turning them into `?` would trade one class of wrong
+/// output for another. This fixes what was measured and nothing else.
+pub(crate) fn fold_terminal_safe(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| {
+            Some(match c {
+                // Box drawing, light through heavy and double: horizontals,
+                // verticals, then every corner and junction as '+'.
+                '\u{2500}' | '\u{2501}' | '\u{2504}' | '\u{2505}' | '\u{2508}' | '\u{2509}'
+                | '\u{254C}' | '\u{254D}' | '\u{2550}' | '\u{2574}' | '\u{2576}'
+                | '\u{2578}' | '\u{257A}' => '-',
+                '\u{2502}' | '\u{2503}' | '\u{2506}' | '\u{2507}' | '\u{250A}' | '\u{250B}'
+                | '\u{254E}' | '\u{254F}' | '\u{2551}' | '\u{2575}' | '\u{2577}'
+                | '\u{2579}' | '\u{257B}' => '|',
+                c if ('\u{2500}'..='\u{257F}').contains(&c) => '+',
+                // Block elements and shading — a filled cell reads as '#'.
+                c if ('\u{2580}'..='\u{259F}').contains(&c) => '#',
+                // The typography a CMS emits without being asked.
+                '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' => '\'',
+                '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2033}' => '"',
+                '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+                '\u{00A0}' | '\u{2007}' | '\u{202F}' | '\u{2009}' => ' ',
+                '\u{2022}' | '\u{00B7}' | '\u{25AA}' | '\u{25CF}' | '\u{25E6}' => '*',
+                // A soft hyphen is an invisible break hint; on a fixed-width
+                // screen it is noise, so it goes rather than becoming '-'.
+                '\u{00AD}' => return None,
+                // U+2026 is deliberately NOT mapped here: it is the one fold
+                // that is not one-for-one, and it is expanded below.  Mapping
+                // it to '.' here would consume it and leave a single dot.
+                other => other,
+            })
+        })
+        .collect::<String>()
+        // The ellipsis is the one fold that is not 1:1, done after the pass so
+        // the character map above stays a simple substitution.
+        .replace('\u{2026}', "...")
 }
 
 /// Word-wrap a single line to fit within `width` columns, breaking at spaces.

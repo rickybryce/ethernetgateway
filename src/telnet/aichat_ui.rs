@@ -74,7 +74,7 @@ impl TelnetSession {
                     let normalized = answer.replace("\r\n", "\n").replace('\r', "\n");
                     let lines: Vec<String> = normalized
                         .lines()
-                        .map(crate::aichat::sanitize_for_terminal)
+                        .map(crate::aichat::display_for_terminal)
                         .flat_map(|line| crate::aichat::wrap_line(&line, content_width))
                         .collect();
 
@@ -97,7 +97,7 @@ impl TelnetSession {
                     // That is exactly the failure this feature hit in the field:
                     // Groq retired the shipped default and the error said so, off
                     // the right-hand edge of the screen.
-                    let mut lines = crate::aichat::wrap_line(&e, max_w);
+                    let mut lines = crate::aichat::wrap_line(&crate::aichat::display_for_terminal(&e), max_w);
                     if e.to_lowercase().contains("model") {
                         lines.push(String::new());
                         lines.push("Change it: Configuration >".to_string());

@@ -94,7 +94,7 @@ impl WebPage {
         use crate::aichat::sanitize_for_terminal;
         if let Some(title) = self.title.as_mut() {
             // Folded like the body: the title is drawn on the same screen.
-            *title = fold_terminal_safe(&sanitize_for_terminal(title));
+            *title = crate::aichat::display_for_terminal(title);
         }
         for line in self.lines.iter_mut() {
             *line = sanitize_line_keep_markers(line);
@@ -133,83 +133,26 @@ impl WebPage {
     }
 }
 
-/// Fold the characters a text-mode terminal cannot draw down to ASCII.
-///
-/// **Measured, not guessed.** Loading `telnetbible.com` through this browser
-/// and capturing the wire showed page 1 carrying zero bytes above 0x7F and
-/// page 3 carrying **918** — a third of the stream. Every one of them was a
-/// box-drawing character: `html2text` renders an HTML table with `─` (284 of
-/// them), `│`, `┼`, `┴`, `┬`, each three bytes of UTF-8. On a 7-bit console —
-/// an SC126 running EGT80, a C64, any real serial terminal — each arrives as
-/// three unrenderable characters, which is exactly the "garbage from page two
-/// onward" an operator sees. It looks like a terminal fault and is not one.
-///
-/// `html2text` offers `no_table_borders()`, which would also remove the bytes
-/// — by removing the table's structure. `+---+` says the same thing in
-/// characters every terminal since the teletype can draw, so the borders are
-/// translated rather than dropped.
-///
-/// **Deliberately narrow.** Only characters with an unambiguous ASCII
-/// equivalent are folded: box drawing, the smart quotes and dashes that word
-/// processors emit, the non-breaking space. Accented letters and non-Latin
-/// scripts are left exactly as they were — a modern terminal over SSH still
-/// renders them, and turning them into `?` would trade one class of wrong
-/// output for another. This fixes what was measured and nothing else.
-fn fold_terminal_safe(s: &str) -> String {
-    s.chars()
-        .filter_map(|c| {
-            Some(match c {
-                // Box drawing, light through heavy and double: horizontals,
-                // verticals, then every corner and junction as '+'.
-                '\u{2500}' | '\u{2501}' | '\u{2504}' | '\u{2505}' | '\u{2508}' | '\u{2509}'
-                | '\u{254C}' | '\u{254D}' | '\u{2550}' | '\u{2574}' | '\u{2576}'
-                | '\u{2578}' | '\u{257A}' => '-',
-                '\u{2502}' | '\u{2503}' | '\u{2506}' | '\u{2507}' | '\u{250A}' | '\u{250B}'
-                | '\u{254E}' | '\u{254F}' | '\u{2551}' | '\u{2575}' | '\u{2577}'
-                | '\u{2579}' | '\u{257B}' => '|',
-                c if ('\u{2500}'..='\u{257F}').contains(&c) => '+',
-                // Block elements and shading — a filled cell reads as '#'.
-                c if ('\u{2580}'..='\u{259F}').contains(&c) => '#',
-                // The typography a CMS emits without being asked.
-                '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' | '\u{2032}' => '\'',
-                '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' | '\u{2033}' => '"',
-                '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
-                '\u{00A0}' | '\u{2007}' | '\u{202F}' | '\u{2009}' => ' ',
-                '\u{2022}' | '\u{00B7}' | '\u{25AA}' | '\u{25CF}' | '\u{25E6}' => '*',
-                // A soft hyphen is an invisible break hint; on a fixed-width
-                // screen it is noise, so it goes rather than becoming '-'.
-                '\u{00AD}' => return None,
-                // U+2026 is deliberately NOT mapped here: it is the one fold
-                // that is not one-for-one, and it is expanded below.  Mapping
-                // it to '.' here would consume it and leave a single dot.
-                other => other,
-            })
-        })
-        .collect::<String>()
-        // The ellipsis is the one fold that is not 1:1, done after the pass so
-        // the character map above stays a simple substitution.
-        .replace('\u{2026}', "...")
-}
 
 /// Apply `aichat::sanitize_for_terminal` to a rendered line while preserving
 /// the `\x02N\x03` link-marker sentinels (see [`WebPage::sanitize`]).
 fn sanitize_line_keep_markers(line: &str) -> String {
     // Fast path: no sentinels, sanitize the whole line in one pass.
     if !line.contains(['\u{02}', '\u{03}']) {
-        return fold_terminal_safe(&crate::aichat::sanitize_for_terminal(line));
+        return crate::aichat::display_for_terminal(line);
     }
     let mut out = String::with_capacity(line.len());
     let mut segment = String::new();
     for c in line.chars() {
         if c == '\u{02}' || c == '\u{03}' {
-            out.push_str(&fold_terminal_safe(&crate::aichat::sanitize_for_terminal(&segment)));
+            out.push_str(&crate::aichat::display_for_terminal(&segment));
             segment.clear();
             out.push(c);
         } else {
             segment.push(c);
         }
     }
-    out.push_str(&fold_terminal_safe(&crate::aichat::sanitize_for_terminal(&segment)));
+    out.push_str(&crate::aichat::display_for_terminal(&segment));
     out
 }
 
@@ -1896,6 +1839,7 @@ pub(crate) fn build_gopher_search_url(url: &str, query: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::aichat::fold_terminal_safe;
     use super::*;
 
     /// The measured defect: an HTML table renders as box-drawing characters.
