@@ -1112,7 +1112,7 @@ pub(in crate::telnet) enum GatewayPick {
     Remote { ip: IpAddr, label: String },
 }
 
-/// Max remote console ports shown in the Serial Gateway picker.  §9 #12
+/// Max remote (slave) ports shown in the Serial Gateway picker.  §9 #12
 /// allows "paging OR a cap"; a cap (like `SERVER_ADDR_DISPLAY_CAP`) keeps
 /// the picker inside the 22-row PETSCII budget without paging state.
 pub(in crate::telnet) const REMOTE_PORT_DISPLAY_CAP: usize = 6;
@@ -2433,20 +2433,38 @@ impl TelnetSession {
             }
             self.send_line("").await?;
 
-            // Registered remote console ports (§9 #12), capped.  Each is a
-            // single line keyed by a digit; the captured Vec maps the digit
-            // back to its (slave IP, label) on selection.
+            // Registered remote (slave) ports (§9 #12), capped.  Each is a
+            // single line keyed by a digit; the captured Vec maps the digit back
+            // to its port on selection.
+            //
+            // Not "console ports", which these comments said until 2026-08-23:
+            // modem ports and the CP/M endpoint register here too, and the words
+            // outlived the code by two years' worth of features.  A Kermit-mode
+            // port is the one that does not -- it takes the relay path instead.
             let remotes = crate::relay::list_remote_ports();
-            let shown: Vec<(std::net::IpAddr, String)> =
+            let shown: Vec<crate::relay::RemotePort> =
                 remotes.iter().take(REMOTE_PORT_DISPLAY_CAP).cloned().collect();
             any_eligible |= !shown.is_empty();
             if !remotes.is_empty() {
                 self.send_line(&format!("  {}", self.dim("Remote (slave) ports:")))
                     .await?;
-                for (i, (ip, label)) in shown.iter().enumerate() {
+                for (i, port) in shown.iter().enumerate() {
                     // No spaces around '@' — the entry is exactly the string the
                     // user types to dial it (`ATDT <Port>@<ip>`).
-                    let entry = truncate_to_width(&format!("{}@{}", label, ip), 30);
+                    //
+                    // **And what it is, in the same words the local rows above
+                    // use.** A console port, a modem port and a Kermit-server
+                    // port read identically as a bare address, so an operator
+                    // could not see what they were picking while the two rows
+                    // above them said "Console mode" plainly. The mode is
+                    // omitted when the slave did not say -- one older than the
+                    // protocol addition sends none, and a guessed default would
+                    // put the wrong word beside a real port.
+                    let mut entry = truncate_to_width(&port.address(), 30);
+                    if let Some(mode) = port.mode_label() {
+                        entry.push_str(" - ");
+                        entry.push_str(mode);
+                    }
                     self.send_line(&format!(
                         "  {} {}",
                         self.cyan(&format!("[{}]", i + 1)),
@@ -2507,8 +2525,11 @@ impl TelnetSession {
                         && n >= 1
                         && n <= shown.len()
                     {
-                        let (ip, label) = shown[n - 1].clone();
-                        return Ok(Some(GatewayPick::Remote { ip, label }));
+                        let picked = shown[n - 1].clone();
+                        return Ok(Some(GatewayPick::Remote {
+                            ip: picked.ip,
+                            label: picked.label,
+                        }));
                     }
                     self.show_error("Press A, B, a number, or Q.").await?;
                     continue;

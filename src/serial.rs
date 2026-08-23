@@ -1684,7 +1684,20 @@ fn console_slave_register_tick(
             attempt
         );
         let connected = handle.block_on(async {
-            crate::relay::connect_master_register(&host, mport, &user, &pass, label).await
+            // **The port's own mode, not a literal.** These ticks are
+            // per-mode functions and I labelled one of them wrong by hand --
+            // `modem_slave_announce_tick` went out as "kermit". Reading it from
+            // the config it was handed cannot be mislabelled, and follows the
+            // port if its mode changes.
+            crate::relay::connect_master_register(
+                &host,
+                mport,
+                &user,
+                &pass,
+                label,
+                &port_cfg.mode,
+            )
+            .await
         });
         let relay = match connected {
             Ok(r) => r,
@@ -2002,7 +2015,11 @@ fn modem_slave_announce_tick(
             attempt
         );
         let connected = handle.block_on(async {
-            crate::relay::connect_master_register(&host, mport, &user, &pass, label).await
+            // Read here rather than captured: this tick has only the port id,
+            // and the mode is what the master will *display* -- so the value at
+            // registration time is the honest one.
+            let mode = config::get_config().port(id).mode.clone();
+            crate::relay::connect_master_register(&host, mport, &user, &pass, label, &mode).await
         });
         let relay = match connected {
             Ok(r) => r,
@@ -2313,7 +2330,11 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
             user,
             attempt
         );
-        match crate::relay::connect_master_register(&host, mport, &user, &pass, "CPM").await {
+        // Not a serial port at all: the CP/M emulator's virtual modem endpoint,
+        // which registers by the same mechanism so a master user can dial it.
+        match crate::relay::connect_master_register(&host, mport, &user, &pass, "CPM", "emulator")
+            .await
+        {
             Ok(crate::relay::MasterRelay { _session, mut stream }) => {
                 attempt = 0; // connected: a later outage counts from one again
                 backoff = RECONNECT_BACKOFF_MIN;

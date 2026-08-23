@@ -2729,9 +2729,17 @@ impl TelnetSession {
                     ))
                     .await?;
                     const RELAY_STATUS_CAP: usize = 3;
-                    for (ip, label) in ports.iter().take(RELAY_STATUS_CAP) {
-                        self.send_line(&format!("    {}@{}", self.amber(label), ip))
-                            .await?;
+                    for port in ports.iter().take(RELAY_STATUS_CAP) {
+                        // The mode here too: this block answers "what can the
+                        // master reach?", and a list of addresses does not.
+                        let mode = port.mode_label().map(|m| format!(" - {m}")).unwrap_or_default();
+                        self.send_line(&format!(
+                            "    {}@{}{}",
+                            self.amber(&port.label),
+                            port.ip,
+                            self.dim(&mode)
+                        ))
+                        .await?;
                     }
                     if ports.len() > RELAY_STATUS_CAP {
                         self.send_line(&format!(

@@ -515,17 +515,21 @@ impl SshHandler {
     /// slot until it disconnects).  The channel is held idle in the global
     /// registry; the Serial Gateway picker claims it.
     ///
-    /// **Mode-agnostic, and the wire cannot say otherwise.** `serial-register`
-    /// carries only the port label, so this end never learns whether the slave
-    /// port is in console or modem mode -- both register here, exactly as
-    /// `relay::REMOTE_PORTS` documents. The log line said "console
-    /// port" for either, which has been wrong for every modem port since they
-    /// began registering (2026-07-26) -- and modem is the default mode, so it
-    /// was wrong for the common case. Say what is known instead.
+    /// **The wire says the mode now, and it did not until 2026-08-23.**
+    /// `serial-register` carried only the port label, so this end could not tell
+    /// a console port from a modem or Kermit one -- all three register here --
+    /// and the picker listed every remote port as a bare `B@ip`. An operator
+    /// therefore could not see what they were about to pick, while the *local*
+    /// rows beside them said "Console mode" plainly. The mode is now an optional
+    /// second token, and optional is the operative word: a slave older than the
+    /// addition sends none, and `None` renders as nothing rather than guessing a
+    /// default. (The log line used to say "console port" for either, which was
+    /// wrong for every modem port from the day they began registering.)
     async fn register_console_port(
         &mut self,
         channel: russh::ChannelId,
         label: &str,
+        mode: Option<String>,
         session: &mut russh::server::Session,
     ) -> Result<(), russh::Error> {
         let cfg = config::get_config();
@@ -598,7 +602,12 @@ impl SshHandler {
 
         let label = label.to_string();
         let generation =
-            crate::relay::register_remote_port(slave_ip, label.clone(), gateway_stream);
+            crate::relay::register_remote_port(
+                slave_ip,
+                label.clone(),
+                mode.clone(),
+                gateway_stream,
+            );
         self.registered_ports.insert(channel, (label, generation));
         Ok(())
     }
@@ -888,10 +897,14 @@ impl russh::server::Handler for SshHandler {
         // the slave offers a console port; we hold the channel idle in the
         // remote-port registry until a master user picks it in the Serial
         // Gateway picker.
-        if let Some(label) = command.strip_prefix("serial-register ") {
-            return self
-                .register_console_port(channel, label.trim(), session)
-                .await;
+        if let Some(rest) = command.strip_prefix("serial-register ") {
+            // `<label> [mode]`.  Tokens, not "everything after the space":
+            // the mode was added as a second token, and a master that took the
+            // remainder whole would register `"B console"` as the label.
+            let mut toks = rest.split_whitespace();
+            let label = toks.next().unwrap_or("").to_string();
+            let mode = toks.next().map(str::to_string);
+            return self.register_console_port(channel, &label, mode, session).await;
         }
 
         // Grammar (§3 Model B): `serial-relay <port> menu`

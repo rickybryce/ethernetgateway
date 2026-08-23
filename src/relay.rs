@@ -722,13 +722,21 @@ pub async fn connect_master_register(
     username: &str,
     password: &str,
     port_label: &str,
+    mode: &str,
 ) -> Result<MasterRelay, RelayConnectError> {
     connect_relay_exec(
         host,
         port,
         username,
         password,
-        &format!("serial-register {}", port_label),
+        // **The mode is a second token, and the label is still the first.** A
+        // master older than this addition takes the whole remainder as the label
+        // and will register `"B console"`, so a mixed pair shows an odd address
+        // in the picker and dial-by-name (`ATDT B@ip`) stops resolving until the
+        // master is upgraded -- the menu pick still works, because it uses the
+        // label it was given. That degradation is the reason the mode goes after
+        // the label rather than before it.
+        &format!("serial-register {} {}", port_label, mode),
         RELAY_HELLO_TIMEOUT,
     )
     .await
@@ -978,7 +986,12 @@ pub const RELAY_ACTIVATE_BYTE: u8 = 0x01;
 /// A registered remote console port: the master's end of the idle SSH
 /// registration channel, paired with the generation stamped when it was
 /// registered (see [`REMOTE_PORTS`] for why the generation matters).
-type RegisteredPort = (tokio::io::DuplexStream, u64);
+/// A registered remote port: the master's end of the channel, the generation
+/// stamp that guards a re-register race, and the mode the slave reported.
+///
+/// The mode is `None` for a slave too old to send one -- see
+/// [`register_remote_port`].
+type RegisteredPort = (tokio::io::DuplexStream, u64, Option<String>);
 
 /// Slave ports currently registered with this master, keyed by `(slave IP,
 /// port label)`.  Each value pairs the master's end of the idle SSH
@@ -1011,11 +1024,16 @@ static REMOTE_PORT_GEN: AtomicU64 = AtomicU64::new(0);
 /// [`remove_remote_port_gen`]).  Marked `#[must_use]`: dropping the
 /// generation silently reintroduces the re-register eviction race.
 #[must_use]
-pub fn register_remote_port(slave_ip: IpAddr, label: String, stream: tokio::io::DuplexStream) -> u64 {
+pub fn register_remote_port(
+    slave_ip: IpAddr,
+    label: String,
+    mode: Option<String>,
+    stream: tokio::io::DuplexStream,
+) -> u64 {
     let generation = REMOTE_PORT_GEN.fetch_add(1, Ordering::Relaxed);
     let mut g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(HashMap::new)
-        .insert((slave_ip, label), (stream, generation));
+        .insert((slave_ip, label), (stream, generation, mode));
     generation
 }
 
@@ -1027,7 +1045,7 @@ pub fn remove_remote_port(slave_ip: IpAddr, label: &str) -> Option<tokio::io::Du
     let mut g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
     g.as_mut()
         .and_then(|m| m.remove(&(slave_ip, label.to_string())))
-        .map(|(stream, _gen)| stream)
+        .map(|(stream, _gen, _mode)| stream)
 }
 
 /// Drop a *specific* registration on channel teardown: removes the entry
@@ -1044,7 +1062,9 @@ pub fn remove_remote_port_gen(
     let map = g.as_mut()?;
     let key = (slave_ip, label.to_string());
     match map.get(&key) {
-        Some((_, stored)) if *stored == generation => map.remove(&key).map(|(stream, _)| stream),
+        Some((_, stored, _)) if *stored == generation => {
+            map.remove(&key).map(|(stream, _, _)| stream)
+        }
         _ => None,
     }
 }
@@ -1079,14 +1099,69 @@ pub async fn claim_remote_peer(ip: IpAddr, label: &str) -> Option<tokio::io::Dup
 
 /// List the currently-registered remote console ports, sorted stably so
 /// the picker order doesn't jump around between redraws.
-pub fn list_remote_ports() -> Vec<(IpAddr, String)> {
+pub fn list_remote_ports() -> Vec<RemotePort> {
     let g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut v: Vec<(IpAddr, String)> = g
+    let mut v: Vec<RemotePort> = g
         .as_ref()
-        .map(|m| m.keys().cloned().collect())
+        .map(|m| {
+            m.iter()
+                .map(|((ip, label), (_, _, mode))| RemotePort {
+                    ip: *ip,
+                    label: label.clone(),
+                    mode: mode.clone(),
+                })
+                .collect()
+        })
         .unwrap_or_default();
-    v.sort();
+    // Sorted by the pair that identifies a port, as before -- the mode is
+    // description, not identity, so it must not affect the order a picker draws.
+    v.sort_by(|a, b| (a.ip, &a.label).cmp(&(b.ip, &b.label)));
     v
+}
+
+/// One registered remote port, as a picker sees it.
+///
+/// **The mode is `Option`, because it is a fact the wire may not carry.** A
+/// slave older than this protocol addition sends only its label, and the honest
+/// rendering of "we were not told" is to say nothing rather than to guess a
+/// default -- guessing would put "Modem mode" beside a console port, which is
+/// worse than a bare address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemotePort {
+    pub ip: IpAddr,
+    pub label: String,
+    /// The slave's `serial_*_mode` for this port, when it said.
+    pub mode: Option<String>,
+}
+
+impl RemotePort {
+    /// `B@192.168.1.141`, the string an operator types to dial it.
+    pub fn address(&self) -> String {
+        format!("{}@{}", self.label, self.ip)
+    }
+
+    /// How the mode reads on a picker row, in the same words the local rows use
+    /// (`Console mode`, `Modem mode`) -- two lists that described one thing
+    /// differently would be worse than one list.
+    ///
+    /// All four arms were checked against a live master/slave pair: a console
+    /// port reads `Console mode`, a modem port `Modem mode`, and the CP/M
+    /// endpoint `CP/M emulator`. **`kermit` is unreachable from the picker
+    /// today**, and deliberately so rather than by omission: a Kermit-mode slave
+    /// port takes the *relay* path (`serial-relay <port> kermit`, "asking master
+    /// to serve Kermit") instead of registering, because its wire is served by
+    /// the master's Kermit server rather than picked by a user. The arm stays so
+    /// that a Kermit port which ever did register would be named rather than
+    /// bare.
+    pub fn mode_label(&self) -> Option<&'static str> {
+        match self.mode.as_deref() {
+            Some("console") => Some("Console mode"),
+            Some("modem") => Some("Modem mode"),
+            Some("kermit") => Some("Kermit server"),
+            Some("emulator") => Some("CP/M emulator"),
+            _ => None,
+        }
+    }
 }
 
 // ─── Slave-side link status (observability, §9 #10) ──────────
