@@ -18,37 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over whatever telnet or the desktop had set, because an absent field also
   became `false` and `backspace_target("false")` is `None` -- pass-through.  An
   operator who set `backspace` for an Altair from the terminal, then changed an
-  unrelated setting in the browser, quietly got their wire back to
-  pass-through.  Measured through the real save path rather than by reading it,
-  and the regression test asserts **both** halves: a "can it be set?" test passes
-  while the clobber survives.
-
-- **A folding erase key in modem mode is marked, and switching to modem mode
-  clears it.**  The fold is a rule about *keystrokes*, and console mode can apply
-  it safely because the byte arrived from a telnet or SSH session -- a human at a
-  terminal.  Modem mode is the one where the folded byte comes off the wire,
-  where `process_online_bytes` sees a single stream and cannot tell a keystroke
-  from a byte of an XMODEM block: an active fold there rewrites 0x08, 0x7F and
-  0x14 inside the payload of an XMODEM, XMODEM-1K, YMODEM, ZMODEM or Punter
-  upload.  (Kermit escapes all three, so it survives; a download arrives in the
-  direction that is never folded.)  Measured against a real 133-byte XMODEM
-  block: two bytes rewritten under `backspace`, two under `rubout`, none under
-  the `passthrough` default.
-
-  Three things follow, and none of them is a refusal -- a device whose only erase
-  key is DEL, typing at a remote prompt, has a real use for the fold, and this
-  gateway cannot know whether a file will cross the same call.  **Switching a
-  port to modem mode clears an active fold**, since the setting was made for the
-  mode being left and is hazardous in the one being entered; it is the
-  *transition* and not an invariant, because "modem mode implies pass-through"
-  would make the setting unreachable there.  **All three screens then mark it**
-  while a modem port is folding -- red, with the explanation in the desktop
-  tooltip and the web `title`, and printed outright on a terminal, which has no
-  hover to put it in.  One predicate and one text, shared, so no surface can
-  decide on its own what counts as a risk.  The terminal's marker rides the
-  existing row rather than adding one: that screen is 21 of its 22 PETSCII rows
-  and its row-count test models arithmetic rather than the real `send_line`
-  calls, so a conditional row there would have gone uncaught.
+  unrelated setting in the browser, quietly got their wire back to pass-through.
+  Measured through the real save path rather than by reading it, and the
+  regression test asserts **both** halves: a "can it be set?" test passes while
+  the clobber survives.
 
 ## [0.9.5] - 2026-08-23
 

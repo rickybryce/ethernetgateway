@@ -51,9 +51,6 @@ const POPUP_INPUT_BG: Color32 = Color32::from_rgb(0x1c, 0x46, 0x2a); // brighter
 const WARN_BG: Color32 = Color32::from_rgb(0x33, 0x06, 0x06);      // dark red — WARNING popup panel (must-acknowledge)
 const WARN_BORDER: Color32 = Color32::from_rgb(0xe0, 0x3a, 0x3a);  // red border for warning popups
 
-/// The Erase-key row's own explanation, shared by both states of its tooltip.
-const ERASE_KEY_HOVER: &str = "Which byte the erase key becomes on its way out of this port.  Whoever is typing decides which of 0x08 and 0x7F their terminal sends and cannot be asked to change it, while a lot of period hardware edits with 0x08 and a modern client sends 0x7F -- neither end is wrong, which is why this exists.  Note which way it runs: on a CONSOLE bridge you are on the network side and the byte goes out to the device on the wire; in MODEM mode the device on the wire is typing and the byte goes out to whatever it dialled.  One meaning either way.  Never in Kermit-server mode: there those bytes are packet data and rewriting one would corrupt the transfer.  It rewrites keystrokes, so set it back to pass-through before sending a binary through the same connection -- the same caveat PETSCII carries.  ATZ reloads it, AT&F clears it.";
-
 /// Launch the GUI window.  Blocks the calling thread until the window is closed.
 /// If the GUI fails to start (e.g. missing graphics drivers), logs the error and
 /// returns so the server continues running headless.
@@ -3255,10 +3252,6 @@ impl App {
     ) {
         ui.horizontal(|ui| {
             ui.label("Mode:");
-            // Read before the combo can change it: entering modem mode clears an
-            // active erase fold, and the draft is edited in place by the
-            // selectable_values below, so "what it was" has to be taken first.
-            let mode_before = self.cfg.port(id).mode.clone();
             egui::ComboBox::from_id_salt(format!("mode_{}", id.label()))
                 .width(220.0)
                 .selected_text(match self.cfg.port(id).mode.as_str() {
@@ -3283,16 +3276,6 @@ impl App {
                         "Kermit Server Mode",
                     );
                 });
-            // In the draft, not on save: the operator should see the Erase row
-            // change with the mode they just picked, rather than discover it
-            // after a restart.
-            if let Some(pass) = crate::serial::backspace_after_mode_change(
-                &mode_before,
-                &self.cfg.port(id).mode,
-                &self.cfg.port(id).backspace,
-            ) {
-                self.cfg.port_mut(id).backspace = pass.to_string();
-            }
         });
     }
 
@@ -3374,20 +3357,7 @@ impl App {
         // Which byte the device edits with, on a console bridge.  Beside PETSCII
         // because both are "translate what crosses this wire", and both carry
         // the same caveat about binary.
-        // **Red while it is folding in modem mode**, which is the one
-        // combination that rewrites a file transfer's payload.  The label
-        // carries it rather than the control: the control shows the *choice*,
-        // and what is wrong is the choice paired with the mode.
-        let risky = crate::serial::erase_fold_risks_transfer(
-            &self.cfg.port(id).mode,
-            &self.cfg.port(id).backspace,
-        );
-        let erase_label = if risky {
-            egui::RichText::new("Erase key:").color(RED_ALERT)
-        } else {
-            egui::RichText::new("Erase key:")
-        };
-        cpm_choice_row(ui, erase_label, |ui| {
+        cpm_choice_row(ui, "Erase key:", |ui| {
             let current = crate::serial::backspace_label(&self.cfg.port(id).backspace).to_string();
             cpm_combo(ui, &format!("serial_backspace_{}", id.label()))
                 .selected_text(current)
@@ -3403,14 +3373,7 @@ impl App {
         })
         .response
         .on_hover_text(
-            // The warning goes FIRST when it applies.  A tooltip is read from
-            // the top and this one is already long; an explanation of the red
-            // buried in its sixth sentence is one the operator never reaches.
-            if risky {
-                format!("{}\n\n{}", crate::serial::ERASE_FOLD_MODEM_WARNING, ERASE_KEY_HOVER)
-            } else {
-                ERASE_KEY_HOVER.to_string()
-            },
+            "Which byte the erase key becomes on its way out of this port.  Whoever is typing decides which of 0x08 and 0x7F their terminal sends and cannot be asked to change it, while a lot of period hardware edits with 0x08 and a modern client sends 0x7F -- neither end is wrong, which is why this exists.  Note which way it runs: on a CONSOLE bridge you are on the network side and the byte goes out to the device on the wire; in MODEM mode the device on the wire is typing and the byte goes out to whatever it dialled.  One meaning either way.  Never in Kermit-server mode: there those bytes are packet data and rewriting one would corrupt the transfer.  It rewrites keystrokes, so set it back to pass-through before sending a binary through the same connection -- the same caveat PETSCII carries.  ATZ reloads it, AT&F clears it.",
         );
         ui.horizontal(|ui| {
             ui.checkbox(
@@ -4419,7 +4382,7 @@ const CPM_CONTROL_W: f32 = 330.0;
 /// against the rest of the window.
 fn cpm_choice_row(
     ui: &mut egui::Ui,
-    label: impl Into<egui::WidgetText>,
+    label: &str,
     control: impl FnOnce(&mut egui::Ui),
 ) -> egui::InnerResponse<()> {
     cpm_choice_row_trailing(ui, label, control, |_| {})
@@ -4433,7 +4396,7 @@ fn cpm_choice_row(
 /// with its dropdown truncated mid-value and the button sitting on top of it.
 fn cpm_choice_row_trailing(
     ui: &mut egui::Ui,
-    label: impl Into<egui::WidgetText>,
+    label: &str,
     control: impl FnOnce(&mut egui::Ui),
     trailing: impl FnOnce(&mut egui::Ui),
 ) -> egui::InnerResponse<()> {
