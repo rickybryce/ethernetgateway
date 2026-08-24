@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A file transfer the gateway itself runs is no longer rewritten on its way
+  to a serial port.**  The gateway keeps two paths for data -- a session renders
+  text through `send`/`send_line`, which translate (PETSCII case swapping so a
+  C64 can read at all, and the port's erase fold), while a transfer protocol
+  writes raw -- but both arrive at the byte pumps as one stream, so a pump could
+  not tell a menu character from a byte of an XMODEM block and rewrote whatever
+  came through.  A device dialling `ATDT ethernetgateway` and uploading from the
+  transfer menu, or dialling `ATDT KERMIT`, had its data blocks folded: only
+  blocks containing `08`, `7F` or `14` were damaged, they failed their check,
+  the sender resent them and the fold reproduced the identical corruption, so
+  the retry never converged.  It presented as "transfers work for some files and
+  stall on others", with nothing pointing at an erase-key or PETSCII setting.
+
+  A protocol now holds the port's wire for exactly as long as it runs, and the
+  pumps pass bytes through untouched while it does.  The guard is a **count**
+  (overlapping holders would otherwise clear each other) released on **every**
+  exit path including an abort, a peer cancel, an early return and a panic.
+
+  This covers transfers **this gateway is an endpoint of**.  A device
+  transferring against a third party *through* the gateway -- console-mode
+  PCGET/PCPUT, `ATDT <host>` to a BBS, a peer dial, or a relayed transfer seen
+  from the slave -- is a pipe whose protocol two other parties run, and is not
+  yet covered.
+
 - **The web page could not set a port's erase key, and saving from it silently
   cleared one set elsewhere.**  `serial_a_backspace` / `serial_b_backspace` are a
   three-way choice and had been listed among the *boolean* keys since the setting
