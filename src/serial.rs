@@ -598,11 +598,26 @@ static TRANSFER_ACTIVE: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::ne
 pub struct TransferActive(Option<SerialPortId>);
 
 impl TransferActive {
-    /// Raise the count before the protocol's first byte.
+    /// Raise the count before the far end can send its first byte.
     ///
-    /// `Release`, paired with the `Acquire` in [`transfer_active`]: the pump
-    /// runs on another thread and must not see a byte of the transfer while
-    /// still reading a stale zero.
+    /// **What keeps this safe is the order of events, not the memory ordering.**
+    /// The pump sits *upstream* of the protocol -- it folds a byte on its way
+    /// off the wire, long before any protocol code sees it -- so the only thing
+    /// that can protect a transfer is having the count up before the far end
+    /// starts sending. Every call site therefore raises it before the screen
+    /// that says "start now" (and `handle_zmodem_autostart`, where a sender is
+    /// already pushing, raises it as its very first act).
+    ///
+    /// Say what the atomics do and do not buy, because it is easy to write
+    /// down the opposite: a `Release` **store** orders writes that came
+    /// *before* it, so it cannot stop a reader seeing a stale zero at any
+    /// given instant, and no ordering can -- that is a wall-clock question,
+    /// settled structurally above. The count itself needs nothing stronger
+    /// than `Relaxed` to be read correctly. The pairing that *is* load-bearing
+    /// runs the other way: `Release` on the decrement against `Acquire` in
+    /// [`transfer_active`], so a pump that sees the count reach zero also sees
+    /// everything the finished transfer did. `Release` is kept here for
+    /// symmetry with that, not because it guards the raise.
     pub fn hold(id: Option<SerialPortId>) -> TransferActive {
         if let Some(id) = id {
             TRANSFER_ACTIVE[id.index()].fetch_add(1, Ordering::Release);
@@ -614,7 +629,14 @@ impl TransferActive {
 impl Drop for TransferActive {
     fn drop(&mut self) {
         if let Some(id) = self.0 {
-            TRANSFER_ACTIVE[id.index()].fetch_sub(1, Ordering::Release);
+            let prev = TRANSFER_ACTIVE[id.index()].fetch_sub(1, Ordering::Release);
+            // A decrement without a matching raise wraps to `usize::MAX`, and
+            // `> 0` would then be true for the life of the process -- a port
+            // that silently stops folding and never starts again. Construction
+            // makes that impossible today (only `hold` builds one, and it
+            // increments exactly when `self.0` is `Some`), which is precisely
+            // why an asymmetry introduced later would go unnoticed without this.
+            debug_assert!(prev > 0, "TransferActive released more times than held");
         }
     }
 }
@@ -6961,6 +6983,83 @@ mod tests {
             }
         }
     }
+
+    /// The wire is held **before** the far end is told to start sending.
+    ///
+    /// The pump is upstream of every protocol: it folds a byte on its way off
+    /// the wire, long before protocol code sees it. So a guard raised just
+    /// before the first `read` is already too late -- what matters is that it
+    /// is up before the far end could plausibly send anything.
+    ///
+    /// It was too late, and the gap was not small: the guard sat after the
+    /// "start now" screen *and* after `drain_input`, which for Punter waits up
+    /// to two seconds. Nothing corrupted in that window only because all four
+    /// protocols open with ASCII-printable handshakes -- a property of the
+    /// protocols, not a guarantee this design made. This pins the fix so the
+    /// line cannot drift back down the function.
+    #[test]
+    fn test_the_wire_is_held_before_the_far_end_is_told_to_start() {
+        // Each marker is a line that tells the far end to begin, or (for the
+        // autostart path) announces one already has.
+        const MARKERS: &[&str] = &[
+            "send from your terminal now.",
+            "receive now.",
+            "Listening for Kermit packets.",
+            "ZMODEM upload detected",
+        ];
+        let sources: &[(&str, &str)] = &[
+            ("telnet/transfer.rs", include_str!("telnet/transfer.rs")),
+            ("telnet/io.rs", include_str!("telnet/io.rs")),
+        ];
+        let mut checked = 0usize;
+        for (name, src) in sources {
+            let lines: Vec<&str> = src.lines().collect();
+            // Stop at the file's own tests: a test may quote a marker string.
+            let end = lines
+                .iter()
+                .position(|l| l.trim_start().starts_with("mod tests"))
+                .unwrap_or(lines.len());
+            for (i, line) in lines[..end].iter().enumerate() {
+                // Comments stripped, or this scan reads its own prose -- the
+                // doc comments above quote these markers verbatim.
+                let code = match line.find("//") {
+                    Some(c) => &line[..c],
+                    None => line,
+                };
+                if !MARKERS.iter().any(|m| code.contains(m)) {
+                    continue;
+                }
+                // Walk back to the enclosing fn; the hold must be inside it and
+                // above this line.
+                let mut j = i;
+                while j > 0
+                    && !lines[j].trim_start().starts_with("fn ")
+                    && !lines[j].contains(" fn ")
+                {
+                    j -= 1;
+                }
+                let scope = lines[j..i].join("\n");
+                assert!(
+                    scope.contains("TransferActive::hold"),
+                    "{name}:{} tells the far end to start before the wire is \
+                     held -- every byte it sends until the hold is folded or \
+                     PETSCII-translated by the pump:\n  {}",
+                    i + 1,
+                    line.trim()
+                );
+                checked += 1;
+            }
+        }
+        // Positive control: a scan that matches nothing passes vacuously, and
+        // these markers are ordinary UI strings that a reword would silently
+        // take out from under it.
+        assert!(
+            checked >= 10,
+            "only {checked} start-the-transfer markers found -- the scan has \
+             stopped matching the screens it is meant to police",
+        );
+    }
+
 
     // ─── AT command parsing ──────────────────────────────
 
