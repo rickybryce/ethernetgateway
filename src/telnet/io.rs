@@ -1066,6 +1066,7 @@ impl TelnetSession {
 
         let start = std::time::Instant::now();
         let result = {
+            let _wire = crate::serial::TransferActive::hold(self.serial_port_id);
             let mut writer_guard = self.writer.lock().await;
             crate::zmodem::zmodem_receive(
                 &mut self.reader,

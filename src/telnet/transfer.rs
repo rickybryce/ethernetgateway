@@ -864,6 +864,10 @@ impl TelnetSession {
         // peer's flavor is detected.  Surfaced in the post-transfer
         // summary so the user sees who they talked to.
         let mut kermit_flavor: Option<String> = None;
+        // The wire is the transfer's for exactly as long as the protocol runs:
+        // raised before its first byte, dropped the moment it returns.  See
+        // `serial::TransferActive`.
+        let wire = crate::serial::TransferActive::hold(self.serial_port_id);
         let result: Result<Received, String> = match protocol {
             UploadProtocol::Zmodem => crate::zmodem::zmodem_receive(
                 &mut self.reader,
@@ -973,6 +977,9 @@ impl TelnetSession {
             }),
         };
         drop(writer_guard);
+        // Released here, not at the end of the function: everything below is
+        // summaries and saved files, and the wire is a terminal again already.
+        drop(wire);
         let elapsed = start.elapsed();
 
         let uploads = match result {
@@ -1509,6 +1516,7 @@ impl TelnetSession {
         let cfg = config::get_config();
         let verbose = cfg.verbose;
         let mut writer_guard = self.writer.lock().await;
+        let wire = crate::serial::TransferActive::hold(self.serial_port_id);
         let result = if matches!(protocol, DownloadProtocol::Zmodem) {
             // zmodem_send is batch-capable; download always sends
             // exactly one file, so we pass a single-element slice.
@@ -1591,6 +1599,7 @@ impl TelnetSession {
             .await
         };
         drop(writer_guard);
+        drop(wire);
         let elapsed = start.elapsed();
 
         match result {
@@ -1774,6 +1783,7 @@ impl TelnetSession {
 
         let start = std::time::Instant::now();
         let result = {
+            let _wire = crate::serial::TransferActive::hold(self.serial_port_id);
             let mut writer_guard = self.writer.lock().await;
             crate::kermit::kermit_server_with_outcome(
                 &mut self.reader,

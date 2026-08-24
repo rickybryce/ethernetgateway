@@ -1986,6 +1986,12 @@ pub fn start_kermit_server(
                                 }
                                 let mut saved: Vec<(String, usize)> = Vec::new();
                                 let mut skipped: Vec<(String, &'static str)> = Vec::new();
+                                // No wire under this one -- it is a TCP client
+                                // on the standalone Kermit port -- but held so
+                                // that every protocol call site holds one, which
+                                // is what makes the rule checkable.
+                                let _wire =
+                                    crate::serial::TransferActive::hold(None);
                                 let result = crate::kermit::kermit_server_with_outcome(
                                     &mut read_half,
                                     &mut write_half,

@@ -543,6 +543,88 @@ const CONSOLE_DUPLEX_BUFSIZE: usize = 16 * 1024;
 /// their own concurrent bridge.
 static BRIDGE_ACTIVE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
+// ─── A file transfer owns the wire ─────────────────────────
+
+/// **Is a file transfer running on this port's wire right now?**
+///
+/// The gateway maintains two paths for data and they converge here.  A session
+/// renders text through `send`/`send_line`, which translate -- PETSCII case
+/// swapping for a C64, and this port's erase fold -- while a transfer protocol
+/// writes through the raw path, which must not be touched at all.  Both arrive
+/// at the byte pumps as one stream, so the pump cannot tell a menu character
+/// from a byte of an XMODEM block.  Anything it rewrites, it rewrites in both.
+///
+/// This is how the distinction survives that boundary: a protocol raises the
+/// count for the port it is about to speak on, and the pumps pass bytes through
+/// untouched while it is up.  It answers only for transfers **this gateway is
+/// running** -- a device transferring against a third party through a dial-out
+/// is a pipe we are not an endpoint of, and nothing here can know about it.
+///
+/// A **count**, not a flag, so two overlapping holders cannot clear each
+/// other's state: the last one out restores translation.
+///
+/// **Keyed by port, which is what "per session" means here.** The readers are
+/// the byte pumps, and a pump can only name a port -- it has no handle on a
+/// session -- so a session-keyed map would need a port->session lookup to be
+/// readable at all, for no change in behaviour. A wire carries exactly one
+/// session at a time (`BRIDGE_ACTIVE` allows one bridge per port, and a modem
+/// session owns its port for its duration), so the port *is* the session for
+/// anything that reads this. The two ways a transfer could reach across a
+/// session boundary are both closed and both tested: Port A never answers for
+/// Port B, and a network-side session -- telnet, SSH, the web UI -- holds
+/// `None`, so its transfers cannot touch a wire at all.
+static TRANSFER_ACTIVE: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+
+/// Holds a port's wire for a file transfer, and releases it on **every** exit
+/// path.
+///
+/// RAII because "cleared immediately after the transfer" has to include the
+/// paths nobody writes code for: a protocol that aborts, a peer that vanishes,
+/// a CAN from the far end, a dropped connection, an early `?`.  A flag cleared
+/// on the success path only would leave a port translating nothing for the rest
+/// of its life -- the same reason [`crate::telnet::cpm_boot_ui`]'s drive claims
+/// and `RemountOnDrop` are guards rather than paired calls.
+///
+/// `None` is a transfer with no serial port under it -- a telnet or SSH client,
+/// where no pump is involved and there is nothing to suppress.  Held anyway, so
+/// a call site never has to ask whether it is on a wire.
+///
+/// `#[must_use]` because the whole thing is its lifetime: written as a bare
+/// statement it would raise the count and drop it again on the same line, and
+/// the transfer that followed would be folded exactly as before -- a silent
+/// no-op that reads like a guard.
+#[must_use = "the wire is held for as long as this guard lives; binding it to \
+              nothing raises and releases the count on the spot"]
+pub struct TransferActive(Option<SerialPortId>);
+
+impl TransferActive {
+    /// Raise the count before the protocol's first byte.
+    ///
+    /// `Release`, paired with the `Acquire` in [`transfer_active`]: the pump
+    /// runs on another thread and must not see a byte of the transfer while
+    /// still reading a stale zero.
+    pub fn hold(id: Option<SerialPortId>) -> TransferActive {
+        if let Some(id) = id {
+            TRANSFER_ACTIVE[id.index()].fetch_add(1, Ordering::Release);
+        }
+        TransferActive(id)
+    }
+}
+
+impl Drop for TransferActive {
+    fn drop(&mut self) {
+        if let Some(id) = self.0 {
+            TRANSFER_ACTIVE[id.index()].fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
+/// Whether a transfer holds this port's wire, so the pumps can pass bytes
+/// through untouched.  One relaxed-cost load per chunk, never per byte.
+pub fn transfer_active(id: SerialPortId) -> bool {
+    TRANSFER_ACTIVE[id.index()].load(Ordering::Acquire) > 0
+}
+
 // ─── Serial broadcast channel ──────────────────────────────
 
 /// Capacity of the serial broadcast ring.  Each subscriber (one per open
@@ -2896,7 +2978,13 @@ fn run_console_bridge<S>(
                     // setting is `passthrough` or the chunk has no erase key in
                     // it, which is almost every chunk -- so the common path does
                     // not copy.
-                    let folded = fold_backspace(&bytes, &erase_setting);
+                    // Nothing is folded while a transfer holds this wire --
+                    // the gateway's own Kermit server on this port raises it.
+                    let folded = if transfer_active(id) {
+                        None
+                    } else {
+                        fold_backspace(&bytes, &erase_setting)
+                    };
                     let out = folded.as_deref().unwrap_or(&bytes);
                     if let Err(e) = port.write_all(out) {
                         glog!("{} (Port {}): write error: {}", subsystem, id.label(), e);
@@ -3038,6 +3126,15 @@ fn run_kermit_server_port(
 
     let (async_stream, serial_stream) = tokio::io::duplex(65536);
     let sd = shutdown.clone();
+    // **Belt and braces, and raised here rather than inside the task.**
+    // Kermit-server mode does not fold: `run_console_bridge` resolves the erase
+    // setting to pass-through for every mode but `console`, and no PETSCII
+    // translation reaches this path either -- so nothing reads the flag here
+    // today. It is held anyway, because every protocol call site holding one is
+    // what makes the rule checkable, and because the static gate is one edit
+    // away from not covering this. Outside the spawn because `spawn` only
+    // *queues* the task while the pump below starts as soon as it returns.
+    let _wire = TransferActive::hold(Some(id));
     let kermit_task = handle.spawn(async move {
         let (mut r, mut w) = tokio::io::split(async_stream);
         loop {
@@ -5408,6 +5505,10 @@ fn dial_kermit_server(state: &mut ModemState) {
     // we emit NO CARRIER.  Idle-timeout enforcement comes from the
     // standard `kermit_idle_timeout` config — same as the telnet
     // F→K entry path.
+    // Before the spawn, not inside it: `spawn` only queues the task, and the
+    // pump below starts as soon as this returns -- so a hold in there left a
+    // window where the dialling client's first packets could be folded.
+    let _wire = TransferActive::hold(Some(port_id));
     state.handle.spawn(async move {
         // is_tcp = false: no telnet IAC escaping on a serial bridge.
         // is_petscii = false: serial sessions don't terminal-detect;
@@ -6029,7 +6130,11 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
                 }
                 let mut forward = Vec::with_capacity(n);
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
-                if state.petscii_translate {
+                // Suppressed while a transfer holds the wire, for the reason the
+                // fold is: this translation rewrites punctuation, strips ANSI and
+                // case-swaps letters, which is what a C64 needs to READ a host
+                // and the last thing a binary payload can survive.
+                if state.petscii_translate && !transfer_active(state.port_id) {
                     for b in forward.iter_mut() {
                         *b = translate_petscii_to_ascii_byte(*b);
                     }
@@ -6048,7 +6153,10 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
         match tcp.read(&mut tcp_buf) {
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
-                if state.petscii_translate {
+                // Both directions, unlike the fold: PETSCII translation is
+                // applied each way, so it corrupts a download as well as an
+                // upload.
+                if state.petscii_translate && !transfer_active(state.port_id) {
                     let mut translated = Vec::with_capacity(n);
                     for &b in &tcp_buf[..n] {
                         if let Some(stripped) = ansi.feed(b) {
@@ -6127,6 +6235,13 @@ fn process_online_bytes(
 ) {
     let esc = escape_char(state);
     let guard = guard_time(state);
+    // **A transfer holds this wire: nothing is rewritten while it does.** The
+    // fold is a rule about keystrokes, and a byte of an XMODEM block is not one
+    // -- but online they arrive on the same stream, so the only honest answer is
+    // to stop folding for as long as a transfer owns the port.  Read once per
+    // chunk, not per byte, for the reason `erase_target` is cached at all.
+    let erase_target =
+        if transfer_active(state.port_id) { None } else { state.erase_target };
     // Per Hayes standard, S2 > 127 or S12 = 0 disables escape detection.
     let escape_enabled = esc <= 127 && !guard.is_zero();
     let trace = modem_trace_enabled();
@@ -6202,7 +6317,7 @@ fn process_online_bytes(
         // onward is this byte."
         //
         // Cached on the state, so this costs a compare per byte and no lock.
-        forward.push(fold_erase_byte(byte, state.erase_target));
+        forward.push(fold_erase_byte(byte, erase_target));
         state.last_data_time = now;
     }
 }
@@ -6667,6 +6782,184 @@ mod tests {
 
     fn lock_global_state() -> std::sync::MutexGuard<'static, ()> {
         GLOBAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // ─── A file transfer owns the wire ───────────────────
+
+    /// A transfer holds the port it is on, and only that one.
+    #[test]
+    fn test_a_transfer_holds_only_its_own_port() {
+        let _g = lock_global_state();
+        assert!(!transfer_active(SerialPortId::A));
+        assert!(!transfer_active(SerialPortId::B));
+        {
+            let _wire = TransferActive::hold(Some(SerialPortId::A));
+            assert!(transfer_active(SerialPortId::A));
+            assert!(
+                !transfer_active(SerialPortId::B),
+                "a transfer on A must not stop B rendering PETSCII for whoever \
+                 is reading it"
+            );
+        }
+        assert!(!transfer_active(SerialPortId::A), "the wire was never released");
+    }
+
+    /// **A count, not a flag.** Two overlapping holders must not clear each
+    /// other -- with a bool the first to finish would restore translation while
+    /// the second was still sending.
+    #[test]
+    fn test_overlapping_holders_do_not_clear_each_other() {
+        let _g = lock_global_state();
+        let outer = TransferActive::hold(Some(SerialPortId::A));
+        {
+            let _inner = TransferActive::hold(Some(SerialPortId::A));
+            assert!(transfer_active(SerialPortId::A));
+        }
+        assert!(
+            transfer_active(SerialPortId::A),
+            "the inner holder finishing released a wire the outer one still owns"
+        );
+        drop(outer);
+        assert!(!transfer_active(SerialPortId::A));
+    }
+
+    /// A transfer with no wire under it -- a telnet or SSH client -- is a no-op,
+    /// so a call site never has to ask whether it is on a serial port.
+    #[test]
+    fn test_a_transfer_with_no_wire_is_a_no_op() {
+        let _g = lock_global_state();
+        let _wire = TransferActive::hold(None);
+        assert!(!transfer_active(SerialPortId::A));
+        assert!(!transfer_active(SerialPortId::B));
+    }
+
+    /// **Released on the paths nobody writes code for.** "Cleared immediately
+    /// after the transfer" has to include an abort, a vanished peer, a CAN from
+    /// the far end and an early `?` -- a flag cleared on the success path only
+    /// would leave a port translating nothing for the rest of its life. This is
+    /// why it is a guard and not a pair of calls.
+    #[test]
+    fn test_the_wire_is_released_when_a_transfer_fails() {
+        let _g = lock_global_state();
+
+        fn aborts_early() -> Result<(), &'static str> {
+            let _wire = TransferActive::hold(Some(SerialPortId::B));
+            assert!(transfer_active(SerialPortId::B));
+            Err("peer cancelled")?;
+            unreachable!("the ? returned above");
+        }
+        assert!(aborts_early().is_err());
+        assert!(
+            !transfer_active(SerialPortId::B),
+            "an aborted transfer left the wire held, so this port would never \
+             translate again"
+        );
+
+        // And a panicking protocol, which unwinds rather than returning.  The
+        // hook is silenced around it: the panic is the point of the test, and
+        // its backtrace in the suite's output reads like a failure.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let held = std::panic::catch_unwind(|| {
+            let _wire = TransferActive::hold(Some(SerialPortId::B));
+            panic!("protocol blew up");
+        });
+        std::panic::set_hook(previous);
+        assert!(held.is_err(), "the panic should have propagated to us");
+        assert!(
+            !transfer_active(SerialPortId::B),
+            "a panicking transfer left the wire held"
+        );
+    }
+
+    /// **Every protocol call site raises the flag before its first byte.**
+    ///
+    /// The point of the flag is that it is up before a transfer's first byte
+    /// reaches a pump, so a call site that forgets it is the whole defect back
+    /// again -- silently, on one protocol only. Scanned with comments stripped,
+    /// or the test reads its own prose.
+    #[test]
+    fn test_every_protocol_call_site_holds_the_wire() {
+        // The entry points that write protocol bytes. Helpers that only
+        // validate a path (`is_safe_relative_subdir`) are deliberately absent:
+        // they send nothing.
+        // Every entry point that puts protocol bytes on a wire -- including the
+        // ones no production path calls today. The Kermit *client* mode is
+        // driven only from `relay/tests.rs`, and `xmodem_receive` /
+        // `kermit_server` / `kermit_receive_with_init` from tests as well; they
+        // are listed so that wiring one to a real surface cannot skip the guard.
+        // Helpers that only validate a path (`is_safe_relative_subdir`) are
+        // deliberately absent: they send nothing.
+        const ENTRIES: &[&str] = &[
+            "xmodem_send",
+            "xmodem_receive",
+            "xmodem_receive_batch",
+            "zmodem_send",
+            "zmodem_receive",
+            "kermit_send",
+            "kermit_send_with_starting_seq",
+            "kermit_receive",
+            "kermit_receive_with_init",
+            "kermit_server",
+            "kermit_server_with_outcome",
+            "kermit_client_get",
+            "kermit_client_dir",
+            "kermit_client_type",
+            "kermit_client_space",
+            "kermit_client_delete",
+            "kermit_client_rename",
+            "kermit_client_cwd",
+            "kermit_client_mkdir",
+            "kermit_client_rmdir",
+            "kermit_client_help",
+            "kermit_client_version",
+            "kermit_client_logout",
+            "kermit_client_bye",
+            "kermit_client_finish",
+            "punter_send",
+            "punter_receive",
+        ];
+        let sources: &[(&str, &str)] = &[
+            ("telnet/transfer.rs", include_str!("telnet/transfer.rs")),
+            ("telnet/io.rs", include_str!("telnet/io.rs")),
+            ("telnet/mod.rs", include_str!("telnet/mod.rs")),
+            ("relay.rs", include_str!("relay.rs")),
+            ("serial.rs", include_str!("serial.rs")),
+        ];
+        for (name, src) in sources {
+            let lines: Vec<&str> = src.lines().collect();
+            // Stop at the file's own test module: a test may call a protocol
+            // directly, and it is not on anybody's wire.
+            let end = lines
+                .iter()
+                .position(|l| l.trim_start().starts_with("mod tests"))
+                .unwrap_or(lines.len());
+            for (i, line) in lines[..end].iter().enumerate() {
+                let code = match line.find("//") {
+                    Some(c) => &line[..c],
+                    None => line,
+                };
+                if !ENTRIES.iter().any(|e| code.contains(&format!("::{e}("))) {
+                    continue;
+                }
+                // Walk back to the enclosing fn and require a hold inside it.
+                let mut j = i;
+                while j > 0 && !lines[j].trim_start().starts_with("fn ")
+                    && !lines[j].contains(" fn ")
+                {
+                    j -= 1;
+                }
+                let scope = lines[j..=i].join("\n");
+                assert!(
+                    scope.contains("TransferActive::hold"),
+                    "{name}:{} calls a transfer protocol without holding the \
+                     wire first -- its bytes would be folded or PETSCII-translated \
+                     on the way out:\n  {}",
+                    i + 1,
+                    line.trim()
+                );
+            }
+        }
     }
 
     // ─── AT command parsing ──────────────────────────────

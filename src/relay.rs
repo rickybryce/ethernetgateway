@@ -242,6 +242,11 @@ where
     glog!("Relay: Kermit server serving slave port {} from {:?}", who, target_dir);
 
     let (mut read_half, mut write_half) = tokio::io::split(relay);
+    // `None`, and the reason is worth stating: this gateway runs the protocol,
+    // but the wire is the SLAVE's serial port in another process, which cannot
+    // be told from here.  A relayed transfer is therefore a pipe from the
+    // slave's point of view -- the case a flag cannot cover.
+    let _wire = crate::serial::TransferActive::hold(None);
     let result = crate::kermit::kermit_server_with_outcome(
         &mut read_half,
         &mut write_half,
