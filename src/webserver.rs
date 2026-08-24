@@ -1314,7 +1314,6 @@ fn collect_form_updates(
         "serial_a_echo", "serial_a_verbose", "serial_a_quiet",
         "serial_b_echo", "serial_b_verbose", "serial_b_quiet",
         "serial_a_petscii_translate", "serial_b_petscii_translate",
-        "serial_a_backspace", "serial_b_backspace",
         "serial_a_drive_carrier", "serial_b_drive_carrier",
     ];
     for key in bool_keys {
@@ -1331,10 +1330,18 @@ fn collect_form_updates(
     }
 
     // Per-port serial settings (the rest are plain).
+    //
+    // **`backspace` belongs here and spent 0.9.5 in `bool_keys`.** It is a
+    // three-way choice, and the boolean loop wrote `is_truthy("rubout")` --
+    // `false` -- for it: the page could not set the erase key at all, and worse,
+    // ANY save from this page silently cleared one set from telnet or the
+    // desktop, because an absent field also became `false` and
+    // `backspace_target("false")` is `None`. A setting that quietly stops
+    // working, in the one surface an operator is most likely to save from.
     let serial_keys: &[&str] = &[
         "mode", "port", "baud", "databits", "parity", "stopbits",
         "flowcontrol", "s_regs", "x_code", "dtr_mode", "flow_mode",
-        "dcd_mode",
+        "dcd_mode", "backspace",
         "stored_0", "stored_1", "stored_2", "stored_3",
     ];
     for port in ["serial_a", "serial_b"] {
@@ -1342,6 +1349,29 @@ fn collect_form_updates(
             let full = format!("{}_{}", port, k);
             if let Some(v) = fields.get(&full) {
                 updates.push((full, v.clone()));
+            }
+        }
+    }
+    // Entering modem mode clears an active erase fold, the same rule the telnet
+    // and desktop screens apply at their own mode selectors -- one function, so
+    // three surfaces cannot disagree about it.  Appended after the loop above so
+    // it overrides the submitted value: `update_config_values` takes the pairs in
+    // order, and the form was filled in before the mode changed.
+    for (port, id) in
+        [("serial_a", crate::config::SerialPortId::A), ("serial_b", crate::config::SerialPortId::B)]
+    {
+        let submitted_mode = fields.get(&format!("{port}_mode"));
+        let submitted_erase = fields.get(&format!("{port}_backspace"));
+        if let Some(new_mode) = submitted_mode {
+            let current_erase = submitted_erase
+                .map(|s| s.as_str())
+                .unwrap_or(&old_cfg.port(id).backspace);
+            if let Some(pass) = crate::serial::backspace_after_mode_change(
+                &old_cfg.port(id).mode,
+                new_mode,
+                current_erase,
+            ) {
+                updates.push((format!("{port}_backspace"), pass.to_string()));
             }
         }
     }
@@ -4008,8 +4038,21 @@ fn serial_more_popup(
                     )
                 })
                 .collect();
+            // **Marked when it is folding in modem mode**, the one combination
+            // that rewrites a transfer's payload.  `title` is the web's hover,
+            // so it carries the same explanation the desktop tooltip leads with
+            // and the terminal prints -- one text, three surfaces.
+            let risky = crate::serial::erase_fold_risks_transfer(&port.mode, &port.backspace);
+            let warn = if risky {
+                format!(
+                    "<span class=\"warn-inline\" title=\"{}\">&#9888; folds file transfers</span>",
+                    html_escape(crate::serial::ERASE_FOLD_MODEM_WARNING),
+                )
+            } else {
+                String::new()
+            };
             format!(
-                "<select name=\"{}_backspace\">{}</select>\
+                "<select name=\"{}_backspace\"{}>{}</select>{}\
                  <span class=\"hint\">Which byte the erase key becomes on its way out of \
                  this port. Whoever is typing picks one and cannot be asked to change it, and \
                  a lot of period hardware edits with 0x08 while a modern client sends 0x7F \
@@ -4022,7 +4065,15 @@ fn serial_more_popup(
                  switch it back to <em>pass through</em> before sending a binary through the \
                  same connection &mdash; the same caveat PETSCII carries. <code>ATZ</code> \
                  reloads it, <code>AT&amp;F</code> clears it.</span>",
-                prefix, opts,
+                prefix,
+                if risky {
+                    format!(" class=\"warn-control\" title=\"{}\"",
+                            html_escape(crate::serial::ERASE_FOLD_MODEM_WARNING))
+                } else {
+                    String::new()
+                },
+                opts,
+                warn,
             )
         },
         xc = numfield(&format!("{}_x_code", prefix), "X-code", port.x_code),
@@ -4288,6 +4339,14 @@ a.linkbtn:hover { background: #22365a; }
    warning-modal red so the two read as the same class of message.  Wraps rather
    than overflowing its frame — the text is a full sentence. */
 .warn-inline { color: var(--warn-border); font-style: italic; }
+/* A form control whose CURRENT VALUE is the problem -- not its input, which
+   is why this is a colour and not a validation state.  Must match a
+   `select`: `button.more.alert` is scoped to buttons, and reusing it here
+   left the marked control unstyled with nothing but a screenshot to say so. */
+select.warn-control, input.warn-control {
+  color: var(--warn-border);
+  border-color: var(--warn-border);
+}
 .notice {
   background: #1c3a50; color: var(--amber-bright);
   padding: 8px 12px; border: 1px solid var(--amber);
@@ -5595,6 +5654,129 @@ mod tests {
 
     fn empty_form() -> HashMap<String, String> {
         HashMap::new()
+    }
+
+    /// **The erase key is a three-way choice, not a checkbox.** It sat in
+    /// `bool_keys` through 0.9.5, where `is_truthy("rubout")` wrote `false`: the
+    /// page could not set it, and any save from this page cleared one set from
+    /// telnet or the desktop, because an absent field became `false` too and
+    /// `backspace_target("false")` is `None`. Both halves are asserted -- the
+    /// clobber is the worse one and the one a "can it be set?" test misses.
+    #[test]
+    fn test_the_web_page_can_set_the_erase_key_and_never_clobbers_it() {
+        let mut stored = Config::default();
+        stored.port_mut(crate::config::SerialPortId::A).backspace = "rubout".into();
+
+        for choice in ["passthrough", "backspace", "rubout"] {
+            let mut form = empty_form();
+            form.insert("serial_a_backspace".into(), choice.into());
+            let (updates, _) = collect_form_updates(&form, &stored);
+            let written: Vec<&String> = updates
+                .iter()
+                .filter(|(k, _)| k == "serial_a_backspace")
+                .map(|(_, v)| v)
+                .collect();
+            assert_eq!(
+                written,
+                vec![choice],
+                "submitting {choice:?} must store {choice:?}, not a boolean"
+            );
+        }
+
+        // A save that never touched the select must leave the stored value alone.
+        let (updates, _) = collect_form_updates(&empty_form(), &stored);
+        assert!(
+            !updates.iter().any(|(k, _)| k == "serial_a_backspace"),
+            "an unrelated save wrote the erase key, silently reverting the \
+             operator's setting to pass-through"
+        );
+    }
+
+    /// Switching a port to modem mode clears an active fold, through the same
+    /// shared rule the telnet and desktop selectors use.
+    #[test]
+    fn test_switching_a_port_to_modem_mode_clears_the_fold() {
+        let mut stored = Config::default();
+        {
+            let p = stored.port_mut(crate::config::SerialPortId::A);
+            p.mode = "console".into();
+            p.backspace = "backspace".into();
+        }
+        let mut form = empty_form();
+        form.insert("serial_a_mode".into(), "modem".into());
+        form.insert("serial_a_backspace".into(), "backspace".into());
+        let (updates, _) = collect_form_updates(&form, &stored);
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|(k, _)| k == "serial_a_backspace")
+                .map(|(_, v)| v.as_str())
+                .next_back(),
+            Some("passthrough"),
+            "entering modem mode must clear the fold, and the clearing pair must \
+             come last -- update_config_values takes them in order"
+        );
+
+        // Already in modem mode: an operator who turned it back on keeps it.
+        stored.port_mut(crate::config::SerialPortId::A).mode = "modem".into();
+        let (updates, _) = collect_form_updates(&form, &stored);
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|(k, _)| k == "serial_a_backspace")
+                .map(|(_, v)| v.as_str())
+                .next_back(),
+            Some("backspace"),
+            "a save inside modem mode must not undo a deliberate choice"
+        );
+    }
+
+    /// The page marks the risky combination and explains it in a `title`, which
+    /// is the web's hover.
+    #[test]
+    fn test_the_page_marks_a_folding_modem_port() {
+        let mut cfg = Config::default();
+        {
+            let p = cfg.port_mut(crate::config::SerialPortId::A);
+            p.mode = "modem".into();
+            p.backspace = "rubout".into();
+        }
+        let html = render_main_page(&cfg, None, false);
+        assert!(html.contains("folds file transfers"), "no marker on the risky row");
+        assert!(
+            html.contains(&html_escape(crate::serial::ERASE_FOLD_MODEM_WARNING)),
+            "the marker has no explanation to hover"
+        );
+
+        // **Every class the marked control carries must have a rule in this page's
+        // own stylesheet.**  The first version used `class="alert"`, whose rule is
+        // `button.more.alert` -- scoped to buttons, so the select was never
+        // styled and the red simply did not appear.  Nothing but a screenshot
+        // would have caught that, which is what this reads instead.
+        let tag = html
+            .split("<select name=\"serial_a_backspace\"")
+            .nth(1)
+            .and_then(|rest| rest.split('>').next())
+            .expect("the marked select");
+        let class = tag
+            .split("class=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the marked select carries a class");
+        assert!(
+            html.contains(&format!("select.{class}")),
+            "the marked select is class {class:?}, which this page's CSS never \
+             selects for a select -- the control would render unstyled"
+        );
+
+        // Console mode with the same fold: safe, so nothing is marked -- a mark
+        // that appears where there is no risk teaches the operator to ignore it.
+        cfg.port_mut(crate::config::SerialPortId::A).mode = "console".into();
+        let html = render_main_page(&cfg, None, false);
+        assert!(
+            !html.contains("folds file transfers"),
+            "a console bridge was marked; it folds a byte that came from a terminal"
+        );
     }
 
     #[test]

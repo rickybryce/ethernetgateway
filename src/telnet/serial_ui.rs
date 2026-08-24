@@ -505,13 +505,36 @@ impl TelnetSession {
                 // The modem path folds as well, so it says so as well.  Named
                 // by the value rather than the choice's whole label: this row
                 // shares its width with nothing but has 40 columns on a C64.
-                let w = if self.terminal_type == TerminalType::Petscii { 26 } else { 58 };
+                //
+                // **Red when it is folding**, because this is the one mode where
+                // an active fold rewrites a file transfer's payload -- a
+                // terminal has no hover to explain that in, so the colour is the
+                // whole signal here and pressing K prints the reason.
+                // **And it costs no row.** This screen is 21 of its 22 PETSCII
+                // rows and the row-count test models arithmetic rather than the
+                // real `send_line` calls, so a conditional row added here would
+                // not be caught by it -- the marker rides the same line, and on
+                // a 40-column C64, where there is no room for even that, the
+                // colour carries it and `K` prints the reason.
+                let petscii = self.terminal_type == TerminalType::Petscii;
+                let risky = crate::serial::erase_fold_risks_transfer(
+                    &port.mode,
+                    &port.backspace,
+                );
+                let marker =
+                    if risky && !petscii { crate::serial::ERASE_FOLD_ROW_MARKER } else { "" };
+                let w = if petscii { 26 } else { 58 - marker.len() };
+                let shown = truncate_to_width(
+                    crate::serial::backspace_label(&port.backspace),
+                    w,
+                );
                 self.send_line(&format!(
                     "  Erase:  {}",
-                    self.amber(&truncate_to_width(
-                        crate::serial::backspace_label(&port.backspace),
-                        w
-                    ))
+                    if risky {
+                        self.red(&format!("{shown}{marker}"))
+                    } else {
+                        self.amber(&shown)
+                    }
                 ))
                 .await?;
             }
@@ -666,6 +689,9 @@ impl TelnetSession {
                         .map(|i| (i + 1) % choices.len())
                         .unwrap_or(0);
                     let next = choices[idx].0.to_string();
+                    // Read before `next` is moved into the write.
+                    let now_risky =
+                        crate::serial::erase_fold_risks_transfer(&port.mode, &next);
                     let key = config::serial_key(id, "backspace");
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value(&key, &next);
@@ -676,6 +702,14 @@ impl TelnetSession {
                     // setting once per session, so a user mid-command does not
                     // have the wire changed under them.
                     crate::serial::restart_serial(id);
+                    // A terminal has no hover, so the explanation is printed at
+                    // the moment the operator chooses the risky combination --
+                    // and on landing back on pass-through it is not printed,
+                    // because there is nothing left to warn about.
+                    if now_risky {
+                        self.show_error_lines(crate::serial::erase_fold_warning_lines())
+                            .await?;
+                    }
                 }
                 "t" if !(self.is_serial && self.serial_port_id == Some(id)) => {
                     self.toggle_serial_mode(id).await?;
@@ -929,11 +963,36 @@ impl TelnetSession {
         };
         let v = new_mode.to_string();
         let key = config::serial_key(id, "mode");
-        tokio::task::spawn_blocking(move || {
-            config::update_config_value(&key, &v);
+        // Entering modem mode clears an active erase fold -- one batch write, so
+        // a port never exists on disk as "modem mode with a fold" it did not ask
+        // for.  See `serial::backspace_after_mode_change` for why this is the
+        // transition and not an invariant.
+        let cleared_fold = crate::serial::backspace_after_mode_change(
+            &original_cfg.port(id).mode,
+            new_mode,
+            &original_cfg.port(id).backspace,
+        );
+        let erase_key = config::serial_key(id, "backspace");
+        tokio::task::spawn_blocking(move || match cleared_fold {
+            Some(pass) => config::update_config_values(&[(&key, &v), (&erase_key, pass)]),
+            None => config::update_config_value(&key, &v),
         })
         .await
         .ok();
+        if cleared_fold.is_some() {
+            self.show_error_lines(&[
+                "Erase key set back to pass-through.",
+                "",
+                "A fold is safe on a console bridge,",
+                "where the byte came from a terminal.",
+                "In modem mode it would rewrite the",
+                "payload of a file transfer, so this",
+                "port starts out passing it through.",
+                "",
+                "Press K if you meant to keep it.",
+            ])
+            .await?;
+        }
         self.modem_apply_settings(id, &original_cfg).await
     }
 
