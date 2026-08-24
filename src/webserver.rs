@@ -7413,4 +7413,117 @@ mod tests {
         assert!(web_ip_rejection(false, true, false, public).is_none());
         assert!(web_ip_rejection(true, true, false, public).is_none());
     }
+
+    /// Every value-bearing control on the page survives a save **verbatim**.
+    ///
+    /// This is the systemic form of the bug that shipped in 0.9.5: the three
+    /// erase-key `<select>`s sat in `bool_keys`, so a save ran
+    /// `is_truthy("rubout")` over a three-way choice and stored `false`.  The
+    /// page could not set the key at all, and *any* save from the browser wrote
+    /// `false` over whatever telnet or the desktop had set.
+    ///
+    /// **Reachability alone would not have caught it** -- the key still appeared
+    /// in the update list, carrying a coerced `false`.  What separates a value
+    /// control from a checkbox is that its value is its *content*, so this
+    /// submits a distinctive string through every `<select>` and text/number
+    /// `<input>` and requires that exact string to come back.  A control routed
+    /// through the boolean loop fails, because that loop can only emit `true`
+    /// or `false`.
+    ///
+    /// Checkboxes are deliberately out of scope: coercion is correct for them,
+    /// and `test_collect_form_updates_absent_checkboxes_become_false` and
+    /// `test_place_bundled_terminals_is_on_the_page_and_savable` cover that side.
+    #[test]
+    fn test_every_value_control_survives_a_save_verbatim() {
+        // Master role, so the role-gated relay controls are live rather than
+        // skipped -- a gate must not be able to hide a control from this scan.
+        let cfg = Config { gateway_role: "master".to_string(), ..Config::default() };
+
+        let mut html = render_main_page(&cfg, None, false);
+        html.push_str(&render_more_popups(&cfg));
+
+        // Controls whose values a *different* handler owns.  Named rather than
+        // pattern-matched, and each is asserted to still be on the page below,
+        // so an exclusion cannot outlive the control it excuses.
+        let mut elsewhere: Vec<String> =
+            vec!["cpm_new_format".to_string(), "cpm_new_name".to_string()];
+        for d in 0..16u8 {
+            elsewhere.push(format!("cpm_mount_{}", (b'a' + d) as char));
+        }
+
+        let controls = value_controls(&html);
+        assert!(
+            controls.len() > 40,
+            "only {} value controls found -- the scan stopped matching the markup",
+            controls.len(),
+        );
+
+        const PROBE: &str = "zzprobe";
+        let mut form = empty_form();
+        for name in &controls {
+            form.insert(name.clone(), PROBE.to_string());
+        }
+        // A master with relays armed, so nothing is skipped as inert.
+        form.insert("gateway_role".to_string(), "master".to_string());
+        let (updates, _) = collect_form_updates(&form, &cfg);
+
+        for name in &controls {
+            if name == "gateway_role" {
+                continue; // pinned to `master` above to open the role gate
+            }
+            if elsewhere.contains(name) {
+                assert!(
+                    html.contains(&format!("name=\"{name}\"")),
+                    "{name} is excused as handled elsewhere but is no longer on the page",
+                );
+                continue;
+            }
+            let got = updates.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+            assert_eq!(
+                got,
+                Some(PROBE),
+                "{name} is a value control, so a save must carry its value through \
+                 unchanged. `None` means no list claims it and the save is silently \
+                 dropped; `true`/`false` means it is in `bool_keys`, which coerces a \
+                 choice to a boolean -- the 0.9.5 erase-key bug.",
+            );
+        }
+    }
+
+    /// Names of every `<select>` and text/number `<input>` in `html`.
+    ///
+    /// Reads the rendered page rather than the source, so a control added by a
+    /// helper this test has never heard of is still scanned.  Checkboxes,
+    /// buttons, hidden fields and `<meta name=...>` are all excluded by looking
+    /// only at these two tags and at the `type` a control declares.
+    fn value_controls(html: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for tag in html.split('<').skip(1) {
+            let end = tag.find('>').unwrap_or(tag.len());
+            let tag = &tag[..end];
+            let (is_select, is_input) =
+                (tag.starts_with("select "), tag.starts_with("input "));
+            if !is_select && !is_input {
+                continue;
+            }
+            let attr = |a: &str| -> Option<String> {
+                let pat = format!("{a}=\"");
+                let i = tag.find(&pat)? + pat.len();
+                let rest = &tag[i..];
+                Some(rest[..rest.find('"')?].to_string())
+            };
+            if is_input
+                && !matches!(attr("type").as_deref(), Some("text" | "number" | "password"))
+            {
+                continue;
+            }
+            if let Some(name) = attr("name")
+                && !out.contains(&name)
+            {
+                out.push(name);
+            }
+        }
+        out
+    }
+
 }
