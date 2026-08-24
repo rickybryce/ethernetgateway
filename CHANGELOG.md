@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A transfer was invited before the wire was held, so the first moments of one
+  were still being rewritten.**  The byte pump sits *upstream* of the transfer
+  protocols -- it rewrites a byte on its way off the serial port, before any
+  protocol code sees it -- so the guard has to be up before the far end starts
+  sending, not before the gateway starts reading.  Each menu path printed
+  "Start <protocol> send now", drained the input and took a lock, and only then
+  held the wire; for Punter that drain waits up to two seconds with the device
+  already sending.  The ZMODEM auto-start path was sharper still, since it runs
+  *because* a sender is already pushing.  Every path now holds the wire before
+  the screen that invites the transfer.  No file is known to have been damaged
+  through this window -- all four protocols happen to open with ASCII-printable
+  handshakes -- but that was a property of the protocols rather than anything
+  the gateway guaranteed.
+
 - **A file transfer the gateway itself runs is no longer rewritten on its way
   to a serial port.**  The gateway keeps two paths for data -- a session renders
   text through `send`/`send_line`, which translate (PETSCII case swapping so a
