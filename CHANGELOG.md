@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A console bridge says so when the port rewrites the erase key, before you
+  connect.**  `serial_a_backspace` / `serial_b_backspace` fold Backspace and
+  Delete to the byte the device edits with, which is what the setting is for
+  and is right for typing.  It is wrong for a file transfer, and a console
+  bridge carries those: the CP/M-side `PCGET` / `PCPUT` utilities run XMODEM
+  over the console line, so the blocks travel through the same fold.  The
+  failure is quiet and does not resolve itself -- only blocks containing 0x08,
+  0x7F or 0x14 are altered, they fail their check, the sender resends and the
+  fold reproduces the identical corruption, so the transfer stalls rather than
+  failing outright, and nothing on screen names an erase key.
+
+  The Serial Gateway now says this on the connect screen, above the Y/N prompt
+  so it is read while there is still something to do about it, and **only when
+  the port actually folds** -- a notice that appears whatever the setting says
+  is one an operator learns to skip.  The gateway does not try to detect the
+  transfer itself: it is a pipe for one, the two ends run the protocol between
+  them, and nothing declares it.  The setting is the answer, so the operator is
+  told the setting is on.
+
+  Not yet shown for a **remote** console port picked from a master: the slave
+  folds in its own process and `serial-register` does not carry the setting.
+
 ### Changed
 
 - **The erase-key fold is a console-mode setting again; the modem path no longer

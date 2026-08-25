@@ -2659,6 +2659,20 @@ impl TelnetSession {
             port_cfg.flowcontrol,
         ))
         .await?;
+        // Said before the Y/N, not after connecting: the point of it is to be
+        // read while there is still something to do about it.  Console mode
+        // only, because that is the only mode that folds -- a modem-mode target
+        // is reached by the peer-dial branch below and passes bytes through.
+        // Shown only when the port actually folds: a warning that appears
+        // whatever the setting says is one an operator learns to skip.
+        if is_console {
+            if let Some(warning) = crate::serial::erase_fold_transfer_warning(&port_cfg.backspace) {
+                self.send_line("").await?;
+                for line in warning {
+                    self.send_line(&format!("  {}", self.yellow(line))).await?;
+                }
+            }
+        }
         self.send_line("").await?;
         self.send_line(&format!(
             "  Press {} {} to disconnect.",

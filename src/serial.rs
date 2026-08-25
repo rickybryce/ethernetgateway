@@ -2532,6 +2532,36 @@ pub fn backspace_label(value: &str) -> &'static str {
     BACKSPACE_CHOICES.iter().find(|(v, _)| *v == want).map(|(_, l)| *l).unwrap_or(want)
 }
 
+/// What a console bridge should say before it connects, when this port folds.
+///
+/// `None` when the port sends what arrived -- there is nothing to warn about,
+/// and a notice that appears whatever the setting says is one an operator
+/// learns to skip. The lines are the *whole* text for this warning on every
+/// surface that shows it, for the reason `MountContext::boot_slot_note` is:
+/// three screens phrasing one rule three ways is how they drift apart.
+///
+/// **A console bridge is a pipe for a file transfer, which is why this is
+/// worth a screen.** `PCGET` / `PCPUT` run XMODEM over the CP/M box's console
+/// line, so a transfer crosses the same pump this setting folds -- and it
+/// cannot be detected from here, because the two ends run the protocol between
+/// them and nothing declares it to us. The setting is the answer, so the
+/// operator has to be told it is on before they need it, not after a transfer
+/// has already failed in a way that names nothing.
+///
+/// Sized for the narrowest surface that shows it: 40-column PETSCII with a
+/// two-space indent, so every line is at most 38 characters. Pinned by
+/// `test_the_erase_fold_warning_fits_the_narrowest_screen`.
+pub fn erase_fold_transfer_warning(value: &str) -> Option<&'static [&'static str]> {
+    backspace_target(value)?;
+    Some(&[
+        "WARNING: Erase key is not Pass",
+        "through -- some bytes are changed",
+        "on the way to the device.  Set it",
+        "to Pass through before any file",
+        "transfer, or the transfer stalls.",
+    ])
+}
+
 /// The byte this setting sends, or `None` to send what arrived.
 ///
 /// Anything unrecognised is `None` -- the setting is hand-editable, and a typo
@@ -2572,6 +2602,71 @@ pub fn fold_backspace(bytes: &[u8], setting: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod backspace_tests {
     use super::*;
+
+    /// The warning is offered for exactly the settings that rewrite a byte.
+    ///
+    /// The negative half is the load-bearing one: a notice that appears
+    /// whatever the setting says is one an operator learns to skip, so it has
+    /// to be silent on `passthrough` -- and on a hand-edited typo too, which
+    /// `backspace_target` reads as pass-through, so the screen and the wire
+    /// cannot disagree about whether anything is being changed.
+    #[test]
+    fn test_the_erase_fold_warning_appears_only_when_a_byte_is_rewritten() {
+        for folding in [BACKSPACE_BS, BACKSPACE_DEL, " RUBOUT ", "Backspace"] {
+            assert!(
+                erase_fold_transfer_warning(folding).is_some(),
+                "{folding} rewrites a byte and must warn"
+            );
+        }
+        for quiet in [BACKSPACE_PASSTHROUGH, "", "nonsense", "0x08", "bs", "del"] {
+            assert!(
+                erase_fold_transfer_warning(quiet).is_none(),
+                "{quiet:?} sends what arrived, so there is nothing to warn about"
+            );
+            // The pair that must never disagree: no warning and no fold.
+            assert!(
+                backspace_target(quiet).is_none(),
+                "{quiet:?} must not fold if it does not warn"
+            );
+        }
+    }
+
+    /// Sized for the narrowest surface that shows it.
+    ///
+    /// A telnet screen renders these at 40 columns on PETSCII with a two-space
+    /// indent, and a long line there does **not** wrap -- it silently loses its
+    /// end, which for a warning means losing the half that says what to do.
+    /// The indent is included rather than assumed, because the caller adds it
+    /// and a test that measures the bare string passes while the screen cuts.
+    #[test]
+    fn test_the_erase_fold_warning_fits_the_narrowest_screen() {
+        let lines = erase_fold_transfer_warning(BACKSPACE_BS).expect("backspace folds");
+        assert!(!lines.is_empty(), "a warning with no lines warns nobody");
+        for line in lines {
+            let rendered = format!("  {}", line);
+            assert!(
+                rendered.len() <= 40,
+                "'{}' is {} columns, over the 40 a PETSCII screen has",
+                rendered,
+                rendered.len()
+            );
+            // A high byte renders as a different glyph on a 7-bit terminal, and
+            // the count above would be wrong for it as well.
+            assert!(line.is_ascii(), "'{}' is not printable on a C64", line);
+        }
+        // It must say what to do, not only that something is wrong: the whole
+        // point is that the operator can fix this before the transfer, and
+        // "Pass through" is the words all three config surfaces use for it.
+        let joined = lines.join(" ");
+        assert!(
+            joined.contains("Pass through"),
+            "the warning must name the setting to change: {joined}"
+        );
+        assert!(
+            joined.contains("transfer"),
+            "the warning must say when it matters: {joined}"
+        );
+    }
 
     /// **Both spellings fold, because the operator's terminal picks one and
     /// cannot be asked to change it.** That is the whole reason the setting
