@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The erase-key fold is a console-mode setting again; the modem path no longer
+  folds.**  `serial_a_backspace` / `serial_b_backspace` shipped in 0.9.5 applying
+  to both a console bridge and the modem path.  The modem half is withdrawn: a
+  console bridge is a link the gateway owns end to end, while a modem-mode port
+  is usually a *pipe* -- `ATDT <host>` to a BBS, a peer dial, a relayed port --
+  where two other parties run whatever protocol crosses it and the gateway is
+  only carrying bytes.  Rewriting a byte in a pipe corrupts any file transfer
+  containing it, and does so identically on every retry, so no checksum recovers
+  it and the transfer stalls rather than failing outright.  The gateway cannot
+  tell a keystroke from a payload byte there, and the several attempts to infer
+  it were less trustworthy than not rewriting at all.
+
+  What this means in practice: a port in **console** mode behaves exactly as it
+  does in 0.9.5 -- the setting is unchanged, it is still on all three surfaces,
+  and the Altair erase-key fix it was written for still works.  A port in
+  **modem** mode passes 0x08, 0x7F and 0x14 through untouched whatever the
+  setting says, which is what the gateway did before 0.9.5.  `ATZ` and `AT&F` no
+  longer carry an erase-key state.  Kermit-server mode never folded and still
+  does not.
+
+  The PETSCII translator on `ATDT <host>` is unchanged and carries the same
+  caveat it always has: `AT+PETSCII=0` before sending a binary over a dialled
+  connection.
+
 ### Fixed
 
 - **Six live interop gates had been passing without running, and one of them
@@ -31,44 +57,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accept the payload.  A guard test scans for any gate that can skip without
   being `#[ignore]`d, since the next one will be written by someone who never
   read this entry.
-
-- **A transfer was invited before the wire was held, so the first moments of one
-  were still being rewritten.**  The byte pump sits *upstream* of the transfer
-  protocols -- it rewrites a byte on its way off the serial port, before any
-  protocol code sees it -- so the guard has to be up before the far end starts
-  sending, not before the gateway starts reading.  Each menu path printed
-  "Start <protocol> send now", drained the input and took a lock, and only then
-  held the wire; for Punter that drain waits up to two seconds with the device
-  already sending.  The ZMODEM auto-start path was sharper still, since it runs
-  *because* a sender is already pushing.  Every path now holds the wire before
-  the screen that invites the transfer.  No file is known to have been damaged
-  through this window -- all four protocols happen to open with ASCII-printable
-  handshakes -- but that was a property of the protocols rather than anything
-  the gateway guaranteed.
-
-- **A file transfer the gateway itself runs is no longer rewritten on its way
-  to a serial port.**  The gateway keeps two paths for data -- a session renders
-  text through `send`/`send_line`, which translate (PETSCII case swapping so a
-  C64 can read at all, and the port's erase fold), while a transfer protocol
-  writes raw -- but both arrive at the byte pumps as one stream, so a pump could
-  not tell a menu character from a byte of an XMODEM block and rewrote whatever
-  came through.  A device dialling `ATDT ethernetgateway` and uploading from the
-  transfer menu, or dialling `ATDT KERMIT`, had its data blocks folded: only
-  blocks containing `08`, `7F` or `14` were damaged, they failed their check,
-  the sender resent them and the fold reproduced the identical corruption, so
-  the retry never converged.  It presented as "transfers work for some files and
-  stall on others", with nothing pointing at an erase-key or PETSCII setting.
-
-  A protocol now holds the port's wire for exactly as long as it runs, and the
-  pumps pass bytes through untouched while it does.  The guard is a **count**
-  (overlapping holders would otherwise clear each other) released on **every**
-  exit path including an abort, a peer cancel, an early return and a panic.
-
-  This covers transfers **this gateway is an endpoint of**.  A device
-  transferring against a third party *through* the gateway -- console-mode
-  PCGET/PCPUT, `ATDT <host>` to a BBS, a peer dial, or a relayed transfer seen
-  from the slave -- is a pipe whose protocol two other parties run, and is not
-  yet covered.
 
 - **The web page could not set a port's erase key, and saving from it silently
   cleared one set elsewhere.**  `serial_a_backspace` / `serial_b_backspace` are a

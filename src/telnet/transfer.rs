@@ -769,16 +769,6 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line("").await?;
-        // **Raised before the device is told to start, not before the first
-        // byte we read.**  The pump is *upstream* of us: it folds a byte on its
-        // way off the wire, long before this function sees it.  So the guard has
-        // to be up before the far end could plausibly send anything -- and the
-        // line below is exactly that moment.  Raising it after the prompt left a
-        // window covering this whole screen plus `drain_input`, which for Punter
-        // waits up to two seconds.  Nothing corrupted in that window only because
-        // all four protocols open with ASCII-printable handshakes, which is a
-        // property of the protocols rather than anything this design guarantees.
-        let wire = crate::serial::TransferActive::hold(self.serial_port_id);
         self.send_line(&format!(
             "  {}",
             self.green(match protocol {
@@ -983,9 +973,6 @@ impl TelnetSession {
             }),
         };
         drop(writer_guard);
-        // Released here, not at the end of the function: everything below is
-        // summaries and saved files, and the wire is a terminal again already.
-        drop(wire);
         let elapsed = start.elapsed();
 
         let uploads = match result {
@@ -1470,12 +1457,6 @@ impl TelnetSession {
             None => return Ok(()),
         };
 
-        // Before the device is told to start, for the reason the upload path
-        // spells out.  A download's *return* channel is the folded direction --
-        // the far end's ACK / NAK / `C` travel wire->session through the same
-        // pump -- so the window is the same one even though the file itself
-        // flows the other way.
-        let wire = crate::serial::TransferActive::hold(self.serial_port_id);
         self.send_line("").await?;
         self.send_line(&format!(
             "  {}",
@@ -1610,7 +1591,6 @@ impl TelnetSession {
             .await
         };
         drop(writer_guard);
-        drop(wire);
         let elapsed = start.elapsed();
 
         match result {
@@ -1685,11 +1665,6 @@ impl TelnetSession {
             return Ok(());
         }
 
-        // Before the screen, because the line below it says we are listening and
-        // a client may answer immediately.  There is no user input between here
-        // and the server, so the whole screen is inside the hold -- the same
-        // reason the upload and download paths raise it before their prompts.
-        let wire = crate::serial::TransferActive::hold(self.serial_port_id);
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
@@ -1866,9 +1841,6 @@ impl TelnetSession {
             )
             .await
         };
-        // Released here, not at the end of the function: everything below is
-        // the summary, and the wire is a terminal again already.
-        drop(wire);
         let elapsed = start.elapsed();
 
         // On Err the closure may have already committed files to

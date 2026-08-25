@@ -1031,13 +1031,6 @@ impl TelnetSession {
     /// `Z` upload.
     pub(in crate::telnet) async fn handle_zmodem_autostart(&mut self) -> Result<(), std::io::Error> {
         glog!("File transfer: ZMODEM autostart detected; switching to receive");
-        // **First thing, before even the drain.**  This path is entered because
-        // a sender is *already* pushing, so unlike the menu-driven transfers
-        // there is no moment before the far end starts -- the earliest possible
-        // hold is the best available, and everything below it (the drain, the
-        // disk check, the banner) is time the pump would otherwise spend folding
-        // a transfer already in flight.
-        let wire = crate::serial::TransferActive::hold(self.serial_port_id);
         // Drain residual ZRQINIT bytes the sender already pushed before
         // we got a chance to start the receiver — the sender will
         // retransmit once it sees our ZRINIT below.
@@ -1083,7 +1076,6 @@ impl TelnetSession {
             )
             .await
         };
-        drop(wire);
         let elapsed = start.elapsed();
 
         let received = match result {

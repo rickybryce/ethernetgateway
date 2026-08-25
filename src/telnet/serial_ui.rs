@@ -480,38 +480,12 @@ impl TelnetSession {
                     self.amber(&port.flowcontrol)
                 ))
                 .await?;
-                // With the status block, not among the action rows below: it is
-                // a value, and it read as an orphan sitting between `E` and `T`
-                // on a real slave.
-                if !kermit_mode {
-                    let w = if self.terminal_type == TerminalType::Petscii { 24 } else { 58 };
-                    self.send_line(&format!(
-                        "  Erase:  {}",
-                        self.amber(&truncate_to_width(
-                            crate::serial::backspace_label(&port.backspace),
-                            w
-                        ))
-                    ))
-                    .await?;
-                }
             } else {
                 let petscii_state = if port.petscii_translate { "on" } else { "off" };
                 self.send_line(&format!(
                     "  Flow:   {}   PETSCII: {}",
                     self.amber(&port.flowcontrol),
                     self.amber(petscii_state)
-                ))
-                .await?;
-                // The modem path folds as well, so it says so as well.  Named
-                // by the value rather than the choice's whole label: this row
-                // shares its width with nothing but has 40 columns on a C64.
-                let w = if self.terminal_type == TerminalType::Petscii { 26 } else { 58 };
-                self.send_line(&format!(
-                    "  Erase:  {}",
-                    self.amber(&truncate_to_width(
-                        crate::serial::backspace_label(&port.backspace),
-                        w
-                    ))
                 ))
                 .await?;
             }
@@ -535,6 +509,17 @@ impl TelnetSession {
             // tear down their connection before they could confirm.
             // Hiding T for the OTHER port would be over-conservative:
             // restarting Port B from a Port A serial session is safe.
+            if console_mode {
+                let w = if self.terminal_type == TerminalType::Petscii { 24 } else { 58 };
+                self.send_line(&format!(
+                    "  Erase key:  {}",
+                    self.amber(&truncate_to_width(
+                        crate::serial::backspace_label(&port.backspace),
+                        w
+                    ))
+                ))
+                .await?;
+            }
             let toggling_own_port = self.is_serial && self.serial_port_id == Some(id);
             if !toggling_own_port {
                 self.send_line(&format!(
@@ -543,24 +528,11 @@ impl TelnetSession {
                 ))
                 .await?;
             }
-            // The erase key shares this row rather than taking one: this screen
-            // is at the 22-row PETSCII budget.  Offered in every mode that
-            // folds -- which is every mode but Kermit, whose wire carries those
-            // bytes as packet data.
-            if kermit_mode {
-                self.send_line(&format!(
-                    "  {}  Select serial port",
-                    self.cyan("S")
-                ))
-                .await?;
-            } else {
-                self.send_line(&format!(
-                    "  {}  Select serial port   {}  Erase key",
-                    self.cyan("S"),
-                    self.cyan("K")
-                ))
-                .await?;
-            }
+            self.send_line(&format!(
+                "  {}  Select serial port",
+                self.cyan("S")
+            ))
+            .await?;
             self.send_line(&format!(
                 "  {}  Set baud rate",
                 self.cyan("B")
@@ -580,11 +552,20 @@ impl TelnetSession {
                 // the Kermit server's wire carries 0x08 and 0x7F as packet data,
                 // where rewriting them would corrupt a transfer, and a setting
                 // that does nothing is worse than no setting.
-                self.send_line(&format!(
-                    "  {}  Set flow control",
-                    self.cyan("F")
-                ))
-                .await?;
+                if console_mode {
+                    self.send_line(&format!(
+                        "  {}  Set flow control   {}  Erase key",
+                        self.cyan("F"),
+                        self.cyan("K")
+                    ))
+                    .await?;
+                } else {
+                    self.send_line(&format!(
+                        "  {}  Set flow control",
+                        self.cyan("F")
+                    ))
+                    .await?;
+                }
             } else {
                 self.send_line(&format!(
                     "  {}  Set flow control   {}  PETSCII",
@@ -654,7 +635,7 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "k" if !kermit_mode => {
+                "k" if console_mode => {
                     // Cycled in the shared list's own order, like every other
                     // choice here.  A hand-edited value lands on the first
                     // choice next, which is `passthrough` -- the end that
