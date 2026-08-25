@@ -2705,8 +2705,24 @@ fn run_console_bridge<S>(
     // **Console mode only, and that is not a scope decision but a correctness
     // one.** This same pump carries the always-on Kermit server's wire, where
     // 0x08, 0x7F and 0x14 are ordinary bytes inside a packet -- rewriting them
-    // would corrupt every transfer that happened to contain one. A console
-    // bridge is a terminal session, where they are a keystroke.
+    // would corrupt every transfer that happened to contain one.
+    //
+    // **A console bridge is mostly keystrokes, but not only keystrokes**, and
+    // the comment here used to claim otherwise. The CP/M-side `PCGET` / `PCPUT`
+    // utilities run XMODEM over the *console* line, so a real transfer crosses
+    // this pump -- and the fold is on `session_to_port`, which is the direction
+    // PCGET's data blocks travel. The damage is quiet: only blocks containing
+    // one of the three bytes are altered, they fail CRC, the sender resends and
+    // the fold reproduces the identical corruption, so the retry loop cannot
+    // converge. It presents as "XMODEM works for some files and stalls on
+    // others" with nothing pointing at an erase-key setting.
+    //
+    // There is deliberately no attempt to detect that here. The gateway is a
+    // pipe for such a transfer -- the CP/M box and the operator's terminal run
+    // the protocol between them and nothing declares it to us -- and inferring
+    // it from the byte stream was tried and withdrawn (see the CHANGELOG entry
+    // for the modem-path fold). The setting is the answer: `passthrough` while
+    // transferring, which is what the manual and all three config surfaces say.
     let erase_setting = {
         let cfg = crate::config::get_config();
         let port_cfg = cfg.port(id);
