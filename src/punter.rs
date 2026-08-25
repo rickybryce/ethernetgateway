@@ -1145,11 +1145,12 @@ mod tests {
     // binary path to run; otherwise skipped. The child speaks raw bytes over
     // its stdio, so is_tcp=false.
     #[tokio::test]
+    #[ignore]
     async fn ccgms_real_receiver_interop() {
-        let bin = match std::env::var("CCGMS_RECV_BIN") {
-            Ok(b) => b,
-            Err(_) => {
-                eprintln!("CCGMS_RECV_BIN not set; skipping");
+        let bin = match crate::interop::harness_bin("CCGMS_RECV_BIN", "ccgms-recv") {
+            Some(b) => b,
+            None => {
+                crate::interop::skipping("CCGMS harness");
                 return;
             }
         };
@@ -1178,18 +1179,37 @@ mod tests {
         )
         .await;
         eprintln!("punter_send result: {:?}", res);
-        let _ = child.kill().await;
+        // **This test asserted nothing until 2026-08-25.** It printed the
+        // result and returned, so it passed whether the send succeeded, failed
+        // or timed out -- the send path's only live cover could not go red, and
+        // reported a pass every time it ran. Both halves are needed: our send
+        // has to finish, *and* the reference has to be satisfied by what it
+        // received, which is what its exit status carries.
+        res.expect("our Punter send to the CCGMS reference timed out")
+            .expect("our Punter send to the CCGMS reference failed");
+        let status = child
+            .wait()
+            .await
+            .expect("waiting for the CCGMS receiver failed");
+        assert!(
+            status.success(),
+            "the CCGMS reference receiver rejected what we sent (exit {:?}) -- \
+             it checks the 300-byte i*7+1 pattern itself and its stderr says \
+             whether the payload matched",
+            status.code(),
+        );
     }
 
     // Live interop the other direction: the gateway RECEIVES from CCGMS's real
     // sender (punter_xmit, sends 300 bytes = i*7+1, type SEQ). Set
     // CCGMS_SEND_BIN to the compiled sender binary path to run; else skipped.
     #[tokio::test]
+    #[ignore]
     async fn ccgms_real_sender_interop() {
-        let bin = match std::env::var("CCGMS_SEND_BIN") {
-            Ok(b) => b,
-            Err(_) => {
-                eprintln!("CCGMS_SEND_BIN not set; skipping");
+        let bin = match crate::interop::harness_bin("CCGMS_SEND_BIN", "ccgms-send") {
+            Some(b) => b,
+            None => {
+                crate::interop::skipping("CCGMS harness");
                 return;
             }
         };

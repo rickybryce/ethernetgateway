@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Six live interop gates had been passing without running, and one of them
+  could not fail even when it did.**  The CCGMS gates -- the closest automated
+  stand-in for a real C64, run against the genuine `ccgmsterm` reference codecs
+  -- asked for `CCGMS_SEND_BIN` / `CCGMS_RECV_BIN` / `CCGMS_XFER_BIN`, and when
+  those were unset they printed a note to a stream cargo hides for passing tests
+  and returned success.  They were also the only interop tests in the suite not
+  marked `#[ignore]`, so `--ignored` never selected them and an ordinary run
+  folded them into its pass count.  The compiled harness had been sitting built
+  on the same machine throughout.
+
+  They now find the harness where its own README builds it, so no environment
+  variable is needed; a variable that *is* set but names a missing file is an
+  error rather than a skip; and all six are `#[ignore]`d like their lrzsz and
+  C-Kermit siblings, so an ordinary run reports them under `ignored` and the
+  live-gate sweep picks them up (82 gates to 88).
+
+  Separately, the Punter **send** gate asserted nothing at all -- it printed the
+  result and returned, so it passed whether the transfer succeeded, failed or
+  timed out.  It now requires the send to complete and the reference receiver to
+  accept the payload.  A guard test scans for any gate that can skip without
+  being `#[ignore]`d, since the next one will be written by someone who never
+  read this entry.
+
 - **A transfer was invited before the wire was held, so the first moments of one
   were still being rewritten.**  The byte pump sits *upstream* of the transfer
   protocols -- it rewrites a byte on its way off the serial port, before any

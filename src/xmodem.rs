@@ -4396,7 +4396,7 @@ mod tests {
     /// Spawn the CCGMS harness in `mode`, returning the child (or None to skip).
     #[cfg(unix)]
     fn spawn_ccgms_xfer(mode: &str) -> Option<tokio::process::Child> {
-        let bin = std::env::var("CCGMS_XFER_BIN").ok()?;
+        let bin = crate::interop::harness_bin("CCGMS_XFER_BIN", "ccgms-xfer")?;
         use tokio::process::Command;
         Some(
             Command::new(&bin)
@@ -4413,10 +4413,11 @@ mod tests {
     /// Our XMODEM sender → real CCGMS `xmodemReceive` (CRC, 128-byte blocks).
     #[cfg(unix)]
     #[tokio::test]
+    #[ignore]
     async fn ccgms_xmodem_us_send_128() {
         let mut child = match spawn_ccgms_xfer("xrecv-crc") {
             Some(c) => c,
-            None => { eprintln!("CCGMS_XFER_BIN not set; skipping"); return; }
+            None => { crate::interop::skipping("CCGMS harness"); return; }
         };
         let mut to_child = child.stdin.take().unwrap();
         let mut from_child = child.stdout.take().unwrap();
@@ -4435,10 +4436,11 @@ mod tests {
     /// Our XMODEM-1K sender → real CCGMS `xmodemReceive` (CRC, STX 1024 blocks).
     #[cfg(unix)]
     #[tokio::test]
+    #[ignore]
     async fn ccgms_xmodem_us_send_1k() {
         let mut child = match spawn_ccgms_xfer("xrecv-crc") {
             Some(c) => c,
-            None => { eprintln!("CCGMS_XFER_BIN not set; skipping"); return; }
+            None => { crate::interop::skipping("CCGMS harness"); return; }
         };
         let mut to_child = child.stdin.take().unwrap();
         let mut from_child = child.stdout.take().unwrap();
@@ -4457,10 +4459,11 @@ mod tests {
     /// Real CCGMS `xmodemTransmit` (128-byte blocks) → our XMODEM receiver.
     #[cfg(unix)]
     #[tokio::test]
+    #[ignore]
     async fn ccgms_xmodem_us_recv_from_128() {
         let mut child = match spawn_ccgms_xfer("xsend-128") {
             Some(c) => c,
-            None => { eprintln!("CCGMS_XFER_BIN not set; skipping"); return; }
+            None => { crate::interop::skipping("CCGMS harness"); return; }
         };
         let mut to_child = child.stdin.take().unwrap();
         let mut from_child = child.stdout.take().unwrap();
@@ -4481,10 +4484,11 @@ mod tests {
     /// Real CCGMS `xmodemTransmit` (STX 1024 blocks) → our XMODEM receiver.
     #[cfg(unix)]
     #[tokio::test]
+    #[ignore]
     async fn ccgms_xmodem_us_recv_from_1k() {
         let mut child = match spawn_ccgms_xfer("xsend-1k") {
             Some(c) => c,
-            None => { eprintln!("CCGMS_XFER_BIN not set; skipping"); return; }
+            None => { crate::interop::skipping("CCGMS harness"); return; }
         };
         let mut to_child = child.stdin.take().unwrap();
         let mut from_child = child.stdout.take().unwrap();

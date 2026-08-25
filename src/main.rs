@@ -46,6 +46,8 @@ mod config;
 mod cpm;
 mod gui;
 mod instance;
+#[cfg(test)]
+mod interop;
 mod kermit;
 mod logger;
 mod portcheck;

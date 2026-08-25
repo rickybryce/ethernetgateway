@@ -13237,7 +13237,7 @@ mod tests {
             .map(|s| !s.success())
             .unwrap_or(true)
         {
-            eprintln!("ckermit not on PATH; skipping interop test");
+            crate::interop::skipping("ckermit on PATH");
             return;
         }
 
@@ -13354,7 +13354,7 @@ mod tests {
             .map(|s| !s.success())
             .unwrap_or(true)
         {
-            eprintln!("ckermit not on PATH; skipping interop test");
+            crate::interop::skipping("ckermit on PATH");
             return;
         }
 
