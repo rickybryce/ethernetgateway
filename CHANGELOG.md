@@ -36,34 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says nothing rather than guessing, because "we were not told" and "it is set
   to pass through" have to stay different answers.
 
-- **The erase key moved next to Mode, out of the Hayes AT block.**  It was under
-  "Hayes AT Saved State" on the web page and the desktop editor, and it belonged
-  there for exactly one release: 0.9.5 made it modem state, reloaded by `ATZ` and
-  cleared by `AT&F`.  Withdrawing the modem-path fold took that away, leaving the
-  one row in that block no AT command touches.  **It is not a Hayes setting at
-  all**: Hayes answers "which byte is the erase key?" with `S5`, on the AT command
-  line, which this gateway implements with the standard default of 8 and which
-  lives in the S-register block.  This setting is a property of the console
-  *wire*, so it now sits beside the Mode control that decides whether it applies.
-  The AT-command reference gained a note distinguishing the two, and Hayes says
-  nothing about the case the modem fold covered because a modem in online mode is
-  *transparent* -- which is a better argument for having removed it than the one
-  the withdrawal entry gives.  Telnet already showed the row next to its Mode
-  line; only a stale comment needed moving.
-
-- **The erase key is greyed out when the port is not in console mode.**  It only
-  ever applied to a console bridge -- a modem port passes 0x08, 0x7F and 0x14
-  through, and on a Kermit-server wire they are packet data whose rewriting
-  would corrupt a transfer -- but the web page and the desktop editor showed a
-  live control in all three modes, explaining the restriction in a hint beside
-  it.  An operator could set it, watch it save, and get no change on the wire.
-  Both now grey it outside console mode, and the web page re-enables it the
-  moment the Mode select changes; telnet already omitted the row, which is the
-  same rule on a screen with no way to draw "greyed".  **The stored value is
-  kept** -- a disabled control is not submitted, and the serial save path skips
-  an absent field rather than reading it as a cleared one -- so switching a port
-  to modem mode and back does not lose the erase key.
-
 ### Changed
 
 - **The erase-key fold is a console-mode setting again; the modem path no longer
@@ -89,6 +61,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The PETSCII translator on `ATDT <host>` is unchanged and carries the same
   caveat it always has: `AT+PETSCII=0` before sending a binary over a dialled
   connection.
+
+- **The erase key is greyed out when the port is not in console mode.**  It only
+  ever applied to a console bridge -- a modem port passes 0x08, 0x7F and 0x14
+  through, and on a Kermit-server wire they are packet data whose rewriting
+  would corrupt a transfer -- but the web page and the desktop editor showed a
+  live control in all three modes, explaining the restriction in a hint beside
+  it.  An operator could set it, watch it save, and get no change on the wire.
+  Both now grey it outside console mode, and the web page re-enables it the
+  moment the Mode select changes; telnet already omitted the row, which is the
+  same rule on a screen with no way to draw "greyed".  **The stored value is
+  kept** -- a disabled control is not submitted, and the serial save path skips
+  an absent field rather than reading it as a cleared one -- so switching a port
+  to modem mode and back does not lose the erase key.
+
+- **The erase key moved next to Mode, out of the Hayes AT block.**  It was under
+  "Hayes AT Saved State" on the web page and the desktop editor, and it belonged
+  there for exactly one release: 0.9.5 made it modem state, reloaded by `ATZ` and
+  cleared by `AT&F`.  Withdrawing the modem-path fold took that away, leaving the
+  one row in that block no AT command touches.  **It is not a Hayes setting at
+  all**: Hayes answers "which byte is the erase key?" with `S5`, on the AT command
+  line, which this gateway implements with the standard default of 8 and which
+  lives in the S-register block.  This setting is a property of the console
+  *wire*, so it now sits beside the Mode control that decides whether it applies.
+  The AT-command reference gained a note distinguishing the two, and Hayes says
+  nothing about the case the modem fold covered because a modem in online mode is
+  *transparent* -- which is a better argument for having removed it than the one
+  the withdrawal entry gives.  Telnet already showed the row next to its Mode
+  line; only a stale comment needed moving.
 
 ### Fixed
 
