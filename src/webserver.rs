@@ -3955,13 +3955,13 @@ fn serial_more_popup(
          <option value=\"console\" {ms_console}>Telnet-Serial</option>\
          <option value=\"kermit\" {ms_kermit}>Kermit Server</option>\
          </select></div>\
+         <div class=\"row\"><span class=\"label\">Erase key:</span>{erase}</div>\
          <div class=\"row\">{bits} {stop}\
          <span class=\"label\">Parity:</span><select name=\"{prefix}_parity\">{po}</select>\
          <span class=\"label\">Flow:</span><select name=\"{prefix}_flowcontrol\">{fo}</select>\
          </div>\
          <h3>Hayes AT Saved State</h3>\
          <div class=\"row\">{echo} {verb} {quiet} {petscii}</div>\
-         <div class=\"row\"><span class=\"label\">Erase key:</span>{erase}</div>\
          <div class=\"row\">{xc} {dtr} {flw} {dcd} {carrier}</div>\
          <h3>S-Registers</h3>\
          <div class=\"row\"><span class=\"label\">S-registers:</span>\

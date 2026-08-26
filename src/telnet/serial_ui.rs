@@ -502,13 +502,13 @@ impl TelnetSession {
                 self.cyan("E")
             ))
             .await?;
-            // T moved here from the Configuration menu so each port's
-            // mode toggle lives next to the rest of its settings.
-            // Hidden only when the caller is dialed in on THIS port —
-            // flipping their own port to console mid-session would
-            // tear down their connection before they could confirm.
-            // Hiding T for the OTHER port would be over-conservative:
-            // restarting Port B from a Port A serial session is safe.
+            // Shown directly above the Mode line, because Mode is what decides
+            // whether this applies at all -- and omitted outright in the other
+            // two modes rather than greyed, which a 40-column screen cannot
+            // draw. The web page and the desktop editor put it beside their Mode
+            // control for the same reason. It is deliberately NOT under the
+            // Hayes AT settings: Hayes answers "which byte is the erase key?"
+            // with S5, on the AT command line, and this is the console wire.
             if console_mode {
                 let w = if self.terminal_type == TerminalType::Petscii { 24 } else { 58 };
                 self.send_line(&format!(
@@ -520,6 +520,13 @@ impl TelnetSession {
                 ))
                 .await?;
             }
+            // T moved here from the Configuration menu so each port's
+            // mode toggle lives next to the rest of its settings.
+            // Hidden only when the caller is dialed in on THIS port —
+            // flipping their own port to console mid-session would
+            // tear down their connection before they could confirm.
+            // Hiding T for the OTHER port would be over-conservative:
+            // restarting Port B from a Port A serial session is safe.
             let toggling_own_port = self.is_serial && self.serial_port_id == Some(id);
             if !toggling_own_port {
                 self.send_line(&format!(

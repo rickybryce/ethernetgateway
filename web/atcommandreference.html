@@ -886,6 +886,19 @@
                     terminate the line. The Hayes defaults (13 / 10 / 8) are safe; leave them
                     be.
                 </div>
+                <div class="callout callout-info">
+                    <strong>S5 is not the same thing as a port&rsquo;s <code>Erase key</code>
+                    setting.</strong> S5 is Hayes: it says which byte erases a character while
+                    you are typing an <code>AT</code> command, and the modem itself is what
+                    consumes it. The <code>Erase key</code> setting
+                    (<code>serial_<em>x</em>_backspace</code>) is a gateway setting on a
+                    <em>console-mode</em> bridge, and it rewrites a byte travelling out to the
+                    device. Hayes has nothing to say about that case, because a modem in online
+                    mode is <em>transparent</em> &mdash; it passes data through untouched, which
+                    is why this gateway no longer folds the erase key on the modem path at all.
+                    The two are on different screens for that reason: S5 with the S-registers,
+                    the erase key beside a port&rsquo;s Mode.
+                </div>
             </div>
 
             <hr class="divider">
