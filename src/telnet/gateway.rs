@@ -2802,6 +2802,36 @@ impl TelnetSession {
             self.cyan(esc_label)
         ))
         .await?;
+        // The same warning the local console screen gives, from the fact the
+        // slave sent with its registration -- **this is the case the erase key
+        // was first reported for**, a relayed port picked from a master, and it
+        // is the one a master could not see: the slave folds in its own process,
+        // so nothing here can read its config.
+        //
+        // Looked up rather than passed in, because this function is reached with
+        // an address and the registry is what knows the rest.
+        //
+        // Silent when the slave did not say (`None` -- a slave older than the
+        // third token), because inventing a warning is the same fault as
+        // inventing a mode: it would train an operator to ignore the screen.
+        // Silent too when the slave says the port is not console mode, since
+        // nothing folds there -- but *not* silent when the mode is unknown and
+        // the erase key folds, because that is a real risk we can name.
+        let remote_erase = crate::relay::list_remote_ports()
+            .into_iter()
+            .find(|p| p.ip == ip && p.label == label)
+            .and_then(|p| match p.mode.as_deref() {
+                Some("console") | None => p.erase,
+                Some(_) => None,
+            });
+        if let Some(setting) = remote_erase
+            && let Some(warning) = crate::serial::erase_fold_transfer_warning(&setting)
+        {
+            self.send_line("").await?;
+            for line in warning {
+                self.send_line(&format!("  {}", self.yellow(line))).await?;
+            }
+        }
         self.send_line("").await?;
         self.send(&format!("  {} ", self.cyan("Connect now? (Y/N):")))
             .await?;

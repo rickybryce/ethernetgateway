@@ -12,6 +12,7 @@
 //! the modem dial tests; Phase 2's SSH transport adds the over-the-wire
 //! integration test.
 
+use super::RemotePortFacts;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -657,7 +658,8 @@ async fn test_claim_remote_peer_activates() {
     // can't collide under parallel execution.
     let ip: IpAddr = "198.51.100.7".parse().unwrap();
     let (mut device_end, master_end) = tokio::io::duplex(64);
-    let _gen = register_remote_port(ip, "A".to_string(), Some("console".into()), master_end);
+    let facts = RemotePortFacts { mode: Some("console".into()), erase: None };
+    let _gen = register_remote_port(ip, "A".to_string(), facts, master_end);
 
     let claimed = claim_remote_peer(ip, "A").await;
     assert!(claimed.is_some(), "a registered port is claimable");
@@ -731,6 +733,92 @@ fn test_slave_link_state_roundtrip() {
 /// The console-mode remote-port registry (§9 #12): register, list,
 /// claim-removes, and a second claim finds nothing.  Uses a TEST-NET-3 IP
 /// (203.0.113.x) so it can't collide with another test's registry keys.
+/// The register grammar grew a third token, and old peers still work.
+///
+/// Both directions of compatibility matter and they fail differently:
+/// a **new slave against an old master** must not break (the old master splits
+/// on whitespace and ignores what it does not know), and an **old slave against
+/// a new master** must produce `None` rather than a guess -- because the master
+/// uses this to decide whether to warn a user that the far end is rewriting
+/// bytes, and a guess there is either a warning nobody can act on or silence
+/// about a real hazard.
+#[test]
+fn test_the_register_grammar_carries_the_erase_key_and_tolerates_old_peers() {
+    // Today's slave: label, mode, erase key.
+    let (label, facts) = super::parse_register_args("A console rubout");
+    assert_eq!(label, "A");
+    assert_eq!(facts.mode.as_deref(), Some("console"));
+    assert_eq!(facts.erase.as_deref(), Some("rubout"));
+
+    // A slave from before the erase token: mode known, erase unknown.  NOT
+    // "passthrough" -- the master must be able to tell those apart.
+    let (label, facts) = super::parse_register_args("B modem");
+    assert_eq!(label, "B");
+    assert_eq!(facts.mode.as_deref(), Some("modem"));
+    assert_eq!(facts.erase, None, "unknown must not read as pass-through");
+
+    // A slave from before the mode token: only a label.
+    let (label, facts) = super::parse_register_args("A");
+    assert_eq!(label, "A");
+    assert_eq!(facts, RemotePortFacts::default());
+
+    // A token this version does not know is ignored rather than mistaken for
+    // one it does -- the next addition goes on the end, as these two did.
+    let (label, facts) = super::parse_register_args("A console backspace future");
+    assert_eq!(label, "A");
+    assert_eq!(facts.mode.as_deref(), Some("console"));
+    assert_eq!(facts.erase.as_deref(), Some("backspace"));
+
+    // Ragged whitespace is a wire, not a formatter.
+    let (label, facts) = super::parse_register_args("  A   console   rubout  ");
+    assert_eq!(label, "A");
+    assert_eq!(facts.erase.as_deref(), Some("rubout"));
+}
+
+/// The erase key the slave reported survives into the picker's view of a port.
+///
+/// The master cannot read a slave's config -- the slave folds in its own
+/// process -- so the registration is the only channel this fact has, and a
+/// registry that dropped it would leave the remote console screen silent about
+/// exactly the case the setting was first reported for.
+#[tokio::test]
+async fn test_the_registry_remembers_a_remote_ports_erase_key() {
+    use std::net::IpAddr;
+    let ip: IpAddr = "203.0.113.9".parse().unwrap();
+    let (m_folds, _d1) = tokio::io::duplex(64);
+    let (m_quiet, _d2) = tokio::io::duplex(64);
+
+    let folds = RemotePortFacts {
+        mode: Some("console".into()),
+        erase: Some("backspace".into()),
+    };
+    let quiet = RemotePortFacts {
+        mode: Some("console".into()),
+        erase: Some("passthrough".into()),
+    };
+    let _ = super::register_remote_port(ip, "A".into(), folds, m_folds);
+    let _ = super::register_remote_port(ip, "B".into(), quiet, m_quiet);
+
+    let listed = super::list_remote_ports();
+    let found = |l: &str| listed.iter().find(|p| p.ip == ip && p.label == l).unwrap().clone();
+    assert_eq!(found("A").erase.as_deref(), Some("backspace"));
+    assert_eq!(found("B").erase.as_deref(), Some("passthrough"));
+
+    // And the fact is only useful if it still answers the question the screen
+    // asks of it, which is "does this rewrite bytes?" -- so ask it that way.
+    assert!(
+        crate::serial::erase_fold_transfer_warning(&found("A").erase.unwrap()).is_some(),
+        "a port folding to 0x08 must produce the warning"
+    );
+    assert!(
+        crate::serial::erase_fold_transfer_warning(&found("B").erase.unwrap()).is_none(),
+        "a pass-through port must stay quiet"
+    );
+
+    let _ = super::remove_remote_port(ip, "A");
+    let _ = super::remove_remote_port(ip, "B");
+}
+
 #[tokio::test]
 async fn test_remote_port_registry() {
     use std::net::IpAddr;
@@ -738,8 +826,10 @@ async fn test_remote_port_registry() {
     let (master_a, _dev_a) = tokio::io::duplex(64);
     let (master_b, _dev_b) = tokio::io::duplex(64);
 
-    let _ = super::register_remote_port(ip, "A".into(), Some("console".into()), master_a);
-    let _ = super::register_remote_port(ip, "B".into(), Some("modem".into()), master_b);
+    let console = RemotePortFacts { mode: Some("console".into()), erase: None };
+    let modem = RemotePortFacts { mode: Some("modem".into()), erase: None };
+    let _ = super::register_remote_port(ip, "A".into(), console, master_a);
+    let _ = super::register_remote_port(ip, "B".into(), modem, master_b);
 
     let listed = super::list_remote_ports();
     let found = |label: &str| listed.iter().find(|p| p.ip == ip && p.label == label);
@@ -771,14 +861,15 @@ async fn test_remote_port_registry() {
 async fn test_a_mode_the_slave_did_not_report_is_not_invented() {
     let ip: std::net::IpAddr = "10.55.0.9".parse().unwrap();
     let (master_end, _slave_end) = tokio::io::duplex(64);
-    let _ = super::register_remote_port(ip, "A".into(), None, master_end);
+    let _ = super::register_remote_port(ip, "A".into(), RemotePortFacts::default(), master_end);
     let listed = super::list_remote_ports();
     let port = listed.iter().find(|p| p.ip == ip && p.label == "A").expect("registered");
     assert_eq!(port.mode_label(), None, "an unreported mode must stay unreported");
     assert_eq!(port.address(), format!("A@{ip}"));
     // And a mode nobody recognises is treated the same way rather than shown raw.
     let (m2, _s2) = tokio::io::duplex(64);
-    let _ = super::register_remote_port(ip, "B".into(), Some("wat".into()), m2);
+    let facts = RemotePortFacts { mode: Some("wat".into()), erase: None };
+    let _ = super::register_remote_port(ip, "B".into(), facts, m2);
     let listed = super::list_remote_ports();
     let port = listed.iter().find(|p| p.ip == ip && p.label == "B").expect("registered");
     assert_eq!(port.mode_label(), None, "an unknown mode is not printed raw");
@@ -799,12 +890,14 @@ async fn test_remote_port_reregister_generation_guard() {
 
     // First registration (old channel) -> gen0.
     let (master_old, _dev_old) = tokio::io::duplex(64);
-    let gen0 = super::register_remote_port(ip, "A".into(), Some("console".into()), master_old);
+    let facts = RemotePortFacts { mode: Some("console".into()), erase: None };
+    let gen0 = super::register_remote_port(ip, "A".into(), facts, master_old);
 
     // Slave re-registers "A" on a new channel before the old one tore
     // down -> gen1 overwrites the map entry.
     let (master_new, _dev_new) = tokio::io::duplex(64);
-    let gen1 = super::register_remote_port(ip, "A".into(), Some("console".into()), master_new);
+    let facts = RemotePortFacts { mode: Some("console".into()), erase: None };
+    let gen1 = super::register_remote_port(ip, "A".into(), facts, master_new);
     assert_ne!(gen0, gen1, "each registration gets a fresh generation");
 
     // The OLD channel tears down: removing by its stale generation must be
@@ -824,7 +917,8 @@ async fn test_remote_port_reregister_generation_guard() {
 
     // A picker claim ignores generation — it takes whatever is current.
     let (master_c, _dev_c) = tokio::io::duplex(64);
-    let _gen2 = super::register_remote_port(ip, "A".into(), Some("console".into()), master_c);
+    let facts = RemotePortFacts { mode: Some("console".into()), erase: None };
+    let _gen2 = super::register_remote_port(ip, "A".into(), facts, master_c);
     assert!(super::remove_remote_port(ip, "A").is_some());
     assert!(super::remove_remote_port(ip, "A").is_none());
 }

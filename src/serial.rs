@@ -1689,6 +1689,7 @@ fn console_slave_register_tick(
                 &pass,
                 label,
                 &port_cfg.mode,
+                &port_cfg.backspace,
             )
             .await
         });
@@ -2011,8 +2012,16 @@ fn modem_slave_announce_tick(
             // Read here rather than captured: this tick has only the port id,
             // and the mode is what the master will *display* -- so the value at
             // registration time is the honest one.
-            let mode = config::get_config().port(id).mode.clone();
-            crate::relay::connect_master_register(&host, mport, &user, &pass, label, &mode).await
+            // The erase key travels beside the mode, read at the same moment and
+            // for the same reason: it is what the master will *say*, so the value
+            // at registration time is the honest one.
+            let (mode, erase) = {
+                let cfg = config::get_config();
+                let p = cfg.port(id);
+                (p.mode.clone(), p.backspace.clone())
+            };
+            crate::relay::connect_master_register(&host, mport, &user, &pass, label, &mode, &erase)
+                .await
         });
         let relay = match connected {
             Ok(r) => r,
@@ -2325,8 +2334,19 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
         );
         // Not a serial port at all: the CP/M emulator's virtual modem endpoint,
         // which registers by the same mechanism so a master user can dial it.
-        match crate::relay::connect_master_register(&host, mport, &user, &pass, "CPM", "emulator")
-            .await
+        // No erase key: this is not a serial port, so it folds nothing and the
+        // honest answer is pass-through rather than an omitted token (which
+        // would read as "a slave too old to tell us").
+        match crate::relay::connect_master_register(
+            &host,
+            mport,
+            &user,
+            &pass,
+            "CPM",
+            "emulator",
+            crate::serial::BACKSPACE_PASSTHROUGH,
+        )
+        .await
         {
             Ok(crate::relay::MasterRelay { _session, mut stream }) => {
                 attempt = 0; // connected: a later outage counts from one again

@@ -529,7 +529,7 @@ impl SshHandler {
         &mut self,
         channel: russh::ChannelId,
         label: &str,
-        mode: Option<String>,
+        facts: crate::relay::RemotePortFacts,
         session: &mut russh::server::Session,
     ) -> Result<(), russh::Error> {
         let cfg = config::get_config();
@@ -605,7 +605,7 @@ impl SshHandler {
             crate::relay::register_remote_port(
                 slave_ip,
                 label.clone(),
-                mode.clone(),
+                facts.clone(),
                 gateway_stream,
             );
         self.registered_ports.insert(channel, (label, generation));
@@ -901,10 +901,8 @@ impl russh::server::Handler for SshHandler {
             // `<label> [mode]`.  Tokens, not "everything after the space":
             // the mode was added as a second token, and a master that took the
             // remainder whole would register `"B console"` as the label.
-            let mut toks = rest.split_whitespace();
-            let label = toks.next().unwrap_or("").to_string();
-            let mode = toks.next().map(str::to_string);
-            return self.register_console_port(channel, &label, mode, session).await;
+            let (label, facts) = crate::relay::parse_register_args(rest);
+            return self.register_console_port(channel, &label, facts, session).await;
         }
 
         // Grammar (§3 Model B): `serial-relay <port> menu`

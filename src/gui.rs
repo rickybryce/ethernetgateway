@@ -3357,6 +3357,16 @@ impl App {
         // Which byte the device edits with, on a console bridge.  Beside PETSCII
         // because both are "translate what crosses this wire", and both carry
         // the same caveat about binary.
+        //
+        // **Greyed outside console mode**, the same gate the web page applies and
+        // that telnet applies by hiding the row (a 40-column screen cannot draw
+        // "greyed").  A modem port passes 0x08/0x7F/0x14 through, and on a
+        // Kermit-server wire they are packet data -- so on both this setting does
+        // nothing, and a live control that silently does nothing is worse than no
+        // control.  `add_enabled_ui` only stops the *edit*: the stored value is
+        // untouched, so switching to modem mode and back keeps the erase key.
+        let console_mode = self.cfg.port(id).mode == "console";
+        ui.add_enabled_ui(console_mode, |ui| {
         cpm_choice_row(ui, "Erase key:", |ui| {
             let current = crate::serial::backspace_label(&self.cfg.port(id).backspace).to_string();
             cpm_combo(ui, &format!("serial_backspace_{}", id.label()))
@@ -3373,8 +3383,9 @@ impl App {
         })
         .response
         .on_hover_text(
-            "Which byte the device is handed when you press Backspace or Delete on a CONSOLE-MODE bridge.  Your terminal decides which of 0x08 and 0x7F it sends and cannot be asked to change it, while a lot of period hardware edits with 0x08 and a modern client sends 0x7F -- neither end is wrong, which is why this exists.  Console mode only: on a Kermit-server port those bytes are packet data and rewriting them would corrupt every transfer containing one.  It rewrites what you TYPE, so set it back to pass-through before sending a binary up the same bridge.",
+            "Which byte the device is handed when you press Backspace or Delete on a CONSOLE-MODE bridge.  Your terminal decides which of 0x08 and 0x7F it sends and cannot be asked to change it, while a lot of period hardware edits with 0x08 and a modern client sends 0x7F -- neither end is wrong, which is why this exists.  CONSOLE MODE ONLY, so it is greyed out in Modem and Kermit Server mode: a modem port passes these bytes through, and on a Kermit-server port they are packet data whose rewriting would corrupt every transfer containing one.  It rewrites what you TYPE, so set it back to pass-through before a file transfer over the same bridge -- PCGET and PCPUT run XMODEM over the console line.",
         );
+        });
         ui.horizontal(|ui| {
             ui.checkbox(
                 &mut self.cfg.port_mut(id).petscii_translate,

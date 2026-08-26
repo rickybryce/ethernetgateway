@@ -3997,9 +3997,22 @@ fn serial_more_popup(
             "title=\"Text only — disable before XMODEM/YMODEM/ZMODEM/Kermit/Punter transfers over the same TCP session, or the binary payload will be corrupted.\"",
         ),
         erase = {
-            // Console mode only, and the hint says why rather than greying it
-            // out silently: on a Kermit-server port 0x08 and 0x7F are packet
-            // data, and rewriting them would corrupt transfers.
+            // **Console mode only, and greyed rather than merely explained.**
+            // The hint used to carry that alone, which left a live control that
+            // did nothing on two of the three modes -- an operator could set it,
+            // see it stored, and get no change on the wire. Disabled here from
+            // the *stored* mode and toggled live by `updateSerialFields()` when
+            // the Mode select changes, the same two halves the raw-TCP gate on
+            // `telnet_gateway_negotiate` uses.
+            //
+            // A disabled control is not submitted, and that is safe **because
+            // `serial_keys` skips an absent field** rather than reading it as a
+            // cleared one -- the stored value survives, so switching a port to
+            // modem mode and back does not lose the erase key. That is the
+            // opposite of the boolean loop, where absent means `false` and
+            // `bool_checkbox_gated_off` has to skip explicitly; the pair is
+            // pinned by `test_a_greyed_erase_key_is_not_cleared_by_a_save`.
+            let gated = port.mode != "console";
             let opts: String = crate::serial::BACKSPACE_CHOICES
                 .iter()
                 .map(|(value, label)| {
@@ -4016,16 +4029,21 @@ fn serial_more_popup(
                 })
                 .collect();
             format!(
-                "<select name=\"{}_backspace\">{}</select>\
+                "<select name=\"{}_backspace\"{}>{}</select>\
                  <span class=\"hint\">Which byte the device is handed when you press \
                  Backspace or Delete on a <em>console-mode</em> bridge. Your terminal picks \
                  one and cannot be asked to change it, and a lot of period hardware edits \
                  with 0x08 while a modern client sends 0x7F &mdash; neither end is wrong. \
-                 <strong>Console mode only</strong>: on a Kermit-server port those bytes are \
-                 packet data and rewriting them would corrupt transfers. It rewrites what you \
-                 type, so switch it back to <em>pass through</em> before sending a binary \
-                 up the same bridge.</span>",
-                prefix, opts,
+                 <strong>Console mode only</strong>, so it is greyed out in Modem and \
+                 Kermit Server mode: a modem port passes these bytes through, and on a \
+                 Kermit-server port they are packet data whose rewriting would corrupt \
+                 transfers. It rewrites what you type, so switch it back to \
+                 <em>pass through</em> before a file transfer over the same bridge \
+                 &mdash; <code>PCGET</code> and <code>PCPUT</code> run XMODEM over the \
+                 console line.</span>",
+                prefix,
+                if gated { " disabled" } else { "" },
+                opts,
             )
         },
         xc = numfield(&format!("{}_x_code", prefix), "X-code", port.x_code),
@@ -4713,6 +4731,33 @@ function updateGatewayFields() {
   if (raw && neg) neg.disabled = raw.checked;
 }
 updateGatewayFields();
+// The erase key applies to CONSOLE mode only: a modem port passes 0x08/0x7F/0x14
+// through, and on a Kermit-server port they are packet data whose rewriting
+// would corrupt a transfer.  Grey it in the other two modes, matching the
+// desktop editor -- telnet goes further and hides the row, because a 40-column
+// screen has no way to show it greyed.  The server renders the initial state from
+// the stored mode (correct with no JS at all); this keeps it in sync while the
+// Mode select is changed.  Unlike the checkbox gates this needs no save-side
+// skip: `serial_keys` ignores an absent field instead of reading it as cleared,
+// so a port switched to modem mode and back keeps its erase key.
+// Names are spelled out rather than built from the port prefix so
+// test_disabled_inputs_are_re_enabled_by_js can see them.
+var ERASE_GATED = [
+  ['serial_a_mode', 'serial_a_backspace'],
+  ['serial_b_mode', 'serial_b_backspace'],
+];
+function updateSerialFields() {
+  ERASE_GATED.forEach(function(pair) {
+    var mode = document.querySelector('[name=' + pair[0] + ']');
+    var erase = document.querySelector('[name=' + pair[1] + ']');
+    if (mode && erase) erase.disabled = (mode.value !== 'console');
+  });
+}
+updateSerialFields();
+ERASE_GATED.forEach(function(pair) {
+  var mode = document.querySelector('[name=' + pair[0] + ']');
+  if (mode) mode.addEventListener('change', updateSerialFields);
+});
 var LOG_GATED = ['log_file', 'log_max_size_kb', 'log_max_files'];
 function updateLogFields() {
   var box = document.querySelector('[name=log_to_file]');
@@ -4880,7 +4925,13 @@ mod tests {
 
         let mut checked = 0;
         for tag in html.split('<') {
-            if !tag.starts_with("input") || !tag.contains("disabled") {
+            // **`select` as well as `input`.** This scanned inputs only, and the
+            // first greyed `<select>` on the page -- the console-mode erase key
+            // -- went straight past it. The rule is about a control the operator
+            // cannot re-enable, which has nothing to do with which tag draws it.
+            let is_input = tag.starts_with("input");
+            let is_select = tag.starts_with("select");
+            if (!is_input && !is_select) || !tag.contains("disabled") {
                 continue;
             }
             let Some(name) = tag
@@ -4893,7 +4944,7 @@ mod tests {
             let is_checkbox = tag.contains("type=\"checkbox\"");
             assert!(
                 script.contains(name),
-                "input {name:?} renders disabled but no JS mentions it, so nothing \
+                "control {name:?} renders disabled but no JS mentions it, so nothing \
                  can re-enable it — the operator is stuck until a save-and-reload"
             );
             if is_checkbox {
@@ -5635,6 +5686,60 @@ mod tests {
             "an unrelated save wrote the erase key, silently reverting the \
              operator's setting to pass-through"
         );
+    }
+
+    /// The erase key is greyed outside console mode, and greying it is safe.
+    ///
+    /// Two halves that have to hold together, because either alone is a bug.
+    /// **Greyed**: the setting does nothing on a modem or Kermit-server port --
+    /// a modem port passes those bytes through, and on a Kermit wire they are
+    /// packet data -- and a live control that silently does nothing is worse
+    /// than no control. **Not cleared**: a disabled control is not submitted, so
+    /// if the save read an absent field as an empty one, greying it would wipe
+    /// the operator's setting the moment they saved from any other section.
+    /// `serial_keys` skips an absent field, which is what makes this safe; the
+    /// boolean loop does the opposite and needs `bool_checkbox_gated_off`.
+    ///
+    /// The console-mode case is the positive control, and it is the half that
+    /// matters: without it, code that disabled the select unconditionally --
+    /// making the setting unreachable on every surface but telnet -- passes.
+    #[test]
+    fn test_a_greyed_erase_key_is_not_cleared_by_a_save() {
+        // The rendered `<select ...>` opening tag for port A, whatever attributes
+        // it carries. Matched from the page rather than rebuilt, or this asserts
+        // against a copy of itself.
+        fn erase_tag(html: &str) -> String {
+            let at = html
+                .find("<select name=\"serial_a_backspace\"")
+                .expect("the erase select must be on the page");
+            let rest = &html[at..];
+            rest[..rest.find('>').expect("unterminated tag")].to_string()
+        }
+
+        for (mode, expect_gated) in [("modem", true), ("kermit", true), ("console", false)] {
+            let mut cfg = Config::default();
+            {
+                let p = cfg.port_mut(crate::config::SerialPortId::A);
+                p.mode = mode.into();
+                p.backspace = "rubout".into();
+            }
+            let tag = erase_tag(&render_main_page(&cfg, None, false));
+            assert_eq!(
+                tag.contains("disabled"),
+                expect_gated,
+                "in {mode:?} mode the erase select should{} be greyed; got {tag:?}",
+                if expect_gated { "" } else { " not" }
+            );
+
+            // Whatever the mode, a browser save that did not submit the control
+            // (which is exactly what a disabled one does) must not touch it.
+            let (updates, _) = collect_form_updates(&empty_form(), &cfg);
+            assert!(
+                !updates.iter().any(|(k, _)| k == "serial_a_backspace"),
+                "saving from a {mode:?}-mode page cleared the stored erase key; \
+                 an operator switching to modem mode and back would lose it"
+            );
+        }
     }
 
     #[test]

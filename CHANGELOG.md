@@ -28,8 +28,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them, and nothing declares it.  The setting is the answer, so the operator is
   told the setting is on.
 
-  Not yet shown for a **remote** console port picked from a master: the slave
-  folds in its own process and `serial-register` does not carry the setting.
+  Shown for a **remote** console port on a slave too.  The slave folds in its
+  own process, so a master had no way to know -- and a relayed port picked from
+  a master is the case this setting was first reported for.  `serial-register`
+  now carries the erase key as an optional third token, the way it grew the mode
+  in 0.9.5: a slave older than the addition sends nothing, and the master then
+  says nothing rather than guessing, because "we were not told" and "it is set
+  to pass through" have to stay different answers.
+
+- **The erase key is greyed out when the port is not in console mode.**  It only
+  ever applied to a console bridge -- a modem port passes 0x08, 0x7F and 0x14
+  through, and on a Kermit-server wire they are packet data whose rewriting
+  would corrupt a transfer -- but the web page and the desktop editor showed a
+  live control in all three modes, explaining the restriction in a hint beside
+  it.  An operator could set it, watch it save, and get no change on the wire.
+  Both now grey it outside console mode, and the web page re-enables it the
+  moment the Mode select changes; telnet already omitted the row, which is the
+  same rule on a screen with no way to draw "greyed".  **The stored value is
+  kept** -- a disabled control is not submitted, and the serial save path skips
+  an absent field rather than reading it as a cleared one -- so switching a port
+  to modem mode and back does not lose the erase key.
 
 ### Changed
 

@@ -723,6 +723,7 @@ pub async fn connect_master_register(
     password: &str,
     port_label: &str,
     mode: &str,
+    erase: &str,
 ) -> Result<MasterRelay, RelayConnectError> {
     connect_relay_exec(
         host,
@@ -736,10 +737,46 @@ pub async fn connect_master_register(
         // master is upgraded -- the menu pick still works, because it uses the
         // label it was given. That degradation is the reason the mode goes after
         // the label rather than before it.
-        &format!("serial-register {} {}", port_label, mode),
+        // **The erase key is a THIRD token, added the same way and for the same
+        // reason the mode was.** The slave folds it in its own process, so a
+        // master had no way to know a remote console port was rewriting bytes --
+        // and that is the case this setting was first reported for. A master too
+        // old to expect it simply ignores the extra token (it splits on
+        // whitespace and takes what it knows), so a new slave against an old
+        // master degrades to exactly today's behaviour rather than breaking.
+        &format!("serial-register {} {} {}", port_label, mode, erase),
         RELAY_HELLO_TIMEOUT,
     )
     .await
+}
+
+/// Parse the arguments of a `serial-register` exec, the other half of the
+/// command [`connect_master_register`] builds.
+///
+/// Here rather than inline in the SSH handler so the two halves of the grammar
+/// sit together: a builder and a parser that live apart drift apart, and this
+/// one has now grown a token twice.
+///
+/// **Tokens, never "the remainder".** The label came first and alone; the mode
+/// was added as a second token and the erase key as a third. A master that took
+/// everything after the space as the label registered `"B console"` the moment a
+/// newer slave appeared, so each addition has to be a token a reader can ignore.
+/// Anything beyond the third is ignored for the same reason -- a fourth is how
+/// this grammar has grown twice already.
+///
+/// A missing token is `None` rather than a default: "we were not told" and "it
+/// is set to pass-through" are different answers, and only the first should keep
+/// a screen quiet about something it cannot see.
+pub fn parse_register_args(rest: &str) -> (String, RemotePortFacts) {
+    let mut toks = rest.split_whitespace();
+    let label = toks.next().unwrap_or("").to_string();
+    (
+        label,
+        RemotePortFacts {
+            mode: toks.next().map(str::to_string),
+            erase: toks.next().map(str::to_string),
+        },
+    )
 }
 
 /// Shared connect+auth+channel+exec, bounded by `RELAY_CONNECT_TIMEOUT`
@@ -991,7 +1028,30 @@ pub const RELAY_ACTIVATE_BYTE: u8 = 0x01;
 ///
 /// The mode is `None` for a slave too old to send one -- see
 /// [`register_remote_port`].
-type RegisteredPort = (tokio::io::DuplexStream, u64, Option<String>);
+type RegisteredPort = (tokio::io::DuplexStream, u64, RemotePortFacts);
+
+/// What the wire told us about a registered port, beyond where it is.
+///
+/// A struct rather than two more tuple slots: both fields are
+/// `Option<String>` and sit side by side, so a positional pair could be
+/// swapped at any call site and still compile -- the master would then grey a
+/// picker row by the erase key and warn about the mode.
+///
+/// **Every field is `Option` because each is a fact the wire may not carry.**
+/// A slave older than the addition that introduced it sends nothing, and the
+/// honest rendering of "we were not told" is to say nothing rather than guess a
+/// default. Guessing would put "Modem mode" beside a console port, or -- worse
+/// for `erase` -- stay silent about a port that really is rewriting bytes, or
+/// warn about one that is not.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemotePortFacts {
+    /// The slave's `serial_*_mode` for this port, when it said.
+    pub mode: Option<String>,
+    /// The slave's `serial_*_backspace`, when it said. Only meaningful on a
+    /// console port -- the slave folds in its own process, and this is the only
+    /// way a master can know it is happening.
+    pub erase: Option<String>,
+}
 
 /// Slave ports currently registered with this master, keyed by `(slave IP,
 /// port label)`.  Each value pairs the master's end of the idle SSH
@@ -1027,13 +1087,13 @@ static REMOTE_PORT_GEN: AtomicU64 = AtomicU64::new(0);
 pub fn register_remote_port(
     slave_ip: IpAddr,
     label: String,
-    mode: Option<String>,
+    facts: RemotePortFacts,
     stream: tokio::io::DuplexStream,
 ) -> u64 {
     let generation = REMOTE_PORT_GEN.fetch_add(1, Ordering::Relaxed);
     let mut g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(HashMap::new)
-        .insert((slave_ip, label), (stream, generation, mode));
+        .insert((slave_ip, label), (stream, generation, facts));
     generation
 }
 
@@ -1105,10 +1165,11 @@ pub fn list_remote_ports() -> Vec<RemotePort> {
         .as_ref()
         .map(|m| {
             m.iter()
-                .map(|((ip, label), (_, _, mode))| RemotePort {
+                .map(|((ip, label), (_, _, facts))| RemotePort {
                     ip: *ip,
                     label: label.clone(),
-                    mode: mode.clone(),
+                    mode: facts.mode.clone(),
+                    erase: facts.erase.clone(),
                 })
                 .collect()
         })
@@ -1132,6 +1193,9 @@ pub struct RemotePort {
     pub label: String,
     /// The slave's `serial_*_mode` for this port, when it said.
     pub mode: Option<String>,
+    /// The slave's `serial_*_backspace`, when it said. `None` from a slave too
+    /// old to send it, and the master then says nothing rather than guessing.
+    pub erase: Option<String>,
 }
 
 impl RemotePort {
