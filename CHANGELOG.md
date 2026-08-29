@@ -131,6 +131,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regression test asserts **both** halves: a "can it be set?" test passes while
   the clobber survives.
 
+- **Two documented defaults were wrong, and the surfaces that carry them had no
+  guard.**  `test_the_manual_sample_config_matches_the_real_defaults` reads
+  `usermanual.html`; the eight reference pages under `web/` carry Key/Default
+  tables describing the same settings and nothing had ever read them.
+
+  `web/cpmreference.html` gave `cpm_boot_machine` a default of `altair_2sio` --
+  the value it fell back to *before* `auto` existed.  The same page's machine
+  table two sections further down already called `auto` "The default", so the
+  page disagreed with itself as well as with the code, and the manual had been
+  right throughout.  The row also still described the setting as choosing only
+  where a disk finds its console, from before it chose the disk controllers too.
+  On the same page `cpm_emu_s_regs` had `S0…S27` in its Default column, which
+  is the shape of the value rather than the default -- it is empty until
+  something is saved.
+
+  Both fixed, and `test_the_reference_pages_state_the_real_defaults` now holds
+  all sixty-six key/default rows across those pages against a config written
+  from `Config::default()`, tolerant of presentation (`300 s` for `300`,
+  `(empty)` for an empty string) and strict about the value.  It carries a
+  positive control: the first version split on `<table>`, matched **zero** rows
+  because those tags carry attributes, and reported a clean sweep -- a scan that
+  reads nothing agrees with everything.
+
+- **The PETSCII Kermit config screen stated a negotiate timeout of 45 s; the
+  real default is 300.**  Wrong by nearly seven times, on the one screen a C64
+  operator reads, and two rows below the same screen printing the live value
+  correctly -- the figure had been left behind when the negotiation and idle
+  timeouts were split apart.  The ANSI variant never gave a number.  The
+  parenthetical is gone rather than corrected, since the screen already prints
+  that value and a second copy is a second thing to go stale.
+
+  `test_transfer_help_screens_state_the_real_defaults` now pins every number the
+  XMODEM, ZMODEM and Punter help screens state against the constant it
+  describes, and requires the Kermit rows to state none.  Its own first version
+  could not go red: it picked its subject with `contains("Negotiate")` and found
+  the prose line "parameters.  Negotiated with the peer at session start", which
+  has no digits in it, so the stale `45 s` put straight back still passed.  A
+  guard whose subject is selected by a substring can be aimed at the wrong line
+  by an ordinary word.
+
 ## [0.9.5] - 2026-08-23
 
 ### Added
