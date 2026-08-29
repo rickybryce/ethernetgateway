@@ -4643,6 +4643,87 @@ fn test_kermit_help_lines_fit_petscii() {
     }
 }
 
+/// **A help screen that states a default rots when the default moves.**
+///
+/// The PETSCII Kermit screen read `Negotiate timeout (45 s)` while the real
+/// default had been 300 since the negotiation and idle timeouts were split
+/// apart -- out by nearly seven times, on the one screen a C64 operator reads,
+/// and two rows below the same screen printing the live value correctly.  The
+/// manual's table was right the whole time, which is the usual direction of
+/// this drift: the code-rendered half follows the code and the hand-written
+/// half beside it does not.
+///
+/// So every number these screens state is pinned to the constant it describes.
+/// Kermit's states none at all now -- the screen already prints that value, so
+/// the parenthetical was redundant as well as wrong, and the ANSI variant had
+/// always spelled it `(Send-Init handshake)` rather than giving a figure.
+#[test]
+fn test_transfer_help_screens_state_the_real_defaults() {
+    let cfg = crate::config::Config::default();
+
+    for petscii in [true, false] {
+        let xmodem = TelnetSession::xmodem_help_lines(petscii).join("\n");
+        assert!(
+            xmodem.contains(&format!("default {}", cfg.xmodem_negotiation_retry_interval))
+                || xmodem.contains(&format!("def {} s", cfg.xmodem_negotiation_retry_interval)),
+            "the XMODEM help ({}) no longer states the real C/NAK poke gap of {} s:\n{}",
+            if petscii { "PETSCII" } else { "ANSI" },
+            cfg.xmodem_negotiation_retry_interval,
+            xmodem,
+        );
+
+        let zmodem = TelnetSession::zmodem_help_lines(petscii).join("\n");
+        assert!(
+            zmodem.contains(&format!("def {}", cfg.zmodem_negotiation_retry_interval)),
+            "the ZMODEM help ({}) no longer states the real re-send gap of {} s:\n{}",
+            if petscii { "PETSCII" } else { "ANSI" },
+            cfg.zmodem_negotiation_retry_interval,
+            zmodem,
+        );
+
+        let punter = TelnetSession::punter_help_lines(petscii).join("\n");
+        assert!(
+            punter.contains(&cfg.punter_block_size.to_string()),
+            "the PUNTER help ({}) no longer states the real block size of {}:\n{}",
+            if petscii { "PETSCII" } else { "ANSI" },
+            cfg.punter_block_size,
+            punter,
+        );
+
+        // Kermit states no figure: the screen prints the live one.  A number
+        // here would be a second place for it to be wrong.
+        let kermit = TelnetSession::kermit_help_lines(petscii).join("\n");
+        // Match the key row, not the prose.  The first version of this looked
+        // for "Negotiate" and found the blurb line "parameters.  Negotiated
+        // with the peer at session start" -- which carries no digits, so the
+        // check passed with the stale "45 s" put straight back.  A guard whose
+        // subject is chosen by a substring can be pointed at the wrong line by
+        // an ordinary word.
+        let negotiate: Vec<&str> = kermit
+            .lines()
+            .filter(|l| l.contains("Negotiate timeout"))
+            .collect();
+        assert_eq!(
+            negotiate.len(),
+            1,
+            "expected exactly one negotiate-timeout key row in the Kermit help \
+             ({}), found {:?}",
+            if petscii { "PETSCII" } else { "ANSI" },
+            negotiate,
+        );
+        let negotiate = negotiate[0];
+        assert!(
+            !negotiate.chars().any(|c| c.is_ascii_digit()),
+            "the Kermit help ({}) states a negotiate timeout of its own -- it \
+             drifted to 45 s once while the default was {} s, and the screen \
+             already prints the live value: {:?}",
+            if petscii { "PETSCII" } else { "ANSI" },
+            cfg.kermit_negotiation_timeout,
+            negotiate,
+        );
+    }
+}
+
 /// File transfer help lines (PETSCII) must fit 40 cols.
 #[test]
 fn test_file_transfer_help_lines_fit_petscii() {

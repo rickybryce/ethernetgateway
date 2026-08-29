@@ -5363,7 +5363,7 @@ impl TelnetSession {
                 "  parameters.  Negotiated with",
                 "  the peer at session start.",
                 "",
-                "  N  Negotiate timeout (45 s)",
+                "  N  Negotiate timeout (Send-Init)",
                 "  P  Per-packet timeout",
                 "  X  Max retries per packet",
                 "  M  Max packet length",
