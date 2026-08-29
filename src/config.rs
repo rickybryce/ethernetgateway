@@ -6142,6 +6142,143 @@ mod tests {
             );
         }
     }
+    /// **The manual is guarded; the reference pages beside it were not.**
+    ///
+    /// `test_the_manual_sample_config_matches_the_real_defaults` reads
+    /// `usermanual.html`, and eight pages under `web/` carry Key/Default
+    /// tables of their own describing the same settings.  Nothing read them,
+    /// and `web/cpmreference.html` had `cpm_boot_machine` defaulting to
+    /// `altair_2sio` -- the value it fell back to *before* `auto` existed.  The
+    /// same page's machine table two sections down already said `auto` was
+    /// "The default", so the page disagreed with itself as well as with the
+    /// code, and the manual had been right the whole time.  Same direction as
+    /// every other instance of this: the half a human maintains is the half
+    /// that rots.
+    ///
+    /// The comparison is deliberately tolerant about *presentation* and strict
+    /// about *value*: a reference page writes `300 s` where the config writer
+    /// writes `300`, and `(empty)` for an empty string.  Anything past that has
+    /// to match.
+    #[test]
+    fn test_the_reference_pages_state_the_real_defaults() {
+        let dir = std::env::temp_dir().join(format!("egw_web_cfg_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("defaults.conf");
+        write_config_file(path.to_str().unwrap(), &Config::default()).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let mut real: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for line in written.lines() {
+            let line = line.trim();
+            if line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                real.insert(k.trim(), v.trim());
+            }
+        }
+        assert!(real.len() > 50, "the writer emitted only {} keys", real.len());
+
+        // How a reference page is allowed to dress a value up.
+        fn normalise(v: &str) -> String {
+            let v = v
+                .replace("&mdash;", "-")
+                .replace("&nbsp;", " ")
+                .replace("&quot;", "\"")
+                .replace("&amp;", "&");
+            let v = v.trim().trim_matches('"').trim();
+            let lower = v.to_ascii_lowercase();
+            if lower == "(empty)" || lower == "empty" || lower == "(none)" || lower == "-" {
+                return String::new();
+            }
+            for unit in [" seconds", " secs", " s", " hours", " bytes"] {
+                if let Some(stripped) = lower.strip_suffix(unit) {
+                    return stripped.trim().to_string();
+                }
+            }
+            lower
+        }
+
+        let pages: [(&str, &str); 8] = [
+            ("web/cpmreference.html", include_str!("../web/cpmreference.html")),
+            ("web/kermit.html", include_str!("../web/kermit.html")),
+            ("web/kermitreference.html", include_str!("../web/kermitreference.html")),
+            ("web/punterreference.html", include_str!("../web/punterreference.html")),
+            ("web/sshreference.html", include_str!("../web/sshreference.html")),
+            ("web/xmodemreference.html", include_str!("../web/xmodemreference.html")),
+            ("web/ymodemreference.html", include_str!("../web/ymodemreference.html")),
+            ("web/zmodemreference.html", include_str!("../web/zmodemreference.html")),
+        ];
+
+        let strip = |cell: &str| -> String {
+            let mut out = String::new();
+            let mut in_tag = false;
+            for c in cell.chars() {
+                match c {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => out.push(c),
+                    _ => {}
+                }
+            }
+            out.trim().to_string()
+        };
+
+        let mut checked = 0usize;
+        let mut wrong = Vec::new();
+        for (name, page) in pages {
+            let page = page.replace("\r\n", "\n");
+            // `<table` not `<table>`: these tags carry attributes, and matching
+            // the closing bracket found no tables at all -- a scan that checks
+            // nothing reports no problems.
+            for table in page.split("<table").skip(1) {
+                let table = table.split_once("</table>").map_or(table, |(t, _)| t);
+                let headers: Vec<String> = table
+                    .split("<th>")
+                    .skip(1)
+                    .map(|c| strip(c.split_once("</th>").map_or(c, |(t, _)| t)))
+                    .collect();
+                if headers.first().map(String::as_str) != Some("Key") {
+                    continue;
+                }
+                let Some(default_col) =
+                    headers.iter().position(|h| h.to_ascii_lowercase().ends_with("default"))
+                else {
+                    continue;
+                };
+                for row in table.split("<tr>").skip(1) {
+                    let row = row.split_once("</tr>").map_or(row, |(r, _)| r);
+                    let cells: Vec<&str> = row
+                        .split("<td>")
+                        .skip(1)
+                        .map(|c| c.split_once("</td>").map_or(c, |(t, _)| t))
+                        .collect();
+                    if cells.len() <= default_col {
+                        continue;
+                    }
+                    let key = strip(cells[0]);
+                    let Some(&actual) = real.get(key.as_str()) else { continue };
+                    checked += 1;
+                    let stated = strip(cells[default_col]);
+                    if normalise(&stated) != normalise(actual) {
+                        wrong.push(format!(
+                            "{name}: {key} is documented as {stated:?}, a default config says {actual:?}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Positive control.  The first version of this scan split on `<table>`
+        // and matched zero rows, which is indistinguishable from a clean sweep.
+        assert!(
+            checked >= 40,
+            "only matched {checked} key/default rows across the reference pages -- \
+             the scan has stopped finding them, and a scan that reads nothing \
+             agrees with everything"
+        );
+        assert!(wrong.is_empty(), "reference pages disagree with the code:\n  {}", wrong.join("\n  "));
+    }
+
 
     /// **The manual's sample configuration must be a real default config.**
     ///
