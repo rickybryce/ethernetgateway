@@ -216,22 +216,30 @@ const DEFAULT_GATEWAY_PETSCII_TRANSLATE: bool = true;
 /// The hover text for `gateway_petscii_translate`, shared by the web page and
 /// the desktop editor.
 ///
+/// **Worded for neither control shape in particular**: it hangs off a checkbox
+/// (the server-wide key) and off a three-choice dropdown (the per-port one),
+/// so it names the behaviours -- "Translate", "Pass through" -- rather than a
+/// tick state. It said "Ticked / Unticked" first, which read as nonsense on
+/// the dropdown the moment the setting became per port.
+///
 /// One string, because the two surfaces describing one setting in two hand-
 /// written paragraphs is how they come to disagree -- the half a human
 /// maintains beside a code-rendered list is the half that rots, and this repo
 /// has caught that four times.  The telnet screen shows a shortened form: it
 /// has no hover and 40 columns.
 pub const GATEWAY_PETSCII_TRANSLATE_HINT: &str = "\
-PETSCII terminals only. Ticked (the default): the gateway translates for the \
-Commodore -- a remote's ANSI colour and clear-screen become PETSCII, cursor \
-keys and the back-arrow become ANSI on the way out, letters are case-swapped, \
-and the C64's erase byte becomes ASCII DEL so a unix line editor works. Right \
-for an ordinary ASCII board. Unticked: the far end does its own terminal \
-detection (telnetbible.com, or another Ethernet Gateway), so it is sent the \
-C64's real 0x14, recognises the Commodore, and serves native PETSCII in its \
-own 40-column layout -- translating on top of that would case-swap its text \
-twice. The same choice as AT+PETSCII on a dialled connection, for a board you \
-can only reach through the gateway.";
+PETSCII terminals only, and about a gateway's onward connection -- not the \
+wire a port is on, which AT+PETSCII governs. Translate (the default): the \
+gateway converts a remote's ANSI colour and clear-screen to PETSCII, turns \
+the cursor keys and the back-arrow into ANSI on the way out, case-swaps \
+letters, and sends ASCII DEL as the erase key so a unix line editor works -- \
+right for an ordinary ASCII board. Pass through: the far end does its own \
+terminal detection, so it is sent the C64's real 0x14, recognises the \
+Commodore and serves native PETSCII in its own 40-column layout; translating \
+on top of that would case-swap text the board already swapped. Wrong for a \
+board that cannot detect a Commodore, which then gives you no backspace. The \
+same choice as AT+PETSCII on a dialled connection, and the only place to make \
+it for a board reachable solely over SSH.";
 /// Operator override for the terminal geometry a gateway session reports to
 /// the remote host (SSH PTY request / Telnet NAWS).  `0` means "auto": use
 /// the size the local client negotiated via NAWS, and fall back to the
