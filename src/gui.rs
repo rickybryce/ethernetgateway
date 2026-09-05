@@ -3334,7 +3334,7 @@ impl App {
                 "Which byte the device is handed when you press Backspace or Delete on a CONSOLE-MODE bridge.  Your terminal decides which of 0x08 and 0x7F it sends and cannot be asked to change it, while a lot of period hardware edits with 0x08 and a modern client sends 0x7F -- neither end is wrong, which is why this exists.  CONSOLE MODE ONLY, so it is greyed out in Modem and Kermit Server mode: a modem port passes these bytes through, and on a Kermit-server port they are packet data whose rewriting would corrupt every transfer containing one.  It rewrites what you TYPE, so set it back to pass-through before a file transfer over the same bridge -- PCGET and PCPUT run XMODEM over the console line.  This is NOT the Hayes S5 backspace, which is the AT command line's own erase key and lives in the S-registers.",
             );
         });
-        }
+    }
 
     /// Render the Serial Port frame's advanced options — Hayes AT
     /// saved state, S-registers, and stored phone-number slots.  Shown

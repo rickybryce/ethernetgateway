@@ -131,6 +131,19 @@ const FG_BRIGHT: [u8; 8] = [
 /// `ANSI_STRIP_CSI_LEN_CAP` this module replaces.
 const CSI_PARAM_CAP: usize = 64;
 
+/// How many bytes an unterminated string sequence (`OSC`, `DCS`, `APC`, …) may
+/// swallow before the parser gives up on it.
+///
+/// The CSI path has had a cap from the start, for the reason its comment
+/// gives; this state had none, and that was a **regression on the modem path**
+/// specifically.  The stripper this module replaced had no string state at all
+/// -- it consumed `ESC ]` as a two-byte sequence and resumed immediately -- so
+/// under `AT+PETSCII=1` a host emitting an unterminated `ESC ]`, or any stray
+/// `1B 5D` in a stream, would have silenced the C64's screen for the rest of
+/// the online session with no way back.  Generous enough for a real title and
+/// far short of forever.
+const STRING_SEQ_CAP: usize = 512;
+
 /// Translates a remote's ANSI output into PETSCII, one byte at a time.
 ///
 /// The state is carried across calls because a sequence can straddle any two
@@ -144,6 +157,9 @@ pub(crate) struct AnsiToPetscii {
     state: u8,
     /// Parameter and intermediate bytes of the CSI being read.
     params: Vec<u8>,
+    /// Bytes consumed inside the current string sequence, bounded by
+    /// `STRING_SEQ_CAP`.  Reset whenever one ends.
+    swallowed: usize,
     /// Whether `ESC[1m` is in force, which selects the bright half of the
     /// table for a colour that arrives in a later sequence.  Boards write
     /// both `ESC[1;32m` and `ESC[1m` … `ESC[32m`, so this cannot be handled
@@ -215,16 +231,28 @@ impl AnsiToPetscii {
                 }
             }
             3 => {
+                self.swallowed = self.swallowed.saturating_add(1);
                 if byte == 0x07 {
                     self.state = 0;
+                    self.swallowed = 0;
                 } else if byte == 0x1B {
                     self.state = 4;
+                } else if self.swallowed >= STRING_SEQ_CAP {
+                    // Never terminated.  Give up and resume ordinary output
+                    // rather than eat the rest of the session.
+                    self.state = 0;
+                    self.swallowed = 0;
                 }
             }
             _ => {
                 // ESC inside a string sequence: `ESC \` is ST and ends it,
                 // anything else was part of the payload.
-                self.state = if byte == b'\\' { 0 } else { 3 };
+                if byte == b'\\' {
+                    self.state = 0;
+                    self.swallowed = 0;
+                } else {
+                    self.state = 3;
+                }
             }
         }
     }
@@ -304,7 +332,10 @@ impl AnsiToPetscii {
             out.push(DEFAULT_COLOUR);
             return;
         }
-        for &p in params {
+        let mut i = 0;
+        while i < params.len() {
+            let p = params[i];
+            i += 1;
             match p {
                 0 => {
                     self.bold = false;
@@ -317,11 +348,47 @@ impl AnsiToPetscii {
                 7 => out.push(RVS_ON),
                 27 => out.push(RVS_OFF),
                 30..=37 => {
-                    let i = (p - 30) as usize;
-                    out.push(if self.bold { FG_BRIGHT[i] } else { FG_NORMAL[i] });
+                    let n = (p - 30) as usize;
+                    out.push(if self.bold { FG_BRIGHT[n] } else { FG_NORMAL[n] });
                 }
                 39 => out.push(DEFAULT_COLOUR),
                 90..=97 => out.push(FG_BRIGHT[(p - 90) as usize]),
+                // **Extended colour, and its sub-parameters must be consumed.**
+                // `38`/`48` are followed by `5;<index>` or `2;<r>;<g>;<b>`, and
+                // simply ignoring the `38` left those numbers to be read as
+                // ordinary colour codes on the next turn of the loop: measured,
+                // `ESC[38;5;33m` (a blue) came out YELLOW, and `ESC[48;5;31m` --
+                // a *background* request -- set the foreground RED, which the
+                // comment below rightly says never happens.  Any modern host
+                // through the SSH Gateway emits these: vim, git diff, ls with a
+                // 256-colour LS_COLORS.
+                //
+                // The first sixteen indices of the 256-colour cube *are* the
+                // basic sixteen, so those translate exactly; everything beyond
+                // them, and every truecolour triple, has no PETSCII equivalent
+                // and is dropped like any other sequence we cannot render.
+                // Background (`48`) is always dropped -- the screen has one
+                // background and it belongs to the user.
+                38 | 48 => {
+                    let foreground = p == 38;
+                    match params.get(i).copied() {
+                        Some(5) => {
+                            let idx = params.get(i + 1).copied();
+                            i = (i + 2).min(params.len());
+                            if let (true, Some(n)) = (foreground, idx) {
+                                if n < 8 {
+                                    out.push(FG_NORMAL[n as usize]);
+                                } else if n < 16 {
+                                    out.push(FG_BRIGHT[(n - 8) as usize]);
+                                }
+                            }
+                        }
+                        Some(2) => i = (i + 4).min(params.len()),
+                        // A malformed extended colour: drop what follows it
+                        // rather than read the remainder as basic colours.
+                        _ => i = params.len(),
+                    }
+                }
                 // Background colours (40-49, 100-107) and every text
                 // attribute a C64 cannot express are dropped.  The screen has
                 // one background and it belongs to the user, not to a BBS.
@@ -493,6 +560,60 @@ mod tests {
         assert_eq!(xlate(b"\x1b[7;32m"), vec![RVS_ON, GREEN]);
     }
 
+    /// Extended colour must consume its own sub-parameters.
+    ///
+    /// Ignoring the `38` left `5` and the index to be read as ordinary colour
+    /// codes on the next turn of the loop, so a 256-colour blue arrived
+    /// yellow, and a 256-colour *background* set the foreground.  Every one of
+    /// these was measured against the code before the fix.
+    #[test]
+    fn test_extended_colour_consumes_its_own_parameters() {
+        // The first sixteen indices are the basic sixteen, so they translate.
+        assert_eq!(xlate(b"\x1b[38;5;1m"), vec![RED]);
+        assert_eq!(xlate(b"\x1b[38;5;9m"), vec![LIGHT_RED]);
+        assert_eq!(xlate(b"\x1b[38;5;4m"), vec![BLUE]);
+        // Beyond them there is no PETSCII equivalent, so nothing is emitted --
+        // and in particular NOT a colour read out of the index.
+        assert_eq!(xlate(b"\x1b[38;5;33m"), Vec::<u8>::new(), "33 must not read as ESC[33m");
+        assert_eq!(xlate(b"\x1b[38;5;196m"), Vec::<u8>::new());
+        // Truecolour: three more parameters, none of them a colour code.
+        assert_eq!(xlate(b"\x1b[38;2;30;40;50m"), Vec::<u8>::new());
+        // A background request must never touch the foreground.
+        assert_eq!(xlate(b"\x1b[48;5;31m"), Vec::<u8>::new(), "background must not set text colour");
+        assert_eq!(xlate(b"\x1b[48;5;1m"), Vec::<u8>::new());
+        assert_eq!(xlate(b"\x1b[48;2;1;2;3m"), Vec::<u8>::new());
+        // Parameters after a complete extended colour still apply.
+        assert_eq!(xlate(b"\x1b[38;5;33;32m"), vec![GREEN]);
+        assert_eq!(xlate(b"\x1b[0;38;2;1;2;3;1;31m"), vec![RVS_OFF, DEFAULT_COLOUR, LIGHT_RED]);
+        // A truncated one drops the remainder rather than guessing at it.
+        assert_eq!(xlate(b"\x1b[38m"), Vec::<u8>::new());
+        assert_eq!(xlate(b"\x1b[38;9;31m"), Vec::<u8>::new());
+    }
+
+    /// An unterminated string sequence must not silence the terminal.
+    ///
+    /// The CSI path has always had a cap; this state had none, and the
+    /// stripper this module replaced had no string state at all -- so on the
+    /// modem path a stray `1B 5D` used to cost nothing and would have cost the
+    /// rest of the session.
+    #[test]
+    fn test_an_unterminated_string_sequence_gives_up() {
+        let mut wire = vec![0x1B, b']'];
+        wire.extend(std::iter::repeat_n(b'x', STRING_SEQ_CAP + 8));
+        wire.extend_from_slice(b"visible");
+        let out = xlate(&wire);
+        assert!(
+            out.ends_with(b"visible"),
+            "the line never came back: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        // A terminated one still costs nothing, however long the run before it.
+        let mut ok = vec![0x1B, b']'];
+        ok.extend(std::iter::repeat_n(b'y', 64));
+        ok.extend_from_slice(b"\x07after");
+        assert_eq!(xlate(&ok), b"after".to_vec());
+    }
+
     #[test]
     fn test_background_and_unknown_attributes_are_dropped() {
         // A C64's background belongs to the user; a BBS does not get a vote.
@@ -590,3 +711,4 @@ mod tests {
         }
     }
 }
+

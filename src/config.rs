@@ -2806,6 +2806,22 @@ fn write_serial_port_section(
     }
     write_kv(out, &format!("{}_petscii_translate", prefix), port.petscii_translate);
     write_kv(out, &format!("{}_drive_carrier", prefix), port.drive_carrier);
+    out.push_str("\
+#   gateway_petscii: what sessions arriving on THIS port do about PETSCII on a
+#     GATEWAY's onward hop -- the second link, out to the board a Telnet or SSH
+#     Gateway dials.  Not this wire, which petscii_translate (AT+PETSCII) above
+#     governs.
+#       default      DEFAULT - use the server-wide gateway_petscii_translate
+#       translate    the gateway converts a remote's ANSI colour and clear-
+#                    screen to PETSCII and case-swaps its text; right for an
+#                    ordinary ASCII board
+#       passthrough  the far end does its own terminal detection, so it is sent
+#                    the C64's real 0x14, recognises the Commodore and serves
+#                    native PETSCII in its own 40-column layout.  Better where
+#                    it works, and wrong for a board that cannot detect a
+#                    Commodore -- that one sees a 0x14 it has no meaning for
+#                    and gives the caller no backspace.
+");
     write_kv_str(out, &format!("{}_gateway_petscii", prefix), &port.gateway_petscii);
     out.push_str("\
 #   backspace: which byte the device is handed when you press Backspace or

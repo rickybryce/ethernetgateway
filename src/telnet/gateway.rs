@@ -1254,7 +1254,12 @@ impl TelnetSession {
     /// Kept to 33 columns so it fits a 40-column screen with its colour codes,
     /// which cost bytes but no columns.
     async fn send_gateway_esc_hint(&mut self) -> Result<(), std::io::Error> {
-        if self.terminal_type == TerminalType::Petscii {
+        // Gated on the resolved mode, not merely on the terminal: under
+        // `Raw` a single back-arrow is forwarded as 0x5F, so the line would be
+        // claiming a translation that is not happening.  A Commodore-aware far
+        // end reads 0x5F as ESC itself, but that is its doing and not ours,
+        // and a banner must not take credit for it.
+        if self.gateway_filter() == GatewayFilter::Petscii {
             self.send_line(&format!(
                 "  One {}, or {}, sends ESC.",
                 self.cyan("<-"),
@@ -1929,7 +1934,11 @@ impl TelnetSession {
                                     let dt = now.duration_since(gw_last).as_millis();
                                     let t = now.duration_since(gw_start).as_millis();
                                     gw_last = now;
-                                    let swap = if raw != b { format!(" (petscii 0x{:02x})", raw) } else { String::new() };
+                                    let swap = if send.len() > 1 {
+                                        format!(" (petscii 0x{:02x} -> {})", raw, gw_hexdump(&send))
+                                    } else if raw != b {
+                                        format!(" (petscii 0x{:02x})", raw)
+                                    } else { String::new() };
                                     glog!("[gw-in] +{:>5}ms t={:>6}ms  byte=0x{:02x} '{}'{}",
                                         dt, t, b,
                                         if (0x20..=0x7E).contains(&b) { b as char } else { '.' },
@@ -2833,6 +2842,7 @@ impl TelnetSession {
             self.cyan(esc_label)
         ))
         .await?;
+        self.send_gateway_esc_hint().await?;
         self.send_line("  Single ESC passes through on the").await?;
         self.send_line("  next keystroke.").await?;
         self.send_line("").await?;
@@ -2955,6 +2965,7 @@ impl TelnetSession {
             self.cyan(esc_label)
         ))
         .await?;
+        self.send_gateway_esc_hint().await?;
         // The same warning the local console screen gives, from the fact the
         // slave sent with its registration -- **this is the case the erase key
         // was first reported for**, a relayed port picked from a master, and it
@@ -3061,13 +3072,21 @@ impl TelnetSession {
 
         let (mut bridge_read, mut bridge_write) = tokio::io::split(bridge);
 
+        // Resolved before the reader is borrowed, as the other bridges do it.
+        let gw_filter = self.gateway_filter();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
-        // Not `gateway_filter()`: this bridge's far end is a local serial
-        // device, never a board that could recognise a Commodore, so
-        // `gateway_petscii_translate` has no meaning here.
-        let gw_filter = if is_petscii { GatewayFilter::Petscii } else { GatewayFilter::Ansi };
+        // **The same resolver as the network gateways**, which it did not use
+        // at first on the grounds that a local serial device can never
+        // recognise a Commodore.  That was true of the setting's first job --
+        // deciding whether the *far end* detects a C64 -- and stopped being
+        // true when it also began deciding whether we rewrite the caller's
+        // KEYS.  The back-arrow became ESC and the cursor keys became CSI on
+        // this bridge too, unconditionally, with no surface anywhere that
+        // could turn it off: a C64 driving an RC2014 could no longer type an
+        // underscore at all.  A special case that cannot be switched off is
+        // worse than one setting understood in one way.
         let erase_char = self.erase_char;
         // Idle bound for the bridge (see gateway_ssh): disconnect a
         // half-open client so it can't pin the session's max_sessions
