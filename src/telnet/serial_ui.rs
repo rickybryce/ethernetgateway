@@ -482,10 +482,19 @@ impl TelnetSession {
                 .await?;
             } else {
                 let petscii_state = if port.petscii_translate { "on" } else { "off" };
+                // The gateway's own PETSCII choice rides here too, abbreviated,
+                // for the same reason `PETSCII` does: this screen is at the
+                // 22-row budget and a fourth status row would push it over.
+                let gw_state = match port.gateway_petscii.as_str() {
+                    crate::serial::GW_PETSCII_TRANSLATE => "xlat",
+                    crate::serial::GW_PETSCII_PASSTHROUGH => "raw",
+                    _ => "dflt",
+                };
                 self.send_line(&format!(
-                    "  Flow:   {}   PETSCII: {}",
+                    "  Flow: {}  PETSCII: {}  Gw: {}",
                     self.amber(&port.flowcontrol),
-                    self.amber(petscii_state)
+                    self.amber(petscii_state),
+                    self.amber(gw_state)
                 ))
                 .await?;
             }
@@ -535,11 +544,25 @@ impl TelnetSession {
                 ))
                 .await?;
             }
-            self.send_line(&format!(
-                "  {}  Select serial port",
-                self.cyan("S")
-            ))
-            .await?;
+            // `G` rides this row rather than taking one of its own: this
+            // screen is at the 22-row PETSCII budget, the same reason the
+            // erase key and PETSCII already share rows here.  Hidden with the
+            // rest of the modem-only settings on a raw console/Kermit wire,
+            // where no gateway session can arrive.
+            if raw_mode {
+                self.send_line(&format!(
+                    "  {}  Select serial port",
+                    self.cyan("S")
+                ))
+                .await?;
+            } else {
+                self.send_line(&format!(
+                    "  {}  Select serial port   {}  Gw PETSCII",
+                    self.cyan("S"),
+                    self.cyan("G")
+                ))
+                .await?;
+            }
             self.send_line(&format!(
                 "  {}  Set baud rate",
                 self.cyan("B")
@@ -664,6 +687,25 @@ impl TelnetSession {
                     // setting once per session, so a user mid-command does not
                     // have the wire changed under them.
                     crate::serial::restart_serial(id);
+                }
+                "g" if !raw_mode => {
+                    // Cycled in the shared list's own order, like every other
+                    // choice on this screen.  A hand-edited value lands on the
+                    // first choice next, which is `default` -- the end that
+                    // changes nothing.
+                    let choices = crate::serial::GW_PETSCII_CHOICES;
+                    let idx = choices
+                        .iter()
+                        .position(|(v, _)| *v == port.gateway_petscii.trim().to_ascii_lowercase())
+                        .map(|i| (i + 1) % choices.len())
+                        .unwrap_or(0);
+                    let next = choices[idx].0.to_string();
+                    let key = config::serial_key(id, "gateway_petscii");
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value(&key, &next);
+                    })
+                    .await
+                    .ok();
                 }
                 "t" if !(self.is_serial && self.serial_port_id == Some(id)) => {
                     self.toggle_serial_mode(id).await?;

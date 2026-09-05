@@ -1342,7 +1342,7 @@ fn collect_form_updates(
     let serial_keys: &[&str] = &[
         "mode", "port", "baud", "databits", "parity", "stopbits",
         "flowcontrol", "s_regs", "x_code", "dtr_mode", "flow_mode",
-        "dcd_mode", "backspace",
+        "dcd_mode", "backspace", "gateway_petscii",
         "stored_0", "stored_1", "stored_2", "stored_3",
     ];
     for port in ["serial_a", "serial_b"] {
@@ -3265,7 +3265,6 @@ fn render_more_popups(cfg: &Config) -> String {
          </select></div>\
          <h3>Telnet Gateway</h3>\
          <div class=\"row\">{tneg} {traw}</div>\
-         <div class=\"row\">{tpet}</div>\
          <h3>SSH Gateway</h3>\
          <div class=\"row\"><span class=\"label\">Auth:</span>\
          <select name=\"ssh_gateway_auth\">\
@@ -3273,6 +3272,8 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"password\" {pwd_sel}>Password</option>\
          </select></div>\
          {gwpubkey}\
+         <h3>Commodore (PETSCII) terminals</h3>\
+         <div class=\"row\">{tpet}</div>\
          <h3>Terminal size reported to remote</h3>\
          <div class=\"row\">{gwcols} {gwrows}</div>\
          <div class=\"row\"><span class=\"hint\">{gwgeom_hint}</span></div>\
@@ -3313,6 +3314,12 @@ fn render_more_popups(cfg: &Config) -> String {
             cfg.telnet_gateway_negotiate,
             if cfg.telnet_gateway_raw { "disabled" } else { "" },
         ),
+        // Its own heading, and deliberately NOT under "Telnet Gateway": it
+        // governs the SSH Gateway too, and an SSH-only board is the case that
+        // made the setting necessary at all, so filing it under Telnet would
+        // hide it from the person who needs it most.  The desktop puts it in
+        // the same place for the same reason.
+        //
         // PETSCII only, and the label has to say so: on a screen an ANSI
         // operator also reads, an unqualified "translate" invites them to
         // turn off something that has never applied to them.  The hover text
@@ -3969,6 +3976,7 @@ fn serial_more_popup(
          <option value=\"kermit\" {ms_kermit}>Kermit Server</option>\
          </select></div>\
          <div class=\"row\"><span class=\"label\">Erase key:</span>{erase}</div>\
+         <div class=\"row\"><span class=\"label\">Gateway PETSCII:</span>{gwpet}</div>\
          <div class=\"row\">{bits} {stop}\
          <span class=\"label\">Parity:</span><select name=\"{prefix}_parity\">{po}</select>\
          <span class=\"label\">Flow:</span><select name=\"{prefix}_flowcontrol\">{fo}</select>\
@@ -4009,6 +4017,46 @@ fn serial_more_popup(
             port.petscii_translate,
             "title=\"Text only — disable before XMODEM/YMODEM/ZMODEM/Kermit/Punter transfers over the same TCP session, or the binary payload will be corrupted.\"",
         ),
+        // The **second** PETSCII question this port answers, and the two must
+        // not be confused: `AT+PETSCII` above describes the far end of *this
+        // wire*, this one the far end of the hop a Telnet or SSH Gateway opens
+        // afterwards.  Per port because that is where the operator is already
+        // thinking about the machine plugged in; `Default` defers to the
+        // server-wide key, which is what a Commodore arriving over telnet on a
+        // WiFi modem uses, having no port to speak for it.
+        gwpet = {
+            let opts: String = crate::serial::GW_PETSCII_CHOICES
+                .iter()
+                .map(|(value, label)| {
+                    format!(
+                        "<option value=\"{}\"{}>{}</option>",
+                        value,
+                        if *value == port.gateway_petscii.trim().to_ascii_lowercase() {
+                            " selected"
+                        } else {
+                            ""
+                        },
+                        html_escape(label),
+                    )
+                })
+                .collect();
+            format!(
+                "<select name=\"{}_gateway_petscii\" title=\"{}\">{}</select>\
+                 <span class=\"hint\">PETSCII clients on this port only, and about the \
+                 <em>gateway's</em> onward connection &mdash; not this wire, which \
+                 <code>AT+PETSCII</code> above governs. <em>Translate</em>: the gateway \
+                 converts a remote's ANSI colour and clear-screen to PETSCII and \
+                 case-swaps its text. <em>Pass through</em>: the far end does its own \
+                 terminal detection, so it is sent the C64's real 0x14, recognises the \
+                 Commodore and serves native PETSCII in 40 columns &mdash; better where \
+                 it works, and wrong for a board that cannot, which then gives you no \
+                 backspace. <em>Default</em> uses the server-wide setting under \
+                 Server &rarr; More.</span>",
+                prefix,
+                html_escape(crate::config::GATEWAY_PETSCII_TRANSLATE_HINT),
+                opts,
+            )
+        },
         erase = {
             // **Console mode only, and greyed rather than merely explained.**
             // The hint used to carry that alone, which left a live control that

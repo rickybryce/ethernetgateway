@@ -9532,3 +9532,42 @@ fn test_the_leave_pair_honours_only_the_key_the_screen_promises() {
     gateway_input_for_remote(0x5F, GatewayFilter::Ansi, 0x7F, &mut keys);
     assert_eq!(keys, vec![0x5F], "an underscore is just an underscore elsewhere");
 }
+
+/// The per-port override, and the fallback that keeps a portless client whole.
+///
+/// `AT+PETSCII` answers this question for the wire a Commodore is *on*; this
+/// one answers it for the hop a gateway opens afterwards, and it lives beside
+/// that key on the same port screen because that is where an operator is
+/// already thinking about the machine plugged in.  The fallback is the part
+/// worth pinning: a C64 on a WiFi modem reaches the gateway over telnet with
+/// **no serial port at all**, so a purely per-port key would leave that client
+/// unable to express this — the server-wide value is what speaks for it.
+#[test]
+fn test_the_port_answers_first_and_a_portless_client_falls_back() {
+    use crate::serial::{GW_PETSCII_DEFAULT, GW_PETSCII_PASSTHROUGH, GW_PETSCII_TRANSLATE};
+    // Every choice resolves, and an unknown value reads as the default rather
+    // than as one of the two real answers.
+    for (stored, server_wide, want) in [
+        (GW_PETSCII_TRANSLATE, false, true),
+        (GW_PETSCII_PASSTHROUGH, true, false),
+        (GW_PETSCII_DEFAULT, true, true),
+        (GW_PETSCII_DEFAULT, false, false),
+        ("nonsense", true, true),
+        ("nonsense", false, false),
+    ] {
+        let resolved = crate::serial::resolve_gw_petscii(stored, server_wide);
+        assert_eq!(
+            resolved, want,
+            "port set to {stored:?} with server-wide {server_wide}"
+        );
+    }
+    // The label shown on all three screens never invents a fourth answer.
+    for (value, _) in crate::serial::GW_PETSCII_CHOICES {
+        assert!(!crate::serial::gw_petscii_label(value).is_empty());
+    }
+    assert_eq!(
+        crate::serial::gw_petscii_label("nonsense"),
+        crate::serial::GW_PETSCII_CHOICES[0].1,
+        "an unreadable value must read as the default, as the resolver treats it"
+    );
+}

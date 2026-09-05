@@ -3334,7 +3334,7 @@ impl App {
                 "Which byte the device is handed when you press Backspace or Delete on a CONSOLE-MODE bridge.  Your terminal decides which of 0x08 and 0x7F it sends and cannot be asked to change it, while a lot of period hardware edits with 0x08 and a modern client sends 0x7F -- neither end is wrong, which is why this exists.  CONSOLE MODE ONLY, so it is greyed out in Modem and Kermit Server mode: a modem port passes these bytes through, and on a Kermit-server port they are packet data whose rewriting would corrupt every transfer containing one.  It rewrites what you TYPE, so set it back to pass-through before a file transfer over the same bridge -- PCGET and PCPUT run XMODEM over the console line.  This is NOT the Hayes S5 backspace, which is the AT command line's own erase key and lives in the S-registers.",
             );
         });
-    }
+        }
 
     /// Render the Serial Port frame's advanced options — Hayes AT
     /// saved state, S-registers, and stored phone-number slots.  Shown
@@ -3426,6 +3426,32 @@ impl App {
                     .small()
                     .color(AMBER),
             );
+        });
+        // The port's **second** PETSCII question, and deliberately beside the
+        // first: `AT+PETSCII` above describes the far end of *this wire*, this
+        // one the far end of the hop a Telnet or SSH Gateway opens afterwards.
+        // Per port because this is where an operator is already thinking about
+        // the machine plugged in.  `Default` defers to the server-wide key,
+        // which is what a Commodore arriving over telnet on a WiFi modem uses,
+        // having no port to speak for it.
+        ui.horizontal(|ui| {
+            ui.label("Gateway PETSCII:");
+            let current =
+                crate::serial::gw_petscii_label(&self.cfg.port(id).gateway_petscii).to_string();
+            egui::ComboBox::from_id_salt(format!("serial_gw_petscii_{}", id.label()))
+                .width(260.0)
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (value, label) in crate::serial::GW_PETSCII_CHOICES {
+                        ui.selectable_value(
+                            &mut self.cfg.port_mut(id).gateway_petscii,
+                            (*value).to_string(),
+                            *label,
+                        );
+                    }
+                })
+                .response
+                .on_hover_text(crate::config::GATEWAY_PETSCII_TRANSLATE_HINT);
         });
         ui.horizontal(|ui| {
             ui.checkbox(

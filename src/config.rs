@@ -848,6 +848,10 @@ pub struct SerialPortConfig {
     /// than a mismatch. Named with the same two words as
     /// `cpm_boot_backspace`, so an operator meets one vocabulary and not two.
     pub backspace: String,
+    /// What sessions arriving on this port do about PETSCII on a **gateway's**
+    /// onward hop.  `default` defers to `gateway_petscii_translate`; see
+    /// `crate::serial::GW_PETSCII_CHOICES`.
+    pub gateway_petscii: String,
     /// Drive DTR as a hardware carrier proxy (default false).  When true,
     /// the modem emulator asserts/drops DTR with the connection (tied to
     /// AT&C) so a terminal wired DTR→DCD sees carrier detect.  When false
@@ -884,6 +888,7 @@ impl Default for SerialPortConfig {
             ],
             petscii_translate: DEFAULT_SERIAL_PETSCII_TRANSLATE,
             backspace: crate::serial::BACKSPACE_PASSTHROUGH.to_string(),
+            gateway_petscii: crate::serial::GW_PETSCII_DEFAULT.to_string(),
             drive_carrier: DEFAULT_SERIAL_DRIVE_CARRIER,
         }
     }
@@ -2683,6 +2688,10 @@ fn read_serial_port_config(
             .map(|v| v.trim().to_ascii_lowercase())
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| crate::serial::BACKSPACE_PASSTHROUGH.to_string()),
+        gateway_petscii: lookup("gateway_petscii", "serial_gateway_petscii")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| crate::serial::GW_PETSCII_CHOICES.iter().any(|(k, _)| *k == v))
+            .unwrap_or_else(|| crate::serial::GW_PETSCII_DEFAULT.to_string()),
     }
 }
 
@@ -2789,6 +2798,7 @@ fn write_serial_port_section(
     }
     write_kv(out, &format!("{}_petscii_translate", prefix), port.petscii_translate);
     write_kv(out, &format!("{}_drive_carrier", prefix), port.drive_carrier);
+    write_kv_str(out, &format!("{}_gateway_petscii", prefix), &port.gateway_petscii);
     out.push_str("\
 #   backspace: which byte the device is handed when you press Backspace or
 #     Delete on a CONSOLE-mode bridge.
@@ -3814,6 +3824,12 @@ fn apply_serial_port_key(port: &mut SerialPortConfig, suffix: &str, value: &str)
             let v = value.trim().to_ascii_lowercase();
             if crate::serial::BACKSPACE_CHOICES.iter().any(|(k, _)| *k == v) {
                 port.backspace = v;
+            }
+        }
+        "gateway_petscii" => {
+            let v = value.trim().to_ascii_lowercase();
+            if crate::serial::GW_PETSCII_CHOICES.iter().any(|(k, _)| *k == v) {
+                port.gateway_petscii = v;
             }
         }
         _ => {}
@@ -5626,6 +5642,7 @@ mod tests {
                 // Not the default, and different from Port B's below: the
                 // roundtrip then proves the key is per-port rather than shared.
                 backspace: crate::serial::BACKSPACE_BS.to_string(),
+                gateway_petscii: crate::serial::GW_PETSCII_DEFAULT.to_string(),
                 drive_carrier: true,
             },
             serial_b: SerialPortConfig {
@@ -5653,6 +5670,7 @@ mod tests {
                 ],
                 petscii_translate: false,
                 backspace: crate::serial::BACKSPACE_DEL.to_string(),
+                gateway_petscii: crate::serial::GW_PETSCII_DEFAULT.to_string(),
                 drive_carrier: false,
             },
             ssh_enabled: true,
@@ -7977,6 +7995,7 @@ mod tests {
                 petscii_translate: true,
                 drive_carrier: true,
                 backspace: crate::serial::BACKSPACE_BS.to_string(),
+                gateway_petscii: crate::serial::GW_PETSCII_DEFAULT.to_string(),
             },
             ..Config::default()
         };

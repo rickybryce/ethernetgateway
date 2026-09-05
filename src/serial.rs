@@ -2530,6 +2530,31 @@ pub const BACKSPACE_DEL: &str = "rubout";
 /// [`crate::cpm::boot::BACKSPACE_CHOICES`] serves the booted-disk setting -- and
 /// deliberately the same two words for the same two meanings, so an operator
 /// reading the CP/M screen and the serial screen learns one vocabulary.
+/// `serial_*_gateway_petscii`: use the server-wide `gateway_petscii_translate`.
+pub const GW_PETSCII_DEFAULT: &str = "default";
+/// `serial_*_gateway_petscii`: the gateway translates for this Commodore.
+pub const GW_PETSCII_TRANSLATE: &str = "translate";
+/// `serial_*_gateway_petscii`: the far end understands Commodores; pass through.
+pub const GW_PETSCII_PASSTHROUGH: &str = "passthrough";
+
+/// What a port's sessions do about PETSCII on a **gateway's onward hop** --
+/// the second link, to the board a Telnet or SSH Gateway dials, not this wire.
+///
+/// Per port because that is where an operator is already thinking about the
+/// machine plugged in, next to `AT+PETSCII`, which answers the same question
+/// about *this* wire.  `default` defers to the server-wide
+/// `gateway_petscii_translate`, which is what a client with no serial port at
+/// all -- a C64 on a WiFi modem, reaching the gateway over telnet -- uses,
+/// since there is no port whose setting could speak for it.
+///
+/// One list, so config validation and all three screens enumerate the same
+/// choices, exactly as [`BACKSPACE_CHOICES`] does.
+pub const GW_PETSCII_CHOICES: &[(&str, &str)] = &[
+    (GW_PETSCII_DEFAULT, "Default - use the server-wide setting"),
+    (GW_PETSCII_TRANSLATE, "Translate - gateway converts ANSI to PETSCII"),
+    (GW_PETSCII_PASSTHROUGH, "Pass through - the board speaks PETSCII"),
+];
+
 pub const BACKSPACE_CHOICES: &[(&str, &str)] = &[
     (BACKSPACE_PASSTHROUGH, "Pass through - send what you typed"),
     (BACKSPACE_BS, "Backspace 0x08 - most CP/M, RomWBW"),
@@ -2543,6 +2568,35 @@ pub const BACKSPACE_CHOICES: &[(&str, &str)] = &[
 /// the same rule as `cpm::boot::backspace_label`, and for the same reason: a
 /// screen that agrees with the config file and disagrees with the hardware is
 /// worse than no screen.
+/// The menu text for a `serial_*_gateway_petscii` value, so all three screens
+/// render one wording.  An unknown value reads as the default, which is what
+/// the resolver does with it.
+/// Resolve a port's `serial_*_gateway_petscii` against the server-wide
+/// `gateway_petscii_translate`.
+///
+/// A free function so the rule has one statement and a test can exercise the
+/// real one: a test that re-implements a resolution in its own body is
+/// comparing the source with a copy of itself.
+///
+/// An unreadable value resolves as `default` rather than as either real
+/// answer, so a hand-edited config cannot silently pick a side.
+pub fn resolve_gw_petscii(port_value: &str, server_wide: bool) -> bool {
+    match port_value.trim().to_ascii_lowercase().as_str() {
+        GW_PETSCII_TRANSLATE => true,
+        GW_PETSCII_PASSTHROUGH => false,
+        _ => server_wide,
+    }
+}
+
+pub fn gw_petscii_label(value: &str) -> &'static str {
+    let want = value.trim().to_ascii_lowercase();
+    GW_PETSCII_CHOICES
+        .iter()
+        .find(|(v, _)| *v == want)
+        .map(|(_, l)| *l)
+        .unwrap_or(GW_PETSCII_CHOICES[0].1)
+}
+
 pub fn backspace_label(value: &str) -> &'static str {
     let want = match backspace_target(value) {
         None => BACKSPACE_PASSTHROUGH,

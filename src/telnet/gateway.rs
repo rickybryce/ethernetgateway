@@ -1208,7 +1208,7 @@ impl TelnetSession {
     fn gateway_filter(&self) -> GatewayFilter {
         match self.terminal_type {
             TerminalType::Petscii => {
-                if config::get_config().gateway_petscii_translate {
+                if self.gateway_translates_petscii() {
                     GatewayFilter::Petscii
                 } else {
                     GatewayFilter::Raw
@@ -1216,6 +1216,27 @@ impl TelnetSession {
             }
             TerminalType::Ascii => GatewayFilter::Ascii,
             _ => GatewayFilter::Ansi,
+        }
+    }
+
+    /// Whether a gateway hop should translate for this Commodore.
+    ///
+    /// **The port answers first.**  The setting describes the machine plugged
+    /// into a wire, so it belongs beside `AT+PETSCII` on that port's own
+    /// screen -- which is also what makes it reachable from the machine
+    /// itself rather than only from a web page the operator may be nowhere
+    /// near.  `default`, and any session with **no port at all**, fall back to
+    /// the server-wide key: a C64 on a WiFi modem reaches us over telnet, so
+    /// there is no port whose setting could speak for it, and without the
+    /// fallback that client would have no way to express this.
+    fn gateway_translates_petscii(&self) -> bool {
+        let cfg = config::get_config();
+        match self.serial_port_id {
+            Some(id) => crate::serial::resolve_gw_petscii(
+                &cfg.port(id).gateway_petscii,
+                cfg.gateway_petscii_translate,
+            ),
+            None => cfg.gateway_petscii_translate,
         }
     }
 
