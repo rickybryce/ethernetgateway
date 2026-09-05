@@ -50,6 +50,7 @@ mod instance;
 mod interop;
 mod kermit;
 mod logger;
+mod petscii;
 mod portcheck;
 mod punter;
 mod relay;

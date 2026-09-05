@@ -44,7 +44,8 @@ pub(in crate::telnet) use gateway::{GatewayTelnetIac, GatewayIacState, OptState,
     GatewayInboundEvent, REMOTE_PORT_DISPLAY_CAP, read_gateway_event,
     filter_gateway_output, GatewayOutState, GW_FILTER_FLUSH, OSC_TITLE_MAX,
     EscHold, GW_ESC_PAIR,
-    normalize_gateway_input, gateway_default_window};
+    normalize_gateway_input, gateway_default_window,
+    gateway_input_for_remote, is_gateway_leave_key};
 mod io;
 pub(crate) use io::{read_byte_iac_filtered, write_telnet_data};
 

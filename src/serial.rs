@@ -3380,14 +3380,20 @@ fn serial_thread(
 // ─── Command mode ──────────────────────────────────────────
 
 /// Whether `byte` should erase a character during command-mode line
-/// editing.  Always accepts the configured backspace char (`S5`, default
-/// ASCII BS 0x08) and ASCII DEL (0x7F).  The C64's PETSCII DEL (0x14, the
-/// INST/DEL key) is accepted only when PETSCII translation is active
-/// (`AT+PETSCII=1`), so a plain-ASCII caller's command-mode editing is byte-for-
-/// byte unchanged — e.g. an ASCII terminal sending 0x14 (Ctrl-T) stays an
-/// ignored control byte, exactly as before the C64 affordance was added.
-fn is_command_backspace(byte: u8, bs: u8, petscii: bool) -> bool {
-    byte == bs || byte == 0x7F || (petscii && byte == 0x14)
+/// editing.  The configured backspace char (`S5`, default ASCII BS 0x08),
+/// ASCII DEL (0x7F), and the C64's PETSCII DEL (0x14, the INST/DEL key).
+///
+/// **0x14 used to be accepted only under `AT+PETSCII=1`, and that was wrong.**
+/// What the far end speaks has nothing to do with editing `ATDT somewhere`
+/// at the `OK` prompt, and the two settings were in direct conflict: measured
+/// on Ricky's C64 on 2026-09-05, `AT+PETSCII=0` is the setting that makes a
+/// PETSCII-aware board work -- and it was also the setting that left his
+/// INST/DEL key dead in command mode.  The old gate was justified as
+/// protecting an ASCII terminal that sends 0x14 as Ctrl-T, but an AT command
+/// line is printable ASCII: a bare 0x14 there is not data under any reading,
+/// so the caution protected nothing real.
+fn is_command_backspace(byte: u8, bs: u8) -> bool {
+    byte == bs || byte == 0x7F || byte == 0x14
 }
 
 /// Whether `byte` is a command-line terminator: the configured CR (S3) or
@@ -3470,20 +3476,26 @@ fn command_mode_tick(state: &mut ModemState) -> bool {
                 if !cmd.is_empty() {
                     process_at_command(state, &cmd);
                 }
-            } else if is_command_backspace(byte, bs, state.petscii_translate) {
+            } else if is_command_backspace(byte, bs) {
                 if !state.cmd_buffer.is_empty() {
                     state.cmd_buffer.pop();
                     if state.echo {
-                        if state.petscii_translate {
-                            // On a C64, PETSCII DEL is a self-contained
-                            // destructive backspace: a single 0x14 erases
-                            // the char to the left and pulls the line
-                            // back.  The ASCII BS-SPACE-BS dance would
-                            // just print garbage there.
+                        // **Echo in the alphabet the key arrived in**, not in
+                        // the one a mode flag names.  On a C64, PETSCII DEL is
+                        // a self-contained destructive backspace: a single
+                        // 0x14 erases the character to the left and pulls the
+                        // line back, and the ASCII BS-SPACE-BS dance would
+                        // print garbage there (0x08 on a C64 is not a
+                        // backspace at all -- it locks the character set).
+                        // Deciding from the byte rather than from
+                        // `petscii_translate` means a Commodore and an ASCII
+                        // terminal both edit correctly on the same port with
+                        // no configuration, which is the whole point: the
+                        // erase key is a property of the keyboard in front of
+                        // the user, not of what the far end speaks.
+                        if byte == 0x14 {
                             let _ = state.port.write_all(&[0x14]);
                         } else {
-                            // ASCII: erase with BS-SPACE-BS using the
-                            // configured BS char.
                             let _ = state.port.write_all(&[bs, b' ', bs]);
                         }
                     }
@@ -5860,68 +5872,14 @@ fn translate_ascii_to_petscii_byte(byte: u8) -> u8 {
     }
 }
 
-/// State machine that strips ECMA-48 / ANSI escape sequences from a
-/// byte stream.  PETSCII terminals can't render `ESC [ … letter`
-/// cursor-control sequences from ASCII BBSes (telehack, NetHack, etc.)
-/// so when AT+PETSCII=1 is active we drop them rather than leak garbage to
-/// the C64.  Persists across reads — a CSI split across two TCP
-/// packets is still recognized.
-/// Hard cap on how many bytes we'll consume inside an unterminated CSI
-/// before giving up and resuming normal forwarding.  ECMA-48 doesn't bound
-/// the parameter-byte run, but in practice no real terminal sends more than
-/// a handful, so 64 covers every legitimate sequence and still recovers
-/// quickly if a malformed/truncated CSI arrives (a host that dropped its
-/// final byte would otherwise wedge the inbound path indefinitely).
-const ANSI_STRIP_CSI_LEN_CAP: usize = 64;
-
-#[derive(Default)]
-struct AnsiStripState {
-    in_esc: bool,
-    in_csi: bool,
-    /// Bytes consumed in the current CSI run, including the `[` opener.
-    /// Reset to 0 each time we exit CSI mode.
-    csi_len: usize,
-}
-
-impl AnsiStripState {
-    /// Push one input byte.  Returns `Some(b)` if `b` should be
-    /// forwarded, `None` if it's part of an escape sequence we're
-    /// dropping.
-    fn feed(&mut self, byte: u8) -> Option<u8> {
-        if self.in_csi {
-            // CSI ends on a final byte in 0x40..=0x7E; intermediate
-            // and parameter bytes (0x20..=0x3F) all get dropped.
-            // ANSI_STRIP_CSI_LEN_CAP guards against an unterminated
-            // CSI (host disconnect mid-sequence, non-spec emitter)
-            // that would otherwise eat every following byte forever.
-            self.csi_len = self.csi_len.saturating_add(1);
-            if (0x40..=0x7E).contains(&byte) || self.csi_len >= ANSI_STRIP_CSI_LEN_CAP {
-                self.in_csi = false;
-                self.csi_len = 0;
-            }
-            return None;
-        }
-        if self.in_esc {
-            self.in_esc = false;
-            if byte == b'[' {
-                self.in_csi = true;
-                self.csi_len = 1;
-                return None;
-            }
-            // Single-byte-final ESC sequences (ESC 7, ESC 8, ESC =,
-            // charset selectors `ESC ( B`, etc.).  Dropping just the
-            // immediate byte misses two-byte tails like `ESC ( B`, but
-            // those collapse to one screen glyph at worst — preferable
-            // to a stuck state machine if a stray ESC arrives.
-            return None;
-        }
-        if byte == 0x1B {
-            self.in_esc = true;
-            return None;
-        }
-        Some(byte)
-    }
-}
+// The ANSI stripper that used to live here is gone: `crate::petscii` now
+// *translates* what it can into PETSCII (colour, clear screen, cursor moves)
+// and drops only the rest.  Stripping meant a C64 dialling an ASCII BBS got
+// no colour and no cleared screen at all, which is what a user reported on
+// 2026-09-05.  The two paths that used to hold a copy of that state machine
+// each -- here and `telnet/gateway.rs` -- now share one, because the last two
+// defects in this area (the BS -> 0x9D mapping, twice) were one rule written
+// in two places.
 
 /// State machine that normalizes inbound punctuation so it renders
 /// legibly on a C64 in lower/upper (text) mode.  Old ASCII text files
@@ -6052,7 +6010,7 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
     // Only consulted when AT+PETSCII=1 is active, but its state has to live
     // across reads regardless so a CSI split across packets still
     // collapses correctly.
-    let mut ansi = AnsiStripState::default();
+    let mut ansi = crate::petscii::AnsiToPetscii::new();
     // Punctuation normalizer for the inbound direction, applied after
     // the ANSI stripper and before the ASCII→PETSCII case-swap.  Lives
     // across reads so a UTF-8 smart-quote split across packets decodes.
@@ -6095,9 +6053,24 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
                 let mut forward = Vec::with_capacity(n);
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
                 if state.petscii_translate {
-                    for b in forward.iter_mut() {
-                        *b = translate_petscii_to_ascii_byte(*b);
+                    // A cursor key is one PETSCII byte and becomes a
+                    // three-byte ANSI sequence, so this cannot be done in
+                    // place.  CRSR DOWN is 0x11 -- XON -- and forwarding it
+                    // raw told a host with software flow control to resume
+                    // sending.  The back-arrow becomes ESC here too: this mode
+                    // means "the far end speaks ASCII", and a C64 user's ESC
+                    // key should mean ESC there as much as it does through the
+                    // Telnet Gateway.  Online mode leaves with `+++`, not with
+                    // a key pair, so nothing else claims the byte -- the cost
+                    // is only that an underscore can no longer be typed.
+                    let mut mapped = Vec::with_capacity(forward.len());
+                    for &b in forward.iter() {
+                        match crate::petscii::key_to_ansi_host(b) {
+                            Some(seq) => mapped.extend_from_slice(seq),
+                            None => mapped.push(translate_petscii_to_ascii_byte(b)),
+                        }
                     }
+                    forward = mapped;
                 }
                 if !forward.is_empty() && tcp.write_all(&forward).is_err() {
                     return OnlineExit::Disconnected;
@@ -6115,13 +6088,21 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
             Ok(n) => {
                 if state.petscii_translate {
                     let mut translated = Vec::with_capacity(n);
-                    for &b in &tcp_buf[..n] {
-                        if let Some(stripped) = ansi.feed(b) {
-                            punct.feed(stripped, &mut translated);
+                    // Text goes through the punctuation folder and the case
+                    // swap; the escape translator's own PETSCII control bytes
+                    // must not, because `PetsciiPunctState` drops 0x80..=0x9F
+                    // -- which is where nine of the sixteen colour codes live.
+                    // Keeping the two apart is why `feed` takes the caller's
+                    // text handler rather than doing the mapping itself.
+                    let mut text = |b: u8, out: &mut Vec<u8>| {
+                        let start = out.len();
+                        punct.feed(b, out);
+                        for v in out[start..].iter_mut() {
+                            *v = translate_ascii_to_petscii_byte(*v);
                         }
-                    }
-                    for b in translated.iter_mut() {
-                        *b = translate_ascii_to_petscii_byte(*b);
+                    };
+                    for &b in &tcp_buf[..n] {
+                        ansi.feed(b, &mut text, &mut translated);
                     }
                     if !translated.is_empty() {
                         if state.port.write_all(&translated).is_err() {
@@ -9123,22 +9104,19 @@ mod tests {
         // Default S5 backspace char is ASCII BS (0x08).
         let bs = S_REG_DEFAULTS[5];
         assert_eq!(bs, 0x08);
-        // Configured BS and ASCII DEL are backspace regardless of mode.
-        for petscii in [false, true] {
-            assert!(is_command_backspace(0x08, bs, petscii));
-            assert!(is_command_backspace(0x7F, bs, petscii));
-            // A custom S5 char is honored too.
-            assert!(is_command_backspace(0x7F, 0x7F, petscii));
-            // Ordinary input is never a backspace.
-            for b in [b'A', b'+', b'0', b' ', 0x0D, 0x0A, 0x1B] {
-                assert!(!is_command_backspace(b, bs, petscii));
-            }
+        assert!(is_command_backspace(0x08, bs));
+        assert!(is_command_backspace(0x7F, bs));
+        // A custom S5 char is honored too.
+        assert!(is_command_backspace(0x7F, 0x7F));
+        // Ordinary input is never a backspace.
+        for b in [b'A', b'+', b'0', b' ', 0x0D, 0x0A, 0x1B] {
+            assert!(!is_command_backspace(b, bs));
         }
-        // C64 PETSCII DEL (INST/DEL key) is backspace ONLY under AT+PETSCII=1 —
-        // a plain-ASCII caller's 0x14 (Ctrl-T) stays an ignored control
-        // byte, so ASCII command-mode editing is unchanged.
-        assert!(is_command_backspace(0x14, bs, true));
-        assert!(!is_command_backspace(0x14, bs, false));
+        // The C64's INST/DEL erases whatever the far end speaks: editing the
+        // command line is not a property of the connection, and tying the two
+        // together left a real C64 unable to correct `atdt` on the setting
+        // that makes PETSCII-aware boards work.
+        assert!(is_command_backspace(0x14, bs));
     }
 
     #[test]
@@ -9198,40 +9176,6 @@ mod tests {
         ] {
             assert_eq!(translate_petscii_to_ascii_byte(typed_byte), expected_ascii);
         }
-    }
-
-    #[test]
-    fn test_ansi_strip_csi() {
-        let mut ansi = AnsiStripState::default();
-        // Bare text passes through.
-        let kept: Vec<u8> = b"hi".iter().filter_map(|&b| ansi.feed(b)).collect();
-        assert_eq!(kept, b"hi");
-        // CSI sequence is dropped end-to-end.
-        let kept: Vec<u8> = b"\x1b[31mX\x1b[0mY"
-            .iter()
-            .filter_map(|&b| ansi.feed(b))
-            .collect();
-        assert_eq!(kept, b"XY");
-    }
-
-    #[test]
-    fn test_ansi_strip_csi_split_across_reads() {
-        // A CSI split mid-sequence still collapses — the parser
-        // state survives across feed() calls.
-        let mut ansi = AnsiStripState::default();
-        let first: Vec<u8> = b"A\x1b[3".iter().filter_map(|&b| ansi.feed(b)).collect();
-        let second: Vec<u8> = b"1mB".iter().filter_map(|&b| ansi.feed(b)).collect();
-        let combined: Vec<u8> = first.into_iter().chain(second).collect();
-        assert_eq!(combined, b"AB");
-    }
-
-    #[test]
-    fn test_ansi_strip_non_csi_esc() {
-        // Single-byte-final ESC sequences (ESC 7 / ESC 8 / charset
-        // selectors) drop the ESC and the next byte.
-        let mut ansi = AnsiStripState::default();
-        let kept: Vec<u8> = b"A\x1b7B".iter().filter_map(|&b| ansi.feed(b)).collect();
-        assert_eq!(kept, b"AB");
     }
 
     // ─── PETSCII inbound punctuation normalizer ────────────

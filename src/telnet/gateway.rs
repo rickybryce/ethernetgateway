@@ -222,6 +222,11 @@ pub(in crate::telnet) struct GatewayOutState {
     /// 4=ESC in string, 5=weighing a title, 6=ESC while weighing one
     state: u8,
     held: Vec<u8>,
+    /// The PETSCII path's own parser.  It does not share the state machine
+    /// below because it does the opposite job: that one decides what to
+    /// *discard*, this one decides what an escape sequence becomes on a
+    /// Commodore.  Unused in the other two modes.
+    petscii: crate::petscii::AnsiToPetscii,
 }
 
 /// How long a candidate may be withheld once the remote stops sending.
@@ -242,7 +247,12 @@ pub(in crate::telnet) const GW_FILTER_FLUSH: std::time::Duration =
 impl GatewayOutState {
     /// A fresh parser for one client terminal.
     pub(in crate::telnet) fn new(mode: GatewayFilter) -> Self {
-        Self { mode, state: 0, held: Vec::new() }
+        Self {
+            mode,
+            state: 0,
+            held: Vec::new(),
+            petscii: crate::petscii::AnsiToPetscii::new(),
+        }
     }
 
     /// The parser phase, for tests that check a sequence is still open across
@@ -313,8 +323,38 @@ pub(in crate::telnet) fn filter_gateway_output(
     st: &mut GatewayOutState,
     out: &mut Vec<u8>,
 ) {
+    // A Commodore is served by `crate::petscii`, which *translates* the
+    // sequences it can and drops the rest, rather than dropping them all.
+    // Handled here and returned, so the machine below -- and in particular the
+    // held-title candidate the `Ansi` mode depends on -- is left exactly as it
+    // was.  The character mapping stays the caller's: a translator that also
+    // case-swapped would have to be told which caller it was serving.
+    if st.mode == GatewayFilter::Petscii {
+        // ASCII BS (0x08) becomes PETSCII **CRSR LEFT (0x9D)**, never PETSCII
+        // DEL (0x14).  They are not equivalents: 0x08 moves the cursor left
+        // and erases nothing, 0x14 deletes the character to the left and pulls
+        // the rest of the line back.  A host uses BS both to reposition (a
+        // readline redraw emits runs of bare BS -- each one silently deleted a
+        // character the remote still believed was on screen) and to erase with
+        // the universal `BS SPACE BS`, which became `DEL SPACE DEL`.  With
+        // 0x9D that idiom renders as left, space, left: the character is
+        // overwritten and the cursor ends up before it, exactly as meant.
+        // 0x7F is treated the same, as it is everywhere else in this codebase.
+        // The same rule, and the same write-up, lives in `serial.rs`'s
+        // `translate_ascii_to_petscii_byte`.
+        let mut text = |b: u8, out: &mut Vec<u8>| match b {
+            b'~' => {}  // tilde has no PETSCII equivalent
+            0x08 | 0x7F => out.push(0x9D),
+            b'A'..=b'Z' => out.push(b + 32),
+            b'a'..=b'z' => out.push(b - 32),
+            _ => out.push(b),
+        };
+        for &b in input {
+            st.petscii.feed(b, &mut text, out);
+        }
+        return;
+    }
     let strip_all = st.mode != GatewayFilter::Ansi;
-    let is_petscii = st.mode == GatewayFilter::Petscii;
     // A held candidate that turned out to be ordinary data, in arrival order.
     fn release(st: &mut GatewayOutState, out: &mut Vec<u8>) {
         out.extend_from_slice(&st.held);
@@ -329,44 +369,6 @@ pub(in crate::telnet) fn filter_gateway_output(
             0 => {
                 if b == 0x1B {
                     st.state = 1;
-                } else if is_petscii {
-                    match b {
-                        b'~' => {}  // tilde has no PETSCII equivalent
-                        // Host BS → PETSCII CURSOR LEFT (0x9D), *not* PETSCII
-                        // DEL (0x14).  They are not equivalents and the
-                        // difference corrupted the screen on every edited line:
-                        //
-                        //   ASCII 0x08  = move left one column, NON-destructive
-                        //   PETSCII 0x14 = delete the char to the left and pull
-                        //                  the rest of the line back (see the
-                        //                  same point made from the other side
-                        //                  in serial.rs's AT-echo handler)
-                        //   PETSCII 0x9D = move left one column — the actual
-                        //                  equivalent
-                        //
-                        // A host uses BS two ways, and 0x14 broke both.
-                        // Readline repositions the cursor with bare BS after
-                        // redrawing a line — each one silently DELETED a
-                        // character the remote still believes is on screen — and
-                        // it erases with the universal `BS SPACE BS`, which
-                        // became `DEL SPACE DEL`: delete a char, insert a space,
-                        // delete that.  Both leave the C64's screen disagreeing
-                        // with the host, and the damage grows with line length
-                        // because longer lines are repositioned more, which is
-                        // why short commands always looked fine.
-                        //
-                        // With 0x9D, `BS SPACE BS` renders as left, space, left
-                        // — the character is overwritten with a blank and the
-                        // cursor ends up before it, which is exactly what the
-                        // host means.  0x7F (ASCII DEL) is treated the same as
-                        // BS, as it was before; a host emitting it as output at
-                        // all is vanishingly rare, and a non-destructive move is
-                        // the safe reading.
-                        0x08 | 0x7F => out.push(0x9D),
-                        b'A'..=b'Z' => out.push(b + 32),
-                        b'a'..=b'z' => out.push(b - 32),
-                        _ => out.push(b),
-                    }
                 } else {
                     out.push(b);
                 }
@@ -1071,6 +1073,60 @@ pub(in crate::telnet) fn gateway_window_source(ovr: u16, negotiated: Option<u16>
     }
 }
 
+/// Whether this keystroke counts toward the double press that leaves a
+/// gateway session.
+///
+/// Deliberately **not** `is_esc_key`, and the difference is the fix.
+/// `is_esc_key` accepts both 0x1B and, on a Commodore, the back-arrow 0x5F --
+/// right for a prompt, where either key should cancel.  Inside a live bridge
+/// it is wrong, because it made both count toward the leave pair, and a C64
+/// *can* send a real ESC: measured on Ricky's machine 2026-09-05, CTRL+: emits
+/// 0x1B and reaches the remote untouched.  So pressing ESC twice at a remote's
+/// prompt -- idiomatic in vi, and in half the BBS menus in existence -- dropped
+/// the connection instead of reaching the host.
+///
+/// The screens only ever promise the back-arrow to a PETSCII caller ("press
+/// <- twice quickly to disconnect"), so honouring that key alone is both
+/// safer and what was advertised.
+pub(in crate::telnet) fn is_gateway_leave_key(byte: u8, petscii: bool) -> bool {
+    if petscii { byte == 0x5F } else { byte == 0x1B }
+}
+
+/// One client keystroke, as the bytes the remote end should receive.
+///
+/// Three rules, which used to be two lines copied at three call sites:
+///
+/// * A Commodore's **cursor keys** are single PETSCII control bytes, and were
+///   forwarded raw.  No ASCII host has ever understood them, and CRSR DOWN
+///   (0x11) is worse than meaningless -- it is XON, so a host with software
+///   flow control reads a cursor key as permission to resume sending.  They
+///   become the ANSI sequences a host does understand.
+/// * A Commodore's **cursor keys** become ANSI sequences, and its
+///   **back-arrow becomes ESC** -- the key a C64 user calls ESC used to reach
+///   the remote as an underscore.  Both rules, and why, live in
+///   `crate::petscii::key_to_ansi_host`, which the modem's `AT+PETSCII=1`
+///   path calls too.  The leave pair is unaffected: the call site weighs the
+///   key *before* this runs, so two quick back-arrows still disconnect and a
+///   single one is forwarded.
+/// * PETSCII letters are case-swapped into ASCII.
+/// * An unusual erase byte (a C64's 0x14) becomes ASCII DEL, so editors that
+///   expect 0x7F see what they expect.
+pub(in crate::telnet) fn gateway_input_for_remote(
+    byte: u8,
+    petscii: bool,
+    erase_char: u8,
+    out: &mut Vec<u8>,
+) {
+    if petscii {
+        if let Some(seq) = crate::petscii::key_to_ansi_host(byte) {
+            out.extend_from_slice(seq);
+            return;
+        }
+    }
+    let b = if petscii { petscii_to_ascii_byte(byte) } else { byte };
+    out.push(if b == erase_char && erase_char != 0x7F { 0x7F } else { b });
+}
+
 /// Normalize a client input byte for SSH gateway forwarding.
 ///
 /// Telnet clients send CR+LF or CR+NUL for Enter; SSH expects bare CR.
@@ -1122,6 +1178,31 @@ impl TelnetSession {
 
     /// Gateway timeout for SSH connection attempts.
     const GATEWAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// The line telling a Commodore how to send a real ESC to the remote.
+    ///
+    /// Shown on PETSCII only, because it is the one terminal whose ESC key is
+    /// not marked ESC.  Measured on Ricky's C64 on 2026-09-05: CCGMS emits
+    /// 0x1B for CTRL+: and the gateway forwards it untouched, while the
+    /// back-arrow -- which the line above this one names as the way *out* --
+    /// reaches the remote as an underscore.  Both facts were true before this
+    /// was written and neither was stated on any surface, which is most of why
+    /// "my ESC key does not work" was reported as a fault rather than as a
+    /// missing instruction.
+    ///
+    /// Kept to 33 columns so it fits a 40-column screen with its colour codes,
+    /// which cost bytes but no columns.
+    async fn send_gateway_esc_hint(&mut self) -> Result<(), std::io::Error> {
+        if self.terminal_type == TerminalType::Petscii {
+            self.send_line(&format!(
+                "  One {}, or {}, sends ESC.",
+                self.cyan("<-"),
+                self.cyan("CTRL+:")
+            ))
+            .await?;
+        }
+        Ok(())
+    }
 
     /// Prompt for the remote SSH host, port, and username.  Password is
     /// collected separately (`gateway_password_prompt`) so we can skip
@@ -1668,6 +1749,7 @@ impl TelnetSession {
             self.cyan(esc_label)
         ))
         .await?;
+        self.send_gateway_esc_hint().await?;
         self.send_line("").await?;
         self.flush().await?;
 
@@ -1765,15 +1847,25 @@ impl TelnetSession {
                             // `EscHold`.  Only a *consecutive* pair inside
                             // `GW_ESC_PAIR` leaves, and that pair's second
                             // byte is ours rather than the remote's.
-                            if is_esc_key(b, is_petscii) {
+                            if is_gateway_leave_key(b, is_petscii) {
                                 if esc.press(tokio::time::Instant::now()) { break; }
                             } else {
                                 esc.other();
                             }
                             let raw = b;
-                            let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
-                            let b = if b == erase_char && erase_char != 0x7F { 0x7F } else { b };
-                            if let Some(b) = normalize_gateway_input(b, &mut last_cr) {
+                            let mut keys = Vec::new();
+                            gateway_input_for_remote(b, is_petscii, erase_char, &mut keys);
+                            // CR/LF pairing is per byte, and a translated
+                            // cursor key carries neither, so it passes through
+                            // this untouched.
+                            let mut send = Vec::with_capacity(keys.len());
+                            for k in keys {
+                                if let Some(k) = normalize_gateway_input(k, &mut last_cr) {
+                                    send.push(k);
+                                }
+                            }
+                            if !send.is_empty() {
+                                let b = send[0];
                                 if gw_debug {
                                     let now = std::time::Instant::now();
                                     let dt = now.duration_since(gw_last).as_millis();
@@ -1796,7 +1888,7 @@ impl TelnetSession {
                                         }
                                     }
                                 }
-                                if ssh_writer.write_all(&[b]).await.is_err() { break; }
+                                if ssh_writer.write_all(&send).await.is_err() { break; }
                                 if ssh_writer.flush().await.is_err() { break; }
                             }
                         }
@@ -2009,6 +2101,7 @@ impl TelnetSession {
             self.cyan(esc_label)
         ))
         .await?;
+        self.send_gateway_esc_hint().await?;
         self.send_line("").await?;
         self.flush().await?;
 
@@ -2133,20 +2226,25 @@ impl TelnetSession {
                             // `EscHold`.  Only a *consecutive* pair inside
                             // `GW_ESC_PAIR` leaves, and that pair's second
                             // byte is ours rather than the remote's.
-                            if is_esc_key(b, is_petscii) {
+                            if is_gateway_leave_key(b, is_petscii) {
                                 if esc.press(tokio::time::Instant::now()) { break; }
                             } else {
                                 esc.other();
                             }
                             let raw_in = b;
-                            let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
-                            let b = if b == erase_char && erase_char != 0x7F { 0x7F } else { b };
+                            let mut keys = Vec::new();
+                            gateway_input_for_remote(b, is_petscii, erase_char, &mut keys);
+                            let b = keys.first().copied().unwrap_or(raw_in);
                             if gw_debug {
                                 let now = std::time::Instant::now();
                                 let dt = now.duration_since(gw_last).as_millis();
                                 let t = now.duration_since(gw_start).as_millis();
                                 gw_last = now;
-                                let swap = if raw_in != b { format!(" (petscii 0x{:02x})", raw_in) } else { String::new() };
+                                let swap = if keys.len() > 1 {
+                                    format!(" (petscii 0x{:02x} -> {})", raw_in, gw_hexdump(&keys))
+                                } else if raw_in != b {
+                                    format!(" (petscii 0x{:02x})", raw_in)
+                                } else { String::new() };
                                 glog!("[gw-in] +{:>5}ms t={:>6}ms  byte=0x{:02x} '{}'{}",
                                     dt, t, b,
                                     if (0x20..=0x7E).contains(&b) { b as char } else { '.' },
@@ -2164,9 +2262,9 @@ impl TelnetSession {
                                 }
                             }
                             let write_ok = if raw {
-                                remote_writer.write_all(&[b]).await.is_ok()
+                                remote_writer.write_all(&keys).await.is_ok()
                             } else {
-                                write_telnet_data(&mut remote_writer, &[b]).await.is_ok()
+                                write_telnet_data(&mut remote_writer, &keys).await.is_ok()
                             };
                             if !write_ok { break; }
                             if remote_writer.flush().await.is_err() { break; }
@@ -2939,17 +3037,14 @@ impl TelnetSession {
                             // `EscHold`.  Only a *consecutive* pair inside
                             // `GW_ESC_PAIR` leaves, and that pair's second
                             // byte is ours rather than the far machine's.
-                            if is_esc_key(b, is_petscii) {
+                            if is_gateway_leave_key(b, is_petscii) {
                                 if esc.press(tokio::time::Instant::now()) { break; }
                             } else {
                                 esc.other();
                             }
-                            let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
-                            // Map an unusual erase byte (e.g. PETSCII
-                            // 0x14) back to ASCII DEL so editors that
-                            // expect 0x7F see what they expect.
-                            let b = if b == erase_char && erase_char != 0x7F { 0x7F } else { b };
-                            if bridge_write.write_all(&[b]).await.is_err() {
+                            let mut keys = Vec::new();
+                            gateway_input_for_remote(b, is_petscii, erase_char, &mut keys);
+                            if bridge_write.write_all(&keys).await.is_err() {
                                 break;
                             }
                             if bridge_write.flush().await.is_err() {

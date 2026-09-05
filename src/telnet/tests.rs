@@ -1085,9 +1085,13 @@ fn test_filter_bare_esc_at_end_of_chunk() {
 }
 
 #[test]
-fn test_filter_petscii_strips_and_swaps() {
+fn test_filter_petscii_translates_and_swaps() {
+    // `ESC[32m` used to be deleted, which is why a C64 saw no colour from any
+    // host.  It is now PETSCII green, and the text is still case-swapped.
     let input = b"\x1b[32mHello World";
-    assert_eq!(filter_output(input, true), b"hELLO wORLD");
+    let mut want = vec![0x1Eu8];
+    want.extend_from_slice(b"hELLO wORLD");
+    assert_eq!(filter_output(input, true), want);
 }
 
 #[test]
@@ -1142,7 +1146,7 @@ fn test_no_petscii_translator_maps_backspace_to_destructive_del() {
         (
             "telnet/gateway.rs filter_gateway_output",
             include_str!("gateway.rs"),
-            "} else if is_petscii {",
+            "if st.mode == GatewayFilter::Petscii {",
             400,
         ),
         (
@@ -9406,4 +9410,103 @@ fn test_egt80_hangup_guard_keeps_its_cheap_wait_generous() {
         "HUPTAIL={tail} < HUPLEAD={lead}: the FREE wait is now smaller than the PAID one, \
          which is the arrangement that cost fourteen seconds and broke the escape's margin",
     );
+}
+
+// ─── Gateway input: the C64 affordances and their blast radius ──
+
+/// A gateway session is a plain pipe: run `sz` or PCPUT on the far host and
+/// its bytes come through the same path a keystroke does.  **A client that is
+/// not a Commodore must therefore see none of the PETSCII work**, or every
+/// transfer through the SSH and Telnet Gateways would break -- and break
+/// identically on each retry, so no protocol's CRC could recover it.
+///
+/// The one byte that changes is the erase key, which is the behaviour that
+/// predates all of this and is what the fold exists for.
+#[test]
+fn test_a_non_petscii_keystroke_reaches_the_remote_unchanged() {
+    for b in 0u8..=255 {
+        let mut keys = Vec::new();
+        gateway_input_for_remote(b, false, 0x7F, &mut keys);
+        assert_eq!(keys, vec![b], "byte {:02X} was altered for a non-PETSCII client", b);
+    }
+    // With a client whose erase key is BS, only that byte moves.
+    for b in 0u8..=255 {
+        let mut keys = Vec::new();
+        gateway_input_for_remote(b, false, 0x08, &mut keys);
+        let want = if b == 0x08 { 0x7F } else { b };
+        assert_eq!(keys, vec![want], "byte {:02X}", b);
+    }
+}
+
+/// What the PETSCII input path alters, pinned as a closed set.
+///
+/// Every byte named here is one a file transfer cannot survive.  That is not
+/// new -- the case swap has been unconditional for a Commodore since the
+/// gateway was written, which is why PCGET/PCPUT is run over a raw path
+/// (`AT+PETSCII=0`) rather than through a translating one.  The point of the
+/// test is that the set must not **grow** by accident: a fifth entry is a
+/// fifth way to corrupt a download, and it would arrive looking like a
+/// harmless convenience for one more key.
+#[test]
+fn test_what_the_petscii_input_path_alters_is_a_closed_set() {
+    let mut altered: Vec<u8> = Vec::new();
+    for b in 0u8..=255 {
+        let mut keys = Vec::new();
+        gateway_input_for_remote(b, true, 0x14, &mut keys);
+        if keys != vec![b] {
+            altered.push(b);
+        }
+    }
+    let mut expected: Vec<u8> = (0x41u8..=0x5A) // PETSCII upper -> ASCII lower
+        .chain(0xC1u8..=0xDA) // PETSCII shifted -> ASCII upper
+        .chain([
+            0x11, 0x91, 0x1D, 0x9D, // cursor keys -> ANSI CSI
+            0x14, // the C64's erase key -> ASCII DEL
+            0x5F, // the back-arrow -- the C64's ESC key -> 0x1B
+        ])
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(altered, expected);
+}
+
+/// The four cursor keys are the only bytes that become *more* than one byte.
+///
+/// A length change is worse than a substitution for anything framed, so this
+/// is deliberately narrower than the set above.
+#[test]
+fn test_only_the_cursor_keys_change_the_byte_count() {
+    for b in 0u8..=255 {
+        let mut keys = Vec::new();
+        gateway_input_for_remote(b, true, 0x14, &mut keys);
+        let expected = if matches!(b, 0x11 | 0x91 | 0x1D | 0x9D) { 3 } else { 1 };
+        assert_eq!(keys.len(), expected, "byte {:02X} produced {:?}", b, keys);
+    }
+}
+
+/// Leaving a gateway is the back-arrow twice for a Commodore, and ESC twice
+/// for everyone else -- never both.
+///
+/// A C64 *can* send a real ESC (measured: CTRL+: emits 0x1B), and while both
+/// keys counted, pressing it twice at a remote's prompt dropped the
+/// connection instead of reaching the host.  `is_esc_key` still accepts both,
+/// because at one of our own prompts either key should cancel; the two rules
+/// are different and this pins them apart.
+#[test]
+fn test_the_leave_pair_honours_only_the_key_the_screen_promises() {
+    assert!(is_gateway_leave_key(0x5F, true), "back-arrow leaves on a C64");
+    assert!(!is_gateway_leave_key(0x1B, true), "CTRL+: must reach the remote");
+    assert!(is_gateway_leave_key(0x1B, false), "ESC leaves on every other terminal");
+    assert!(!is_gateway_leave_key(0x5F, false), "underscore is just a character");
+    // The prompt rule is unchanged and deliberately more generous.
+    assert!(is_esc_key(0x5F, true));
+    assert!(is_esc_key(0x1B, true));
+    // …and a single back-arrow reaches the remote as a real ESC, which is the
+    // whole point of treating it as one: the key the user calls ESC now means
+    // ESC at the far end too, whatever that end believes our terminal is.
+    let mut keys = Vec::new();
+    gateway_input_for_remote(0x5F, true, 0x14, &mut keys);
+    assert_eq!(keys, vec![0x1B]);
+    let mut keys = Vec::new();
+    gateway_input_for_remote(0x5F, false, 0x7F, &mut keys);
+    assert_eq!(keys, vec![0x5F], "an underscore is just an underscore elsewhere");
 }
