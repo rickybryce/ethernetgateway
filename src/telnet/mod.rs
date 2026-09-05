@@ -280,8 +280,22 @@ enum DownloadProtocol {
 /// of what it means.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GatewayFilter {
-    /// Commodore: strip every escape sequence, and case-swap the text.
+    /// Commodore, reached through a far end that speaks ASCII: translate the
+    /// escape sequences that have a PETSCII equivalent (see `crate::petscii`),
+    /// drop the rest, and case-swap the text.
     Petscii,
+    /// Commodore, reached through a far end that **understands Commodores**:
+    /// pass every byte through untouched, in both directions.
+    ///
+    /// A board doing its own terminal detection -- telnetbible.com, or another
+    /// Ethernet Gateway -- recognises the C64 from its erase byte and serves
+    /// native PETSCII in its own 40-column layout.  Its text is already
+    /// case-swapped for a Commodore and its colour is already PETSCII, so
+    /// translating on top of it would swap the case twice and find no escape
+    /// sequences to convert.  Selected by `gateway_petscii_translate = false`;
+    /// the same judgement as `AT+PETSCII=0` on a dialled connection, and the
+    /// only way to express it for a board reachable solely over SSH.
+    Raw,
     /// A terminal with no escape handling: strip every sequence, text as-is.
     Ascii,
     /// A terminal that understands escapes.  CSI -- colour, cursor addressing

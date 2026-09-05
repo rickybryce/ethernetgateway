@@ -323,6 +323,13 @@ pub(in crate::telnet) fn filter_gateway_output(
     st: &mut GatewayOutState,
     out: &mut Vec<u8>,
 ) {
+    // The far end understands Commodores, so it is already sending PETSCII:
+    // there is nothing to translate and case-swapping it would undo the swap
+    // the far end already did.  A pipe, in both directions.
+    if st.mode == GatewayFilter::Raw {
+        out.extend_from_slice(input);
+        return;
+    }
     // A Commodore is served by `crate::petscii`, which *translates* the
     // sequences it can and drops the rest, rather than dropping them all.
     // Handled here and returned, so the machine below -- and in particular the
@@ -1111,12 +1118,25 @@ pub(in crate::telnet) fn is_gateway_leave_key(byte: u8, petscii: bool) -> bool {
 /// * PETSCII letters are case-swapped into ASCII.
 /// * An unusual erase byte (a C64's 0x14) becomes ASCII DEL, so editors that
 ///   expect 0x7F see what they expect.
+///
+/// The mode is the whole terminal-and-policy question in one value, and is
+/// deliberately not a `petscii` bool beside a `translate` one -- see
+/// `GatewayFilter`, whose own comment records why two bools next to each other
+/// is how a call site silently says the opposite of what it means.  Under
+/// `Raw` the far end understands Commodores, so **nothing** here applies: it
+/// wants the erase byte that identifies the C64, the back-arrow as its own
+/// ESC, and the cursor keys as PETSCII.
 pub(in crate::telnet) fn gateway_input_for_remote(
     byte: u8,
-    petscii: bool,
+    mode: GatewayFilter,
     erase_char: u8,
     out: &mut Vec<u8>,
 ) {
+    if mode == GatewayFilter::Raw {
+        out.push(byte);
+        return;
+    }
+    let petscii = mode == GatewayFilter::Petscii;
     if petscii {
         if let Some(seq) = crate::petscii::key_to_ansi_host(byte) {
             out.extend_from_slice(seq);
@@ -1178,6 +1198,26 @@ impl TelnetSession {
 
     /// Gateway timeout for SSH connection attempts.
     const GATEWAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// Which filter this session's terminal and the operator's setting choose.
+    ///
+    /// One function so the two network gateways cannot disagree, and so a
+    /// third would have to opt out rather than forget.  The Serial Gateway
+    /// deliberately does **not** call this: its far end is a local serial
+    /// device, never a board that could recognise a Commodore.
+    fn gateway_filter(&self) -> GatewayFilter {
+        match self.terminal_type {
+            TerminalType::Petscii => {
+                if config::get_config().gateway_petscii_translate {
+                    GatewayFilter::Petscii
+                } else {
+                    GatewayFilter::Raw
+                }
+            }
+            TerminalType::Ascii => GatewayFilter::Ascii,
+            _ => GatewayFilter::Ansi,
+        }
+    }
 
     /// The line telling a Commodore how to send a real ESC to the remote.
     ///
@@ -1757,17 +1797,14 @@ impl TelnetSession {
         let stream = channel.into_stream();
         let (mut ssh_reader, mut ssh_writer) = tokio::io::split(stream);
 
+        let gw_filter = self.gateway_filter();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let erase_char = self.erase_char;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         // One value per terminal type -- see `GatewayFilter`.  ANSI keeps its
         // CSI sequences and loses only a completed window title.
-        let gw_filter = match self.terminal_type {
-            TerminalType::Petscii => GatewayFilter::Petscii,
-            TerminalType::Ascii => GatewayFilter::Ascii,
-            _ => GatewayFilter::Ansi,
-        };
+
         // Idle bound for the live bridge: if neither side sends a byte
         // within this window, tear the session down so a half-open client
         // (laptop asleep, NAT drop) can't pin it — and its max_sessions
@@ -1854,7 +1891,7 @@ impl TelnetSession {
                             }
                             let raw = b;
                             let mut keys = Vec::new();
-                            gateway_input_for_remote(b, is_petscii, erase_char, &mut keys);
+                            gateway_input_for_remote(b, gw_filter, erase_char, &mut keys);
                             // CR/LF pairing is per byte, and a translated
                             // cursor key carries neither, so it passes through
                             // this untouched.
@@ -2108,16 +2145,13 @@ impl TelnetSession {
         // Proxy I/O between local telnet client and remote telnet server
         let (mut remote_reader, mut remote_writer) = remote.into_split();
 
+        let gw_filter = self.gateway_filter();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         // One value per terminal type -- see `GatewayFilter`.  ANSI keeps its
         // CSI sequences and loses only a completed window title.
-        let gw_filter = match self.terminal_type {
-            TerminalType::Petscii => GatewayFilter::Petscii,
-            TerminalType::Ascii => GatewayFilter::Ascii,
-            _ => GatewayFilter::Ansi,
-        };
+
 
         let erase_char = self.erase_char;
         let mut remote_buf = [0u8; 4096];
@@ -2233,7 +2267,7 @@ impl TelnetSession {
                             }
                             let raw_in = b;
                             let mut keys = Vec::new();
-                            gateway_input_for_remote(b, is_petscii, erase_char, &mut keys);
+                            gateway_input_for_remote(b, gw_filter, erase_char, &mut keys);
                             let b = keys.first().copied().unwrap_or(raw_in);
                             if gw_debug {
                                 let now = std::time::Instant::now();
@@ -3009,6 +3043,10 @@ impl TelnetSession {
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
+        // Not `gateway_filter()`: this bridge's far end is a local serial
+        // device, never a board that could recognise a Commodore, so
+        // `gateway_petscii_translate` has no meaning here.
+        let gw_filter = if is_petscii { GatewayFilter::Petscii } else { GatewayFilter::Ansi };
         let erase_char = self.erase_char;
         // Idle bound for the bridge (see gateway_ssh): disconnect a
         // half-open client so it can't pin the session's max_sessions
@@ -3043,7 +3081,7 @@ impl TelnetSession {
                                 esc.other();
                             }
                             let mut keys = Vec::new();
-                            gateway_input_for_remote(b, is_petscii, erase_char, &mut keys);
+                            gateway_input_for_remote(b, gw_filter, erase_char, &mut keys);
                             if bridge_write.write_all(&keys).await.is_err() {
                                 break;
                             }

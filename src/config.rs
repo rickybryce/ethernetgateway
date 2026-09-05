@@ -190,6 +190,48 @@ const DEFAULT_TELNET_GATEWAY_RAW: bool = false;
 /// each gateway session, so toggling it takes effect on the next session
 /// without restarting the program.
 const DEFAULT_GATEWAY_DEBUG: bool = false;
+/// Whether the gateways translate for a Commodore on the way to the remote.
+///
+/// `true` (the default, and what every release before this did) means the
+/// gateway does the work: a host's ANSI colour becomes PETSCII, the client's
+/// cursor keys and back-arrow become ANSI, letters are case-swapped, and the
+/// C64's erase byte is folded to ASCII DEL so a unix line editor works.
+///
+/// `false` says **the far end is Commodore-aware**, so the gateway gets out of
+/// the way and passes the session through untouched.  A board that does its own
+/// terminal detection -- telnetbible.com, and this gateway itself -- then sees
+/// the C64's real `0x14`, recognises it, and serves native PETSCII with its own
+/// 40-column layout, which is better than any translation of ours because it
+/// knows its own content.  Translating on top of that would be the same text
+/// case-swapped twice.
+///
+/// It is the same decision as `serial_*_petscii_translate`, with the same name
+/// and the same polarity, one link further out: that key describes the far end
+/// of the **modem wire**, this one the far end of the connection a *gateway*
+/// opens.  The distinction matters because `ATDT` can only reach a board
+/// directly -- an SSH board can be reached no other way than through the menu,
+/// so without this there is no setting for it at all.
+const DEFAULT_GATEWAY_PETSCII_TRANSLATE: bool = true;
+
+/// The hover text for `gateway_petscii_translate`, shared by the web page and
+/// the desktop editor.
+///
+/// One string, because the two surfaces describing one setting in two hand-
+/// written paragraphs is how they come to disagree -- the half a human
+/// maintains beside a code-rendered list is the half that rots, and this repo
+/// has caught that four times.  The telnet screen shows a shortened form: it
+/// has no hover and 40 columns.
+pub const GATEWAY_PETSCII_TRANSLATE_HINT: &str = "\
+PETSCII terminals only. Ticked (the default): the gateway translates for the \
+Commodore -- a remote's ANSI colour and clear-screen become PETSCII, cursor \
+keys and the back-arrow become ANSI on the way out, letters are case-swapped, \
+and the C64's erase byte becomes ASCII DEL so a unix line editor works. Right \
+for an ordinary ASCII board. Unticked: the far end does its own terminal \
+detection (telnetbible.com, or another Ethernet Gateway), so it is sent the \
+C64's real 0x14, recognises the Commodore, and serves native PETSCII in its \
+own 40-column layout -- translating on top of that would case-swap its text \
+twice. The same choice as AT+PETSCII on a dialled connection, for a board you \
+can only reach through the gateway.";
 /// Operator override for the terminal geometry a gateway session reports to
 /// the remote host (SSH PTY request / Telnet NAWS).  `0` means "auto": use
 /// the size the local client negotiated via NAWS, and fall back to the
@@ -901,6 +943,9 @@ pub struct Config {
     /// Anything added here should be listed above rather than left for
     /// someone to find by reading the source.
     pub gateway_debug: bool,
+    /// Whether a gateway translates for a Commodore, or steps aside because
+    /// the far end understands one.  See `DEFAULT_GATEWAY_PETSCII_TRANSLATE`.
+    pub gateway_petscii_translate: bool,
     /// Columns to report to the remote for SSH/Telnet gateway sessions, or
     /// `0` for auto (client NAWS, else the per-terminal-type default).
     /// Terminal type does not imply terminal width — see
@@ -1324,6 +1369,7 @@ impl Default for Config {
             telnet_gateway_negotiate: DEFAULT_TELNET_GATEWAY_NEGOTIATE,
             telnet_gateway_raw: DEFAULT_TELNET_GATEWAY_RAW,
             gateway_debug: DEFAULT_GATEWAY_DEBUG,
+            gateway_petscii_translate: DEFAULT_GATEWAY_PETSCII_TRANSLATE,
             gateway_term_width: DEFAULT_GATEWAY_TERM_WIDTH,
             gateway_term_height: DEFAULT_GATEWAY_TERM_HEIGHT,
             enable_console: DEFAULT_ENABLE_CONSOLE,
@@ -2017,6 +2063,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("gateway_debug")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_GATEWAY_DEBUG),
+        gateway_petscii_translate: map
+            .get("gateway_petscii_translate")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_GATEWAY_PETSCII_TRANSLATE),
         // No `>= 1` filter on either: 0 means "auto" and is the only way to
         // ask for it, so flooring these would make auto unreachable.
         gateway_term_width: map
@@ -2839,6 +2889,24 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   Leave it off in normal use: it logs a line per byte or per write.
 ");
     write_kv(&mut content, "gateway_debug", cfg.gateway_debug);
+    content.push('\n');
+
+    content.push_str("\
+# gateway_petscii_translate — does a gateway translate for a Commodore, or
+#   step aside because the far end already understands one?
+#   true  (default): the gateway does the work — a host's ANSI colour becomes
+#         PETSCII, cursor keys and the back-arrow become ANSI on the way out,
+#         letters are case-swapped, and the C64's erase byte becomes ASCII DEL
+#         so a unix line editor works.  Right for an ordinary ASCII board.
+#   false: the far end does its own terminal detection (telnetbible.com, or
+#         another Ethernet Gateway), so it is sent the C64's real 0x14, spots
+#         the Commodore, and serves native PETSCII in its own 40-column
+#         layout.  Translating on top of that would case-swap its text twice.
+#   The same choice as AT+PETSCII on a dialled connection, one link further
+#   out: ATDT can only reach a board directly, so a board reachable only over
+#   SSH has no other place to express it.
+");
+    write_kv(&mut content, "gateway_petscii_translate", cfg.gateway_petscii_translate);
     content.push('\n');
 
     content.push_str("\
@@ -3783,6 +3851,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             cfg.telnet_gateway_raw = value.eq_ignore_ascii_case("true");
         }
         "gateway_debug" => cfg.gateway_debug = value.eq_ignore_ascii_case("true"),
+        "gateway_petscii_translate" => {
+            cfg.gateway_petscii_translate = value.eq_ignore_ascii_case("true")
+        }
         // Both accept 0 deliberately — 0 is "auto", not an invalid width, so
         // these must not carry the `v >= 1` guard the port keys use.
         "gateway_term_width" => {
@@ -5450,6 +5521,7 @@ mod tests {
             telnet_gateway_negotiate: true,
             telnet_gateway_raw: true,
             gateway_debug: true,
+            gateway_petscii_translate: false,
             gateway_term_width: 40,
             gateway_term_height: 25,
             enable_console: true,

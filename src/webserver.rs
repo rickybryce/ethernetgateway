@@ -1295,6 +1295,7 @@ fn collect_form_updates(
         "security_enabled", "disable_ip_safety", "disable_gateway_connections",
         "enable_console", "verbose", "log_to_file",
         "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
+        "gateway_petscii_translate",
         "cpm_emu_enabled",
         "cpm_screen_input",
         "cpm_joystick",
@@ -3264,6 +3265,7 @@ fn render_more_popups(cfg: &Config) -> String {
          </select></div>\
          <h3>Telnet Gateway</h3>\
          <div class=\"row\">{tneg} {traw}</div>\
+         <div class=\"row\">{tpet}</div>\
          <h3>SSH Gateway</h3>\
          <div class=\"row\"><span class=\"label\">Auth:</span>\
          <select name=\"ssh_gateway_auth\">\
@@ -3310,6 +3312,17 @@ fn render_more_popups(cfg: &Config) -> String {
             "Negotiate TTYPE / NAWS with remote (Telnet mode only)",
             cfg.telnet_gateway_negotiate,
             if cfg.telnet_gateway_raw { "disabled" } else { "" },
+        ),
+        // PETSCII only, and the label has to say so: on a screen an ANSI
+        // operator also reads, an unqualified "translate" invites them to
+        // turn off something that has never applied to them.  The hover text
+        // carries the rest -- the row itself must stay short enough for the
+        // column.
+        tpet = checkbox_with_attr(
+            "gateway_petscii_translate",
+            "PETSCII: translate a remote's ANSI for the Commodore",
+            cfg.gateway_petscii_translate,
+            &format!("title=\"{}\"", crate::config::GATEWAY_PETSCII_TRANSLATE_HINT),
         ),
         traw = checkbox_with_attr(
             "telnet_gateway_raw",

@@ -3284,6 +3284,15 @@ impl TelnetSession {
             };
             self.send_line(&format!("  SSH auth:    {}", ssh_auth))
                 .await?;
+            // Shown as what it does rather than On/Off: "PETSCII: On" reads
+            // as "PETSCII mode is on", which is not what this decides.
+            let petscii_xlat = if cfg.gateway_petscii_translate {
+                self.green("Translate")
+            } else {
+                self.amber("Pass through")
+            };
+            self.send_line(&format!("  PETSCII:     {}", petscii_xlat))
+                .await?;
 
             // What the remote will actually be told, resolved by the same
             // fn the gateways use.  "in use" is this session's answer, so an
@@ -3333,6 +3342,11 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
+                "  {}  Toggle PETSCII translation",
+                self.cyan("P")
+            ))
+            .await?;
+            self.send_line(&format!(
                 "  {}  Set terminal width (0 = auto)",
                 self.cyan("W")
             ))
@@ -3378,6 +3392,19 @@ impl TelnetSession {
                     let v = new_val.to_string();
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value("telnet_gateway_negotiate", &v);
+                    })
+                    .await
+                    .ok();
+                }
+                "p" => {
+                    let new_val = if cfg.gateway_petscii_translate {
+                        "false"
+                    } else {
+                        "true"
+                    };
+                    let v = new_val.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("gateway_petscii_translate", &v);
                     })
                     .await
                     .ok();
@@ -3503,6 +3530,30 @@ impl TelnetSession {
                 "    and tab completion past the",
                 "    real right margin.",
                 "",
+                "  PETSCII (Commodore clients only):",
+                "    Translate    - the gateway does",
+                "      the work: a remote's ANSI",
+                "      colour and clear-screen become",
+                "      PETSCII, cursor keys and the",
+                "      back-arrow become ANSI going",
+                "      out, letters are case-swapped,",
+                "      and your erase key becomes",
+                "      ASCII DEL so a unix line",
+                "      editor works. Default, and",
+                "      right for an ASCII board.",
+                "    Pass through - the far end does",
+                "      its own terminal detection, so",
+                "      it is sent your real 0x14,",
+                "      spots the Commodore and serves",
+                "      native PETSCII in 40 columns.",
+                "      Better where it works, and",
+                "      wrong for a board that cannot,",
+                "      which then sees no backspace.",
+                "      Same choice as AT+PETSCII on a",
+                "      dialled call - and the only",
+                "      place to make it for a board",
+                "      reachable only over SSH.",
+                "",
                 "  All settings are saved to",
                 "  egateway.conf and take effect on",
                 "  the next gateway connection.",
@@ -3579,6 +3630,36 @@ impl TelnetSession {
                 "    everything past the real margin -- line",
                 "    wrap, backspace, history recall, tab",
                 "    completion -- is drawn in the wrong place.",
+                "",
+                "  PETSCII (Commodore clients only -- this",
+                "  setting does nothing for an ANSI or ASCII",
+                "  terminal):",
+                "    Translate    - the gateway does the work.",
+                "      A remote's ANSI colour and clear-screen",
+                "      become PETSCII, the cursor keys and the",
+                "      back-arrow become ANSI on the way out,",
+                "      letters are case-swapped, and the C64's",
+                "      erase byte becomes ASCII DEL so a unix",
+                "      line editor works. The default, and the",
+                "      right answer for an ordinary ASCII board.",
+                "    Pass through - the far end does its own",
+                "      terminal detection, so it is sent the",
+                "      C64's real 0x14, recognises the Commodore",
+                "      and serves native PETSCII in its own",
+                "      40-column layout. Better than any",
+                "      translation of ours, because a board that",
+                "      knows its own content renders it best --",
+                "      and translating on top of it would",
+                "      case-swap its text twice. Wrong for a",
+                "      board that cannot detect a Commodore:",
+                "      it sees a 0x14 it has no meaning for, so",
+                "      the backspace key stops working there.",
+                "",
+                "    This is the same judgement as AT+PETSCII on",
+                "    a dialled connection, one link further out.",
+                "    It matters because ATDT can only reach a",
+                "    board directly -- a board reachable solely",
+                "    over SSH has nowhere else to express it.",
                 "",
                 "  Changes are saved immediately and take",
                 "  effect on the next gateway connection.",

@@ -9426,13 +9426,13 @@ fn test_egt80_hangup_guard_keeps_its_cheap_wait_generous() {
 fn test_a_non_petscii_keystroke_reaches_the_remote_unchanged() {
     for b in 0u8..=255 {
         let mut keys = Vec::new();
-        gateway_input_for_remote(b, false, 0x7F, &mut keys);
+        gateway_input_for_remote(b, GatewayFilter::Ansi, 0x7F, &mut keys);
         assert_eq!(keys, vec![b], "byte {:02X} was altered for a non-PETSCII client", b);
     }
     // With a client whose erase key is BS, only that byte moves.
     for b in 0u8..=255 {
         let mut keys = Vec::new();
-        gateway_input_for_remote(b, false, 0x08, &mut keys);
+        gateway_input_for_remote(b, GatewayFilter::Ansi, 0x08, &mut keys);
         let want = if b == 0x08 { 0x7F } else { b };
         assert_eq!(keys, vec![want], "byte {:02X}", b);
     }
@@ -9452,7 +9452,7 @@ fn test_what_the_petscii_input_path_alters_is_a_closed_set() {
     let mut altered: Vec<u8> = Vec::new();
     for b in 0u8..=255 {
         let mut keys = Vec::new();
-        gateway_input_for_remote(b, true, 0x14, &mut keys);
+        gateway_input_for_remote(b, GatewayFilter::Petscii, 0x14, &mut keys);
         if keys != vec![b] {
             altered.push(b);
         }
@@ -9469,6 +9469,28 @@ fn test_what_the_petscii_input_path_alters_is_a_closed_set() {
     assert_eq!(altered, expected);
 }
 
+/// **The pipe mode is a pipe.** With `gateway_petscii_translate = false` the
+/// far end understands Commodores, so every byte must reach it exactly as
+/// typed -- the erase byte it identifies the C64 by, the back-arrow it reads
+/// as its own ESC, and the cursor keys it knows as PETSCII.  A single byte
+/// altered here would be a translation the operator asked us not to do.
+#[test]
+fn test_the_commodore_aware_mode_alters_nothing_in_either_direction() {
+    for b in 0u8..=255 {
+        let mut keys = Vec::new();
+        gateway_input_for_remote(b, GatewayFilter::Raw, 0x14, &mut keys);
+        assert_eq!(keys, vec![b], "byte {:02X} was altered on the way out", b);
+    }
+    // …and the same coming back, including a whole ANSI sequence, which must
+    // NOT be translated: a Commodore-aware board never sends one.
+    let mut st = GatewayOutState::new(GatewayFilter::Raw);
+    let mut out = Vec::new();
+    let wire: Vec<u8> = (0u8..=255).chain(*b"\x1b[32mHi\x93\x9e").collect();
+    filter_gateway_output(&wire, &mut st, &mut out);
+    assert_eq!(out, wire);
+    assert!(!st.has_pending());
+}
+
 /// The four cursor keys are the only bytes that become *more* than one byte.
 ///
 /// A length change is worse than a substitution for anything framed, so this
@@ -9477,7 +9499,7 @@ fn test_what_the_petscii_input_path_alters_is_a_closed_set() {
 fn test_only_the_cursor_keys_change_the_byte_count() {
     for b in 0u8..=255 {
         let mut keys = Vec::new();
-        gateway_input_for_remote(b, true, 0x14, &mut keys);
+        gateway_input_for_remote(b, GatewayFilter::Petscii, 0x14, &mut keys);
         let expected = if matches!(b, 0x11 | 0x91 | 0x1D | 0x9D) { 3 } else { 1 };
         assert_eq!(keys.len(), expected, "byte {:02X} produced {:?}", b, keys);
     }
@@ -9504,9 +9526,9 @@ fn test_the_leave_pair_honours_only_the_key_the_screen_promises() {
     // whole point of treating it as one: the key the user calls ESC now means
     // ESC at the far end too, whatever that end believes our terminal is.
     let mut keys = Vec::new();
-    gateway_input_for_remote(0x5F, true, 0x14, &mut keys);
+    gateway_input_for_remote(0x5F, GatewayFilter::Petscii, 0x14, &mut keys);
     assert_eq!(keys, vec![0x1B]);
     let mut keys = Vec::new();
-    gateway_input_for_remote(0x5F, false, 0x7F, &mut keys);
+    gateway_input_for_remote(0x5F, GatewayFilter::Ansi, 0x7F, &mut keys);
     assert_eq!(keys, vec![0x5F], "an underscore is just an underscore elsewhere");
 }

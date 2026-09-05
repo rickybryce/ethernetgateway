@@ -3005,6 +3005,25 @@ impl App {
                 .italics()
                 .small(),
         );
+
+        // Its own heading, and not under "Telnet Gateway", because it governs
+        // the SSH Gateway too -- and because an ANSI operator reading this
+        // popup must be able to see at a glance that it is none of their
+        // business.  The label names the Commodore; the hover carries the rest,
+        // from the one string the web page also shows.
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new("Commodore (PETSCII) terminals")
+                .strong()
+                .color(AMBER),
+        );
+        ui.checkbox(
+            &mut self.cfg.gateway_petscii_translate,
+            "Translate a remote's ANSI for the Commodore",
+        )
+        .on_hover_text(crate::config::GATEWAY_PETSCII_TRANSLATE_HINT);
     }
 
     /// Render the Master/Slave serial-extender (relay) options.  Role is a
