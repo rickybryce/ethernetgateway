@@ -5733,6 +5733,8 @@ impl TelnetSession {
         self.flush().await?;
 
         let mut last_was_esc = false;
+        // Said once per visit to this screen, not once per keypress.
+        let mut warned_shift = false;
 
         loop {
             let byte = match self.read_byte_filtered().await? {
@@ -5780,7 +5782,37 @@ impl TelnetSession {
                 _ => "",
             };
 
-            let display = if !name.is_empty() {
+            // **A shifted Commodore key must say so.**  The named list above
+            // covers the control codes and the cursor keys; everything in the
+            // C64's shifted/graphics set fell through to a bare hex number,
+            // and that cost a real diagnosis: reported 2026-09-05 as "+ and -
+            // do not work", the key test answered `0xDB` and `0xDD` and left
+            // the operator to work out that both were shifted.
+            //
+            // The trap is that SHIFT LOCK is a *latching* key and its effect
+            // is **asymmetric**: shifted letters (0xC1-0xDA) are translated
+            // back to ASCII by every path in this program, so menus keep
+            // working, while shifted punctuation has no such mapping and
+            // silently matches nothing.  A caller therefore sees most of the
+            // product work and two keys die, which reads as a bug in those
+            // two keys.  Naming the byte turns that into a one-second answer.
+            //
+            // The letter is derived (byte - 0x80), not tabulated: a table of
+            // the shifted punctuation would have to be measured key by key
+            // off a real machine, and only two entries of it are -- SHIFT+`+`
+            // is 0xDB and SHIFT+`-` is 0xDD, measured on Ricky's C64.  So the
+            // rest is reported as "shifted" without naming a key it might get
+            // wrong.
+            let shifted_letter = (0xC1..=0xDA).contains(&byte);
+            let shifted_other = matches!(byte, 0xA1..=0xBF | 0xDB..=0xDF);
+            let display = if shifted_letter {
+                format!("  Key: {} ({:3}) = C64 SHIFT-{}",
+                    self.cyan(&format!("0x{:02X}", byte)), byte,
+                    (byte - 0x80) as char)
+            } else if shifted_other {
+                format!("  Key: {} ({:3}) = C64 shifted key",
+                    self.cyan(&format!("0x{:02X}", byte)), byte)
+            } else if !name.is_empty() {
                 format!("  Key: {} ({:3}) = {}",
                     self.cyan(&format!("0x{:02X}", byte)), byte, name)
             } else if (0x20..=0x7E).contains(&byte) {
@@ -5791,6 +5823,17 @@ impl TelnetSession {
                     self.cyan(&format!("0x{:02X}", byte)), byte)
             };
             self.send_line(&display).await?;
+            // Said once, and only once a shifted key has actually arrived --
+            // an operator pressing ordinary keys should not be nagged about a
+            // latch that is not down.
+            if (shifted_letter || shifted_other) && !warned_shift {
+                warned_shift = true;
+                self.send_line(&format!(
+                    "  {}",
+                    self.amber("Shifted. Is SHIFT LOCK down?")
+                ))
+                .await?;
+            }
             self.flush().await?;
 
             if is_esc_key(byte, self.terminal_type == TerminalType::Petscii) {
