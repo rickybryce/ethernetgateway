@@ -2499,6 +2499,22 @@ impl TelnetSession {
                 self.cyan("F")
             ))
             .await?;
+            // Per-IP connection rate.  One key for two values because this
+            // screen is at its 22-row PETSCII budget and the pair is one
+            // decision -- "how many, how often" -- not two.
+            self.send_line(&format!(
+                "  {}  Conn rate: {}",
+                self.cyan("L"),
+                if cfg.conn_rate_max == 0 {
+                    self.green("off")
+                } else {
+                    self.amber(&format!(
+                        "{}/{}s",
+                        cfg.conn_rate_max, cfg.conn_rate_window_secs
+                    ))
+                }
+            ))
+            .await?;
             // **Always shown, not only when a star was drawn.**  The star means
             // "we tested this port and nothing answered"; the line means "ports
             // may need opening on a firewall", which is true whether or not the
@@ -2639,6 +2655,31 @@ impl TelnetSession {
                         "New session cap (1 or more)",
                     )
                     .await?;
+                }
+                "l" => {
+                    // Both halves in sequence: the limit is meaningless
+                    // without its window, and an operator who sets one and
+                    // not the other has not finished the thought.
+                    self.config_set_count(
+                        "connection rate limit",
+                        "conn_rate_max",
+                        cfg.conn_rate_max as u64,
+                        0,
+                        "Max connections per IP (0 = no limit)",
+                    )
+                    .await?;
+                    // Re-read: the call above saved, so `cfg` is now stale.
+                    let live = config::get_config();
+                    if live.conn_rate_max > 0 {
+                        self.config_set_count(
+                            "rate window",
+                            "conn_rate_window_secs",
+                            live.conn_rate_window_secs,
+                            1,
+                            "Window in seconds (1 or more)",
+                        )
+                        .await?;
+                    }
                 }
                 "d" => {
                     self.config_set_count(

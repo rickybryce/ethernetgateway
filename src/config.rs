@@ -335,6 +335,17 @@ const DEFAULT_LOG_MAX_SIZE_KB: u64 = 1024;
 /// log can never occupy more than 1024 KB x (5 + 1) = 6 MB total.
 const DEFAULT_LOG_MAX_FILES: u32 = 5;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900; // 15 minutes
+/// How many connections one IP may open to telnet/SSH inside
+/// [`DEFAULT_CONN_RATE_WINDOW_SECS`] before the rest are refused.  `0`
+/// disables the check.
+///
+/// 20 a minute is far above any human or retro client -- a C64 user connects
+/// once and stays -- and far below a credential scanner, which the measured
+/// attack shows opening one connection *per guess*: 71, 48 and 43 connections
+/// from three IPs inside two hours (2026-09-13).
+const DEFAULT_CONN_RATE_MAX: u32 = 20;
+/// The window [`DEFAULT_CONN_RATE_MAX`] is counted over.
+const DEFAULT_CONN_RATE_WINDOW_SECS: u64 = 60;
 const DEFAULT_GROQ_API_KEY: &str = "";
 const DEFAULT_BROWSER_HOMEPAGE: &str = "http://telnetbible.com";
 const DEFAULT_WEATHER_LOCATION: &str = "";
@@ -1019,6 +1030,22 @@ pub struct Config {
     pub gui_zoom: String,
     pub max_sessions: usize,
     pub idle_timeout_secs: u64,
+    /// Per-IP connection rate limit for telnet and SSH: at most
+    /// `conn_rate_max` connections from one address inside
+    /// `conn_rate_window_secs`.  `0` disables it.
+    ///
+    /// This is a SEPARATE defence from the auth lockout, not a duplicate of
+    /// it.  The lockout counts *failed credentials*; a telnet credential
+    /// scanner never submits one, because it opens a connection per guess and
+    /// hangs up at the first prompt it does not recognise.  Measured
+    /// 2026-09-13: 62 credential attempts, zero telnet lockouts armed.
+    /// Counting connections catches what counting failures structurally
+    /// cannot.
+    ///
+    /// Deliberately NOT applied to the web listener -- see
+    /// `telnet::note_connection`.
+    pub conn_rate_max: u32,
+    pub conn_rate_window_secs: u64,
     /// Groq API key. If empty, AI chat is disabled.
     pub groq_api_key: String,
     /// Which Groq model AI Chat asks.  Blank means
@@ -1435,6 +1462,8 @@ impl std::fmt::Debug for Config {
             .field("gui_zoom", &self.gui_zoom)
             .field("max_sessions", &self.max_sessions)
             .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("conn_rate_max", &self.conn_rate_max)
+            .field("conn_rate_window_secs", &self.conn_rate_window_secs)
             .field("groq_api_key", &redact(&self.groq_api_key))
             .field("ai_model", &self.ai_model)
             .field("browser_homepage", &self.browser_homepage)
@@ -1542,6 +1571,8 @@ impl Default for Config {
             gui_zoom: DEFAULT_GUI_ZOOM.into(),
             max_sessions: DEFAULT_MAX_SESSIONS,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            conn_rate_max: DEFAULT_CONN_RATE_MAX,
+            conn_rate_window_secs: DEFAULT_CONN_RATE_WINDOW_SECS,
             groq_api_key: DEFAULT_GROQ_API_KEY.into(),
             ai_model: crate::aichat::GROQ_MODEL.to_string(),
             browser_homepage: DEFAULT_BROWSER_HOMEPAGE.into(),
@@ -1744,6 +1775,20 @@ pub fn get_security_flags() -> (bool, bool, bool) {
             DEFAULT_DISABLE_GATEWAY_CONNECTIONS,
         ),
     }
+}
+
+/// Read the per-IP connection rate limit without cloning the full Config.
+/// Consulted on every telnet and SSH accept, so it avoids the ~20-String
+/// allocation `get_config()` would cost under an accept flood -- which is
+/// precisely the condition this limit exists to survive.  Mirrors
+/// [`get_security_flags`].
+pub fn get_conn_rate() -> (u32, std::time::Duration) {
+    let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    let (max, secs) = match guard.as_ref() {
+        Some(cfg) => (cfg.conn_rate_max, cfg.conn_rate_window_secs),
+        None => (DEFAULT_CONN_RATE_MAX, DEFAULT_CONN_RATE_WINDOW_SECS),
+    };
+    (max, std::time::Duration::from_secs(secs))
 }
 
 /// Read the gateway-debug trace flag without cloning the full Config.
@@ -2328,6 +2373,18 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("idle_timeout_secs")
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
+        conn_rate_max: map
+            .get("conn_rate_max")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_CONN_RATE_MAX),
+        // A zero window would make every connection "inside" an empty window
+        // and refuse the whole listener once the max is reached, so a bad
+        // value falls back to the default rather than to zero.
+        conn_rate_window_secs: map
+            .get("conn_rate_window_secs")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u64| v >= 1)
+            .unwrap_or(DEFAULT_CONN_RATE_WINDOW_SECS),
         // Missing or blank means the shipped default, which is what an upgrade
         // wants: the config it was written from named no model, and the model it
         // used has since been retired.
@@ -3265,6 +3322,8 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 
     content.push_str("# Maximum concurrent telnet sessions\n");
     write_kv(&mut content, "max_sessions", cfg.max_sessions);
+    write_kv(&mut content, "conn_rate_max", cfg.conn_rate_max);
+    write_kv(&mut content, "conn_rate_window_secs", cfg.conn_rate_window_secs);
     content.push('\n');
 
     content.push_str("# Idle session timeout in seconds (0 = no timeout)\n");
@@ -4163,6 +4222,18 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "idle_timeout_secs" => {
             if let Ok(v) = value.parse() {
                 cfg.idle_timeout_secs = v;
+            }
+        }
+        // 0 is a legal value here -- it disables the rate limit -- so this
+        // one has no `>= 1` guard, unlike its window below.
+        "conn_rate_max" => {
+            if let Ok(v) = value.parse() {
+                cfg.conn_rate_max = v;
+            }
+        }
+        "conn_rate_window_secs" => {
+            if let Ok(v) = value.parse::<u64>() && v >= 1 {
+                cfg.conn_rate_window_secs = v;
             }
         }
         "groq_api_key" => cfg.groq_api_key = value.to_string(),
@@ -5880,6 +5951,10 @@ mod tests {
             gui_window_geometry: "100,120,1280,900".into(),
             gui_zoom: "auto".into(),
             max_sessions: 5,
+            // Neither is the default, so the roundtrip proves both keys are
+            // written and read back rather than defaulting at both ends.
+            conn_rate_max: 7,
+            conn_rate_window_secs: 90,
             idle_timeout_secs: 60,
             groq_api_key: "gsk_test123".into(),
             // Not the shipped default, so the roundtrip proves the key travels.

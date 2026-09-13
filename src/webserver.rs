@@ -1264,6 +1264,7 @@ fn collect_form_updates(
         "telnet_port", "ssh_port", "kermit_server_port", "web_port",
         "username", "password",
         "transfer_dir", "max_sessions", "idle_timeout_secs", "gui_zoom",
+        "conn_rate_max", "conn_rate_window_secs",
         "log_file", "log_max_size_kb", "log_max_files",
         "groq_api_key", "ai_model", "browser_homepage", "weather_location", "weather_units",
         "xmodem_negotiation_timeout", "xmodem_block_timeout",
@@ -3371,6 +3372,10 @@ fn render_more_popups(cfg: &Config) -> String {
          forwarding them, and on Windows and macOS a connection to your own address \
          skips the firewall entirely.</span></div>\
          <div class=\"row\">{sessions} {idle}</div>\
+         <div class=\"row\">{rate_max} {rate_win}</div>\
+         <div class=\"hint\">Per-IP connection rate for telnet and SSH. 0 = no limit. \
+         Not applied to this web server: every request here is its own \
+         connection and the booted-disk screen polls several times a second.</div>\
          <div class=\"row\"><span class=\"label\">GUI display scale:</span>\
          <select name=\"gui_zoom\">\
          <option value=\"auto\" {z_auto}>Auto</option>\
@@ -3415,6 +3420,8 @@ fn render_more_popups(cfg: &Config) -> String {
         },
         sessions = numfield("max_sessions", "Sessions", cfg.max_sessions),
         idle = numfield("idle_timeout_secs", "Idle (s)", cfg.idle_timeout_secs),
+        rate_max = numfield("conn_rate_max", "Conn/IP", cfg.conn_rate_max),
+        rate_win = numfield("conn_rate_window_secs", "Per (s)", cfg.conn_rate_window_secs),
         z_auto = if zf.is_none() { "selected" } else { "" },
         z75 = zsel(0.75),
         z100 = zsel(1.0),

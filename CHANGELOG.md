@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A per-IP connection rate limit for telnet and SSH** (`conn_rate_max`,
+  default 20, and `conn_rate_window_secs`, default 60; `0` disables it).  It
+  is a second, independent defence from the login lockout, and a measurement
+  is why it exists.  An internet-exposed gateway was read on 2026-09-13: 26
+  distinct addresses in two hours, 62 credential attempts from three of them
+  &mdash; and **not one telnet lockout ever armed**.  The scanners send
+  `USER<CRLF>PASS<CRLF>` blind, one connection per guess, and this gateway's
+  own terminal-detection prompt eats the first byte while the colour prompt
+  eats the rest; by the time `Username:` is printed the script is spent and
+  the peer hangs up, so `authenticate` returns without ever reaching
+  `record_auth_failure`.  The lockout counts *failed credentials* and a
+  scanner of this shape never submits one, so counting **connections** covers
+  what counting failures structurally cannot.  Deliberately **not** applied to
+  the web listener: every HTTP request there is its own TCP connection
+  (`Connection: close`) and the booted-disk screen polls `/vdm/frame` every
+  150&nbsp;ms, so an operator watching a CP/M guest makes several connections a
+  second &mdash; that listener is gated by the private-IP allowlist instead.  A
+  refused connection is counted but never stored, capping the map at
+  `conn_rate_max` entries per address, because a rate limiter that allocates
+  per refused connection is an amplifier rather than a defence.  An abandoned
+  session is still **not** recorded as a failed guess: doing so would let
+  anyone lock out a neighbour's address by connecting and dropping.
+
 ### Fixed
 
 - **The desktop editor did not tick Enabled when a serial port was chosen.**

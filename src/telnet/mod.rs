@@ -442,6 +442,65 @@ pub(crate) fn is_locked_out(lockouts: &LockoutMap, ip: IpAddr) -> bool {
     }
 }
 
+// ─── Connection rate limit ──────────────────────────────────
+//
+// Shared between telnet and SSH for the same reason `LockoutMap` is: an
+// attacker must not reset the counter by bouncing between protocols.
+//
+// This is a SEPARATE defence from the auth lockout above, not a second
+// spelling of it.  The lockout counts *failed credentials*, and the measured
+// attack never submits one: a telnet credential scanner opens a connection
+// per guess, sends `USER<CRLF>PASS<CRLF>` blind, and hangs up at the first
+// prompt it does not recognise -- so `record_auth_failure` is never reached
+// and the lockout never arms.  Measured on an internet-exposed gateway
+// 2026-09-13: 62 credential attempts from three IPs (71, 48 and 43
+// connections each) and *zero* telnet lockouts.  Counting connections
+// catches what counting failures structurally cannot.
+//
+// Deliberately NOT applied to the web listener.  `webserver::write_response`
+// sends `Connection: close`, so every HTTP request is its own TCP
+// connection, and the booted-disk screen polls `/vdm/frame` every
+// `VDM_POLL_MS` (150 ms) on top of `/logs` every 2 s -- a legitimate
+// operator watching a CP/M guest would trip any sane per-IP limit within the
+// first second.  That listener is gated by the private-IP allowlist
+// (`webserver::web_ip_rejection`) instead.
+pub(crate) type ConnRateMap = Arc<Mutex<HashMap<IpAddr, Vec<std::time::Instant>>>>;
+
+/// Record a connection from `ip` and report how many fall inside `window`,
+/// counting this one.  The caller refuses the connection when the answer
+/// exceeds its configured maximum.
+///
+/// A connection already over `max` is counted but **not stored**: the vector
+/// is capped at `max` entries per IP, so a flood cannot grow this map into
+/// its own memory-exhaustion vector -- a rate limiter that allocates per
+/// refused connection is an amplifier, not a defence.  The practical effect
+/// is that refusals do not extend the window, so an IP recovers `window`
+/// after its last *accepted* connection rather than after its last attempt.
+pub(crate) fn note_connection(
+    rates: &ConnRateMap,
+    ip: IpAddr,
+    max: u32,
+    window: std::time::Duration,
+) -> u32 {
+    let mut map = rates.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    // Drop IPs with nothing left inside the window, so the map does not grow
+    // one entry per distinct scanner for ever on a public instance -- the
+    // same sweep `record_auth_failure` does, and for the same reason.
+    map.retain(|_, seen| {
+        seen.iter()
+            .any(|t| now.duration_since(*t) < window)
+    });
+    let seen = map.entry(ip).or_default();
+    seen.retain(|t| now.duration_since(*t) < window);
+    if seen.len() as u32 >= max {
+        // Over the limit: report it without storing, per the cap above.
+        return seen.len() as u32 + 1;
+    }
+    seen.push(now);
+    seen.len() as u32
+}
+
 pub(crate) fn record_auth_failure(lockouts: &LockoutMap, ip: IpAddr) -> u32 {
     let mut map = lockouts.lock().unwrap_or_else(|e| e.into_inner());
     // Drop entries past the lockout window so the map doesn't grow one
@@ -1779,6 +1838,7 @@ pub fn start_server(
     shutdown_notify: Arc<tokio::sync::Notify>,
     session_writers: SessionWriters,
     lockouts: LockoutMap,
+    conn_rates: ConnRateMap,
 ) {
     let cfg = config::get_config();
     if !cfg.telnet_enabled {
@@ -1817,6 +1877,31 @@ pub fn start_server(
                 result = listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
+                            // Per-IP connection rate limit, ahead of the
+                            // session claim and the IP allowlist so a refused
+                            // connection costs one map lookup and nothing
+                            // else -- the same "cheapest gate first" ordering
+                            // the web server uses for its lockout check.
+                            //
+                            // Read fresh each accept, like the security flags
+                            // below, so a change applies without a restart.
+                            let (rate_max, rate_window) = config::get_conn_rate();
+                            if rate_max > 0
+                                && note_connection(&conn_rates, addr.ip(), rate_max, rate_window)
+                                    > rate_max
+                            {
+                                glog!(
+                                    "Telnet: rejected {} (more than {} connections in {}s)",
+                                    addr, rate_max, rate_window.as_secs()
+                                );
+                                // Dropped without a message: a scanner opening
+                                // a connection per guess is not reading our
+                                // replies, and spawning a bounded write per
+                                // refusal is the accept-loop serialization
+                                // this file already warns about below.
+                                drop(stream);
+                                continue;
+                            }
                             // Atomic claim: fetch_add returns the value
                             // BEFORE the increment, so concurrent
                             // accepts each see a unique slot.  This

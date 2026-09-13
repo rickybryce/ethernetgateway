@@ -163,6 +163,67 @@ fn test_constants() {
     const _: () = assert!(TelnetSession::TRANSFER_PAGE_SIZE <= 20);
 }
 
+// ─── Connection rate limit ───────────────────────────
+
+#[test]
+fn test_the_rate_limit_allows_exactly_the_max_then_refuses() {
+    let rates: ConnRateMap = Arc::new(Mutex::new(HashMap::new()));
+    let ip: IpAddr = "203.0.113.9".parse().unwrap();
+    let w = std::time::Duration::from_secs(60);
+    // The Nth connection is still allowed; the caller refuses only when the
+    // answer EXCEEDS max, so an off-by-one here would cost a real user their
+    // last permitted connection.
+    for n in 1..=5 {
+        assert_eq!(note_connection(&rates, ip, 5, w), n, "connection {n} of 5");
+    }
+    assert!(note_connection(&rates, ip, 5, w) > 5, "the 6th must be over");
+    assert!(note_connection(&rates, ip, 5, w) > 5, "and it stays over");
+}
+
+#[test]
+fn test_the_rate_limit_is_per_ip() {
+    let rates: ConnRateMap = Arc::new(Mutex::new(HashMap::new()));
+    let a: IpAddr = "203.0.113.9".parse().unwrap();
+    let b: IpAddr = "203.0.113.10".parse().unwrap();
+    let w = std::time::Duration::from_secs(60);
+    for _ in 0..5 {
+        note_connection(&rates, a, 5, w);
+    }
+    assert!(note_connection(&rates, a, 5, w) > 5);
+    // A flooding neighbour must not spend this address's allowance -- the
+    // whole point of keying on the IP.
+    assert_eq!(note_connection(&rates, b, 5, w), 1);
+}
+
+#[test]
+fn test_a_refused_connection_is_not_stored() {
+    // The cap that stops the limiter becoming its own memory-exhaustion
+    // vector: an IP already over the limit is counted but never pushed, so
+    // the stored vector cannot grow past `max` however long a flood runs.
+    let rates: ConnRateMap = Arc::new(Mutex::new(HashMap::new()));
+    let ip: IpAddr = "203.0.113.9".parse().unwrap();
+    let w = std::time::Duration::from_secs(60);
+    for _ in 0..200 {
+        note_connection(&rates, ip, 3, w);
+    }
+    let map = rates.lock().unwrap();
+    assert_eq!(map.get(&ip).map(|v| v.len()), Some(3), "stored entries capped at max");
+}
+
+#[test]
+fn test_the_window_expires_and_the_map_is_pruned() {
+    // A zero-length window means every timestamp is already outside it, so
+    // nothing is ever counted and nothing is ever retained.  This is the
+    // expiry path without sleeping for it.
+    let rates: ConnRateMap = Arc::new(Mutex::new(HashMap::new()));
+    let ip: IpAddr = "203.0.113.9".parse().unwrap();
+    let zero = std::time::Duration::from_secs(0);
+    assert_eq!(note_connection(&rates, ip, 5, zero), 1);
+    assert_eq!(note_connection(&rates, ip, 5, zero), 1, "the previous one expired");
+    let map = rates.lock().unwrap();
+    assert!(map.len() <= 1, "expired IPs are pruned, not accumulated");
+}
+
 // ─── Auth lockout ────────────────────────────────────
 
 #[test]

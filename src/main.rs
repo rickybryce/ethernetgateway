@@ -533,6 +533,14 @@ fn main() {
                 let lockouts: telnet::LockoutMap = Arc::new(
                     std::sync::Mutex::new(std::collections::HashMap::new()),
                 );
+                // Shared for the same reason, and a separate defence: the
+                // lockout counts failed credentials, this counts connections.
+                // A telnet credential scanner never submits a credential --
+                // see `telnet::note_connection`.  The web listener is
+                // deliberately not given this map.
+                let conn_rates: telnet::ConnRateMap = Arc::new(
+                    std::sync::Mutex::new(std::collections::HashMap::new()),
+                );
                 // Fresh slate for this server cycle: each listener registers
                 // below and reports whether it bound, and the watcher then says
                 // out loud if none of them did (see bindwatch).
@@ -547,6 +555,7 @@ fn main() {
                     notify_rt.clone(),
                     session_writers.clone(),
                     lockouts.clone(),
+                    conn_rates.clone(),
                 );
                 ssh::start_ssh_server(
                     shutdown_rt.clone(),
@@ -554,6 +563,7 @@ fn main() {
                     notify_rt.clone(),
                     session_writers.clone(),
                     lockouts.clone(),
+                    conn_rates,
                 );
                 let serial_handles = serial::start_serial(shutdown_rt.clone(), restart_rt.clone());
                 // On a slave, offer the CP/M endpoint to the master for the whole

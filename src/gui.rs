@@ -820,6 +820,8 @@ struct App {
     /// would make an unrelated Save look like an answer.
     master_pw_entry: String,
     max_sessions_buf: String,
+    conn_rate_max_buf: String,
+    conn_rate_window_buf: String,
     idle_timeout_buf: String,
     negotiation_timeout_buf: String,
     block_timeout_buf: String,
@@ -1199,6 +1201,8 @@ impl App {
         let web_port_buf = cfg.web_port.to_string();
         let slave_master_port_buf = cfg.slave_master_port.to_string();
         let max_sessions_buf = cfg.max_sessions.to_string();
+        let conn_rate_max_buf = cfg.conn_rate_max.to_string();
+        let conn_rate_window_buf = cfg.conn_rate_window_secs.to_string();
         let idle_timeout_buf = cfg.idle_timeout_secs.to_string();
         let negotiation_timeout_buf = cfg.xmodem_negotiation_timeout.to_string();
         let block_timeout_buf = cfg.xmodem_block_timeout.to_string();
@@ -1273,6 +1277,8 @@ impl App {
             web_port_buf,
             slave_master_port_buf,
             max_sessions_buf,
+            conn_rate_max_buf,
+            conn_rate_window_buf,
             idle_timeout_buf,
             negotiation_timeout_buf,
             block_timeout_buf,
@@ -1380,6 +1386,10 @@ impl App {
         if let Ok(v) = self.web_port_buf.parse::<u16>() && v >= 1 { self.cfg.web_port = v; }
         if let Ok(v) = self.slave_master_port_buf.parse::<u16>() && v >= 1 { self.cfg.slave_master_port = v; }
         if let Ok(v) = self.max_sessions_buf.parse::<usize>() && v >= 1 { self.cfg.max_sessions = v; }
+        // 0 is legal here (it disables the limit), so no `>= 1` guard -- but
+        // the window keeps one, since a zero window would refuse the listener.
+        if let Ok(v) = self.conn_rate_max_buf.parse::<u32>() { self.cfg.conn_rate_max = v; }
+        if let Ok(v) = self.conn_rate_window_buf.parse::<u64>() && v >= 1 { self.cfg.conn_rate_window_secs = v; }
         if let Ok(v) = self.idle_timeout_buf.parse() { self.cfg.idle_timeout_secs = v; }
         if let Ok(v) = self.negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_negotiation_timeout = v; }
         if let Ok(v) = self.block_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_block_timeout = v; }
@@ -1674,6 +1684,19 @@ impl App {
             ui.add_space(8.0);
             labeled_field(ui, "Idle (s):", &mut self.idle_timeout_buf, 50.0);
         });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            labeled_field(ui, "Conn/IP:", &mut self.conn_rate_max_buf, 50.0);
+            ui.add_space(8.0);
+            labeled_field(ui, "Per (s):", &mut self.conn_rate_window_buf, 50.0);
+        });
+        ui.label(
+            egui::RichText::new(
+                "Per-IP connection rate for telnet and SSH. 0 = no limit.",
+            )
+            .small()
+            .color(AMBER_DIM),
+        );
         ui.add_space(4.0);
         // Display scale for THIS console window. "Auto" follows the monitor's
         // reported DPI; a fixed percentage pins the size so a display that
@@ -4586,6 +4609,8 @@ impl App {
         self.web_port_buf = self.cfg.web_port.to_string();
         self.slave_master_port_buf = self.cfg.slave_master_port.to_string();
         self.max_sessions_buf = self.cfg.max_sessions.to_string();
+        self.conn_rate_max_buf = self.cfg.conn_rate_max.to_string();
+        self.conn_rate_window_buf = self.cfg.conn_rate_window_secs.to_string();
         self.idle_timeout_buf = self.cfg.idle_timeout_secs.to_string();
         self.negotiation_timeout_buf = self.cfg.xmodem_negotiation_timeout.to_string();
         self.block_timeout_buf = self.cfg.xmodem_block_timeout.to_string();
@@ -7078,6 +7103,8 @@ impl eframe::App for App {
                 || self.web_port_buf != self.last_synced_cfg.web_port.to_string()
                 || self.slave_master_port_buf != self.last_synced_cfg.slave_master_port.to_string()
                 || self.max_sessions_buf != self.last_synced_cfg.max_sessions.to_string()
+                || self.conn_rate_max_buf != self.last_synced_cfg.conn_rate_max.to_string()
+                || self.conn_rate_window_buf != self.last_synced_cfg.conn_rate_window_secs.to_string()
                 || self.idle_timeout_buf != self.last_synced_cfg.idle_timeout_secs.to_string()
                 || self.negotiation_timeout_buf != self.last_synced_cfg.xmodem_negotiation_timeout.to_string()
                 || self.block_timeout_buf != self.last_synced_cfg.xmodem_block_timeout.to_string()

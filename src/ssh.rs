@@ -74,6 +74,7 @@ pub fn start_ssh_server(
     shutdown_notify: Arc<tokio::sync::Notify>,
     session_writers: telnet::SessionWriters,
     lockouts: telnet::LockoutMap,
+    conn_rates: telnet::ConnRateMap,
 ) {
     let cfg = config::get_config();
     if !cfg.ssh_enabled {
@@ -121,6 +122,7 @@ pub fn start_ssh_server(
             max_sessions: cfg.max_sessions,
             session_writers: session_writers.clone(),
             lockouts: lockouts.clone(),
+            conn_rates: conn_rates.clone(),
         };
 
         // Bind the socket ourselves and hand it to russh (`run_on_address` is
@@ -584,6 +586,9 @@ struct SshServer {
     session_writers: telnet::SessionWriters,
     /// Brute-force lockout map shared with the telnet server.
     lockouts: telnet::LockoutMap,
+    /// Per-IP connection rate map, also shared with telnet -- see
+    /// `telnet::note_connection`.
+    conn_rates: telnet::ConnRateMap,
 }
 
 impl russh::server::Server for SshServer {
@@ -598,8 +603,29 @@ impl russh::server::Server for SshServer {
         // users.  The slot is claimed in auth_password on a successful login
         // (atomic fetch_add + rollback, the same pattern the telnet accept
         // loop uses).
+        // Per-IP connection rate limit.  `run_on_socket` owns the accept
+        // loop, so unlike telnet this cannot refuse the TCP connection
+        // itself -- the verdict is recorded here (the one hook that sees
+        // every inbound connection, authenticated or not) and enforced in
+        // both auth paths below, which is the same place the lockout is
+        // enforced and costs an attacker russh's `auth_rejection_time`.
+        let (rate_max, rate_window) = config::get_conn_rate();
+        let rate_limited = match peer_addr {
+            Some(a) if rate_max > 0 => {
+                telnet::note_connection(&self.conn_rates, a.ip(), rate_max, rate_window)
+                    > rate_max
+            }
+            _ => false,
+        };
         if let Some(addr) = peer_addr {
-            glog!("SSH: connection from {}", addr);
+            if rate_limited {
+                glog!(
+                    "SSH: connection from {} over rate limit ({} in {}s)",
+                    addr, rate_max, rate_window.as_secs()
+                );
+            } else {
+                glog!("SSH: connection from {}", addr);
+            }
         }
         SshHandler {
             shutdown: self.shutdown.clone(),
@@ -628,6 +654,7 @@ impl russh::server::Server for SshServer {
             authorized_keys: load_relay_authorized_keys(),
             key_authed: false,
             counted: false,
+            rate_limited,
         }
     }
 }
@@ -675,6 +702,11 @@ struct SshHandler {
     session_writers: telnet::SessionWriters,
     /// Shared brute-force lockout map (telnet + SSH).
     lockouts: telnet::LockoutMap,
+    /// Set at connect time when this IP is over the per-IP connection rate
+    /// limit; every auth path refuses while it is set.  Decided once in
+    /// `new_client` rather than per attempt, so one connection is one unit of
+    /// rate however many auth methods it tries.
+    rate_limited: bool,
     /// Whether this connection claimed a session slot (set once auth
     /// succeeds).  Gates the Drop decrement so an unauthenticated
     /// connection that never counted can't underflow the shared counter.
@@ -909,6 +941,9 @@ impl russh::server::Handler for SshHandler {
         // Reject immediately if this IP is locked out from too many
         // failures (map is shared with the telnet server so bouncing
         // protocols doesn't help an attacker).
+        if self.rate_limited {
+            return Ok(russh::server::Auth::reject());
+        }
         if let Some(ip) = self.peer_addr
             && telnet::is_locked_out(&self.lockouts, ip)
         {
@@ -1014,6 +1049,9 @@ impl russh::server::Handler for SshHandler {
         user: &str,
         public_key: &russh::keys::PublicKey,
     ) -> Result<russh::server::Auth, Self::Error> {
+        if self.rate_limited {
+            return Ok(russh::server::Auth::reject());
+        }
         if let Some(ip) = self.peer_addr
             && telnet::is_locked_out(&self.lockouts, ip)
         {
@@ -1820,6 +1858,7 @@ mod tests {
             authorized_keys: Vec::new(),
             key_authed: false,
             counted: false,
+            rate_limited: false,
         };
 
         let server = tokio::spawn(async move {
@@ -2124,6 +2163,7 @@ mod tests {
             authorized_keys,
             key_authed: false,
             counted: false,
+            rate_limited: false,
         }
     }
 
@@ -2148,6 +2188,7 @@ mod tests {
             authorized_keys: Vec::new(),
             key_authed: false,
             counted: false,
+            rate_limited: false,
         };
 
         // Failed auth must NOT claim a slot, and dropping an uncounted
@@ -2231,6 +2272,7 @@ mod tests {
             authorized_keys: Vec::new(),
             key_authed: false,
             counted: false,
+            rate_limited: false,
         };
 
         // Empty configured password: reject a matching-empty password (the
@@ -2523,6 +2565,7 @@ mod tests {
             authorized_keys: Vec::new(),
             key_authed: false,
             counted: false,
+            rate_limited: false,
         };
         // Correct credentials, but locked out → reject, no slot claimed.
         assert!(matches!(
@@ -2558,6 +2601,7 @@ mod tests {
             authorized_keys: Vec::new(),
             key_authed: false,
             counted: false,
+            rate_limited: false,
         };
         for _ in 0..telnet::AUTH_MAX_ATTEMPTS {
             let mut h = make();
@@ -2608,6 +2652,7 @@ mod tests {
             authorized_keys: Vec::new(),
             key_authed: false,
             counted: false,
+            rate_limited: false,
         };
         assert!(matches!(
             h.auth_password("admin", "secret").await.unwrap(),
