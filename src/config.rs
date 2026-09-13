@@ -6388,19 +6388,33 @@ mod tests {
         update_config_values(&[("serial_a_port", ""), ("serial_a_enabled", "false")]);
     }
 
-    /// **The desktop writes wholesale, so it has to ask for the rule itself.**
+    /// **The desktop applies the rule when the device is CHOSEN, not when the
+    /// config is saved.**
     ///
-    /// Telnet and the web get it free from `update_config_values`; the desktop
-    /// editor and the setup wizard go through `save_config`, and the call in
-    /// `persist_config` is the only thing that carries them.  Scanned from the
-    /// source because the drawing code has no test harness, and a surface that
-    /// silently stopped applying the rule is exactly the defect being fixed.
+    /// That editor is live: its Enabled checkbox is bound to the in-memory
+    /// `cfg`, so applying the rule in `persist_config` -- which works on the
+    /// clone it writes -- left the box visibly unticked while the file said
+    /// otherwise, and the *next* save then saw an unchanged device, did not
+    /// re-apply it, and wrote the stale `false` back over it.  Reported from
+    /// the running GUI.  It is applied beside the port selector instead, so the
+    /// tick appears the moment the selector closes and `cfg` stays the single
+    /// source of truth.
+    ///
+    /// **And it is deliberately NOT in `persist_config`**: with the rule on the
+    /// edit, a save-time copy would re-fire against the stored config and
+    /// override an operator who chose a device and then unticked the box before
+    /// saving.  The setup wizard sets no serial device, so nothing else needs
+    /// it there.
+    ///
+    /// Scanned from the source because the drawing code has no harness, and a
+    /// surface that silently stopped applying the rule is the defect being
+    /// fixed.
     #[test]
-    fn test_the_desktop_save_path_asks_for_the_rule() {
+    fn test_the_desktop_applies_the_rule_where_the_device_is_chosen() {
         let src = include_str!("gui.rs");
         let start = src
-            .find("fn persist_config")
-            .expect("the desktop's single save path");
+            .find("fn draw_serial_primary_row")
+            .expect("the row that draws the port selector");
         let end = src[start..]
             .find("\n    fn ")
             .map(|i| i + start + 5)
@@ -6408,9 +6422,21 @@ mod tests {
         let body = &src[start..end];
         assert!(
             body.contains("enable_ports_that_gained_a_device"),
-            "persist_config no longer applies the rule, so the desktop and the \
-             setup wizard would save a port the operator pointed at a device \
-             and left switched off"
+            "the desktop no longer enables a port when a device is chosen"
+        );
+        assert!(
+            body.contains("device_before"),
+            "the rule needs the device as it was, or it cannot tell a change \
+             from a redraw"
+        );
+
+        // And NOT at save time, where it would override a deliberate untick.
+        let ps = src.find("fn persist_config").expect("the save path");
+        let pe = src[ps..].find("\n    fn ").map(|i| i + ps + 5).unwrap_or(src.len());
+        assert!(
+            !src[ps..pe].contains("enable_ports_that_gained_a_device"),
+            "the save path re-applies the rule, which overrides an operator who \
+             chose a device and then unticked Enabled before saving"
         );
     }
 

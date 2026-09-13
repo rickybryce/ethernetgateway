@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The desktop editor did not tick Enabled when a serial port was chosen.**
+  The auto-enable was applied at *save* time, on the copy `persist_config`
+  writes &mdash; but that editor is live and its Enabled checkbox is bound to
+  the in-memory config, so the box stayed visibly unticked while the file said
+  otherwise.  Worse, the **next** save saw a device that had not changed, did
+  not re-apply the rule, and wrote the stale `false` straight back over it.
+  The rule now runs where the device is chosen, so the tick appears the moment
+  the selector closes and the in-memory config stays the single source of
+  truth; it is deliberately no longer applied at save time, where it would
+  override an operator who chose a device and then unticked the box before
+  saving.  Telnet and the web were unaffected &mdash; they write immediately.
+
 ## [1.0.0] - 2026-09-12
 
 ### Added

@@ -3286,6 +3286,16 @@ impl App {
         let idx = id.index();
         ui.horizontal(|ui| {
             ui.label(format!("Port {}:", id.label()));
+            // **The rule belongs on the edit, not on the save.**  This editor is
+            // live: the Enabled checkbox is bound to `self.cfg`, so applying the
+            // auto-enable at save time (on the clone `persist_config` writes)
+            // left the box visibly unticked while the file said otherwise --
+            // and worse, the *next* save saw an unchanged device, did not
+            // re-apply it, and wrote the stale `false` straight back over it.
+            // Reported by Ricky, who picked a device and watched the box not
+            // move.  Captured here so the change can be seen the moment the
+            // selector closes.
+            let device_before = self.cfg.port(id).port.clone();
             // The closed selector names the hardware too, matching the open list
             // and the web UI's selected option — otherwise the one state an
             // operator looks at most says the least.  Falls back to the bare path
@@ -3336,6 +3346,16 @@ impl App {
                 // which is what an operator needs *before* opening it.
                 .response
                 .on_hover_text(&tooltip);
+            // Choosing a device is the operator saying they want this port, so
+            // tick the box where they can see it.  The clone costs nothing: it
+            // happens only when the selection actually changed, which is a
+            // human action, never a frame.  The shared rule decides -- one
+            // statement of "a device that CHANGED, and is not empty".
+            if self.cfg.port(id).port != device_before {
+                let mut before = self.cfg.clone();
+                before.port_mut(id).port = device_before;
+                config::enable_ports_that_gained_a_device(&before, &mut self.cfg);
+            }
             if ui
                 .small_button("\u{21bb}")
                 .on_hover_text("Refresh ports")
@@ -4037,11 +4057,6 @@ impl App {
         if out.password.is_empty() {
             out.password = config::get_config().password;
         }
-        // A port the operator just pointed at a device comes on, the same rule
-        // the telnet and web paths get from `update_config_values`.  The
-        // desktop writes every key on every save, so it is compared against
-        // the config as stored -- `last_synced_cfg` -- and not against itself.
-        config::enable_ports_that_gained_a_device(&self.last_synced_cfg, &mut out);
         out.slave_master_password = master_password_for_save(
             &out.slave_master_password,
             &config::get_config().slave_master_password,
