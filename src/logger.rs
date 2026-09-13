@@ -603,7 +603,33 @@ pub fn init() {
 /// drain buffer feeds the GUI's per-frame console accumulator; the
 /// history buffer is a non-draining ring that lets the web-config
 /// console poll for recent lines without competing with the GUI.
+/// The local-time prefix every log line carries, e.g. `[2026-09-13 06:46:31] `.
+///
+/// **Local, not UTC, and that is the operator's choice made once.**  Whoever
+/// reads this file is usually sitting at the machine with a clock on the wall;
+/// a line that disagrees with that clock by an offset they must hold in their
+/// head is a line they will misread under pressure.  The cost is that two
+/// gateways in different zones cannot be interleaved without knowing both --
+/// accepted, because this log is read per-machine.
+///
+/// Seconds resolution: these lines are connections and menu keystrokes, not
+/// profiling samples, and a millisecond field would widen every line for
+/// precision nothing here uses.
+fn stamp() -> String {
+    chrono::Local::now().format("[%Y-%m-%d %H:%M:%S] ").to_string()
+}
+
 pub fn log(msg: String) {
+    // Stamped HERE, above the sink and the rings, so that every consumer --
+    // stderr, the file, the GUI console and the web `/logs` view -- shows the
+    // same time for the same line, and so a line held in the pre-arm backlog
+    // carries the moment it was LOGGED rather than the moment a file was
+    // finally armed and it was flushed.  Stamping lower down would have got
+    // that backwards for exactly the startup lines whose ordering matters
+    // most.  The lower layers (`write_line_to`, `push_bounded`,
+    // `drain_backlog_into`) therefore still take an unadorned line, which is
+    // what their own tests assert on.
+    let msg = format!("{}{}", stamp(), msg);
     eprintln!("{}", msg);
     // Before the rings, so a line is on disk even if a ring lock is contended.
     // A line that predates the config (the version banner, the config-load
@@ -621,6 +647,9 @@ pub fn log(msg: String) {
     // re-enter the sink and, on the pause transition, count its own notice as a
     // dropped line.
     if let Some(notice) = outcome.notice {
+        // Stamped like everything else: this notice says logging stopped or
+        // resumed, and "when" is the only interesting thing about it.
+        let notice = format!("{}{}", stamp(), notice);
         eprintln!("{}", notice);
         push_to_rings(notice);
     }
@@ -740,8 +769,11 @@ mod tests {
         let sentinel = format!("snapshot_sentinel_{}_{}", std::process::id(), 7919);
         log(sentinel.clone());
         let snap = snapshot(MAX_LINES);
+        // `ends_with`, not `==`: every line carries the local-time stamp
+        // `log` adds (see `stamp`).  This still pins the stamp as a PREFIX --
+        // a rewrite that mangled the message would fail here.
         assert!(
-            snap.iter().any(|l| l == &sentinel),
+            snap.iter().any(|l| l.ends_with(&sentinel)),
             "snapshot did not include the just-logged sentinel"
         );
     }
@@ -758,8 +790,9 @@ mod tests {
         log(sentinel.clone());
         let first = snapshot(MAX_LINES);
         let second = snapshot(MAX_LINES);
-        assert!(first.iter().any(|l| l == &sentinel));
-        assert!(second.iter().any(|l| l == &sentinel));
+        // Stamped lines: match on the message tail.  See `stamp`.
+        assert!(first.iter().any(|l| l.ends_with(&sentinel)));
+        assert!(second.iter().any(|l| l.ends_with(&sentinel)));
     }
 
     /// `snapshot(max)` returns at most `max` lines — verifies the
@@ -1187,6 +1220,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The stamp is **parsed back**, never re-rendered with the same format
+    /// string: a guard that formats `Local::now()` the way `stamp` does would
+    /// be comparing the source with a copy of itself and would pass with any
+    /// format at all.  Parsing proves the shape independently, and comparing
+    /// against the clock proves it is the *local* clock rather than UTC --
+    /// which is the whole decision this function encodes.
+    #[test]
+    fn test_the_log_stamp_is_a_parsable_local_time() {
+        let s = stamp();
+        assert!(s.starts_with('[') && s.ends_with("] "), "shape: {s:?}");
+        let inner = &s[1..s.len() - 2];
+        let parsed = chrono::NaiveDateTime::parse_from_str(inner, "%Y-%m-%d %H:%M:%S")
+            .unwrap_or_else(|e| panic!("stamp {inner:?} is not a date-time: {e}"));
+        // Against the LOCAL clock.  If `stamp` were UTC this fails everywhere
+        // the machine is not on UTC, which is the point of the assertion.
+        let now = chrono::Local::now().naive_local();
+        let skew = (now - parsed).num_seconds().abs();
+        assert!(skew <= 5, "stamp {parsed} is {skew}s from local now {now} -- UTC?");
+    }
+
+    /// Every consumer must see the same stamped line: the file, the rings that
+    /// feed the GUI console and the web `/logs` view.  A line stamped for one
+    /// and not the others is the drift this sits above `push_to_rings` to
+    /// prevent.
+    #[test]
+    fn test_a_logged_line_reaches_the_rings_stamped() {
+        let marker = format!("stamp_probe_{}_{}", std::process::id(), 4241);
+        init();
+        log(marker.clone());
+        let found = snapshot(2000)
+            .into_iter()
+            .find(|l| l.contains(&marker))
+            .unwrap_or_else(|| panic!("{marker} never reached the ring"));
+        assert!(
+            found.starts_with('['),
+            "the ring got an unstamped line: {found:?}"
+        );
+        assert!(
+            found.ends_with(&marker),
+            "the stamp must be a prefix, not a rewrite: {found:?}"
+        );
+    }
+
     /// The backlog is bounded, and keeps the NEWEST lines — those are the ones
     /// nearest whatever failure is being diagnosed.  Unbounded would mean a
     /// process that never arms a log file grows a buffer nothing will ever read.
@@ -1418,7 +1494,7 @@ mod tests {
         let _ = drain();
         let snap = snapshot(MAX_LINES);
         assert!(
-            snap.iter().any(|l| l == &sentinel),
+            snap.iter().any(|l| l.ends_with(&sentinel)),
             "drain() removed a line from snapshot's history buffer"
         );
     }

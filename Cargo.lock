@@ -1243,6 +1243,7 @@ version = "1.0.0"
 dependencies = [
  "arboard",
  "bytes",
+ "chrono",
  "eframe",
  "egui_extras",
  "html2text",

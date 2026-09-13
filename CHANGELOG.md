@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every log line now carries a local-time stamp**, `[2026-09-13 06:46:31] `.
+  A log doing security work that cannot say *when* is half a log: the survey of
+  an internet-exposed gateway on 2026-09-13 could count 44 connections from one
+  address but could not tell a burst from a slow drip &mdash; which is precisely
+  the fact needed to size `conn_rate_max`.  **Local time rather than UTC**,
+  because whoever reads this file is usually sitting at the machine with a clock
+  on the wall, and a line that disagrees with that clock by an offset they hold
+  in their head is a line they will misread under pressure; the cost, accepted,
+  is that two gateways in different zones cannot be interleaved without knowing
+  both.  The stamp is applied in `logger::log`, above the file sink and the
+  console rings, so stderr, the log file, the desktop console and the web
+  `/logs` view all show the same time for the same line &mdash; and so a line
+  held in the pre-arm backlog (the version banner, the config diagnostics)
+  carries the moment it was *logged* rather than the moment a log file was
+  finally armed and it was flushed.  This adds `chrono` as a dependency: std can
+  format no local time on any platform, and the `libc::localtime_r` route would
+  have covered Linux while leaving Windows deployments on UTC.
+
 - **A per-IP connection rate limit for telnet and SSH** (`conn_rate_max`,
   default 20, and `conn_rate_window_secs`, default 60; `0` disables it).  It
   is a second, independent defence from the login lockout, and a measurement

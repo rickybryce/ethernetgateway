@@ -8353,7 +8353,13 @@ mod tests {
         logger::log("newest".into());
         app.poll_logs();
         assert!(app.console_lines.len() <= 2000);
-        assert_eq!(app.console_lines.last().expect("should contain newest"), "newest");
+        // `ends_with`, not equality: the line carries logger's local-time
+        // stamp.  Still pins it as the LAST line and as a prefix-only change.
+        assert!(
+            app.console_lines.last().expect("should contain newest").ends_with("newest"),
+            "newest line missing or rewritten: {:?}",
+            app.console_lines.last()
+        );
     }
 
     // ── local_ip ─────────────────────────────────────────────

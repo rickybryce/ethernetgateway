@@ -50,6 +50,23 @@ libc = "0.2"
 # is on the OpenSSF criterion's approved list, so the trade buys back the
 # memory without weakening the claim.
 pbkdf2 = { version = "0.13", features = ["phc", "getrandom", "sha2"] }
+# Local-time stamps on every log line (src/logger.rs `stamp`).  A security log
+# that cannot say WHEN is half a log: the 2026-09-13 survey of an exposed
+# gateway could not tell a burst of connections from a slow drip, which is
+# exactly the fact needed to size `conn_rate_max`.
+#
+# `default-features = false` deliberately: the default set drags in `wasmbind`
+# (js-sys + wasm-bindgen) and `serde`, none of which this uses.  `clock` is the
+# feature that provides `Local::now`, and it is the whole reason for the crate
+# -- std can format no local time on any platform, and the `libc::localtime_r`
+# route would have covered Linux while leaving the Windows deployments (where
+# this gateway is actually exposed) on UTC.  It adds `iana-time-zone`.
+#
+# NOTE: chrono was already present in Cargo.lock but NOT in the build graph
+# (`cargo tree` named it nowhere), so unlike `pbkdf2` this is a genuinely new
+# compiled dependency and must be reflected in THIRD-PARTY-NOTICES at the next
+# release cut.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 russh = "0.62"
 ureq = "3"
 serde_json = "1"
