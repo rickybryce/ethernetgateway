@@ -18,6 +18,13 @@ Documentation=https://github.com/rickybryce/ethernetgateway
 After=network-online.target
 Wants=network-online.target
 
+; ── Restart limit ─────────────────────────────────────────
+; These two belong to [Unit].  Put under [Service] -- where they read more
+; naturally, beside Restart= -- systemd ignores them without a word, and a
+; crash loop restarts for ever.  Five starts in sixty seconds, then give up.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=simple
 
@@ -28,6 +35,13 @@ Type=simple
 ; Then the directory and its contents belong to that user.
 User=ethernetgateway
 Group=ethernetgateway
+
+; Serial ports are root:dialout on Linux, so the service account needs that
+; group to open /dev/ttyUSB0 and friends.  This is the access control the
+; PrivateDevices= note below points at; without it the modem port fails to
+; open even with a private /dev turned off.
+;   sudo usermod -aG dialout ethernetgateway
+SupplementaryGroups=dialout
 
 ; ── Paths ─────────────────────────────────────────────────
 ; WorkingDirectory is where the gateway creates its `ethernetgateway-data`
@@ -69,16 +83,26 @@ ExecReload=/bin/kill -HUP $MAINPID
 ; cannot catch, so the warning is what carries it.
 
 ; ── Restart policy ────────────────────────────────────────
+; NOTE: the start-limit pair lives in [Unit] above, not here.  systemd silently
+; ignores StartLimitIntervalSec= / StartLimitBurst= under [Service], so for two
+; releases this block read as though it had a policy and had none at all.
+; Measured while installing the unit on a Pi, 2026-09-14.
 Restart=on-failure
 RestartSec=5s
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 ; ── Hardening ─────────────────────────────────────────────
 ; All of these are defensive; remove any that break your deployment.
 NoNewPrivileges=yes
 PrivateTmp=yes
-PrivateDevices=yes
+; PrivateDevices=yes gives a private /dev holding pseudo devices only, so
+; /dev/ttyUSB0 simply does not exist inside it and the Hayes modem port fails
+; to open with no obvious cause.  A DeviceAllow= allowlist is not the fix
+; either: a cgroup device policy does not hide nodes, so the port picker would
+; still list a port that then fails with EPERM at the moment of use -- a
+; silent failure at the worst moment.  Ordinary Unix permissions plus the
+; `dialout` group below are the right control; the serial nodes are
+; root:dialout.  Set this to `yes` only on a deployment with no serial ports.
+PrivateDevices=no
 ProtectSystem=strict
 ProtectHome=yes
 ProtectKernelTunables=yes
@@ -92,7 +116,12 @@ ProcSubset=pid
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+; AF_NETLINK is not optional: `getifaddrs()` enumerates interfaces over a
+; NETLINK_ROUTE socket, so without it the gateway sees only 127.0.0.1 and its
+; startup port check reports that the machine has no address of its own and
+; skips.  Measured by comparing the app log across a desktop run (found the
+; LAN address) and a service run (did not).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallFilter=@system-service
