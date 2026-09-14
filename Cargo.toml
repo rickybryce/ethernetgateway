@@ -50,7 +50,7 @@ libc = "0.2"
 # is on the OpenSSF criterion's approved list, so the trade buys back the
 # memory without weakening the claim.
 pbkdf2 = { version = "0.13", features = ["phc", "getrandom", "sha2"] }
-russh = "0.62"
+russh = "0.63"
 ureq = "3"
 serde_json = "1"
 html2text = "0.14"
