@@ -6,8 +6,72 @@
 
 use super::*;
 
+/// Column (0-based) where a second key begins on the port settings screen.
+///
+/// The screen is at its 22-row PETSCII budget, so four of its entries ride on
+/// another row's right-hand side rather than taking one of their own.  Those
+/// rows are built by different `if` branches -- raw/console/modem mode each
+/// draw a different pair -- and they were each hand-spaced with three spaces
+/// after a label of a different length, which put `G` at column 26, `X` and
+/// `K` at 24 and `C` at 22.  Reported 2026-09-14 from a live Port B screen:
+/// three right-hand keys in three different columns, which reads as a
+/// misprint rather than a column.
+///
+/// The longest left label is `Select serial port`: `"  S  Select serial port"`
+/// is 23 characters, so its last one sits at index 22 and two spaces would
+/// reach column 25.  26 gives that row three spaces and every other row more
+/// -- the narrowest column is 25, and this is one past it, which keeps the
+/// widest row (`Gw PETSCII`) at 39 columns exactly.  The widest row it produces is the `Gw PETSCII` one
+/// at 39 columns, which is the same budget `separator()` uses -- a row that
+/// exactly fills a C64's 40 auto-wraps and then takes the trailing CR/LF,
+/// costing two rows of the twenty-two.
+pub(in crate::telnet) const SERIAL_MENU_SECOND_COL: usize = 26;
+
 impl TelnetSession {
     // ─── MODEM EMULATOR ──────────────────────────────────────
+
+    /// One port-settings row: a key and its label, optionally with a second
+    /// key and label starting at [`SERIAL_MENU_SECOND_COL`].
+    ///
+    /// **The padding is computed from the plain text, then colour is applied
+    /// around it.**  `cyan()` wraps the key in bytes a terminal does not draw,
+    /// so aligning on the formatted string would align the invisible ones and
+    /// leave the visible columns exactly as ragged as before -- on ANSI, where
+    /// the codes are five bytes, and not on ASCII, where there are none.
+    ///
+    /// A label too long to reach the column keeps a single space rather than
+    /// none, so a row can never run two words together -- but that is damage
+    /// control, not the answer: such a row is both mis-aligned and over the
+    /// screen's width.  `test_the_port_settings_rows_align_their_second_key`
+    /// reads the real labels **out of this file** and holds every one of them
+    /// short enough that the clamp is never reached.  It used to hold a
+    /// hand-copied list instead and could not see a label added or widened at
+    /// a call site; widening `Dialup Mapping` by twenty characters left the
+    /// whole suite green while the drawn row reached 50 columns on a C64.
+    pub(in crate::telnet) fn serial_menu_row(
+        &self,
+        key: &str,
+        label: &str,
+        second: Option<(&str, &str)>,
+    ) -> String {
+        let Some((key2, label2)) = second else {
+            return format!("  {}  {}", self.cyan(key), label);
+        };
+        // Measured on a deliberately uncoloured copy of the same row, so the
+        // count cannot accidentally be taken from the coloured one.  Writing
+        // it as `5 + label.len()` would be the same number and would invite
+        // exactly that mistake the next time the prefix changes.
+        let drawn = format!("  {}  {}", key, label).chars().count();
+        let pad = SERIAL_MENU_SECOND_COL.saturating_sub(drawn).max(1);
+        format!(
+            "  {}  {}{}{}  {}",
+            self.cyan(key),
+            label,
+            " ".repeat(pad),
+            self.cyan(key2),
+            label2,
+        )
+    }
 
     // ─── Dialup Mapping ────────────────────────────────────
 
@@ -549,20 +613,9 @@ impl TelnetSession {
             // erase key and PETSCII already share rows here.  Hidden with the
             // rest of the modem-only settings on a raw console/Kermit wire,
             // where no gateway session can arrive.
-            if raw_mode {
-                self.send_line(&format!(
-                    "  {}  Select serial port",
-                    self.cyan("S")
-                ))
+            let gw = if raw_mode { None } else { Some(("G", "Gw PETSCII")) };
+            self.send_line(&self.serial_menu_row("S", "Select serial port", gw))
                 .await?;
-            } else {
-                self.send_line(&format!(
-                    "  {}  Select serial port   {}  Gw PETSCII",
-                    self.cyan("S"),
-                    self.cyan("G")
-                ))
-                .await?;
-            }
             self.send_line(&format!(
                 "  {}  Set baud rate",
                 self.cyan("B")
@@ -582,25 +635,14 @@ impl TelnetSession {
                 // the Kermit server's wire carries 0x08 and 0x7F as packet data,
                 // where rewriting them would corrupt a transfer, and a setting
                 // that does nothing is worse than no setting.
-                if console_mode {
-                    self.send_line(&format!(
-                        "  {}  Set flow control   {}  Erase key",
-                        self.cyan("F"),
-                        self.cyan("K")
-                    ))
+                let erase = if console_mode { Some(("K", "Erase key")) } else { None };
+                self.send_line(&self.serial_menu_row("F", "Set flow control", erase))
                     .await?;
-                } else {
-                    self.send_line(&format!(
-                        "  {}  Set flow control",
-                        self.cyan("F")
-                    ))
-                    .await?;
-                }
             } else {
-                self.send_line(&format!(
-                    "  {}  Set flow control   {}  PETSCII",
-                    self.cyan("F"),
-                    self.cyan("X")
+                self.send_line(&self.serial_menu_row(
+                    "F",
+                    "Set flow control",
+                    Some(("X", "PETSCII")),
                 ))
                 .await?;
             }
@@ -608,10 +650,10 @@ impl TelnetSession {
             // features only — they don't apply to a raw console bridge
             // or the Kermit server.
             if !raw_mode {
-                self.send_line(&format!(
-                    "  {}  Dialup Mapping   {}  Carrier",
-                    self.cyan("D"),
-                    self.cyan("C")
+                self.send_line(&self.serial_menu_row(
+                    "D",
+                    "Dialup Mapping",
+                    Some(("C", "Carrier")),
                 ))
                 .await?;
                 // Hide Ring on the port the caller is dialed in on
