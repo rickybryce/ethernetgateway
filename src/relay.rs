@@ -884,12 +884,33 @@ fn forget_master_password() {
 }
 
 /// This machine's name, reduced to something worth writing in a file.
-fn hostname_label() -> String {
-    std::fs::read_to_string("/etc/hostname")
+///
+/// Shared with the telnet MORE page, which names the computer its restart and
+/// shutdown keys act on -- one rule for "what is this machine called", because
+/// two would disagree.
+pub(crate) fn hostname_label() -> String {
+    let raw = std::fs::read_to_string("/etc/hostname")
         .ok()
+        .filter(|s| !s.trim().is_empty())
+        // Windows.
         .or_else(|| std::env::var("COMPUTERNAME").ok())
-        .unwrap_or_default()
-        .trim()
+        // **macOS has neither**, and nor do a good many containers: there is
+        // no `/etc/hostname` on a Mac and `COMPUTERNAME` is a Windows
+        // variable, so this returned the empty string on the one Unix where
+        // double-clicking is the normal launch.  The telnet MORE page names
+        // the computer it is about to shut down and simply omitted the row,
+        // which is the one sentence that page exists to say.  `hostname` is on
+        // every Unix; it is asked only when the file was not there, so the
+        // common path still costs one read.
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        })
+        .unwrap_or_default();
+    raw.trim()
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
         .take(32)

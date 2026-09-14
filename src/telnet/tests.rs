@@ -769,6 +769,8 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         telnet_negotiated: false,
         window_width: None,
         window_height: None,
+        #[cfg(unix)]
+        power_password_failures: 0,
     }
 }
 
@@ -827,6 +829,8 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         telnet_negotiated: false,
         window_width: None,
         window_height: None,
+        #[cfg(unix)]
+        power_password_failures: 0,
     };
     (session, peer)
 }
@@ -2490,6 +2494,13 @@ fn test_show_error_literals_fit_petscii() {
         ("aichat_ui.rs",  include_str!("aichat_ui.rs")),
         ("kernel.rs",     include_str!("kernel.rs")),
         ("cpm_emu.rs",    include_str!("cpm_emu.rs")),
+        // Unix only, like the module -- but the strings are just strings, so
+        // the widths are worth checking wherever this test runs.  The list
+        // being hand-maintained is the hole this test's own comment names, and
+        // it opened the moment `power.rs` was added: the file sat outside the
+        // scan while carrying a 51-column message, and `checked > 50` below
+        // was satisfied hundreds of times over by the other twelve.
+        ("power.rs",      include_str!("power.rs")),
     ];
 
     /// Extract the balanced-parenthesis argument text starting at `open`
@@ -2702,11 +2713,20 @@ fn test_all_menu_items_fit_petscii() {
         "  F  File Transfer",
         "  G  Serial Gateway",
         "  K  CP/M System",
+        "  M  More",
         "  R  Troubleshooting",
         "  S  SSH Gateway",
         "  T  Telnet Gateway",
         "  W  Weather",
         "  X  Exit",
+        // MORE page (main menu -> M).  Unix only, but the widths are a
+        // property of the strings, so they are checked on every platform.
+        // (The `Computer:` row is not here: its width depends on a runtime
+        // value, so its worst case is pinned by
+        // `test_the_computer_row_fits_at_its_longest` instead of by an
+        // invented hostname that proves nothing.)
+        "  R  Restart the computer",
+        "  S  Shut down the computer",
         // Modem emulator menu
         "  E  Toggle enabled/disabled",
         "  S  Select serial port",
@@ -2848,17 +2868,73 @@ fn test_all_menu_items_fit_petscii() {
     }
 }
 
-/// Main menu screen: header(3) + blank + 10 items + blank + help = 16 rows;
-/// the optional CP/M `K` item (shown only when `cpm_emu_enabled`) makes it 17.
+/// The main menu must fit the screen it is drawn on — counted from the
+/// **real** rows.
+///
+/// header(3) + blank + 10 items + blank + help = 16 rows; the optional CP/M
+/// `K` item makes it 17 and the Unix-only `M` (More) 18; slave mode adds three
+/// (notice, master line, blank); and `run_menu_loop` writes `ethernet> ` under
+/// it with `send`, not `send_line`, so the prompt is a row too.  Worst case:
+/// **exactly 22 of 22.**  `M` took the last one, which is why it opens a
+/// second page instead of being two entries here.
+///
+/// **This used to be arithmetic over literals** — `16 + cfg!(unix) + 1 + 1 + 3`
+/// compared against 22 — which reads nothing from `render_main_menu`.  Proved
+/// by mutation: a twenty-third `send_line` in the renderer left it green while
+/// the "exactly 22 of 22" claim in this comment, in CLAUDE.md and in the
+/// changelog silently became false.
 #[test]
 fn test_main_menu_row_count() {
-    // sep, title, sep, blank, A, B, C, F, G, [K], R, S, T, W, X, blank, H = 17 max
-    let rows = 17;
-    assert!(rows <= 22, "main menu is {} rows, exceeds 22", rows);
+    for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+        let mut session = make_test_session(term);
+        session.color_enabled = false;
+        // The worst case the renderer can draw: a slave, emulator on.
+        let worst = session.main_menu_rows(true, Some("gateway.example.org"));
+        let drawn = worst.len() + 1; // the prompt line
+        assert!(
+            drawn <= 22,
+            "the slave-mode main menu draws {} rows on {:?}, exceeds 22",
+            drawn,
+            term,
+        );
+        // And it is at the limit, not near it.  If this ever goes slack the
+        // sentence above (and CLAUDE.md, and the changelog) is wrong rather
+        // than merely conservative — which is the failure this project keeps
+        // finding.  If an entry is deliberately removed, correct all three.
+        assert_eq!(
+            drawn, 22,
+            "the worst-case main menu is no longer exactly full on {:?}",
+            term,
+        );
+        // The ordinary case must leave the slave notice out, or the three
+        // rows it costs are not conditional at all.
+        let plain = session.main_menu_rows(true, None);
+        assert_eq!(plain.len() + 3, worst.len(), "the slave notice is not 3 rows");
+        // Turning the emulator off drops exactly the CP/M item.
+        let no_cpm = session.main_menu_rows(false, None);
+        assert_eq!(plain.len(), no_cpm.len() + 1, "the CP/M item is not one row");
+        assert!(
+            !no_cpm.iter().any(|r| r.contains("CP/M")),
+            "the CP/M item is drawn with the emulator off",
+        );
+        // Every row fits: 39 on PETSCII, the `separator()` budget.
+        let width = if term == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 80 };
+        for row in &worst {
+            assert!(
+                row.chars().count() <= width,
+                "main menu row {:?} is {} columns on {:?}, over {}",
+                row,
+                row.chars().count(),
+                term,
+                width,
+            );
+        }
+    }
 }
 
 /// Main menu base items are A, B, C, F, G, R, S, T, W, X (10); the CP/M
-/// emulator adds an optional 11th item `K`, gated on `cpm_emu_enabled`.
+/// emulator adds an optional `K`, gated on `cpm_emu_enabled`, and Unix builds
+/// add `M` (More) — 12 at most.
 #[test]
 fn test_main_menu_item_count() {
     let items = ["A", "B", "C", "F", "G", "R", "S", "T", "W", "X"];
@@ -2866,27 +2942,60 @@ fn test_main_menu_item_count() {
     // With the CP/M emulator enabled, `K` is the optional 11th item.
     let items_with_cpm = ["A", "B", "C", "F", "G", "K", "R", "S", "T", "W", "X"];
     assert_eq!(items_with_cpm.len(), 11, "with CP/M enabled there are 11 items");
+    // `M` is compiled out on Windows, where the page it opens has no items.
+    #[cfg(unix)]
+    {
+        let all = ["A", "B", "C", "F", "G", "K", "M", "R", "S", "T", "W", "X"];
+        assert_eq!(all.len(), 12, "a Unix build with CP/M on has 12 items");
+    }
 }
 
-/// Error hint must list exactly the valid main menu keys.  A second variant
-/// (with `K`) is shown when the CP/M emulator is enabled; both must fit.
+/// Error hint must list exactly the valid main menu keys, in every variant it
+/// has — `K` appears only when the CP/M emulator is enabled, `M` only on Unix.
+///
+/// It reads the **real** `main_menu_key_hint`, not a copy of its output: the
+/// previous version of this test held two literals beside two literals in
+/// `handle_main_command`, which is a guard comparing the source with a copy of
+/// itself.  The width is the reason the hint uses ranges — measured with both
+/// optional keys present, the hint is 36 characters (38 printed), spelling out
+/// `R, S, T` puts it at 40 (42 printed), and restoring the dropped `or` as
+/// well reaches 43 printed.  Both economies are needed, not just one.
 #[test]
 fn test_main_menu_error_hint() {
-    let hint = "Press A-C, F, G, R, S, T, W, X, or H.";
-    let hint_cpm = "Press A-C, F, G, K, R, S, T, W, X, or H.";
-    // Must not mention removed keys (D, E, M)
-    assert!(!hint.contains(" D,"), "error hint must not mention D");
-    assert!(!hint.contains(" E,"), "error hint must not mention E");
-    assert!(!hint.contains(" E "), "error hint must not mention E");
-    assert!(!hint.contains(" M,"), "error hint must not mention M");
-    // Must mention all valid keys
-    for key in ["A", "C", "F", "G", "R", "S", "T", "W", "X", "H"] {
-        assert!(hint.contains(key), "error hint must mention {}", key);
+    for cpm in [false, true] {
+        let hint = main_menu_key_hint(cpm);
+        // **Measured as it is printed.**  `show_error` puts a two-space indent
+        // in front of it, so the budget is 38 -- asserting against 40 is how
+        // the literal this replaced overflowed a C64 row unnoticed on the
+        // shipped default configuration.
+        let printed = format!("  {}", hint);
+        assert!(
+            printed.chars().count() <= PETSCII_WIDTH,
+            "error hint prints as {:?}, {} columns, exceeds {}",
+            printed,
+            printed.chars().count(),
+            PETSCII_WIDTH,
+        );
+        // Every key the menu actually accepts must be named.
+        for key in ["A-C", "F", "G", "R-T", "W", "X", "H"] {
+            assert!(hint.contains(key), "error hint {:?} must mention {}", hint, key);
+        }
+        assert_eq!(
+            hint.contains(" K,"),
+            cpm,
+            "K belongs in the hint exactly when the CP/M item is shown: {:?}",
+            hint,
+        );
+        assert_eq!(
+            hint.contains(" M,"),
+            cfg!(unix),
+            "M belongs in the hint exactly where the item is compiled in: {:?}",
+            hint,
+        );
+        // Keys the menu removed long ago must not come back.
+        assert!(!hint.contains(" D,"), "error hint must not mention D");
+        assert!(!hint.contains(" E,"), "error hint must not mention E");
     }
-    // The CP/M variant additionally lists K.
-    assert!(hint_cpm.contains(" K,"), "CP/M error hint must mention K");
-    assert!(hint.len() <= PETSCII_WIDTH, "error hint exceeds PETSCII width");
-    assert!(hint_cpm.len() <= PETSCII_WIDTH, "CP/M error hint exceeds PETSCII width");
 }
 
 /// Main help screen content has 19 lines (the dual-port refactor
@@ -2898,10 +3007,13 @@ fn test_main_menu_error_hint() {
 /// needed.
 #[test]
 fn test_main_help_content_line_count() {
+    // 20 base lines, plus the two-line `M` entry on Unix.
+    let expected = if cfg!(unix) { 22 } else { 20 };
     assert_eq!(
         TelnetSession::main_help_lines().len(),
-        20,
-        "main help should have exactly 20 content lines"
+        expected,
+        "main help should have exactly {} content lines",
+        expected,
     );
 }
 
@@ -4337,6 +4449,10 @@ fn test_every_help_screen_fits_its_terminal() {
         ),
     ];
 
+    // The MORE page is Unix-only; it is width-checked where it exists.
+    #[cfg(unix)]
+    screens.push(("more", TelnetSession::more_help_lines(), PETSCII_WIDTH));
+
     // Flagged: a narrow text and a wide one, each held to its own width.
     for (name, narrow, wide) in [
         (
@@ -5337,10 +5453,11 @@ fn test_modem_console_menu_row_counts() {
 /// The complete set of help-line tables at the given width — the single
 /// source for both the PETSCII (40) and ANSI (80) fit tests.
 /// MAINTENANCE: every `*_help_lines` fn must appear here exactly once; a
-/// new help screen is only width-checked once added below (bump the array
-/// length to match).  Single-width tables ignore `petscii` (they fit 40).
-fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 27] {
-    [
+/// new help screen is only width-checked once added below.  Single-width
+/// tables ignore `petscii` (they fit 40).
+fn all_help_line_groups(petscii: bool) -> Vec<&'static [&'static str]> {
+    #[allow(unused_mut)]
+    let mut groups: Vec<&'static [&'static str]> = vec![
         TelnetSession::main_help_lines(),
         TelnetSession::config_submenu_help_lines(petscii),
         TelnetSession::config_help_lines(petscii),
@@ -5367,8 +5484,20 @@ fn all_help_line_groups(petscii: bool) -> [&'static [&'static str]; 27] {
         TelnetSession::serial_config_help_lines(),
         TelnetSession::master_slave_help_lines(petscii),
         TelnetSession::cpm_help_lines(),
+        // The CP/M emulator's help had its own width test and was never in
+        // this list -- found by `test_every_help_table_is_width_checked`, the
+        // census that replaced the fixed array length as the tripwire.  Being
+        // checked twice costs nothing; being checked nowhere is what the
+        // MAINTENANCE note above exists to prevent.
+        TelnetSession::cpmemu_help_lines(petscii),
         TelnetSession::CPM_ENTRY_TIPS,
-    ]
+    ];
+    // The MORE page is Unix-only, so it joins the list only where it exists.
+    // A `Vec` rather than the fixed-size array this used to be: a length that
+    // changes with the platform is a number to keep in step twice.
+    #[cfg(unix)]
+    groups.push(TelnetSession::more_help_lines());
+    groups
 }
 
 /// Every help screen's PETSCII variant must fit 40 cols.  Catch-all that
@@ -10352,5 +10481,734 @@ fn test_the_credential_notice_fits_a_c64_and_does_not_promise_a_restart() {
     assert!(
         text.contains("new logins"),
         "the notice no longer says when the change applies: {text}"
+    );
+}
+
+// ─── MORE page: restart / shut down the computer ────────────
+//
+// Unix only, like the page itself.  These are the pure seams; the screens
+// themselves (like every other screen in this file) are verified by driving a
+// live session, and the two commands were verified on the Pi the gateway runs
+// on as a service — a restart it came back from, and a shutdown it did not.
+
+/// Every line of both confirmation bodies must fit a C64's screen.
+///
+/// **Measured as printed.**  The body is drawn with a two-space indent, and
+/// the budget for a whole row is 39, not 40: a PETSCII terminal auto-wraps at
+/// 40 and *then* takes the trailing CR/LF, so a row that exactly fills the
+/// width costs two rows of a 22-row page.  That is `separator()`'s rule, and
+/// asserting the un-indented line against 38 permits a printed 40 -- the case
+/// the rule exists for.
+#[cfg(unix)]
+#[test]
+fn test_power_confirmation_lines_fit_petscii() {
+    for action in [PowerAction::Restart, PowerAction::Shutdown] {
+        for line in confirm_body(action) {
+            // `separator()`'s budget, named rather than written inline: a bare
+            // `<= PETSCII_WIDTH - 1` reads to clippy as `< PETSCII_WIDTH`,
+            // which is true and says nothing about why.
+            const ROW_BUDGET: usize = PETSCII_WIDTH - 1;
+            let printed = format!("  {}", line);
+            assert!(
+                printed.chars().count() <= ROW_BUDGET,
+                "{:?} confirmation line prints as {:?}, {} columns",
+                action,
+                printed,
+                printed.chars().count(),
+            );
+        }
+        // The question and the title share the row with a `(Y/N): ` suffix and
+        // a two-space indent, so they are held tighter still.
+        let asked = format!("  {} (Y/N): ", action.question());
+        assert!(
+            asked.chars().count() <= PETSCII_WIDTH,
+            "{:?} prompt {:?} is {} columns",
+            action,
+            asked,
+            asked.chars().count(),
+        );
+        assert!(action.title().len() + 2 <= PETSCII_WIDTH);
+    }
+}
+
+/// **Both bodies must say the computer, not the gateway.**
+///
+/// This menu sits one keypress from Configuration > Server > R, which restarts
+/// the *gateway* and leaves the machine up.  An operator who reads "Restart?"
+/// and assumes the familiar one loses every other session on the box — so the
+/// distinction is asserted rather than left to the wording surviving an edit.
+#[cfg(unix)]
+#[test]
+fn test_power_confirmation_says_the_whole_computer() {
+    for action in [PowerAction::Restart, PowerAction::Shutdown] {
+        let text = confirm_body(action).join(" ").to_lowercase();
+        assert!(
+            text.contains("whole computer"),
+            "{:?} does not say it takes the whole computer down: {}",
+            action,
+            text,
+        );
+        assert!(
+            text.contains("not just the gateway"),
+            "{:?} does not distinguish itself from restarting the gateway: {}",
+            action,
+            text,
+        );
+        assert!(
+            text.contains("session") && text.contains("transfer"),
+            "{:?} does not say what is lost: {}",
+            action,
+            text,
+        );
+    }
+    // Only the shutdown says somebody has to walk over to the machine.
+    assert!(
+        confirm_body(PowerAction::Shutdown)
+            .join(" ")
+            .contains("switching on by hand"),
+        "the shutdown does not say the computer will not come back on its own",
+    );
+    assert!(
+        !confirm_body(PowerAction::Restart)
+            .join(" ")
+            .contains("switching on by hand"),
+        "the restart claims the computer will not come back, which it will",
+    );
+}
+
+/// The two commands, pinned.
+///
+/// `shutdown -h` rather than `-P`: `cfg(unix)` includes macOS, where `-P` does
+/// not exist and `-h` powers off on both.  `now` rather than `+0` for the same
+/// portability reason.
+#[cfg(unix)]
+#[test]
+fn test_power_commands_are_the_portable_spellings() {
+    assert_eq!(PowerAction::Restart.argv(), &["shutdown", "-r", "now"]);
+    assert_eq!(PowerAction::Shutdown.argv(), &["shutdown", "-h", "now"]);
+    // The two must not be confusable: a copy-paste that left both on `-r`
+    // would shut nothing down and would still pass every screen test.
+    assert_ne!(
+        PowerAction::Restart.argv(),
+        PowerAction::Shutdown.argv(),
+        "both actions run the same command",
+    );
+}
+
+/// `sudo`'s stderr reduced to the one line worth a 40-column screen.
+///
+/// The **last** non-empty line, because sudo's useful sentence comes after its
+/// chatter: with `-S` and a wrong password it says "Sorry, try again." and
+/// then, at EOF, the count.  Showing the first line would show the least
+/// specific one.
+#[cfg(unix)]
+#[test]
+fn test_sudo_error_line_takes_the_last_useful_line() {
+    assert_eq!(
+        sudo_error_line("Sorry, try again.\nsudo: 1 incorrect password attempt\n", 60),
+        "1 incorrect password attempt",
+    );
+    // A single line still works, and the `sudo: ` prefix goes — the screen
+    // already says what was being attempted, and on PETSCII those six
+    // characters are a sixth of the row.
+    assert_eq!(
+        sudo_error_line("sudo: a password is required\n", 60),
+        "a password is required",
+    );
+    // A sudoers refusal is the message that actually explains a live failure.
+    assert!(
+        sudo_error_line(
+            "ricky is not in the sudoers file.  This incident will be reported.\n",
+            60,
+        )
+        .starts_with("ricky is not in the sudoers file."),
+    );
+    // Nothing at all still says something: a blank screen after a password
+    // prompt is indistinguishable from a hang.
+    assert_eq!(
+        sudo_error_line("", 60),
+        "The computer refused the command.",
+    );
+    assert_eq!(
+        sudo_error_line("   \n\n  \n", 60),
+        "The computer refused the command.",
+    );
+    // And it is cut to the width it is given, because it lands on a C64.
+    let long = "x".repeat(200);
+    assert!(sudo_error_line(&long, 38).chars().count() <= 38);
+}
+
+/// The probe must ask about the command it is standing in for.
+///
+/// **This replaced a test that could not fail.**  The first version called
+/// `probe_elevation` and asserted the answer was one of `Elevate`'s three
+/// variants -- a tautology over the type -- and that the `Err` string was
+/// non-empty, against two non-empty literals.  It also shelled out to `sudo`
+/// on every ordinary `cargo test` run, unlike every other external-binary gate
+/// here, which is `#[ignore]`d: on a machine whose user is not in sudoers that
+/// is a logged authentication failure per run.
+///
+/// What is actually worth pinning is the *shape* of the probe, because the
+/// wrong shape is the defect that was found here: `sudo -n true` asks a
+/// different question from the one the answer is used for, and the module
+/// comment now spends three paragraphs on why.  A source scan holds the `-l`
+/// form in place; comments are stripped first, or the scan reads the very
+/// explanation that names the rejected spelling.
+#[cfg(unix)]
+#[test]
+fn test_the_elevation_probe_asks_about_the_real_command() {
+    let src = include_str!("power.rs");
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//") && !l.trim_start().starts_with("///"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        code.contains(r#".args(["-n", "-l", "--"])"#),
+        "the probe no longer asks sudo about a specific command",
+    );
+    assert!(
+        !code.contains(r#".args(["-n", "true"])"#),
+        "the probe is back to asking about `true`, which answers a different \
+         question -- see probe_elevation's doc comment",
+    );
+    // It must be handed the argv it stands in for, not a constant.
+    assert!(
+        code.contains("probe_elevation(action.argv())"),
+        "the probe is no longer given the command it is standing in for",
+    );
+    // Already root means no sudo at all; that branch must stay first, or a
+    // root session would shell out to a sudo it does not need.
+    let body = code
+        .split("pub(in crate::telnet) async fn probe_elevation")
+        .nth(1)
+        .expect("probe_elevation went away");
+    let direct = body.find("Elevate::Direct").expect("the root branch went away");
+    let spawn = body.find("Command::new").expect("the probe went away");
+    assert!(
+        direct < spawn,
+        "the already-root branch no longer comes before the sudo probe",
+    );
+}
+
+/// A `Direct` run (already root) must not go anywhere near `sudo`.
+///
+/// Driven with a harmless command rather than `shutdown`, which is the whole
+/// point of `run_elevated` taking its argv: the plumbing is testable because
+/// nothing about it names the power commands.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_elevated_direct_runs_the_command_itself() {
+    let out = crate::telnet::power::run_elevated(Elevate::Direct, None, &["echo", "hello"])
+        .await
+        .expect("echo should run");
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
+}
+
+/// The password is written to the child's stdin and **stdin is then closed**.
+///
+/// Closing it is load-bearing, not tidiness: `sudo -S` reads until it has a
+/// line, and a child left holding an open stdin that never EOFs is a session
+/// that hangs with the operator looking at a blank screen.  `cat` proves both
+/// halves — it echoes what it was given, and it only exits when stdin closes,
+/// so a test that returns at all has proved the close.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_run_elevated_feeds_the_password_and_closes_stdin() {
+    let out = crate::telnet::power::run_elevated(Elevate::Direct, Some("hunter2"), &["cat"])
+        .await
+        .expect("cat should run");
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hunter2\n");
+}
+
+/// The MORE page must fit the screen it is drawn on — counted and measured
+/// from the **real** rows, not from arithmetic over literals.
+///
+/// The slack is deliberate: this page exists so the main menu, which has one
+/// spare row, does not have to carry any more.  Colour is turned **off** for
+/// the measurement rather than stripped afterwards -- a stripper is a second
+/// implementation of the colour helpers, and it is the one that would be
+/// wrong.  What is left is exactly what a terminal draws.  On PETSCII the
+/// budget is 39, the same one `separator()` uses: a row that exactly fills 40
+/// auto-wraps and then takes the trailing CR/LF, costing two rows.
+#[cfg(unix)]
+#[test]
+fn test_more_menu_rows_fit_the_screen() {
+    for (term, width) in [
+        (TerminalType::Petscii, PETSCII_WIDTH - 1),
+        (TerminalType::Ansi, 80),
+        (TerminalType::Ascii, 80),
+    ] {
+        let mut session = make_test_session(term);
+        session.color_enabled = false;
+        let rows = session.more_menu_rows();
+        // Plus one for the prompt line the loop writes under them.
+        let drawn = rows.len() + 1;
+        assert!(
+            drawn <= 22,
+            "the MORE page is {} rows on {:?}, exceeds 22",
+            drawn,
+            term,
+        );
+        // It must still be a menu: both keys and the footer.
+        let text = rows.join("\n");
+        for want in ["Restart the computer", "Shut down the computer", "Back", "Help"] {
+            assert!(text.contains(want), "the MORE page lost {:?} on {:?}", want, term);
+        }
+        for row in &rows {
+            assert!(
+                row.chars().count() <= width,
+                "MORE row {:?} is {} columns on {:?}, over {}",
+                row,
+                row.chars().count(),
+                term,
+                width,
+            );
+        }
+        // And with colour on the rows must still carry their text: a colour
+        // helper that returned an empty string would leave a page of codes.
+        // (Asserting the row *count* here would not fail -- `more_menu_rows`
+        // pushes a fixed set and colour never varies it.)
+        let coloured = make_test_session(term).more_menu_rows().join("\n");
+        for want in ["Restart the computer", "Shut down the computer"] {
+            assert!(
+                coloured.contains(want),
+                "with colour on, the MORE page lost {:?} on {:?}",
+                want,
+                term,
+            );
+        }
+    }
+}
+
+/// The MORE page's error hint — the real one — names exactly the keys it takes
+/// and fits the row it is printed on.
+#[cfg(unix)]
+#[test]
+fn test_more_menu_error_hint_fits_and_is_complete() {
+    // `show_error` adds the two-space indent; see `main_menu_key_hint`.
+    let printed = format!("  {}", crate::telnet::power::MORE_MENU_HINT);
+    assert!(
+        printed.chars().count() <= PETSCII_WIDTH,
+        "the MORE hint prints as {:?}, {} columns",
+        printed,
+        printed.chars().count(),
+    );
+    for key in ["R", "S", "H", "Q"] {
+        assert!(
+            crate::telnet::power::MORE_MENU_HINT.contains(key),
+            "the MORE hint must mention {}",
+            key,
+        );
+    }
+}
+
+/// Three wrong passwords and the page stops asking for the life of the
+/// session.
+///
+/// The bound is on the **session**, not on a visit to the page: leaving and
+/// coming back must not hand out a fresh three, or the cap bounds nothing.
+/// This pins the constant and the field that carries it; the refusal itself is
+/// one `if` in `power_action`, which needs a live `sudo` to reach.
+#[cfg(unix)]
+#[test]
+fn test_the_password_attempt_bound_is_small_and_lives_on_the_session() {
+    assert!(
+        (1..=5).contains(&crate::telnet::power::MAX_PASSWORD_ATTEMPTS),
+        "the attempt bound is not a bound",
+    );
+    let mut session = make_test_session(TerminalType::Ansi);
+    assert_eq!(session.power_password_failures, 0, "a fresh session starts clean");
+    session.power_password_failures = crate::telnet::power::MAX_PASSWORD_ATTEMPTS;
+    // A second session is unaffected -- the cap is per session, and a new one
+    // costs a connection, which `conn_rate_max` already bounds per address.
+    let other = make_test_session(TerminalType::Ansi);
+    assert_eq!(other.power_password_failures, 0);
+    assert!(session.power_password_failures >= crate::telnet::power::MAX_PASSWORD_ATTEMPTS);
+}
+
+/// The MORE help must point at the *other* restart, or the two stay
+/// confusable everywhere except the confirmation screen.
+#[cfg(unix)]
+#[test]
+fn test_more_help_distinguishes_the_two_restarts() {
+    let text = TelnetSession::more_help_lines().join(" ");
+    assert!(
+        text.contains("Configuration > Server > R"),
+        "the MORE help does not say where restarting the gateway alone lives: {}",
+        text,
+    );
+    assert!(
+        text.to_lowercase().contains("not just"),
+        "the MORE help does not distinguish the computer from the gateway: {}",
+        text,
+    );
+}
+
+/// Every (left label, right key, right label) the port settings screen can
+/// draw, read out of `serial_ui.rs` itself.
+///
+/// Left labels are the second argument of a `serial_menu_row(` call; the
+/// right-hand pairs are the `Some(("K", "Label"))` tuples handed to it, which
+/// this screen builds in local variables rather than inline, so the two are
+/// collected separately and combined.  Comments are stripped first: this
+/// file's prose quotes both shapes, and a scan that reads its own explanation
+/// measures itself.
+#[cfg(test)]
+fn serial_menu_label_pairs() -> Vec<(String, String, String)> {
+    let src = include_str!("serial_ui.rs");
+    let code: String = src
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    /// The string literals inside `text`, in order, without their quotes.
+    fn literals(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let b: Vec<char> = text.chars().collect();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == '"' {
+                let mut lit = String::new();
+                i += 1;
+                while i < b.len() && b[i] != '"' {
+                    if b[i] == '\\' {
+                        i += 1;
+                    }
+                    if i < b.len() {
+                        lit.push(b[i]);
+                    }
+                    i += 1;
+                }
+                out.push(lit);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    // Left labels: the second literal of each call, skipping the definition
+    // itself (which names no labels).
+    let mut lefts: Vec<String> = Vec::new();
+    for chunk in code.split("serial_menu_row(").skip(1) {
+        let arg = chunk.split(");").next().unwrap_or("");
+        let lits = literals(arg);
+        if lits.len() >= 2 {
+            lefts.push(lits[1].clone());
+        }
+    }
+
+    // Right-hand pairs: every `Some(("K", "Label"))` in the file.
+    let mut rights: Vec<(String, String)> = Vec::new();
+    for chunk in code.split("Some((").skip(1) {
+        let arg = chunk.split("))").next().unwrap_or("");
+        let lits = literals(arg);
+        if lits.len() >= 2 {
+            rights.push((lits[0].clone(), lits[1].clone()));
+        }
+    }
+
+    let mut out = Vec::new();
+    for l in &lefts {
+        for (k, r) in &rights {
+            out.push((l.clone(), k.clone(), r.clone()));
+        }
+    }
+    out
+}
+
+/// The port settings screen's right-hand keys must share one column.
+///
+/// Reported 2026-09-14 from a live Port B screen: `G`, `X` and `C` sat at
+/// columns 26, 24 and 22.  Each row was hand-spaced with three spaces after a
+/// label of a different length, and because the three rows are drawn by three
+/// different `if` branches -- raw, console and modem mode each draw a
+/// different pair -- nothing ever compared them.
+///
+/// This asserts the real `serial_menu_row`, on every terminal type, because
+/// the padding has to be computed from the *drawn* width: `cyan()` wraps the
+/// key in bytes a terminal does not print, and aligning on the formatted
+/// string would line the invisible ones up on ANSI and leave the visible
+/// columns ragged.
+#[test]
+fn test_the_port_settings_rows_align_their_second_key() {
+    // **The labels are read out of the screen's own source, not listed here.**
+    // The first version held a hand-copied list, so a label added or widened at
+    // a real call site was invisible to it: proved by mutation -- lengthening
+    // `"Dialup Mapping"` to `"Dialup Mapping and more stuff here"` left every
+    // telnet test green while the drawn row reached 50 columns on a C64, the
+    // gap clamped to a single space by `serial_menu_row`'s `.max(1)`.  That
+    // clamp exists for exactly this case and had no test at all.
+    //
+    // Left labels are the second argument of each `serial_menu_row(` call;
+    // right-hand pairs are every `Some(("K", "Label"))` in the file.  Every
+    // combination is measured, which over-approximates -- the screen never
+    // draws the widest left beside the widest right -- and that is the safe
+    // direction for a budget.
+    let pairs = serial_menu_label_pairs();
+    assert!(
+        pairs.len() >= 4,
+        "the label scan found {} pairs; the screen draws at least four",
+        pairs.len(),
+    );
+    let pairs: Vec<(&str, &str, &str)> = pairs
+        .iter()
+        .map(|(l, k, r)| (l.as_str(), k.as_str(), r.as_str()))
+        .collect();
+    for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+        let mut session = make_test_session(term);
+        session.color_enabled = false; // measure what a terminal draws
+        for &(label, key2, label2) in &pairs {
+            let row = session.serial_menu_row("F", label, Some((key2, label2)));
+            let col = row.find(key2).unwrap_or_else(|| {
+                panic!("row {:?} lost its second key {:?}", row, key2)
+            });
+            assert_eq!(
+                col, SERIAL_MENU_SECOND_COL,
+                "{:?} puts {} at column {}, not {}",
+                row, key2, col, SERIAL_MENU_SECOND_COL,
+            );
+            // At least two spaces before it, or it reads as one word.
+            assert!(
+                row[..col].ends_with("  "),
+                "row {:?} runs its two columns together",
+                row,
+            );
+            // And the whole row still fits the screen it is printed on --
+            // 39 on PETSCII, the `separator()` budget: a row that exactly
+            // fills 40 auto-wraps and then takes the trailing CR/LF.
+            let width = if term == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 80 };
+            assert!(
+                row.chars().count() <= width,
+                "row {:?} is {} columns on {:?}, over {}",
+                row,
+                row.chars().count(),
+                term,
+                width,
+            );
+        }
+        // A row with no second entry is unchanged by the helper.
+        assert_eq!(
+            session.serial_menu_row("B", "Set baud rate", None),
+            "  B  Set baud rate",
+        );
+        // **With colour ON, the drawn column must be the same.**  This is the
+        // half that matters: `cyan()` wraps the key in bytes a terminal does
+        // not print, so a padding computed from the *formatted* string lines
+        // up the invisible ones -- correct on ASCII, where there are no codes,
+        // and wrong on ANSI and PETSCII, where there are.  A version of this
+        // test that only measured the uncoloured row passed with exactly that
+        // bug put back.
+        //
+        // The codes are removed with the program's own constants rather than
+        // by pattern-matching escape sequences: a stripper written here would
+        // be a second implementation of `colors.rs`, and it is the one that
+        // would be wrong.
+        for &(label, key2, label2) in &pairs {
+            let row = make_test_session(term).serial_menu_row("F", label, Some((key2, label2)));
+            let drawn = row
+                .replace(ANSI_CYAN, "")
+                .replace(ANSI_RESET, "")
+                .replace([char::from(PETSCII_CYAN), char::from(PETSCII_DEFAULT)], "");
+            let col = drawn.find(key2).unwrap_or_else(|| {
+                panic!("coloured row {:?} lost its second key {:?}", row, key2)
+            });
+            assert_eq!(
+                col, SERIAL_MENU_SECOND_COL,
+                "with colour on, {:?} draws {} at column {}, not {}",
+                drawn, key2, col, SERIAL_MENU_SECOND_COL,
+            );
+        }
+    }
+}
+
+/// No row on the port settings screen may hand-build its own two columns.
+///
+/// The alignment test above drives `serial_menu_row`, which proves the helper
+/// aligns -- and would happily stay green if a new row went back to writing
+/// `"  {}  Label   {}  Other"` with its own spaces, which is exactly how the
+/// three columns drifted apart in the first place.  So this reads the screen's
+/// own source and fails on any `format!` row carrying two key colourings,
+/// which is what a hand-built two-column row looks like.
+///
+/// Comments are stripped first: this file's prose describes the very pattern
+/// it is looking for, and a scan that reads its own explanation reports
+/// itself.  (That has happened here before.)
+#[test]
+fn test_no_port_settings_row_builds_its_own_columns() {
+    let src = include_str!("serial_ui.rs");
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // `serial_menu_row` is the one place allowed to colour two keys in one
+    // `format!` -- it is the helper every row goes through -- so its own body
+    // is cut out before the scan.  Without this the guard reports the fix as
+    // the defect, which is how it first failed: a scanner that cannot tell the
+    // rule from a breach of it is a scanner nobody will keep.
+    let helper = "pub(in crate::telnet) fn serial_menu_row";
+    let code = match code.find(helper) {
+        Some(start) => {
+            // The function ends at the first `\n    }` -- a closing brace at
+            // the impl's own indent -- after its signature.
+            let end = code[start..]
+                .find("\n    }")
+                .map(|o| start + o + 6)
+                .unwrap_or(code.len());
+            let mut out = code[..start].to_string();
+            out.push_str(&code[end..]);
+            out
+        }
+        None => panic!("serial_menu_row went away; every row is hand-built again"),
+    };
+    let mut offenders = Vec::new();
+    for chunk in code.split("format!(").skip(1) {
+        // One statement's worth: up to the `;` that ends it.
+        let stmt = chunk.split(';').next().unwrap_or("");
+        if stmt.matches("self.cyan(").count() >= 2 {
+            offenders.push(stmt.chars().take(120).collect::<String>());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "{} row(s) build their own two columns instead of calling \
+         serial_menu_row, so their second key will not line up:\n  {}",
+        offenders.len(),
+        offenders.join("\n  "),
+    );
+}
+
+/// The `Computer:` row must fit at the longest name it can ever carry.
+///
+/// **Its width comes from a runtime value, so no fixture measures it.**  The
+/// hand-copied list in `test_all_menu_items_fit_petscii` held
+/// `"  Computer: raspberrypi"` — an invented eleven-character name that is
+/// safe by accident — and `test_more_menu_rows_fit_the_screen` measures
+/// whatever `/etc/hostname` happens to say on the machine running the suite.
+/// Neither is the worst case.
+///
+/// **And it drives `computer_row_for`, not a copy of it.**  The first version
+/// of this test rebuilt the row inline from the same two literals the function
+/// holds; mutation proved it worthless — widening the PETSCII cap from 26 to
+/// 39 left every telnet test green while the row printed at 51 columns on a
+/// C64.  `hostname_label` caps a name at 32 characters, so that is the longest
+/// string that can reach here.
+#[cfg(unix)]
+#[test]
+fn test_the_computer_row_fits_at_its_longest() {
+    let longest = "w".repeat(32);
+    for (term, width) in [
+        (TerminalType::Petscii, PETSCII_WIDTH - 1),
+        (TerminalType::Ansi, 80),
+    ] {
+        let mut session = make_test_session(term);
+        session.color_enabled = false;
+        let row = session
+            .computer_row_for(&longest)
+            .expect("a 32-character name must produce a row");
+        assert!(
+            row.chars().count() <= width,
+            "the computer row is {} columns on {:?} at the longest name ({:?}), over {}",
+            row.chars().count(),
+            term,
+            row,
+            width,
+        );
+        // On PETSCII the cap (26) is below `hostname_label`'s own (32), so
+        // the truncation must actually bite or that branch is untested.  On a
+        // wide screen the cap is 60 and a 32-character name passes through
+        // whole, which is correct and is why this is not asserted there.
+        if term == TerminalType::Petscii {
+            assert!(
+                row.chars().count() < "  Computer: ".len() + longest.chars().count(),
+                "the name was not truncated on {:?}: {:?}",
+                term,
+                row,
+            );
+        }
+        // A machine that will not say what it is called gets no row at all,
+        // rather than `Computer: ` with nothing after it.
+        assert!(session.computer_row_for("").is_none());
+        assert!(session.computer_row_for("   ").is_none());
+    }
+    // `hostname_label` must stay inside the cap this test assumes, on whatever
+    // branch this machine takes (the file, or the `hostname` command).
+    let label = crate::relay::hostname_label();
+    assert!(
+        label.chars().count() <= 32,
+        "hostname_label returned {} characters, over its own cap",
+        label.chars().count(),
+    );
+}
+
+/// Every `*_help_lines` table must appear in `all_help_line_groups`.
+///
+/// **The fixed array length used to be the tripwire.** `all_help_line_groups`
+/// returned `[&'static [&'static str]; 27]`, so adding a help screen without
+/// listing it failed to compile — that is what the MAINTENANCE comment meant
+/// by "bump the array length to match". The MORE page's table is Unix-only, so
+/// the array had to become a `Vec`, and the tripwire went with it: a new help
+/// screen can now be added and silently go unchecked while the comment still
+/// promises otherwise.
+///
+/// So the census is the tripwire now. It counts the `fn *_help_lines` and
+/// `*_HELP*` tables the telnet module defines and holds that against the
+/// number `all_help_line_groups` returns. Comments are stripped, or this
+/// file's own prose about `*_help_lines` is counted as a definition.
+#[test]
+fn test_every_help_table_is_width_checked() {
+    const SOURCES: &[&str] = &[
+        include_str!("mod.rs"),
+        include_str!("config_ui.rs"),
+        include_str!("web.rs"),
+        include_str!("kernel.rs"),
+        include_str!("cpm_emu.rs"),
+        include_str!("serial_ui.rs"),
+        include_str!("transfer.rs"),
+        include_str!("gateway.rs"),
+        include_str!("session.rs"),
+        include_str!("weather.rs"),
+        include_str!("aichat_ui.rs"),
+    ];
+    let mut defined: Vec<String> = Vec::new();
+    for src in SOURCES {
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            // `fn name_help_lines(` — with or without a visibility prefix.
+            if let Some(rest) = t.split("fn ").nth(1) {
+                if let Some(name) = rest.split('(').next() {
+                    if name.ends_with("_help_lines") && !name.is_empty() {
+                        defined.push(name.to_string());
+                    }
+                }
+            }
+            // The one const table in the set.
+            if t.contains("const CPM_ENTRY_TIPS") {
+                defined.push("CPM_ENTRY_TIPS".to_string());
+            }
+        }
+    }
+    defined.sort();
+    defined.dedup();
+
+    let listed = all_help_line_groups(true).len();
+    assert_eq!(
+        defined.len(),
+        listed,
+        "{} help tables are defined but {} are width-checked; \
+         every `*_help_lines` must appear in all_help_line_groups exactly once.\n  {}",
+        defined.len(),
+        listed,
+        defined.join("\n  "),
     );
 }

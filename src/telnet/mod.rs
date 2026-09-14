@@ -92,13 +92,31 @@ pub(crate) use session::master_password_screen_lines;
 pub(crate) use session::{
     can_be_erase_char, match_terminal_name, DEFAULT_ERASE_CHAR, DETECT_PROMPT, DETECT_REPROMPT,
 };
+/// The main menu's valid-key hint, built from a list because its variants
+/// multiply with the CP/M item and the platform.  Test-only re-export.
+#[cfg(test)]
+pub(in crate::telnet) use session::main_menu_key_hint;
 mod transfer;
+// The main menu's second page: restarting and shutting down the computer the
+// gateway runs on.  Unix only -- see the module comment; the `M` entry, its
+// key handler and its half of the valid-key hint are gated to match.
+#[cfg(unix)]
+mod power;
+// Pure seams, referenced only from tests: the confirmation body, the sudo
+// error reducer and the three-way elevation answer.
+#[cfg(all(unix, test))]
+pub(in crate::telnet) use power::{confirm_body, sudo_error_line, Elevate, PowerAction};
 mod config_ui;
 // Width-aware confirmation formatter; used by config_ui itself and by the
 // test that checks every numeric call site's worst case fits the screen.
 #[cfg(test)]
 pub(in crate::telnet) use config_ui::{cpm_runs_row, numeric_confirmation_lines};
 mod serial_ui;
+/// The column a two-column row on the port settings screen puts its second
+/// key at.  Test-only re-export -- the screen's own rows are built through
+/// `serial_menu_row`, which is what the alignment test drives.
+#[cfg(test)]
+pub(in crate::telnet) use serial_ui::SERIAL_MENU_SECOND_COL;
 mod web;
 mod aichat_ui;
 mod weather;
@@ -1136,6 +1154,16 @@ pub(crate) struct TelnetSession {
     // negotiate; callers fall back to TerminalType-driven defaults.
     window_width: Option<u16>,
     window_height: Option<u16>,
+    /// Wrong `sudo` passwords offered on the MORE page during this session.
+    ///
+    /// **A guess at the host account's password, bounded.**  It lives on the
+    /// session rather than on the page, so leaving the page and coming back
+    /// does not hand out a fresh three -- see
+    /// [`crate::telnet::power::MAX_PASSWORD_ATTEMPTS`], which explains why an
+    /// unbounded count is a way to lock the operator out of their own machine
+    /// from a telnet menu.  Unix only, like the page.
+    #[cfg(unix)]
+    power_password_failures: u8,
     /// Is the byte trace armed for this session?
     ///
     /// **Read once here, not per byte.**  It follows `gateway_debug`, whose
@@ -1224,6 +1252,8 @@ impl TelnetSession {
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
+            #[cfg(unix)]
+            power_password_failures: 0,
             trace_bytes: cpm_emu::keytrace_on(),
         }
     }
@@ -1287,6 +1317,8 @@ impl TelnetSession {
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
+            #[cfg(unix)]
+            power_password_failures: 0,
             trace_bytes: cpm_emu::keytrace_on(),
         }
     }
@@ -1366,6 +1398,8 @@ impl TelnetSession {
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
+            #[cfg(unix)]
+            power_password_failures: 0,
             trace_bytes: cpm_emu::keytrace_on(),
         }
     }
@@ -1465,28 +1499,70 @@ impl TelnetSession {
     }
 
     /// Main-menu help (single width — fits 40 cols so it serves PETSCII too).
+    ///
+    /// Built once into a `OnceLock` rather than written as a literal, because
+    /// the `M` entry is Unix-only (see `telnet/power.rs`) and it sits in the
+    /// middle of the list, not at the end.  A `cfg` pair of whole literals
+    /// would be twenty duplicated lines that can drift apart silently — the
+    /// exact shape this project has been bitten by — and every caller here
+    /// (three tests and `show_help_page`) wants a `&'static [&'static str]`,
+    /// which a `OnceLock` gives and a `Vec` return would not.
     fn main_help_lines() -> &'static [&'static str] {
+        static LINES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+        LINES.get_or_init(|| {
+            let mut v: Vec<&'static str> = vec![
+                "  A  AI Chat: ask questions to an AI",
+                "  B  Browser: browse the web",
+                "  C  Configuration: server settings",
+                "     and other options",
+                "  F  File Transfer: upload/download",
+                "     with XMODEM, YMODEM, ZMODEM,",
+                "     Kermit or Punter",
+                "  G  Serial Gateway: pick Port A or B",
+                "     and bridge to its wire (when",
+                "     that port is in console mode)",
+                "  K  CP/M System: run real CP/M .COM",
+                "     software on an emulated Z80",
+            ];
+            #[cfg(unix)]
+            v.extend([
+                "  M  More: restart or shut down the",
+                "     computer the gateway runs on",
+            ]);
+            v.extend([
+                "  R  Troubleshooting: diagnose",
+                "     terminal input issues",
+                "  S  SSH Gateway: connect to a",
+                "     remote server via SSH",
+                "  T  Telnet Gateway: connect to a",
+                "     remote server via telnet",
+                "  W  Weather: by city or postal code",
+                "  X  Exit: disconnect from server",
+            ]);
+            v
+        })
+    }
+
+    /// MORE page help.  Unix only, for the same reason the page is -- see
+    /// `telnet/power.rs`.
+    #[cfg(unix)]
+    fn more_help_lines() -> &'static [&'static str] {
         &[
-            "  A  AI Chat: ask questions to an AI",
-            "  B  Browser: browse the web",
-            "  C  Configuration: server settings",
-            "     and other options",
-            "  F  File Transfer: upload/download",
-            "     with XMODEM, YMODEM, ZMODEM,",
-            "     Kermit or Punter",
-            "  G  Serial Gateway: pick Port A or B",
-            "     and bridge to its wire (when",
-            "     that port is in console mode)",
-            "  K  CP/M System: run real CP/M .COM",
-            "     software on an emulated Z80",
-            "  R  Troubleshooting: diagnose",
-            "     terminal input issues",
-            "  S  SSH Gateway: connect to a",
-            "     remote server via SSH",
-            "  T  Telnet Gateway: connect to a",
-            "     remote server via telnet",
-            "  W  Weather: by city or postal code",
-            "  X  Exit: disconnect from server",
+            "  More options, continued from the",
+            "  main menu.",
+            "",
+            "  R  Restart the computer the",
+            "     gateway runs on -- not just",
+            "     the gateway itself.",
+            "",
+            "  S  Shut down that computer. It",
+            "     will need switching on by hand.",
+            "",
+            "  Both ask to be confirmed, then ask",
+            "  for a password if the computer",
+            "  wants one. To restart the GATEWAY",
+            "  and leave the computer running,",
+            "  use Configuration > Server > R.",
         ]
     }
 
@@ -2041,6 +2117,8 @@ pub fn start_server(
                                     telnet_negotiated: false,
                                     window_width: None,
                                     window_height: None,
+                                    #[cfg(unix)]
+                                    power_password_failures: 0,
                                     trace_bytes: cpm_emu::keytrace_on(),
                                 };
                                 if let Err(e) = session.run().await {

@@ -1239,6 +1239,7 @@ that lifts it. So to reach the web UI from a non-private address you must set
   F  File Transfer
   G  Serial Gateway
   K  CP/M System
+  M  More
   R  Troubleshooting
   S  SSH Gateway
   T  Telnet Gateway
@@ -1251,6 +1252,32 @@ that lifts it. So to reach the web UI from a non-private address you must set
 (chapter&nbsp;8.11). While the toggle is off the item is hidden and the
 <span class="kbd">K</span> key is rejected.
 </p>
+
+<p>
+<strong>M&nbsp;&nbsp;More</strong> opens a second page of the main menu,
+carrying the entries that do not fit on the first.  Today that is
+<span class="kbd">R</span>&nbsp;Restart&nbsp;the&nbsp;computer and
+<span class="kbd">S</span>&nbsp;Shut&nbsp;down&nbsp;the&nbsp;computer &mdash;
+the computer the gateway runs on, <em>not</em> the gateway process.  (To
+restart the gateway alone and leave the machine up, use
+Configuration&nbsp;&gt;&nbsp;Server&nbsp;&gt;&nbsp;<span class="kbd">R</span>.)
+Both ask you to confirm on a full screen &mdash; naming the computer, where the
+machine will say what it is called &mdash; then ask for a password if it wants
+one; the password is the one that answers
+<code>sudo</code> for the account the gateway runs as, and it is checked on its
+own before anything is done, so a wrong one costs a message and nothing else.
+The gateway itself is never run elevated.  The item appears on Linux, macOS and
+the BSDs; it is absent from Windows builds.
+</p>
+
+<aside class="note">
+<span class="label">Commodore</span>
+The back-arrow key is how you cancel a prompt, and it sends the same byte as an
+underscore (<code>0x5F</code>). So a system password containing <code>_</code>
+cannot be typed here from a C64 &mdash; pressing that key cancels and returns
+you to the menu. Use another terminal for that machine, or a password without
+an underscore.
+</aside>
 
 <p>
 <strong>G&nbsp;&nbsp;Serial Gateway</strong> appears whenever at least one

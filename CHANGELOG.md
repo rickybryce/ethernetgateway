@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A second main-menu page, `M&nbsp;&nbsp;More`, that can restart or shut down
+  the computer the gateway runs on.**  A headless gateway &mdash; a Pi on a
+  shelf, reached from a C64 &mdash; had no way to be power-cycled from the
+  session that is already open on it; the only restart anywhere in the product
+  restarts the *gateway process* and leaves the machine up.  The two live on a
+  second page rather than on the main menu because the main menu had **one**
+  spare row and `M` took it: counting the prompt line, a slave with the CP/M
+  emulator enabled now draws **22 of the 22** a PETSCII screen holds.  One
+  entry was the whole budget, and a page that starts empty has room for
+  whatever comes next.
+  **Three things are deliberate.**  *The order*: each step is only reached when
+  the one before it is true, so nothing on screen is ever a promise the next
+  step can break &mdash; a full-screen confirmation first (nobody types a root
+  password to find out what it was for), then the password, then the password
+  is *verified on its own* with `sudo -v`, which changes nothing, and only then
+  the goodbye and the command.  Running the command first and then trying to
+  say goodbye loses the race: systemd starts stopping units immediately and the
+  socket dies mid-verse, which on a retro terminal is indistinguishable from a
+  crash.  *The gateway is never elevated* &mdash; it shells out with the
+  operator's own password through the masked reader, which is also what
+  suppresses the `gateway_debug` byte trace for the length of the prompt; a
+  gateway run under `sudo` leaves root-owned files across the data directory,
+  which this project already treats as a defect to warn about.  And *the
+  confirmation says "the whole computer, not just the gateway"*, because
+  Configuration&nbsp;&gt;&nbsp;Server&nbsp;&gt;&nbsp;R is one keypress away and
+  reads the same at a glance.
+  **Unix only.**  The entry, its key handler, its half of the valid-key hint
+  and the whole page are compiled out on Windows, where there is no equivalent
+  of running one command as another user with a password typed down a telnet
+  session &mdash; so the item is absent rather than shown and then refused.
+  Two details worth knowing.  **The probe names the command it stands in for**:
+  whether a password is needed is asked with `sudo -n -l -- shutdown …`, not
+  with the obvious `sudo -n true`, because the *least-privilege* sudoers line
+  an operator would write for this (`NOPASSWD: /sbin/shutdown`) makes `true`
+  fail &mdash; so the obvious probe would demand a password for an account that
+  has none, on exactly the configuration it was set up for.  And **refused `sudo`
+  attempts are bounded per session** (three): each one is a real PAM failure,
+  so on a machine running `pam_faillock` an unbounded prompt is a way to lock
+  the operator out of their own computer from a telnet menu.  A fresh attempt
+  needs a new connection, which `conn_rate_max` already bounds.  It counts
+  *refusals* rather than wrong passwords deliberately &mdash; a right password
+  from an account with no sudoers line lands the same way, and telling that
+  operator "wrong password" would send them looking in the wrong place.
+
 - **Every log line now carries a local-time stamp**, `[2026-09-13 06:46:31] `.
   A log doing security work that cannot say *when* is half a log: the survey of
   an internet-exposed gateway on 2026-09-13 could count 44 connections from one
@@ -51,6 +95,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyone lock out a neighbour's address by connecting and dropping.
 
 ### Fixed
+
+- **Three defects in the shipped systemd unit, each hit as a real failure
+  while installing it on a Pi** (2026-09-14).  **(1)**
+  `StartLimitIntervalSec=` / `StartLimitBurst=` were under `[Service]`, where
+  systemd ignores them without a word &mdash; they are `[Unit]` directives, so
+  the `; Restart policy` block read as though it had a crash-loop limit and
+  had none at all.  **(2)** `RestrictAddressFamilies=` omitted **`AF_NETLINK`**:
+  `getifaddrs()` enumerates interfaces over a `NETLINK_ROUTE` socket, so the
+  service saw only `127.0.0.1` and its startup port check reported that the
+  machine had no address of its own and skipped &mdash; confirmed by comparing
+  the app log across a desktop run and a service run.  **(3)**
+  `PrivateDevices=yes` gives a private `/dev` of pseudo devices only, so
+  `/dev/ttyUSB0` does not exist inside it and the Hayes modem port fails to
+  open with no obvious cause.  A `DeviceAllow=` allowlist is **not** the fix
+  either &mdash; a cgroup device policy does not hide nodes, so the port picker
+  would still list a port that then fails with `EPERM` at the moment of use.
+  Ordinary Unix permissions plus `SupplementaryGroups=dialout` (also added) are
+  the right control.
+
+- **The main menu's invalid-key hint overflowed a 40-column screen**, and had
+  done since it was written.  `show_error` prints a two-space indent in front
+  of whatever it is given, so the CP/M-enabled variant &mdash; the shipped
+  default &mdash; was 42 columns on a C64: it wrapped, and cost a second row of
+  a 22-row budget.  The hint is now built from a list rather than written out
+  as a literal beside a comment reasoning about the wrong number, and its test
+  measures the string **as it is printed**.
+
+- **The port settings screen's right-hand keys sat in three different
+  columns.**  `G`, `X` and `C` landed at 26, 24 and 22 on a live Port&nbsp;B
+  screen (reported 2026-09-14).  Four entries ride on another row's right-hand
+  side because that screen is at its 22-row PETSCII budget, and the rows are
+  drawn by three different `if` branches &mdash; raw, console and modem mode
+  each draw a different pair &mdash; each hand-spaced with three spaces after a
+  label of a different length, so nothing ever compared them.  One helper now
+  places every second key at one column, computing the padding from the
+  **drawn** width rather than the formatted one (`cyan()` wraps the key in
+  bytes a terminal does not print, so aligning on the formatted string lines
+  up the invisible ones &mdash; right on ASCII, wrong on ANSI and PETSCII).  A
+  source scan fails any future row that builds its own columns, because the
+  test that drives the helper would stay green while a hand-built row drifted.
 
 - **The desktop editor did not tick Enabled when a serial port was chosen.**
   The auto-enable was applied at *save* time, on the copy `persist_config`

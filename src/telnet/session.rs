@@ -189,6 +189,39 @@ pub(crate) fn master_password_screen_lines(host: &str, port: u16) -> Vec<String>
     lines
 }
 
+/// The valid-key hint shown when the main menu gets a key it does not know.
+///
+/// Built from a list rather than written out, because the variants multiply:
+/// `K` is gated on `cpm_emu_enabled` and `M` on the platform, which is four
+/// hand-written strings to keep in step — and the budget they have to fit is
+/// tighter than it looks.
+///
+/// **The budget is 38, not 40.**  `show_error` prints a two-space indent in
+/// front of whatever it is given, so a 40-character hint is 42 columns on a
+/// C64, wraps, and costs a second row of a 22-row screen.  The literals this
+/// replaced were 40 and 36 — the longer of them had been overflowing since it
+/// was written, on the shipped default configuration, which is how a hand-
+/// written string beside a comment reasoning about 40 columns goes wrong.
+///
+/// `R-T` is a range for the same budget, and so is the dropped `or` before
+/// `H`.  Measured, with both optional keys present: the hint as it stands is
+/// 36 characters (38 printed); spelling out `R, S, T` costs four more and puts
+/// it at 40 (42 printed); restoring the `or` as well reaches 43 printed.  Each
+/// change alone overflows, so both economies are load-bearing.  `A-C` was
+/// already written as a range, so the notation is the screen's own.
+///
+/// `test_main_menu_error_hint` holds every variant against the real budget.
+pub(in crate::telnet) fn main_menu_key_hint(cpm_enabled: bool) -> String {
+    let mut keys: Vec<&str> = vec!["A-C", "F", "G"];
+    if cpm_enabled {
+        keys.push("K");
+    }
+    #[cfg(unix)]
+    keys.push("M");
+    keys.extend(["R-T", "W", "X", "H"]);
+    format!("Press {}.", keys.join(", "))
+}
+
 impl TelnetSession {
 
     /// Ask for the master's password, if this slave has no way in.
@@ -1026,67 +1059,66 @@ impl TelnetSession {
 
     // ─── Main menu ──────────────────────────────────────────
 
-    pub(in crate::telnet) async fn render_main_menu(&mut self) -> Result<(), std::io::Error> {
-        self.clear_screen().await?;
+    /// Every row the main menu draws, in order.
+    ///
+    /// Split out of the renderer so `test_main_menu_row_count` can count the
+    /// **real** page.  The guard it replaced was arithmetic over literals --
+    /// `16 + cfg!(unix) + 1 + 1 + 3 == 22` -- which reads nothing from this
+    /// function: proved by mutation, adding a twenty-third `send_line` here
+    /// left all 576 telnet tests green while the claim in three documents
+    /// ("exactly 22 of 22") quietly became false.  `more_menu_rows` was
+    /// written this way from the start; this is the same treatment for the
+    /// screen whose budget is actually full.
+    ///
+    /// The two facts that vary are passed in rather than read from the global
+    /// config, so the worst case -- a slave with the CP/M emulator on -- can
+    /// be drawn without a config file.
+    pub(in crate::telnet) fn main_menu_rows(
+        &self,
+        cpm_enabled: bool,
+        slave_master: Option<&str>,
+    ) -> Vec<String> {
         let sep = self.separator();
-        self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("ETHERNET GATEWAY")))
-            .await?;
-        self.send_line(&sep).await?;
-        self.send_line("").await?;
+        let mut rows = vec![
+            sep.clone(),
+            format!("  {}", self.yellow("ETHERNET GATEWAY")),
+            sep,
+            String::new(),
+        ];
 
         // Slave-mode notice (§9 #13).  Shown only on a slave's own inbound
         // menu (never on the master or on a relay session, whose config is
         // the master's).  The slave still serves its own menu, but its
         // serial ports relay to the master, so point the operator there.
-        // Costs 3 rows in slave mode only; the main menu is 16/22 rows so
-        // a slave lands at ~19, still inside the PETSCII budget.
-        {
-            let cfg = config::get_config();
-            if cfg.gateway_role == "slave" {
-                self.send_line(&format!(
-                    "  {}",
-                    self.amber("SLAVE mode: ports relay to master.")
-                ))
-                .await?;
-                let max_host = if self.terminal_type == TerminalType::Petscii {
-                    28 // 40 - "  Master: " - margin
-                } else {
-                    66
-                };
-                let host = if cfg.slave_master_host.is_empty() {
-                    "(not configured)".to_string()
-                } else {
-                    truncate_to_width(&cfg.slave_master_host, max_host)
-                };
-                self.send_line(&format!("  Master: {}", self.amber(&host)))
-                    .await?;
-                self.send_line("").await?;
-            }
+        // Costs 3 rows in slave mode only.  See `test_main_menu_row_count`
+        // for the arithmetic -- with the CP/M item and the Unix-only `M`,
+        // a slave lands at exactly 22 of 22 once the prompt row is counted,
+        // which is why the next entry has to go on the MORE page.
+        if let Some(host) = slave_master {
+            rows.push(format!(
+                "  {}",
+                self.amber("SLAVE mode: ports relay to master.")
+            ));
+            let max_host = if self.terminal_type == TerminalType::Petscii {
+                28 // 40 - "  Master: " - margin
+            } else {
+                66
+            };
+            let host = if host.is_empty() {
+                "(not configured)".to_string()
+            } else {
+                truncate_to_width(host, max_host)
+            };
+            rows.push(format!("  Master: {}", self.amber(&host)));
+            rows.push(String::new());
         }
 
-        self.send_line(&format!(
-            "  {}  AI Chat",
-            self.cyan("A")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  {}  Simple Browser",
-            self.cyan("B")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  {}  Configuration",
-            self.cyan("C")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  {}  File Transfer",
-            self.cyan("F")
-        ))
-        .await?;
-        // Always shown.  Eligibility — and the own-port loopback reject
-        // for a serial-arrived session — is enforced by the picker, the
+        rows.push(format!("  {}  AI Chat", self.cyan("A")));
+        rows.push(format!("  {}  Simple Browser", self.cyan("B")));
+        rows.push(format!("  {}  Configuration", self.cyan("C")));
+        rows.push(format!("  {}  File Transfer", self.cyan("F")));
+        // Always shown.  Eligibility -- and the own-port loopback reject
+        // for a serial-arrived session -- is enforced by the picker, the
         // single source of truth, which explains *why* a port is
         // unavailable rather than silently hiding the entry.  A
         // serial-arrived user can still legitimately bridge to a
@@ -1094,47 +1126,41 @@ impl TelnetSession {
         // item must not be hidden for them.  Keeping it always-present
         // also avoids a menu that flickers as console targets come and
         // go (relevant once remote ports register at runtime).
-        self.send_line(&format!(
-            "  {}  Serial Gateway",
-            self.cyan("G")
-        ))
-        .await?;
-        // CP/M emulator — gated behind `cpm_emu_enabled`
-        // (on by default, bounded three ways — see the key's doc comment in
-        // config.rs — but it does run arbitrary Z80 code).  Hidden when disabled;
-        // the `k` handler and the error hint are gated the same way.
-        if config::get_config().cpm_emu_enabled {
-            self.send_line(&format!(
-                "  {}  CP/M System",
-                self.cyan("K")
-            ))
-            .await?;
+        rows.push(format!("  {}  Serial Gateway", self.cyan("G")));
+        // CP/M emulator -- gated behind `cpm_emu_enabled`
+        // (on by default, bounded three ways -- see the key's doc comment in
+        // config.rs -- but it does run arbitrary Z80 code).  Hidden when
+        // disabled; the `k` handler and the error hint are gated the same way.
+        if cpm_enabled {
+            rows.push(format!("  {}  CP/M System", self.cyan("K")));
         }
-        self.send_line(&format!(
-            "  {}  Troubleshooting",
-            self.cyan("R")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  {}  SSH Gateway",
-            self.cyan("S")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  {}  Telnet Gateway",
-            self.cyan("T")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  {}  Weather",
-            self.cyan("W")
-        ))
-        .await?;
-        self.send_line(&format!("  {}  Exit", self.cyan("X")))
-            .await?;
-        self.send_line("").await?;
-        self.send_line(&format!("  {}", self.action_prompt("H", "Help")))
-            .await?;
+        // MORE -- the main menu's second page (restart / shut down the
+        // computer).  Unix only; on Windows the page has no items at all, so
+        // the entry is compiled out rather than shown and then refused.  See
+        // `telnet/power.rs`.
+        #[cfg(unix)]
+        rows.push(format!("  {}  More", self.cyan("M")));
+        rows.push(format!("  {}  Troubleshooting", self.cyan("R")));
+        rows.push(format!("  {}  SSH Gateway", self.cyan("S")));
+        rows.push(format!("  {}  Telnet Gateway", self.cyan("T")));
+        rows.push(format!("  {}  Weather", self.cyan("W")));
+        rows.push(format!("  {}  Exit", self.cyan("X")));
+        rows.push(String::new());
+        rows.push(format!("  {}", self.action_prompt("H", "Help")));
+        rows
+    }
+
+    pub(in crate::telnet) async fn render_main_menu(&mut self) -> Result<(), std::io::Error> {
+        self.clear_screen().await?;
+        let cfg = config::get_config();
+        let slave_master = if cfg.gateway_role == "slave" {
+            Some(cfg.slave_master_host.as_str())
+        } else {
+            None
+        };
+        for row in self.main_menu_rows(cfg.cpm_emu_enabled, slave_master) {
+            self.send_line(&row).await?;
+        }
         Ok(())
     }
 
@@ -1183,6 +1209,13 @@ impl TelnetSession {
             "k" if config::get_config().cpm_emu_enabled => {
                 self.cpmemu_shell().await?;
             }
+            // Gated with the menu entry and the hint — Unix only.
+            #[cfg(unix)]
+            "m" => {
+                if !self.more_menu().await? {
+                    return Ok(false);
+                }
+            }
             "s" => {
                 self.gateway_ssh().await?;
             }
@@ -1194,14 +1227,10 @@ impl TelnetSession {
                 return Ok(false);
             }
             _ => {
-                // The valid-key hint gains `K` only when the CP/M emulator
-                // item is enabled (both variants fit the 40-col budget).
-                let hint = if config::get_config().cpm_emu_enabled {
-                    "Press A-C, F, G, K, R, S, T, W, X, or H."
-                } else {
-                    "Press A-C, F, G, R, S, T, W, X, or H."
-                };
-                self.show_error(hint).await?;
+                self.show_error(&main_menu_key_hint(
+                    config::get_config().cpm_emu_enabled,
+                ))
+                .await?;
             }
         }
         Ok(true)
@@ -1215,6 +1244,26 @@ impl TelnetSession {
     /// closing `TCP FIN` / SSH EOF doesn't truncate the final line on
     /// slow retro terminals.
     pub(in crate::telnet) async fn send_farewell(&mut self) -> Result<(), std::io::Error> {
+        self.send_farewell_with_notice("").await
+    }
+
+    /// `send_farewell`, with one line of its own above the verse.
+    ///
+    /// **The notice has to be drawn here, not before the call.**  This page
+    /// opens with `clear_screen`, which on PETSCII is `0x93` and on ANSI
+    /// `ESC[2J ESC[H` -- so anything printed just before it is wiped a few
+    /// milliseconds after it appears, and only an ASCII terminal, whose clear
+    /// is three blank lines, shows it at all.  The MORE page's "Restarting
+    /// now." was printed that way first, with a comment above it saying the
+    /// operator would be told.  They were not.
+    ///
+    /// The notice's bytes are counted into the transmit delay like everything
+    /// else here, or the line the whole change exists to show would be the one
+    /// truncated by the closing FIN on a 1200 baud link.
+    pub(in crate::telnet) async fn send_farewell_with_notice(
+        &mut self,
+        notice: &str,
+    ) -> Result<(), std::io::Error> {
         self.clear_screen().await?;
 
         // Wrap width leaves a two-char indent on both layouts.  36/76
@@ -1238,6 +1287,14 @@ impl TelnetSession {
 
         self.send_line("").await?;
         byte_count += 2;
+
+        if !notice.is_empty() {
+            let line = format!("  {}", self.amber(notice));
+            byte_count += line.len() + 2;
+            self.send_line(&line).await?;
+            self.send_line("").await?;
+            byte_count += 2;
+        }
 
         let header = format!("  {}", self.yellow("John 3:16 (KJV)"));
         byte_count += header.len() + 2;
