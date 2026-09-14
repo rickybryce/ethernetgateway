@@ -69,7 +69,7 @@ html2text = "0.14"
 # crate's `TreeSink` and stop compiling.  `cargo tree -d html5ever` must show a
 # single entry -- if a html2text bump moves this, follow it here in the same
 # commit.
-html5ever = "0.31"
+html5ever = "0.40"
 url = "2"
 serialport = "4"
 bytes = "1"
