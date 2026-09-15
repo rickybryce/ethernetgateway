@@ -242,20 +242,41 @@ fn run(program: &str, args: &[&str]) -> Option<String> {
 // ── Parsers (pure, and tested on every platform) ───────────────
 
 /// `/proc/net/route`: whitespace-separated columns, one header line, then one
-/// row per route.  A default route has Destination `00000000`; its Gateway
-/// column is the next hop as **little-endian** hex (`0101A8C0` = 192.168.1.1).
-/// A `0` gateway means an on-link route with no next hop — not a router.
+/// row per route.  A default route has Destination `00000000` **and Mask
+/// `00000000`**; its Gateway column is the next hop as **little-endian** hex
+/// (`0101A8C0` = 192.168.1.1).  A `0` gateway means an on-link route with no
+/// next hop — not a router.
+///
+/// **The mask is not optional, and leaving it out was a real defect.**  A
+/// destination of `0.0.0.0` with a mask of `128.0.0.0` is `0.0.0.0/1` — the
+/// route essentially every full-tunnel VPN installs (OpenVPN's
+/// `redirect-gateway`, WireGuard, a Tailscale exit node) to override the
+/// default without deleting it.  Matching on the destination alone accepts it
+/// as the default route, and the damage is worse than a wrong label on a
+/// screen: `reject_insecure_ipv4` keys its `.1` fallback on whether *this
+/// family's* router is known, so a bogus answer switches the fallback off and
+/// **admits the real router** — the setting silently becoming weaker, which is
+/// the one thing the comment there promises cannot happen.
+///
+/// Both sibling parsers already got this right and are why it was found:
+/// `parse_proc_net_ipv6_route` rejects a non-zero `dest_len`, and
+/// `parse_windows_route_print_v4` requires its netmask column to be `0.0.0.0`.
+/// One rule in three places, disagreeing in one.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_proc_net_route(text: &str) -> Vec<Ipv4Addr> {
     let mut out = Vec::new();
     for line in text.lines().skip(1) {
-        let mut cols = line.split_whitespace();
-        let (_iface, dest, gw) = match (cols.next(), cols.next(), cols.next()) {
-            (Some(a), Some(b), Some(c)) => (a, b, c),
-            _ => continue,
-        };
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // Iface Destination Gateway Flags RefCnt Use Metric Mask ...
+        if cols.len() < 8 {
+            continue;
+        }
+        let (dest, gw, mask) = (cols[1], cols[2], cols[7]);
         if !dest.eq_ignore_ascii_case("00000000") {
             continue;
+        }
+        if !mask.eq_ignore_ascii_case("00000000") {
+            continue; // a /1 or narrower that merely starts at 0.0.0.0
         }
         let Ok(raw) = u32::from_str_radix(gw, 16) else {
             continue;
@@ -397,25 +418,74 @@ docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0
 
     #[test]
     fn test_parse_proc_net_route_ignores_on_link_and_junk() {
-        // A default route with no next hop is on-link, not a router.
-        let on_link = "Iface\tDestination\tGateway\nppp0\t00000000\t00000000\t0003\n";
+        // A default route with no next hop is on-link, not a router.  The rows
+        // here carry all eleven columns the kernel actually writes, because
+        // the parser reads the Mask at index 7 -- a four-column fixture would
+        // be rejected for its length and the test would pass without ever
+        // reaching the rule it names.
+        let on_link = "Iface\tDestination\tGateway\n\
+                       ppp0\t00000000\t00000000\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
         assert!(parse_proc_net_route(on_link).is_empty());
         // Header only, empty file, and a truncated row must all be survivable.
         assert!(parse_proc_net_route("Iface\tDestination\tGateway\n").is_empty());
         assert!(parse_proc_net_route("").is_empty());
         assert!(parse_proc_net_route("Iface\nnonsense\n").is_empty());
         assert!(parse_proc_net_route("Iface Dest GW\neth0\tZZZZZZZZ\tQQQQQQQQ\n").is_empty());
+        // A row the kernel would never write, cut short before the Mask: with
+        // no mask to read there is no way to tell a default route from a /1,
+        // so it is refused rather than guessed at.
+        assert!(parse_proc_net_route("Iface Dest GW\neth0\t00000000\t0101A8C0\t0003\n").is_empty());
     }
 
     #[test]
     fn test_parse_proc_net_route_handles_two_default_routes() {
         let two = "Iface\tDestination\tGateway\n\
-                   eth0\t00000000\t0101A8C0\t0003\n\
-                   wlan0\t00000000\tFE01A8C0\t0003\n";
+                   eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+                   wlan0\t00000000\tFE01A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n";
         assert_eq!(
             parse_proc_net_route(two),
             vec![Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(192, 168, 1, 254)]
         );
+    }
+
+    /// **A VPN's `0.0.0.0/1` is not the default route**, and taking it for one
+    /// makes the gateway's own setting weaker rather than merely mislabelled.
+    ///
+    /// Full-tunnel VPNs (OpenVPN `redirect-gateway`, WireGuard, a Tailscale
+    /// exit node) install `0.0.0.0/1` and `128.0.0.0/1` to override the
+    /// default without deleting it.  Both have Destination `00000000` or
+    /// `00000080`; only the Mask tells them apart.
+    ///
+    /// The consequence is the reason this is a test and not a tidy-up:
+    /// `reject_insecure_ipv4` keys its `*.*.*.1` fallback on whether this
+    /// family's router is known, so one bogus address switches the fallback
+    /// off and lets the **real** router through.
+    #[test]
+    fn test_a_vpn_half_default_route_is_not_the_default_route() {
+        // A host whose only 0.0.0.0/… route is a VPN's /1.
+        let vpn_only = "Iface\tDestination\tGateway\n\
+                        tun0\t00000000\t0200000A\t0003\t0\t0\t0\t00000080\t0\t0\t0\n";
+        assert!(
+            parse_proc_net_route(vpn_only).is_empty(),
+            "a /1 was taken for the default route",
+        );
+        // And the real default still wins when both are present, with the /1
+        // and the matching 128.0.0.0/1 both refused.
+        let both = "Iface\tDestination\tGateway\n\
+                    tun0\t00000000\t0200000A\t0003\t0\t0\t0\t00000080\t0\t0\t0\n\
+                    tun0\t00000080\t0200000A\t0003\t0\t0\t0\t00000080\t0\t0\t0\n\
+                    eth0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n";
+        assert_eq!(
+            parse_proc_net_route(both),
+            vec![Ipv4Addr::new(192, 168, 1, 1)],
+            "the VPN next hop was reported as this network's router",
+        );
+        // The IPv6 sibling already refused the same shape; pinned here so the
+        // two cannot drift apart again.
+        let v6_half = "\
+00000000000000000000000000000000 01 00000000000000000000000000000000 00 fe800000000000000000000000000099 00000400 00000000 00000000 00000003 tun0
+";
+        assert!(parse_proc_net_ipv6_route(v6_half).is_empty(), "::/1 was taken for the default route");
     }
 
     #[test]

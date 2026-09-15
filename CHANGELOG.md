@@ -96,6 +96,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A VPN's `0.0.0.0/1` was mistaken for the default route, which made
+  `disable_gateway_connections` *weaker* rather than merely mislabelled.**  The
+  Linux parser matched on the Destination column alone and never read the Mask,
+  so the half-default route essentially every full-tunnel VPN installs
+  (OpenVPN's `redirect-gateway`, WireGuard, a Tailscale exit node) &mdash;
+  destination `0.0.0.0`, mask `128.0.0.0` &mdash; was accepted as this
+  network's router.  The damage went past the label on the three config
+  screens: the `*.*.*.1` fallback is keyed on whether *this family's* router is
+  known, so one bogus address switched the fallback off and **admitted the real
+  router**, under a comment promising the setting "is never silently weaker
+  than before".  Both sibling parsers already had it right, which is how it was
+  found &mdash; the IPv6 one rejects a non-zero prefix length and the Windows
+  one requires its netmask column to be `0.0.0.0`.  One rule in three places,
+  disagreeing in one.
+
+- **`rustls` bumped to 0.23.45 for RUSTSEC-2026-0285** (published 2026-09-14,
+  medium): TLS 1.3 handshake messages accepted across encryption-level
+  boundaries.  It arrives through `ureq`, so it sat on the TLS path for the
+  text browser, the weather service, AI Chat and the CP/M sample-disk
+  downloader &mdash; and the advisory landed two days after 1.0.0 was tagged,
+  so the released binaries carry it.
+
 - **Three defects in the shipped systemd unit, each hit as a real failure
   while installing it on a Pi** (2026-09-14).  **(1)**
   `StartLimitIntervalSec=` / `StartLimitBurst=` were under `[Service]`, where
