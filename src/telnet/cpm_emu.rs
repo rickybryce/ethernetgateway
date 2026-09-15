@@ -589,6 +589,49 @@ pub(in crate::telnet) fn pending_csi_arrow(pending: &mut VecDeque<u8>) -> Option
     Some(code)
 }
 
+/// One PETSCII key on its way to a program running under the emulator.
+///
+/// The Commodore half of the console translation, shared by the two places a
+/// key can reach a guest -- [`TelnetSession::cpmemu_pending_key`] (bytes the
+/// out-of-band drain already buffered) and [`TelnetSession::cpmemu_conin`]
+/// (a byte read from the wire).  They held a copy each, and both copies were
+/// missing the same key.
+///
+/// A Commodore's *only* editing key is INST/DEL, which sends **`0x14`**, and no
+/// CP/M guest knows that byte: what they edit with is BS (`0x08`), which
+/// `cpmemu_read_line` answers with the universal `BS SPACE BS`.  Untranslated,
+/// `0x14` fell past that reader's erase arm into its catch-all, which pushed it
+/// into the line buffer **and echoed it** -- and the echo is a destructive DEL
+/// on a C64, so the character vanished from the operator's screen while the
+/// guest kept it.  A dead key is bad; a key whose screen disagrees with the
+/// buffer is worse, because the next thing the operator does is retype.
+///
+/// Folded here, the erase arm catches it and the echo renders correctly:
+/// `Adm3a::feed` maps `0x08` to [`cpm_term::TermOp::Left`], which a PETSCII
+/// session renders as CRSR LEFT (never as `0x14`, which would pull the line
+/// about -- see `colors.rs`'s `ascii_to_petscii_byte`).
+///
+/// The same fold is already in `cpm_boot_ui.rs`'s `boot_key_for_guest` (a
+/// booted disk), `serial.rs`'s `translate_petscii_to_ascii_byte` (the modem)
+/// and `is_backspace_key` (our own prompts, including the emulator's own `A>`),
+/// so this was the one console path in the gateway that disagreed with the
+/// other three -- and with the `A>` prompt of the very feature it is in.
+///
+/// Gated on the session being PETSCII by its callers, exactly as
+/// `boot_key_for_guest` gates it: on an ASCII terminal `0x14` is ^T, a
+/// character a guest may legitimately want.
+fn cpmemu_petscii_key(byte: u8) -> u8 {
+    if byte == 0x14 {
+        return 0x08;
+    }
+    // A cursor key is a single PETSCII byte and has an ADM-3A code of its own.
+    if let Some(code) = cpm_term::petscii_key_to_adm3a(byte) {
+        return code;
+    }
+    // Everything else is an ASCII machine's idea of a letter.
+    petscii_to_ascii_byte(byte)
+}
+
 /// Result of peeking after an `ESC` for an ANSI CSI arrow sequence.
 enum ArrowPeek {
     /// A recognised arrow → this ADM-3A key code.
@@ -2204,10 +2247,7 @@ impl TelnetSession {
     fn cpmemu_pending_key(pending: &mut VecDeque<u8>, is_petscii: bool) -> Option<u8> {
         let b = pending.pop_front()?;
         if is_petscii {
-            if let Some(code) = cpm_term::petscii_key_to_adm3a(b) {
-                return Some(code);
-            }
-            return Some(petscii_to_ascii_byte(b));
+            return Some(cpmemu_petscii_key(b));
         }
         // ANSI: reassemble a buffered CSI arrow (`ESC [ A..D`, entirely in the
         // buffer, so no wire lookahead is needed) to its ADM-3A code.
@@ -2224,7 +2264,9 @@ impl TelnetSession {
     /// double-`ESC` break-out.
     ///
     /// - A C64 cursor key (a single PETSCII byte) maps straight to its ADM-3A
-    ///   code; other PETSCII bytes are folded to ASCII.
+    ///   code, INST/DEL folds to BS and other PETSCII bytes are folded to
+    ///   ASCII -- all of it in [`cpmemu_petscii_key`], shared with the
+    ///   buffered path so the two cannot drift apart again.
     /// - On an ANSI terminal an arrow key arrives as a fast `ESC [ A..D`
     ///   sequence; a short peek after `ESC` recognises it and returns the
     ///   ADM-3A code.  A lone `ESC` (an editor command) has no fast follower,
@@ -2316,11 +2358,7 @@ impl TelnetSession {
             *last_esc = false;
 
             if is_petscii {
-                // A C64 cursor key becomes its ADM-3A code; else fold to ASCII.
-                if let Some(code) = cpm_term::petscii_key_to_adm3a(b) {
-                    return Ok(ConIn::Byte(code));
-                }
-                return Ok(ConIn::Byte(petscii_to_ascii_byte(b)));
+                return Ok(ConIn::Byte(cpmemu_petscii_key(b)));
             }
             return Ok(ConIn::Byte(b));
         }
@@ -3202,6 +3240,181 @@ mod repl_tests {
         let mut q: VecDeque<u8> = (*b"[H").into_iter().collect();
         assert_eq!(pending_csi_arrow(&mut q), None);
         assert_eq!(q.len(), 2, "a non-arrow CSI must be left for the caller");
+    }
+
+    /// A Commodore's only editing key is INST/DEL, and it must reach the guest
+    /// as the byte every CP/M program edits with.
+    ///
+    /// The bug this pins was not a dead key but a **lying screen**: `0x14` fell
+    /// through `cpmemu_read_line`'s erase arm into its catch-all, which pushed
+    /// it into the line buffer *and echoed it*, and an echoed `0x14` is a
+    /// destructive DEL on a C64 -- so `DIR` looked right on screen while the
+    /// guest was handed `DIR\x14`.
+    ///
+    /// The echo is checked through the **real** decoder and renderer rather
+    /// than by asserting what this module's comments claim they do, because
+    /// "folds to BS" is only half the fix: BS rendered back to a C64 as `0x14`
+    /// would pull the line about just as badly.
+    #[test]
+    fn test_a_commodores_delete_key_reaches_the_guest_as_backspace() {
+        use crate::telnet::{DEFAULT_ERASE_CHAR, TerminalType, is_backspace_key};
+
+        // The fold itself.
+        assert_eq!(cpmemu_petscii_key(0x14), 0x08, "INST/DEL is the C64's erase key");
+
+        // It lands on a byte `cpmemu_read_line`'s erase arm acts on -- which is
+        // also what our own prompts accept, so the emulator and the `A>` it
+        // returns to now agree about this key.
+        assert!(
+            is_backspace_key(cpmemu_petscii_key(0x14), DEFAULT_ERASE_CHAR),
+            "the folded byte must be one the line reader erases on",
+        );
+
+        // And the erase the reader then emits (`BS SPACE BS`) renders to a
+        // Commodore as left / space / left -- never as another 0x14.
+        let mut term = Adm3a::default();
+        let mut out = Vec::new();
+        for &b in b"\x08 \x08" {
+            for op in term.feed(b) {
+                cpm_term::render_op(op, TerminalType::Petscii, &mut out);
+            }
+        }
+        assert_eq!(out, vec![0x9D, b' ', 0x9D], "CRSR LEFT, space, CRSR LEFT");
+
+        // Unchanged: the cursor keys keep their ADM-3A codes and letters keep
+        // their case fold, so the fold did not swallow the rest of the table.
+        assert_eq!(cpmemu_petscii_key(0x9D), cpm_term::ADM_LEFT, "CRSR LEFT");
+        assert_eq!(
+            cpmemu_petscii_key(0x11),
+            cpm_term::petscii_key_to_adm3a(0x11).unwrap(),
+            "CRSR DOWN",
+        );
+        assert_eq!(cpmemu_petscii_key(b'A'), b'a', "PETSCII upper bank");
+        assert_eq!(cpmemu_petscii_key(0xC1), b'A', "PETSCII shifted-upper");
+        assert_eq!(cpmemu_petscii_key(b'\r'), b'\r', "CR is untouched");
+    }
+
+    /// The two console paths must share one translation.
+    ///
+    /// They were a copy each -- `cpmemu_pending_key` for bytes the out-of-band
+    /// drain buffered and `cpmemu_conin` for a byte off the wire -- and the
+    /// copies were missing the same key, which is how INST/DEL went unhandled
+    /// while three sibling translators elsewhere in the gateway folded it.
+    /// Fixing one copy would have left a C64 editing correctly only while the
+    /// guest happened to be blocked on input.
+    ///
+    /// So: exactly one caller of the PETSCII key table in this file, the helper
+    /// itself.  Comments are stripped first, or the test reads its own prose.
+    #[test]
+    fn test_the_two_console_paths_share_one_petscii_translation() {
+        let src = include_str!("cpm_emu.rs").replace('\r', "");
+        // Product code only -- the test modules below name these functions.
+        let product = src
+            .split_once("\n#[cfg(test)]")
+            .map(|x| x.0)
+            .expect("cpm_emu.rs has test modules");
+        let code: String = product
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            code.matches("petscii_key_to_adm3a").count(),
+            1,
+            "the PETSCII key table must have exactly one caller in this file \
+             (`cpmemu_petscii_key`); a second one is the duplication that lost \
+             INST/DEL",
+        );
+        assert_eq!(
+            code.matches("cpmemu_petscii_key(").count(),
+            3,
+            "the helper plus its two callers -- `cpmemu_pending_key` and \
+             `cpmemu_conin`",
+        );
+    }
+
+    /// The reported defect, end to end through the real line reader.
+    ///
+    /// [`TelnetSession::cpmemu_read_line`] is what a running program's BDOS 10
+    /// calls, and it is the half the emulator's own `A>` prompt does *not* use
+    /// -- which is why the feature disagreed with itself and why the helper
+    /// test above is not enough on its own.  This drives the actual function
+    /// over a PETSCII session and checks **both** halves of what INST/DEL is
+    /// supposed to do: the byte leaves the guest's buffer, *and* the character
+    /// leaves the operator's screen.  The old bug got neither right while
+    /// looking like it got both.
+    #[tokio::test]
+    async fn test_inst_del_erases_a_commodores_line_and_its_screen() {
+        use crate::telnet::cpm_term::Adm3a;
+        use crate::telnet::tests::make_test_session_with_peer;
+        use crate::telnet::TerminalType;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Petscii);
+        let (mut peer_rd, mut peer_wr) = tokio::io::split(peer);
+
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 256];
+            while let Ok(n) = peer_rd.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n]);
+            }
+            out
+        });
+
+        // What a C64 keyboard actually sends: DIR, then INST/DEL, then RETURN.
+        let feeder = tokio::spawn(async move {
+            let _ = peer_wr.write_all(&[b'D', b'I', b'R', 0x14, b'\r']).await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        let mut term = Adm3a::default();
+        let mut pending = VecDeque::new();
+        let mut last_esc = false;
+        let line = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            sess.cpmemu_read_line(&mut term, &mut pending, &mut last_esc, 128),
+        )
+        .await
+        .expect("the line reader hung")
+        .expect("the line reader errored");
+        feeder.abort();
+        drop(sess);
+        let screen = collector.await.unwrap();
+
+        // The guest's side: the R is gone, and no stray 0x14 was smuggled in.
+        match line {
+            LineRead::Line(buf) => {
+                assert_eq!(
+                    buf,
+                    b"di".to_vec(),
+                    "INST/DEL must erase the R -- a C64's letters fold to \
+                     lower case on the way to an ASCII guest",
+                );
+            }
+            LineRead::BreakOut => panic!("INST/DEL was read as a break-out"),
+            LineRead::Disconnect => panic!("INST/DEL was read as a disconnect"),
+        }
+
+        // The operator's side: D I R echoed (case-swapped back for the C64),
+        // then CRSR LEFT / space / CRSR LEFT, then the CR LF that RETURN
+        // itself echoes.  A 0x14 anywhere in here would be the old behaviour --
+        // the screen erasing a character the guest still holds.
+        assert_eq!(
+            screen,
+            vec![b'D', b'I', b'R', 0x9D, b' ', 0x9D, b'\r', b'\n'],
+            "the echo must rub the R out with cursor moves, never with 0x14",
+        );
+        assert!(
+            !screen.contains(&0x14),
+            "no 0x14 may reach a Commodore's screen: it is a destructive \
+             DELETE there, and the whole defect was the screen and the \
+             buffer disagreeing about one character",
+        );
     }
 }
 
