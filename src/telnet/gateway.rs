@@ -1193,10 +1193,12 @@ impl russh::client::Handler for GatewayHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        // `None` for a certificate, which the "Could not verify server host
+        // key" arm below then refuses -- see `telnet::pinnable_host_key`.
         if let Ok(mut key) = self.server_key.lock() {
-            *key = Some(server_public_key.clone());
+            *key = crate::telnet::pinnable_host_key(server_public_key);
         }
         Ok(true)
     }

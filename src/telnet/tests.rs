@@ -11212,3 +11212,58 @@ fn test_every_help_table_is_width_checked() {
         defined.join("\n  "),
     );
 }
+
+/// A server certificate is refused as a pinnable host key; a plain key is not.
+///
+/// russh 0.63 widened `check_server_key` to `PublicKeyOrCertificate`, and the
+/// migration that compiles is not the one that is correct: taking the
+/// `PublicKey` *inside* a certificate and pinning it would put a key no CA
+/// statement was ever checked for into `gateway_hosts`, on the two paths where
+/// a MITM is most expensive.  See [`pinnable_host_key`].
+///
+/// The fixtures are a real `ssh-keygen` host key and a real host certificate
+/// signed over that same key, which is what makes this a test rather than a
+/// restatement: the certificate's inner key **is** `HOST_KEY`, so an
+/// unwrapping implementation returns `Some(HOST_KEY)` and is caught here.  The
+/// third assertion is the positive control for exactly that -- without it,
+/// `None` would pass just as well for a certificate whose inner key we had
+/// never identified, and the test would be proving nothing about the mutation
+/// it exists to stop.
+#[test]
+fn test_a_host_certificate_is_never_pinned_as_a_host_key() {
+    use russh::keys::{Certificate, PublicKey, PublicKeyOrCertificate};
+
+    const HOST_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJVWeD2ec3r+aZemdrMS2vmNxjl71OENBSNUC/CoIaeh test-host";
+    const HOST_CERT: &str = "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIJJGKSZkOn8KUz6VfVhuY5gOgxhKbM1rOs4Bi9BoBEuPAAAAIJVWeD2ec3r+aZemdrMS2vmNxjl71OENBSNUC/CoIaehAAAAAAAAAAAAAAACAAAACXRlc3QtaG9zdAAAABAAAAAMZXhhbXBsZS50ZXN0AAAAAGqgjG8AAAAAbImo7wAAAAAAAAAAAAAAAAAAADMAAAALc3NoLWVkMjU1MTkAAAAgb4X+oryvFI6AlURCI53CaSEIamywyE97Wl2oryATAtYAAABTAAAAC3NzaC1lZDI1NTE5AAAAQOC1aqeDEQtz0BYJS3CW8C0O4CVE5qF0kNsVkh8tZnlEvBjol8NoLGjTPmdu9dKMzxi6zoUHvA6c6VsKjWUUGwc= test-host";
+
+    let host_key = PublicKey::from_openssh(HOST_KEY).expect("fixture host key parses");
+    let cert = Certificate::from_openssh(HOST_CERT).expect("fixture certificate parses");
+
+    // A plain host key is what we pin, unchanged.
+    let plain = PublicKeyOrCertificate::PublicKey {
+        key: host_key.clone(),
+        hash_alg: None,
+    };
+    assert_eq!(
+        pinnable_host_key(&plain).as_ref(),
+        Some(&host_key),
+        "a plain host key must be pinned exactly as presented",
+    );
+
+    // Positive control: the certificate really does carry that key, so the
+    // wrong migration has something to return.
+    assert_eq!(
+        cert.public_key(),
+        host_key.key_data(),
+        "fixture is not wired up: the certificate must be signed over HOST_KEY, \
+         or the assertion below cannot distinguish refusing from unwrapping",
+    );
+
+    // The rule.
+    assert!(
+        pinnable_host_key(&PublicKeyOrCertificate::Certificate(cert)).is_none(),
+        "a certificate must never become a pinned host key: the key inside it \
+         is not one this gateway was ever told to trust, and pinning it is \
+         trust-on-first-use over a CA statement nobody checked",
+    );
+}

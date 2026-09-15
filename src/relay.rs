@@ -523,10 +523,14 @@ impl russh::client::Handler for SlaveRelayHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        // `None` for a certificate, which the "master presented no host key"
+        // arm below then refuses -- see `telnet::pinnable_host_key`.  Accepting
+        // the transport here and deciding afterwards is the existing design:
+        // this callback has no host:port context to check known-hosts with.
         if let Ok(mut slot) = self.server_key.lock() {
-            *slot = Some(server_public_key.clone());
+            *slot = crate::telnet::pinnable_host_key(server_public_key);
         }
         Ok(true)
     }

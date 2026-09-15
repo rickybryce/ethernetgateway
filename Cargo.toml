@@ -67,7 +67,7 @@ pbkdf2 = { version = "0.13", features = ["phc", "getrandom", "sha2"] }
 # compiled dependency and must be reflected in THIRD-PARTY-NOTICES at the next
 # release cut.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-russh = "0.62"
+russh = "0.63"
 ureq = "3"
 serde_json = "1"
 html2text = "0.14"

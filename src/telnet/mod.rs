@@ -752,6 +752,54 @@ pub(crate) enum HostKeyStatus {
     Unreadable(std::io::Error),
 }
 
+/// The host key a server presented, **if it is one this gateway can pin**.
+///
+/// russh 0.63 widened `client::Handler::check_server_key` from a `PublicKey` to
+/// a `PublicKeyOrCertificate`, so the one question both our SSH clients ask --
+/// "which key do I check against `gateway_hosts`?" -- now has an answer that is
+/// sometimes *none*.  Both handlers go through here, because they are one rule
+/// in two places (`relay.rs`'s slave->master link and the SSH Gateway) and a
+/// rule written twice is a rule that disagrees with itself eventually.
+///
+/// **A certificate is refused, not unwrapped**, and that is the whole point of
+/// this function.  The obvious migration -- take the `PublicKey` inside the
+/// certificate and pin that -- looks like it preserves behaviour and does not:
+/// russh's own source says it plainly, that "the key inside a certificate is
+/// not something the client was ever told to trust".  Pinning it would mean
+/// trust-on-first-use over a key no CA statement was ever checked for, on the
+/// two paths where a MITM is most expensive -- the SSH Gateway carries the
+/// user's typed remote password, and the relay is about to send the master's
+/// unified credentials.  `None` instead lands on each caller's existing
+/// "presented no host key" arm, which disconnects.  Fail closed.
+///
+/// **It cannot fire today**, and it is here so that it already exists when it
+/// can: `russh::client::Config::default()` leaves `preferred.host_key_
+/// certificates` empty, so neither client offers a `*-cert-v01@openssh.com`
+/// host-key algorithm and no server can negotiate one.  The day somebody adds
+/// certificate support to that list, the refusal is already written -- rather
+/// than the inner key being pinned silently by a `match` arm nobody revisited.
+pub(crate) fn pinnable_host_key(
+    presented: &russh::keys::PublicKeyOrCertificate,
+) -> Option<russh::keys::PublicKey> {
+    match presented {
+        russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => Some(key.clone()),
+        russh::keys::PublicKeyOrCertificate::Certificate(cert) => {
+            // Logged here rather than at the two call sites, so the reason is
+            // stated once.  Without it the operator sees only each caller's
+            // generic "could not verify server host key", which is true and
+            // says nothing about why.
+            glog!(
+                "SSH: host presented a certificate ({}), not a plain host key -- \
+                 refusing: this gateway pins keys in {} and has no CA to check a \
+                 certificate against",
+                cert.algorithm(),
+                GATEWAY_HOSTS_FILE
+            );
+            None
+        }
+    }
+}
+
 /// Format the key as "algorithm base64" for storage.
 fn format_host_key(key: &russh::keys::PublicKey) -> String {
     // key.to_string() produces "algorithm base64 comment" in OpenSSH format;

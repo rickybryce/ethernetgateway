@@ -1822,8 +1822,11 @@ mod tests {
             type Error = russh::Error;
             async fn check_server_key(
                 &mut self,
-                _key: &russh::keys::PublicKey,
+                _key: &russh::keys::PublicKeyOrCertificate,
             ) -> Result<bool, Self::Error> {
+                // A throwaway client against our own loopback server: it is
+                // testing the channel path, not host-key policy.  The product's
+                // two real clients go through `telnet::pinnable_host_key`.
                 Ok(true)
             }
         }
