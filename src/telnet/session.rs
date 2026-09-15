@@ -216,9 +216,11 @@ pub(in crate::telnet) fn main_menu_key_hint(cpm_enabled: bool) -> String {
     if cpm_enabled {
         keys.push("K");
     }
+    keys.extend(["R-T", "W", "X"]);
+    // After the letters, because that is where the row is.
     #[cfg(unix)]
-    keys.push("M");
-    keys.extend(["R-T", "W", "X", "H"]);
+    keys.push("2");
+    keys.push("H");
     format!("Press {}.", keys.join(", "))
 }
 
@@ -1138,13 +1140,18 @@ impl TelnetSession {
         // computer).  Unix only; on Windows the page has no items at all, so
         // the entry is compiled out rather than shown and then refused.  See
         // `telnet/power.rs`.
-        #[cfg(unix)]
-        rows.push(format!("  {}  More", self.cyan("M")));
         rows.push(format!("  {}  Troubleshooting", self.cyan("R")));
         rows.push(format!("  {}  SSH Gateway", self.cyan("S")));
         rows.push(format!("  {}  Telnet Gateway", self.cyan("T")));
         rows.push(format!("  {}  Weather", self.cyan("W")));
         rows.push(format!("  {}  Exit", self.cyan("X")));
+        // **Page navigation, not a feature, so it sits below the features.**
+        // As `M` it sat between `K` and `R` in the alphabetical list and read
+        // as one more thing the gateway does; a digit cannot be mistaken for a
+        // feature letter, and it says which page it goes to, so a third page
+        // would be `3` and need no new vocabulary.  Unix only, like the page.
+        #[cfg(unix)]
+        rows.push(format!("  {}  Second Menu", self.cyan("2")));
         rows.push(String::new());
         rows.push(format!("  {}", self.action_prompt("H", "Help")));
         rows
@@ -1211,7 +1218,7 @@ impl TelnetSession {
             }
             // Gated with the menu entry and the hint — Unix only.
             #[cfg(unix)]
-            "m" => {
+            "2" => {
                 if !self.more_menu().await? {
                     return Ok(false);
                 }

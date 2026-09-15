@@ -1572,11 +1572,6 @@ impl TelnetSession {
                 "  K  CP/M System: run real CP/M .COM",
                 "     software on an emulated Z80",
             ];
-            #[cfg(unix)]
-            v.extend([
-                "  M  More: restart or shut down the",
-                "     computer the gateway runs on",
-            ]);
             v.extend([
                 "  R  Troubleshooting: diagnose",
                 "     terminal input issues",
@@ -1587,6 +1582,14 @@ impl TelnetSession {
                 "  W  Weather: by city or postal code",
                 "  X  Exit: disconnect from server",
             ]);
+            // Listed last because the menu draws it last -- a help screen in a
+            // different order from the screen it explains is a help screen the
+            // reader has to search.
+            #[cfg(unix)]
+            v.extend([
+                "  2  Second Menu: restart or shut",
+                "     down the whole computer",
+            ]);
             v
         })
     }
@@ -1596,8 +1599,8 @@ impl TelnetSession {
     #[cfg(unix)]
     fn more_help_lines() -> &'static [&'static str] {
         &[
-            "  More options, continued from the",
-            "  main menu.",
+            "  The second menu, reached with 2",
+            "  from the main menu.",
             "",
             "  R  Restart the computer the",
             "     gateway runs on -- not just",
@@ -1605,6 +1608,8 @@ impl TelnetSession {
             "",
             "  S  Shut down that computer. It",
             "     will need switching on by hand.",
+            "",
+            "  Q  Back to the main menu.",
             "",
             "  Both ask to be confirmed, then ask",
             "  for a password if the computer",

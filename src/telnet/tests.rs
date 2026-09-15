@@ -2901,8 +2901,16 @@ fn test_main_menu_row_count() {
         // sentence above (and CLAUDE.md, and the changelog) is wrong rather
         // than merely conservative — which is the failure this project keeps
         // finding.  If an entry is deliberately removed, correct all three.
+        // **The budget is 22 on every platform; what fills it is not.**  `M`
+        // is `#[cfg(unix)]`, so a Windows build draws one row fewer -- and
+        // pinning that number too, rather than skipping the assertion off
+        // Unix, keeps the Windows menu budgeted as well: a *second* entry
+        // compiled out would otherwise pass unnoticed there.  This asserted a
+        // flat 22 from `85193af` until now and was red on the windows job the
+        // whole time.
+        let full = if cfg!(unix) { 22 } else { 21 };
         assert_eq!(
-            drawn, 22,
+            drawn, full,
             "the worst-case main menu is no longer exactly full on {:?}",
             term,
         );
@@ -2986,12 +2994,16 @@ fn test_main_menu_error_hint() {
             "K belongs in the hint exactly when the CP/M item is shown: {:?}",
             hint,
         );
+        // The second page moved from `M` in the middle of the letters to `2`
+        // at the bottom, so the hint names it after `X` -- and `M` must not
+        // come back, like the `D` and `E` below it.
         assert_eq!(
-            hint.contains(" M,"),
+            hint.contains(" 2,"),
             cfg!(unix),
-            "M belongs in the hint exactly where the item is compiled in: {:?}",
+            "2 belongs in the hint exactly where the item is compiled in: {:?}",
             hint,
         );
+        assert!(!hint.contains(" M,"), "error hint must not mention M");
         // Keys the menu removed long ago must not come back.
         assert!(!hint.contains(" D,"), "error hint must not mention D");
         assert!(!hint.contains(" E,"), "error hint must not mention E");
@@ -11200,6 +11212,15 @@ fn test_every_help_table_is_width_checked() {
     }
     defined.sort();
     defined.dedup();
+    // `more_help_lines` is `#[cfg(unix)]` in mod.rs and a source scan cannot
+    // see a cfg, so off Unix this census was comparing a Unix source file
+    // against a Windows binary's list: 29 defined, 28 listed.  Red on the
+    // windows job and nowhere else, from `85193af` until now -- CI does not
+    // run on dev pushes, so a day of dev commits went by without anyone
+    // seeing it.  Dropped here rather than removing power.rs from `SOURCES`,
+    // because the strings are still worth width-checking wherever this runs.
+    #[cfg(not(unix))]
+    defined.retain(|n| n != "more_help_lines");
 
     let listed = all_help_line_groups(true).len();
     assert_eq!(
@@ -11265,5 +11286,159 @@ fn test_a_host_certificate_is_never_pinned_as_a_host_key() {
         "a certificate must never become a pinned host key: the key inside it \
          is not one this gateway was ever told to trust, and pinning it is \
          trust-on-first-use over a CA statement nobody checked",
+    );
+}
+
+/// Every key a menu page offers must be explained in that page's own help.
+///
+/// Asked for after the second page was added: the main menu documents its
+/// leave key (`X  Exit`) and the second page did not document its own
+/// (`Q  Back`), so the two pages disagreed about what a help screen owes the
+/// reader.  The keys are read out of the **rows the page draws**, not from a
+/// list here, because a hand-kept list beside a code-rendered menu is the half
+/// that rots -- which is the defect this whole family of guards keeps finding.
+///
+/// `H` is the one exclusion: it is the key the reader pressed to get to the
+/// help they are reading, and every page would otherwise carry a line
+/// explaining how to do what they have just done.
+#[test]
+fn test_every_menu_key_is_explained_in_that_pages_help() {
+    /// Keys a rendered page offers, in both shapes the menus use:
+    /// `"  A  Label"` for an item and `"Q=Back"` for a footer action.
+    fn keys_of(rows: &[String]) -> Vec<char> {
+        let mut keys = Vec::new();
+        for row in rows {
+            // Footer actions: `K=Label`, possibly two on one row.
+            let b: Vec<char> = row.chars().collect();
+            for (i, w) in b.windows(2).enumerate() {
+                if w[1] == '=' && w[0].is_ascii_uppercase() && (i == 0 || !b[i - 1].is_alphanumeric())
+                {
+                    keys.push(w[0]);
+                }
+            }
+            // Items: two spaces, one key, two spaces, a label.
+            let t = row.trim_start();
+            let c: Vec<char> = t.chars().collect();
+            if c.len() > 3 && (c[0].is_ascii_uppercase() || c[0].is_ascii_digit())
+                && c[1] == ' ' && c[2] == ' ' && c[3] != ' '
+            {
+                keys.push(c[0]);
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
+    let mut session = make_test_session(TerminalType::Ansi);
+    session.color_enabled = false; // read the keys, not the colour codes
+
+    // Only the `#[cfg(unix)]` push below mutates this, exactly as in
+    // `all_help_line_groups`, which carries the same attribute for the same
+    // reason: on Windows there is no second page and `-D warnings` would
+    // otherwise fail the build on an unused `mut`.
+    #[allow(unused_mut)]
+    let mut pages: Vec<(&str, Vec<String>, &'static [&'static str])> = vec![(
+        "main menu",
+        session.main_menu_rows(true, None),
+        TelnetSession::main_help_lines(),
+    )];
+    #[cfg(unix)]
+    pages.push((
+        "second menu",
+        session.more_menu_rows(),
+        TelnetSession::more_help_lines(),
+    ));
+
+    for (page, rows, help) in pages {
+        let keys = keys_of(&rows);
+        // Positive control: an extractor that finds nothing would pass every
+        // assertion below without reading a single key.
+        assert!(
+            keys.len() >= 3,
+            "{page}: the key scan found {:?} in {:?} -- the page draws more \
+             than that, so the extractor is broken, not the help",
+            keys,
+            rows,
+        );
+        for key in keys {
+            if key == 'H' {
+                continue; // the key they pressed to read this
+            }
+            let wanted = format!("  {}  ", key);
+            assert!(
+                help.iter().any(|l| l.starts_with(&wanted)),
+                "{page}: key {:?} is on the screen but no help line starts \
+                 with {:?}. Every key a page offers must be explained in that \
+                 page's help.\n  keys: {:?}\n  help:\n    {}",
+                key,
+                wanted,
+                keys_of(&rows),
+                help.join("\n    "),
+            );
+        }
+    }
+}
+
+/// The manual's main-menu listing must be the menu the gateway draws.
+///
+/// §5.5 reproduces the menu as a `<pre><code>` block, which is a hand-kept
+/// copy of a code-rendered list -- the half that rots, and it did: moving the
+/// second page from `M` in the middle to `2` at the bottom left the manual
+/// showing the old key in the old place, and nothing would have said so.
+/// Three separate doc surfaces stated that key; this is the one a user reads.
+///
+/// Unix only, because the manual documents the full build and says so in the
+/// paragraph below the block ("absent from Windows builds").  Comparing a
+/// Windows menu against it would fail on the one row that is deliberately
+/// missing -- the trap that put two other guards red on the windows job.
+#[cfg(unix)]
+#[test]
+fn test_the_manual_main_menu_matches_the_real_one() {
+    let manual = include_str!("../../usermanual.html").replace("\r\n", "\n");
+    let at = manual
+        .find("5.5 The Main Menu")
+        .expect("the manual lost its main-menu section");
+    let open = manual[at..]
+        .find("<pre><code>")
+        .map(|o| at + o + "<pre><code>".len())
+        .expect("§5.5 lost its menu block");
+    let close = manual[open..]
+        .find("</code></pre>")
+        .map(|o| open + o)
+        .expect("§5.5's menu block is unterminated");
+
+    /// The `  K  Label` rows of a block, as `(key, label)`.
+    fn items(lines: &str) -> Vec<(char, String)> {
+        lines
+            .lines()
+            .filter_map(|l| {
+                let c: Vec<char> = l.chars().collect();
+                if c.len() > 5 && c[0] == ' ' && c[1] == ' ' && c[3] == ' ' && c[4] == ' '
+                    && (c[2].is_ascii_uppercase() || c[2].is_ascii_digit())
+                {
+                    Some((c[2], c[5..].iter().collect::<String>().trim_end().to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    let documented = items(&manual[open..close]);
+    let mut session = make_test_session(TerminalType::Ansi);
+    session.color_enabled = false;
+    let drawn = items(&session.main_menu_rows(true, None).join("\n"));
+
+    // Positive control: an extractor that matched nothing would make the
+    // comparison below trivially true on two empty lists.
+    assert!(
+        drawn.len() >= 10,
+        "the menu scan found {drawn:?} -- the extractor is broken, not the manual",
+    );
+    assert_eq!(
+        documented, drawn,
+        "usermanual.html §5.5 does not match the menu the gateway draws.\n  \
+         manual: {documented:?}\n  actual: {drawn:?}",
     );
 }

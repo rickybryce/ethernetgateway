@@ -433,7 +433,7 @@ impl TelnetSession {
                     // ASCII only: `to_latin1_bytes` turns anything above
                     // U+00FF into `?`, and a PETSCII screen has no dash of
                     // its own to spare.
-                    self.show_help_page("MORE HELP", Self::more_help_lines())
+                    self.show_help_page("SECOND MENU HELP", Self::more_help_lines())
                         .await?;
                 }
                 "r" => {
@@ -465,7 +465,10 @@ impl TelnetSession {
         let sep = self.separator();
         let mut rows = vec![
             sep.clone(),
-            format!("  {}", self.yellow("MORE")),
+            // Named for the menu item that reaches it: an operator who chose
+            // "2  Second Menu" must not land on a page calling itself
+            // something else.
+            format!("  {}", self.yellow("SECOND MENU")),
             sep,
             String::new(),
         ];

@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **A second main-menu page, `M&nbsp;&nbsp;More`, that can restart or shut down
+- **A second main-menu page, `2&nbsp;&nbsp;Second&nbsp;Menu`, that can restart or shut down
   the computer the gateway runs on.**  A headless gateway &mdash; a Pi on a
   shelf, reached from a C64 &mdash; had no way to be power-cycled from the
   session that is already open on it; the only restart anywhere in the product
   restarts the *gateway process* and leaves the machine up.  The two live on a
   second page rather than on the main menu because the main menu had **one**
-  spare row and `M` took it: counting the prompt line, a slave with the CP/M
+  spare row and the entry took it: counting the prompt line, a slave with the CP/M
   emulator enabled now draws **22 of the 22** a PETSCII screen holds.  One
   entry was the whole budget, and a page that starts empty has room for
   whatever comes next.
