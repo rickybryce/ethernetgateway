@@ -1466,6 +1466,23 @@ impl TelnetSession {
         fn is_blank(s: &str) -> bool {
             s.trim().is_empty()
         }
+        // **Content that already fits is one page.**  Without this, the
+        // prefer-a-blank rule below fires even when nothing overflows: it
+        // scans back from `take` for the last blank and splits there, so a
+        // table well inside the budget still paged if it had a blank line
+        // anywhere but the end.  Measured on the live gateway -- the second
+        // menu's help is 15 lines against a budget of 15 and printed
+        // "Page 1/2", splitting 11 + 3 at the blank before its closing
+        // paragraph.  Splitting what fits is never useful, and the reader
+        // pays a keypress to finish a screen that was already whole.
+        let mut fits: Vec<&'a str> = lines.to_vec();
+        while fits.last().is_some_and(|s| is_blank(s)) {
+            fits.pop();
+        }
+        if fits.len() <= max_per_page {
+            return if fits.is_empty() { Vec::new() } else { vec![fits] };
+        }
+
         let mut pages: Vec<Vec<&'a str>> = Vec::new();
         let mut remaining: &[&str] = lines;
         while !remaining.is_empty() {

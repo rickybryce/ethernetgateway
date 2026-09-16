@@ -10912,14 +10912,45 @@ fn test_the_power_page_counts_against_the_shared_lockout() {
 #[cfg(unix)]
 #[test]
 fn test_the_second_menus_help_is_one_screen() {
-    let n = TelnetSession::more_help_lines().len();
-    assert!(
-        n <= crate::telnet::HELP_MAX_CONTENT_LINES,
-        "the second menu's help is {n} lines against a {}-line screen, so it \
-         paginates: shorten a line rather than making the reader page through \
-         an explanation of two keys",
+    // **Asserted through the paginator, not by counting lines.**  The first
+    // version of this test compared the line count against
+    // `HELP_MAX_CONTENT_LINES` and passed while the live gateway printed
+    // "Page 1/2" -- because `paginate_help` also split at the last blank line,
+    // so 15 lines against a budget of 15 still became two pages.  A count is a
+    // proxy; the number of pages is the claim.
+    let lines = TelnetSession::more_help_lines();
+    let pages = TelnetSession::paginate_help(lines, crate::telnet::HELP_MAX_CONTENT_LINES);
+    assert_eq!(
+        pages.len(),
+        1,
+        "the second menu's help ({} lines, budget {}) paginates into {} pages: \
+         shorten a line rather than making the reader page through an \
+         explanation of two keys",
+        lines.len(),
         crate::telnet::HELP_MAX_CONTENT_LINES,
+        pages.len(),
     );
+}
+
+/// Content that fits is one page, even when it contains a blank line.
+///
+/// The prefer-a-blank split is for *overflow*; it used to fire regardless, so
+/// a table inside the budget still paged if it had a blank anywhere but the
+/// end.  Found on the live gateway, not here: the second menu's help was 15
+/// lines against a budget of 15 and printed "Page 1/2".
+#[test]
+fn test_paginate_help_does_not_split_content_that_fits() {
+    let lines = ["a1", "a2", "", "b1", "b2", "", "c1", "c2"];
+    let pages = TelnetSession::paginate_help(&lines, 15);
+    assert_eq!(pages.len(), 1, "8 lines in a 15-line budget split: {pages:?}");
+    assert_eq!(pages[0], lines, "and the page keeps its blanks in place");
+
+    // Exactly at the budget is still one page -- the case that was wrong.
+    let full: Vec<&str> = (0..15)
+        .map(|i| if i == 11 { "" } else { "x" })
+        .collect();
+    let pages = TelnetSession::paginate_help(&full, 15);
+    assert_eq!(pages.len(), 1, "15 lines in a 15-line budget split: {pages:?}");
 }
 
 
