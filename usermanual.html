@@ -1289,16 +1289,103 @@ gaining privilege, and <code>sudo</code> is a setuid binary, so it cannot
 elevate however correct the password is.  The gateway reads the flag from
 <code>/proc/self/status</code> once at startup and simply does not offer what
 it cannot do: an item an operator cannot use teaches them to distrust the
-menu, and a password prompt that no answer satisfies is worse still.  To
-enable the feature, either run the gateway outside that unit or set
-<code>NoNewPrivileges=no</code> &mdash; which weakens the sandbox for the whole
-service, so it is a deliberate trade rather than a default.
+menu, and a password prompt that no answer satisfies is worse still.
 </p>
 
 <p>
 The second page itself survives an empty power section: it is where future
 items that do not fit the main menu will live, and the <code>2</code> entry
 appears whenever the page has anything on it.
+</p>
+
+<h3 id="ch5-power-enable">5.5.1 Enabling Restart and Shutdown</h3>
+
+<p>
+<strong>You do not have to stop running the gateway as a service.</strong>
+Two conditions have to hold, and the shipped unit deliberately meets neither
+&mdash; but both are settings, not consequences of being a service.
+</p>
+
+<ol>
+  <li><strong>The process must be allowed to gain privilege.</strong>
+  <code>sudo</code> is a setuid binary, and
+  <code>NoNewPrivileges=yes</code> stops any child gaining privilege through
+  <code>execve()</code>. systemd's own default for that setting is
+  <em>false</em>; the template turns it on as hardening. Note that
+  <code>DynamicUser=yes</code> would force it on and make it impossible to
+  disable &mdash; the template does not use it, for this reason among
+  others.</li>
+
+  <li><strong>The account the service runs as must be able to answer
+  <code>sudo</code>.</strong> The feature asks for the password of the account
+  the gateway runs as. The template's service user is created with
+  <code>useradd --system &hellip; --shell /usr/sbin/nologin</code> and no
+  <code>-p</code>, which leaves the account <em>locked</em> &mdash; a single
+  <code>!</code> in <code>/etc/shadow</code>. There is no password that would
+  satisfy the prompt, whatever <code>NoNewPrivileges</code> says.</li>
+</ol>
+
+<p>
+So there are two workable arrangements, and for this feature the second is
+usually the easier one:
+</p>
+
+<ul>
+  <li><strong>As a service, with the hardening relaxed.</strong> Set
+  <code>NoNewPrivileges=no</code> in the unit <em>and</em> run it as an
+  ordinary user account that has a password and may use <code>sudo</code>
+  (<code>User=</code><em>yourname</em> rather than the dedicated service
+  account). The gateway still never runs elevated &mdash; it shells out with
+  the operator's own password. The cost is real: that flag protects the whole
+  service, which also runs emulated Z80 software, a web server and an SSH
+  server, so this is a deliberate trade for a feature you want rather than a
+  default worth shipping.</li>
+
+  <li><strong>As yourself, which is the simpler arrangement and the one most
+  installations will want.</strong> Started from your own session the gateway
+  inherits that account, so both conditions hold with no configuration at all
+  &mdash; there is no hardening to relax and no second account to give a
+  password to.</li>
+</ul>
+
+<p>
+To have it come back after a reboot without being a system service, give it a
+<em>user</em> unit &mdash; <code>~/.config/systemd/user/ethernetgateway.service</code>
+&mdash; and enable lingering so the user manager starts at boot rather than at
+login:
+</p>
+
+<pre><code>systemctl --user enable --now ethernetgateway
+sudo loginctl enable-linger $USER</code></pre>
+
+<p>
+A user unit runs as you, with your password and no
+<code>NoNewPrivileges</code>, so restart and shutdown are available; lingering
+is what makes it start without anyone logging in. A desktop autostart entry
+(<code>~/.config/autostart/</code>) works too, but only once a graphical
+session exists.
+</p>
+
+<p>
+<strong>Set <code>WorkingDirectory=</code> to the same directory the gateway
+was launched from before.</strong> Everything it creates &mdash;
+<code>egateway.conf</code>, the SSH host key, the transfer tree &mdash; lives
+in <code>ethernetgateway-data</code> one level below where it starts
+(&sect;3.1), so a unit that starts somewhere else builds a second, empty data
+directory and comes up on default settings with your configuration still sitting
+untouched in the old one. If the old copy is still running it will also hold
+the ports, and the new one will bind nothing.
+</p>
+
+<p>
+Whichever you choose, the gateway checks at startup and shows the items only
+where they can work &mdash; so if they are still missing after a change, the
+change did not take effect. The password is never optional: this feature
+deliberately has no passwordless route, because the telnet menu is reachable
+without a login when <code>security_enabled</code> is off
+(&sect;5.4), and the <code>sudo</code> password is what stands between a
+visitor and the power button. Wrong answers count against the shared per-IP
+lockout (&sect;7.3).
 </p>
 
 <aside class="note">
