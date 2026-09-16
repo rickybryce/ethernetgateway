@@ -1910,7 +1910,19 @@ The telnet, SSH, and web servers share a single in-memory lockout table
 keyed on the remote IP address. After <strong>3</strong> failed
 authentication attempts within 5 minutes the IP is blocked across
 <em>all three</em> protocols for 5 minutes. An attacker cannot bounce
-between protocols to reset the counter. The web server responds to a
+between protocols to reset the counter.
+</p>
+
+<p>
+A refused <code>sudo</code> password on the second menu
+(&sect;5.5) counts here too, and it is the same three. That prompt asks for
+the password of the <em>host account</em>, not the gateway's, and every wrong
+answer is a real PAM attempt against it &mdash; so the cap has to survive a
+reconnect, or three guesses per connection is as many guesses as the peer
+cares to make. It counts refusals rather than wrong passwords: a right
+password from an account that is not in <code>sudoers</code> is refused too,
+and telling the two apart means reading <code>sudo</code>'s
+locale-dependent English. The web server responds to a
 locked-out client with <code>429 Too Many Requests</code> and a
 <code>Retry-After: 300</code> header; telnet and SSH simply refuse the
 session.

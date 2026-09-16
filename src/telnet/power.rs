@@ -522,17 +522,17 @@ impl TelnetSession {
             // this prompt with no credential, and three guesses per connection
             // times `conn_rate_max` (20 a minute) is sixty PAM attempts a
             // minute against the operator's *system* account, from as many
-            // addresses as the peer likes.  The comment on
-            // `MAX_PASSWORD_ATTEMPTS` offered `conn_rate_max` as the bound on
-            // exactly this, and it is a bound -- just not at the scale that
-            // matters, since `pam_faillock` denies at three.
+            // addresses as the peer likes.  The cap that used to
+            // live here offered `conn_rate_max` as the bound on exactly that,
+            // and it is a bound -- just not at the scale that matters, since
+            // `pam_faillock` denies at three.
             //
             // So it goes in the shared `LockoutMap`, the same counter the
             // telnet, SSH and web credentials use, for the reason that map is
             // already shared between them: a counter an attacker can reset by
             // reconnecting is not a counter.  `MAX_AUTH_ATTEMPTS` is 3, as
-            // `MAX_PASSWORD_ATTEMPTS` was, so one session behaves exactly as
-            // before and only the reconnect changes.
+            // the per-session cap it replaced was, so one session behaves
+            // exactly as before and only the reconnect changes.
             //
             // Checked here rather than in `authenticate`, because that runs
             // only when `security_enabled` is on and this prompt is reachable
