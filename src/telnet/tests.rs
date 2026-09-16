@@ -256,11 +256,59 @@ fn test_lockout_different_ips() {
     assert!(!is_locked_out(&lockouts, ip2));
 }
 
+/// The lockout window rule itself, driven by a supplied age.
+///
+/// **This is the half that cannot skip.**  The two tests below backdate a live
+/// entry with `Instant::checked_sub`, which answers `None` when the result
+/// would pre-date the platform's monotonic epoch -- boot time on Linux -- so
+/// on a host up for less than five minutes, which a fresh CI container is,
+/// both of them take an early `return` and are counted among the passes.  The
+/// rule they exist for is here instead, where the age is a parameter and the
+/// boundary can be stated: at exactly `LOCKOUT_DURATION` the entry has
+/// expired, which is the comparison no elapsed-time test can pin.
+#[test]
+fn test_the_lockout_window_rule() {
+    use std::time::Duration;
+    let secs = |n| Duration::from_secs(n);
+    let window = LOCKOUT_DURATION;
+
+    // The window: inclusive at zero, exclusive at the far end.
+    assert!(within_lockout_window(Duration::ZERO), "a failure just recorded is inside");
+    assert!(
+        within_lockout_window(window - Duration::from_millis(1)),
+        "a millisecond short of the window is still inside",
+    );
+    assert!(
+        !within_lockout_window(window),
+        "exactly at the window the entry has expired -- the boundary the \
+         backdating tests cannot reach",
+    );
+    assert!(!within_lockout_window(window + secs(1)), "past the window is out");
+
+    // The threshold: a lockout needs MAX_AUTH_ATTEMPTS failures AND a fresh one.
+    assert!(
+        !lockout_is_active(MAX_AUTH_ATTEMPTS - 1, Duration::ZERO),
+        "one short of the threshold is not a lockout however recent",
+    );
+    assert!(lockout_is_active(MAX_AUTH_ATTEMPTS, Duration::ZERO), "at the threshold, locked");
+    assert!(
+        lockout_is_active(MAX_AUTH_ATTEMPTS + 5, window - secs(1)),
+        "still locked inside the window",
+    );
+    assert!(
+        !lockout_is_active(MAX_AUTH_ATTEMPTS + 5, window),
+        "the count does not survive the window -- an old lockout must decay",
+    );
+}
+
 /// Lockout counter must reset after `LOCKOUT_DURATION` elapses
 /// without a successful auth.  Faking the elapsed time via direct
 /// map manipulation rather than waiting 5 minutes — the production
 /// code reads `entry.1.elapsed()` so we can backdate `entry.1` to
 /// simulate a stale lockout.
+///
+/// This is the map half, and it can skip (see below); the rule it rests on is
+/// held unconditionally by `test_the_lockout_window_rule`.
 #[test]
 fn test_lockout_counter_resets_after_duration() {
     let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
@@ -314,6 +362,9 @@ fn test_lockout_counter_resets_after_duration() {
 /// A new failure from any IP should sweep stale entries from
 /// other IPs out of the map, so a long-running public instance
 /// doesn't accumulate one entry per distinct attacker forever.
+///
+/// Backdates a live entry, so it can skip on a freshly-booted host; the
+/// staleness rule itself is `test_the_lockout_window_rule`, which cannot.
 #[test]
 fn test_lockout_prunes_stale_entries() {
     let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
@@ -739,6 +790,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         erase_char: 0x7F,
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
+        power_password_failures: 0,
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -797,6 +849,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         erase_char: 0x7F,
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
+        power_password_failures: 0,
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -3006,23 +3059,48 @@ fn test_main_menu_error_hint() {
     }
 }
 
-/// Main help screen content has 19 lines (the dual-port refactor
-/// stretched the G entry to 3 lines; the CP/M `K` entry adds 2 more).
-/// The
-/// `show_help_page` paginator handles overflow gracefully, so the
-/// total still fits the 22-row PETSCII budget for everything
-/// except the bottom prompt — which lands on its own page if
-/// needed.
+/// Main help screen content is 18 lines, plus two for each optional item that
+/// is on the menu: `K` when the CP/M emulator is on, `2` where the second page
+/// has anything on it (Unix only).  The `show_help_page` paginator handles
+/// overflow gracefully, so the total still fits the 22-row PETSCII budget for
+/// everything except the bottom prompt — which lands on its own page if needed.
+///
+/// **Both optional entries are counted from the parameter, not from the
+/// machine**, so every combination is measured wherever the suite runs.  A
+/// version that asked the live state could only ever check the installation it
+/// ran on, which is how the `2` lines came to be printed on a menu that does
+/// not draw that key.
 #[test]
 fn test_main_help_content_line_count() {
-    // 20 base lines, plus the two-line `M` entry on Unix.
-    let expected = if cfg!(unix) { 22 } else { 20 };
-    assert_eq!(
-        TelnetSession::main_help_lines().len(),
-        expected,
-        "main help should have exactly {} content lines",
-        expected,
-    );
+    const BASE: usize = 18;
+    for cpm in [false, true] {
+        for second in [false, true] {
+            let items = MenuItems { cpm, second_page: second };
+            // The second page is compiled out off Unix, so its lines are too.
+            let second_shown = second && cfg!(unix);
+            let expected = BASE + 2 * usize::from(cpm) + 2 * usize::from(second_shown);
+            let lines = TelnetSession::main_help_lines(items);
+            assert_eq!(
+                lines.len(),
+                expected,
+                "main help with cpm={cpm} second={second} should have {expected} \
+                 content lines, not {}:\n  {}",
+                lines.len(),
+                lines.join("\n  "),
+            );
+            // The entry itself, not just the count: two lines could be any two.
+            assert_eq!(
+                lines.iter().any(|l| l.starts_with("  K  ")),
+                cpm,
+                "the K entry is present exactly when the menu draws it",
+            );
+            assert_eq!(
+                lines.iter().any(|l| l.starts_with("  2  ")),
+                second_shown,
+                "the 2 entry is present exactly when the menu draws it",
+            );
+        }
+    }
 }
 
 /// Shutdown broadcast message must be valid and end with CRLF.
@@ -4437,7 +4515,14 @@ fn test_every_help_screen_fits_its_terminal() {
     // (name, lines, width) — the wide screens at 80, the shared ones at 40.
     // No flag: one text for all terminals, so it must fit the narrowest.
     let mut screens: Vec<(&str, &[&str], usize)> = vec![
-        ("main", TelnetSession::main_help_lines(), PETSCII_WIDTH),
+        // The full page: gating an item only ever *removes* lines, so the
+        // variant with both optional entries is the widest this screen gets
+        // and covers the narrower ones.
+        (
+            "main",
+            TelnetSession::main_help_lines(MenuItems { cpm: true, second_page: true }),
+            PETSCII_WIDTH,
+        ),
         ("ai_chat", TelnetSession::ai_chat_help_lines(), PETSCII_WIDTH),
         ("bookmarks", TelnetSession::bookmarks_help_lines(), PETSCII_WIDTH),
         ("form", TelnetSession::form_help_lines(), PETSCII_WIDTH),
@@ -5466,7 +5551,11 @@ fn test_modem_console_menu_row_counts() {
 fn all_help_line_groups(petscii: bool) -> Vec<&'static [&'static str]> {
     #[allow(unused_mut)]
     let mut groups: Vec<&'static [&'static str]> = vec![
-        TelnetSession::main_help_lines(),
+        // One entry per table, which `test_every_help_table_is_width_checked`
+        // counts: the optional items only ever remove lines, so the full page
+        // is the widest and a second variant here would be both redundant and
+        // a table counted twice.
+        TelnetSession::main_help_lines(MenuItems { cpm: true, second_page: true }),
         TelnetSession::config_submenu_help_lines(petscii),
         TelnetSession::config_help_lines(petscii),
         TelnetSession::other_help_lines(petscii),
@@ -10744,6 +10833,11 @@ async fn test_run_elevated_feeds_the_password_and_closes_stdin() {
 #[cfg(unix)]
 #[test]
 fn test_more_menu_rows_fit_the_screen() {
+    // **Both shapes of the page.**  Where the computer cannot be restarted the
+    // two power rows are not drawn, and that page -- which is what a packaged
+    // installation shows -- was measured nowhere: it must still fit, still
+    // carry its way out, and still not offer what it cannot do.
+    for powered in [false, true] {
     for (term, width) in [
         (TerminalType::Petscii, PETSCII_WIDTH - 1),
         (TerminalType::Ansi, 80),
@@ -10751,7 +10845,7 @@ fn test_more_menu_rows_fit_the_screen() {
     ] {
         let mut session = make_test_session(term);
         session.color_enabled = false;
-        let rows = session.more_menu_rows(true);
+        let rows = session.more_menu_rows(powered);
         // Plus one for the prompt line the loop writes under them.
         let drawn = rows.len() + 1;
         assert!(
@@ -10760,10 +10854,19 @@ fn test_more_menu_rows_fit_the_screen() {
             drawn,
             term,
         );
-        // It must still be a menu: both keys and the footer.
+        // It must still be a menu: the footer always, the power keys exactly
+        // when the page offers them.  An empty page keeps its way back, or an
+        // operator who pressed 2 would be stranded on it.
         let text = rows.join("\n");
-        for want in ["Restart the computer", "Shut down the computer", "Back", "Help"] {
+        for want in ["Back", "Help"] {
             assert!(text.contains(want), "the MORE page lost {:?} on {:?}", want, term);
+        }
+        for want in ["Restart the computer", "Shut down the computer"] {
+            assert_eq!(
+                text.contains(want),
+                powered,
+                "{want:?} is on the page exactly when it can be done ({powered}) on {term:?}",
+            );
         }
         for row in &rows {
             assert!(
@@ -10779,15 +10882,18 @@ fn test_more_menu_rows_fit_the_screen() {
         // helper that returned an empty string would leave a page of codes.
         // (Asserting the row *count* here would not fail -- `more_menu_rows`
         // pushes a fixed set and colour never varies it.)
-        let coloured = make_test_session(term).more_menu_rows(true).join("\n");
-        for want in ["Restart the computer", "Shut down the computer"] {
-            assert!(
-                coloured.contains(want),
-                "with colour on, the MORE page lost {:?} on {:?}",
-                want,
-                term,
-            );
+        if powered {
+            let coloured = make_test_session(term).more_menu_rows(true).join("\n");
+            for want in ["Restart the computer", "Shut down the computer"] {
+                assert!(
+                    coloured.contains(want),
+                    "with colour on, the MORE page lost {:?} on {:?}",
+                    want,
+                    term,
+                );
+            }
         }
+    }
     }
 }
 
@@ -10800,28 +10906,31 @@ fn test_more_menu_error_hint_fits_and_is_complete() {
     //
     // The hint follows the page: where the computer cannot be restarted the
     // two power keys are not drawn and are not accepted, so naming them in the
-    // hint would send an operator to keys that do nothing.  Both texts are
-    // checked, because the suite runs on machines of either kind.
-    let hint = crate::telnet::power::more_menu_hint();
-    let printed = format!("  {hint}");
-    assert!(
-        printed.chars().count() <= PETSCII_WIDTH,
-        "the hint prints as {:?}, {} columns",
-        printed,
-        printed.chars().count(),
-    );
-    let always = ["H", "Q"];
-    let power = ["R", "S"];
-    for key in always {
-        assert!(hint.contains(key), "the hint must always mention {key}: {hint:?}");
-    }
-    let offers_power = crate::telnet::power::available();
-    for key in power {
-        assert_eq!(
-            hint.contains(key),
-            offers_power,
-            "the hint names {key} exactly when the page offers it: {hint:?}",
+    // hint would send an operator to keys that do nothing.
+    //
+    // **Both texts, driven by the parameter.**  This read the live
+    // `available()` and asserted the hint agreed with it, which on any one
+    // machine exercises one of the two strings and never measures the other --
+    // and the one it skips here is the one a packaged installation shows.
+    for powered in [false, true] {
+        let hint = crate::telnet::power::more_menu_hint(powered);
+        let printed = format!("  {hint}");
+        assert!(
+            printed.chars().count() <= PETSCII_WIDTH,
+            "the hint prints as {:?}, {} columns",
+            printed,
+            printed.chars().count(),
         );
+        for key in ["H", "Q"] {
+            assert!(hint.contains(key), "the hint must always mention {key}: {hint:?}");
+        }
+        for key in ["R", "S"] {
+            assert_eq!(
+                hint.contains(key),
+                powered,
+                "the hint names {key} exactly when the page offers it: {hint:?}",
+            );
+        }
     }
 }
 
@@ -10854,7 +10963,7 @@ fn test_the_sudo_attempt_bound_survives_a_reconnect() {
     );
     // Three refusals, as if spread over three separate connections -- nothing
     // here carries session state, which is the point.
-    for _ in 0..crate::telnet::AUTH_MAX_ATTEMPTS {
+    for _ in 0..crate::telnet::MAX_AUTH_ATTEMPTS {
         crate::telnet::record_auth_failure(&lockouts, ip);
     }
     assert!(
@@ -10868,7 +10977,7 @@ fn test_the_sudo_attempt_bound_survives_a_reconnect() {
     );
     // And the bound is small enough to be a bound.
     assert!(
-        (1..=5).contains(&crate::telnet::AUTH_MAX_ATTEMPTS),
+        (1..=5).contains(&crate::telnet::MAX_AUTH_ATTEMPTS),
         "the attempt bound is not a bound",
     );
 }
@@ -10907,10 +11016,83 @@ fn test_the_power_page_counts_against_the_shared_lockout() {
          only when security_enabled is on and this page is reachable when \
          it is off",
     );
+    // The per-session field exists again, deliberately and only for a session
+    // the map cannot key -- see `test_the_sudo_cap_uses_the_map_for_an_address`
+    // and its address-less twin, which pin which counter each kind of session
+    // gets.  A scan cannot tell those two apart, so it no longer tries: the
+    // rule it used to assert (`power_password_failures` must not appear) would
+    // now forbid the fix for callers with no address.
     assert!(
-        !code.contains("power_password_failures"),
-        "the per-session counter is back; it resets on reconnect, which is \
-         the whole defect this replaced",
+        code.contains("peer_addr"),
+        "power.rs no longer distinguishes an addressed session from one \
+         without, so one of the two counters is reaching the wrong sessions",
+    );
+}
+
+/// An addressed session is bounded by the shared map, and a reconnect does not
+/// hand out three more.
+#[cfg(unix)]
+#[test]
+fn test_the_sudo_cap_uses_the_map_for_an_address() {
+    let ip: IpAddr = "192.0.2.7".parse().unwrap();
+    let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
+
+    let mut session = make_test_session(TerminalType::Ansi);
+    session.peer_addr = Some(ip);
+    session.lockouts = lockouts.clone();
+    assert!(!session.power_attempts_exhausted(), "a fresh session starts with attempts");
+    for _ in 0..MAX_AUTH_ATTEMPTS {
+        session.record_power_failure();
+    }
+    assert!(session.power_attempts_exhausted(), "three refusals must stop the prompt");
+    assert_eq!(
+        session.power_password_failures, 0,
+        "an addressed session must not be counted in the per-session field --          that one resets on reconnect",
+    );
+
+    // The reconnect: a brand-new session from the same address, sharing the
+    // map the way every listener does.  This is what the per-session counter
+    // could not do and why the map is the primary rule.
+    let mut again = make_test_session(TerminalType::Ansi);
+    again.peer_addr = Some(ip);
+    again.lockouts = lockouts;
+    assert!(
+        again.power_attempts_exhausted(),
+        "hanging up and coming back handed out three more attempts",
+    );
+}
+
+/// A session with no address is bounded by its own count.
+///
+/// **The case the per-IP map is structurally blind to.**  A caller on the
+/// modem, or a CP/M guest that dialled `ATDT ethernetgateway`, has no
+/// `peer_addr`, so it is in the `LockoutMap` under no key at all -- and every
+/// wrong answer at this prompt is a real PAM attempt against the operator's
+/// host account.  Between the per-session counter being removed and this, that
+/// prompt could be answered without bound.
+#[cfg(unix)]
+#[test]
+fn test_the_sudo_cap_falls_back_to_the_session_without_an_address() {
+    let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
+    let mut session = make_test_session(TerminalType::Ansi);
+    session.lockouts = lockouts.clone();
+    assert_eq!(session.peer_addr, None, "this test is about the address-less case");
+
+    assert!(!session.power_attempts_exhausted());
+    for n in 1..=MAX_AUTH_ATTEMPTS {
+        assert_eq!(session.record_power_failure(), n, "the count is the running total");
+    }
+    assert!(
+        session.power_attempts_exhausted(),
+        "an address-less session must still be stopped after {} refusals",
+        MAX_AUTH_ATTEMPTS,
+    );
+    // And it must not have invented a key in the shared map: a made-up address
+    // would lock out whoever really holds it.
+    assert!(
+        lockouts.lock().unwrap().is_empty(),
+        "a session with no address wrote into the per-IP map: {:?}",
+        lockouts.lock().unwrap().keys().collect::<Vec<_>>(),
     );
 }
 /// The second menu's help fits one screen.
@@ -11505,11 +11687,20 @@ fn test_every_menu_key_is_explained_in_that_pages_help() {
     // reason: on Windows there is no second page and `-D warnings` would
     // otherwise fail the build on an unused `mut`.
     #[allow(unused_mut)]
-    let mut pages: Vec<(&str, Vec<String>, &'static [&'static str])> = vec![(
-        "main menu",
-        session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, None),
-        TelnetSession::main_help_lines(),
-    )];
+    let mut pages: Vec<(&str, Vec<String>, &'static [&'static str])> = vec![
+        (
+            "main menu",
+            session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, None),
+            TelnetSession::main_help_lines(MenuItems { cpm: true, second_page: cfg!(unix) }),
+        ),
+        // The same page with both optional items off: the help must still
+        // explain every key that is left.
+        (
+            "main menu (no optional items)",
+            session.main_menu_rows(MenuItems { cpm: false, second_page: false }, None),
+            TelnetSession::main_help_lines(MenuItems { cpm: false, second_page: false }),
+        ),
+    ];
     #[cfg(unix)]
     pages.push((
         "second menu",
@@ -11543,6 +11734,79 @@ fn test_every_menu_key_is_explained_in_that_pages_help() {
                 keys_of(&rows),
                 help.join("\n    "),
             );
+        }
+    }
+}
+
+/// ...and the other way round: a help screen must not explain a key the page
+/// does not draw.
+///
+/// **This is the direction that was missing, and something had already gone
+/// through the gap.**  The second page and its `2` entry are hidden where the
+/// kernel forbids elevation -- the ordinary state of a packaged installation
+/// -- across the menu row, the key arm and the error hint; the help screen was
+/// a fourth surface and was not gated, so `H` documented a key that was not on
+/// the menu and did nothing when pressed.  The existing guard above could not
+/// see it: it only asks that every key on the screen is explained.
+///
+/// Driven by `MenuItems` rather than by the live state, for the reason that
+/// type exists: both flags come from process state a test cannot set, so a
+/// guard reading them could only ever check the machine it runs on.
+#[test]
+fn test_the_main_help_explains_only_keys_the_menu_draws() {
+    /// The item keys a help table documents: `"  K  Label"`.
+    fn help_keys(lines: &[&str]) -> Vec<char> {
+        let mut keys: Vec<char> = lines
+            .iter()
+            .filter_map(|l| {
+                let c: Vec<char> = l.chars().collect();
+                // Two spaces, one key, two spaces, a label -- the indented
+                // continuation lines have five leading spaces and no key.
+                (c.len() > 5
+                    && c[0] == ' '
+                    && c[1] == ' '
+                    && (c[2].is_ascii_uppercase() || c[2].is_ascii_digit())
+                    && c[3] == ' '
+                    && c[4] == ' '
+                    && c[5] != ' ')
+                    .then_some(c[2])
+            })
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
+    let mut session = make_test_session(TerminalType::Ansi);
+    session.color_enabled = false; // read the keys, not the colour codes
+
+    for cpm in [false, true] {
+        for second in [false, true] {
+            let items = MenuItems { cpm, second_page: second };
+            let help = TelnetSession::main_help_lines(items);
+            let documented = help_keys(help);
+            // Positive control: an extractor that found nothing would pass
+            // every assertion below without reading a single key.
+            assert!(
+                documented.len() >= 6,
+                "the help scan found {documented:?} -- the page explains more \
+                 than that, so the extractor is broken, not the help",
+            );
+            let drawn = session.main_menu_rows(items, None).join("\n");
+            for key in documented {
+                if key == 'H' {
+                    continue; // the key they pressed to read this
+                }
+                let wanted = format!("  {key}  ");
+                assert!(
+                    drawn.contains(&wanted),
+                    "cpm={cpm} second={second}: the help explains key {key:?} \
+                     but the menu does not draw it. A help screen documenting \
+                     an absent key is the same defect as an item an operator \
+                     cannot use.\n  menu:\n{drawn}\n  help:\n    {}",
+                    help.join("\n    "),
+                );
+            }
         }
     }
 }
@@ -11632,6 +11896,47 @@ fn test_the_no_new_privs_field_is_read_exactly() {
         !parse_no_new_privs("NoNewPrivsSomething:\t1\n"),
         "a different field beginning with the same text is not this one",
     );
+}
+
+/// The `sudo` password prompt fits a C64, whatever the account is called.
+///
+/// **The account name comes from the environment, so it has no bound of its
+/// own.**  A service account, a long login, or `$USER` set to something
+/// absurd all reach this line, and it is printed with no wrap: on PETSCII a
+/// row that exactly fills 40 takes a second row for its CR/LF, so a long name
+/// costs the screen two rows and lands the prompt somewhere other than where
+/// the operator is looking.  Every other value on these screens is cut
+/// (`computer_row_for` to 26); this one was not, until it was pulled out of
+/// the `format!` it was hiding in.
+#[cfg(unix)]
+#[test]
+fn test_the_sudo_password_prompt_fits_the_narrowest_screen() {
+    use crate::telnet::power::password_prompt_label;
+    let long = "a".repeat(200);
+    for (what, user) in [
+        ("no name at all", None),
+        ("an empty name", Some("")),
+        ("whitespace", Some("   ")),
+        ("an ordinary login", Some("ricky")),
+        ("the service account", Some("ethernetgateway")),
+        ("an absurd name", Some(long.as_str())),
+    ] {
+        let label = password_prompt_label(user);
+        assert!(
+            label.chars().count() <= PETSCII_WIDTH,
+            "the prompt for {what} is {} columns: {label:?}",
+            label.chars().count(),
+        );
+        // It must still say what it wants, or a fit test passes on a blank.
+        assert!(
+            label.to_lowercase().contains("password"),
+            "the prompt for {what} does not ask for a password: {label:?}",
+        );
+    }
+    // The name is shown when there is one, and the two shapes differ -- a
+    // truncation that swallowed the name would pass the width check alone.
+    assert!(password_prompt_label(Some("ricky")).contains("ricky"));
+    assert!(!password_prompt_label(None).contains("for"));
 }
 
 /// The "cannot elevate here" screen says which setting, and fits a C64.

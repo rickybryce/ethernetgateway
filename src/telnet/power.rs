@@ -1,8 +1,9 @@
 //! The main menu's second page — restarting and shutting down the computer
 //! the gateway runs on.
 //!
-//! **Unix only.** The whole module is `#[cfg(unix)]`, along with the `M` entry
-//! on the main menu, its key handler and its half of the valid-key hint. There
+//! **Unix only.** The whole module is `#[cfg(unix)]`, along with the `2` entry
+//! on the main menu, its key handler, its half of the valid-key hint and its
+//! lines in the main help. There
 //! is no Windows equivalent of "run one command as another user with a
 //! password typed down a telnet session": `shutdown /r` needs the *process* to
 //! hold the privilege already, and the gateway deliberately does not run
@@ -12,6 +13,11 @@
 //! So the entries are compiled out there rather than shown and then refused.
 //! When an item that *does* work on Windows lands on this page, the gate moves
 //! from the module to the power items.
+//!
+//! **And on Unix the same items are hidden at run time** where the kernel's
+//! `no_new_privs` forbids elevation -- see [`available`].  Four surfaces carry
+//! that: the rows, the `2` entry, that key's arm, and both the menu hint and
+//! the main help screen.  A fifth would be a key documented and refused.
 //!
 //! **The gateway asks; it is never elevated.** Every path here shells out to
 //! `sudo` with the operator's own password, and the password reaches us
@@ -436,11 +442,41 @@ pub(in crate::telnet) async fn run_elevated(
 ///
 /// Budgeted against `PETSCII_WIDTH - 2`: `show_error` prints a two-space
 /// indent in front of whatever it is given.
-pub(in crate::telnet) fn more_menu_hint() -> &'static str {
-    if available() {
+///
+/// **The flag is a parameter for the reason `more_menu_rows` takes one.**  It
+/// comes from the kernel, so a version reading `available()` itself could only
+/// ever be exercised in whichever state the machine running the suite happens
+/// to be in -- and the text for the other state, which is the one a packaged
+/// installation shows, would be checked nowhere.  The first version of this
+/// did exactly that, under a test comment claiming both were covered.
+pub(in crate::telnet) fn more_menu_hint(powered: bool) -> &'static str {
+    if powered {
         "Press R, S, H, or Q."
     } else {
         "Press H or Q."
+    }
+}
+
+/// `  Password for <user>: `, fitted to the narrowest screen.
+///
+/// **`$USER` is an environment variable, so it can be anything.**  A service
+/// account name is easily longer than a C64's whole row, and this was the one
+/// string on these screens with no width at all while the hostname ten lines
+/// up is carefully cut to 26.  16 leaves room for `  Password for ` and the
+/// `: `.
+///
+/// A free function taking the name, rather than the inline `format!` it was,
+/// for the reason `computer_row_for` is one: a guard has to be able to drive
+/// the longest name that can ever reach it, and a test that rebuilds the row
+/// from the same two literals is a test comparing the source with a copy of
+/// itself.
+pub(in crate::telnet) fn password_prompt_label(user: Option<&str>) -> String {
+    match user.filter(|u| !u.trim().is_empty()) {
+        Some(u) => format!(
+            "  Password for {}: ",
+            crate::webbrowser::truncate_to_width(u, 16)
+        ),
+        None => "  Password: ".to_string(),
     }
 }
 
@@ -499,6 +535,48 @@ impl TelnetSession {
         ))
     }
 
+    /// Who is asking, for the log: the address, or what kind of session it is
+    /// when there is no address.
+    ///
+    /// One helper, because three log lines named the requester and two of them
+    /// did it only for an addressed session.
+    fn power_requester(&self) -> String {
+        match self.peer_addr {
+            Some(ip) => ip.to_string(),
+            None => self.client_type_label().to_string(),
+        }
+    }
+
+    /// Whether this session has spent its `sudo` attempts.
+    ///
+    /// **Two counters, because one of them cannot see every session.**  An
+    /// addressed session is held by the shared per-IP `LockoutMap`, which is
+    /// the counter an attacker cannot reset by reconnecting.  A session with
+    /// no address -- a caller on the modem, a CP/M guest that dialled
+    /// `ATDT ethernetgateway` -- is not in that map at any key, so it was
+    /// bounded by nothing once the per-session field was removed: every wrong
+    /// answer here is a real PAM attempt against the operator's *host*
+    /// account, and the page simply kept asking.  `MAX_AUTH_ATTEMPTS` is the
+    /// same three either way.
+    pub(in crate::telnet) fn power_attempts_exhausted(&self) -> bool {
+        match self.peer_addr {
+            Some(ip) => crate::telnet::is_locked_out(&self.lockouts, ip),
+            None => self.power_password_failures >= crate::telnet::MAX_AUTH_ATTEMPTS,
+        }
+    }
+
+    /// Count one refused `sudo`, wherever this session is counted, and return
+    /// the running total for the log.
+    pub(in crate::telnet) fn record_power_failure(&mut self) -> u32 {
+        match self.peer_addr {
+            Some(ip) => crate::telnet::record_auth_failure(&self.lockouts, ip),
+            None => {
+                self.power_password_failures = self.power_password_failures.saturating_add(1);
+                self.power_password_failures
+            }
+        }
+    }
+
     /// The main menu's second page.
     ///
     /// Returns `false` when the session must end — the same convention as
@@ -554,7 +632,7 @@ impl TelnetSession {
                     }
                 }
                 _ => {
-                    self.show_error(more_menu_hint()).await?;
+                    self.show_error(more_menu_hint(available())).await?;
                 }
             }
         }
@@ -690,12 +768,23 @@ impl TelnetSession {
             // Checked here rather than in `authenticate`, because that runs
             // only when `security_enabled` is on and this prompt is reachable
             // when it is off -- which is the whole exposure.
-            if let Some(ip) = self.peer_addr
-                && crate::telnet::is_locked_out(&self.lockouts, ip)
-            {
-                glog!("Power: {} is locked out; not asking for a password", ip);
-                self.show_error("Too many tries. Try again later.")
-                    .await?;
+            if self.power_attempts_exhausted() {
+                glog!(
+                    "Power: {} has used its attempts; not asking for a password",
+                    self.power_requester(),
+                );
+                // **The two counters expire differently, so they must not
+                // promise the same thing.**  An address is banned for
+                // `LOCKOUT_DURATION` and waiting really does clear it; a
+                // session floor has no clock at all and only a fresh
+                // connection resets it, so "try again later" would be a
+                // screen the next step cannot keep -- the rule the whole
+                // order of steps on this page exists to serve.
+                self.show_error(match self.peer_addr {
+                    Some(_) => "Too many tries. Try again later.",
+                    None => "Too many tries for this session.",
+                })
+                .await?;
                 return Ok(true);
             }
 
@@ -735,10 +824,16 @@ impl TelnetSession {
                     // line is missing sends them looking in the wrong place.
                     // The refusal itself is shown each time and names the
                     // real cause.
-                    if let Some(ip) = self.peer_addr {
-                        let n = crate::telnet::record_auth_failure(&self.lockouts, ip);
-                        glog!("Power: sudo refused for {} (failure {})", ip, n);
-                    }
+                    // Logged for every session, counted for every session.
+                    // Both used to sit inside `if let Some(ip)`, so a caller
+                    // with no address -- the modem, a CP/M guest -- left no
+                    // trace of a refused system password at all.
+                    let n = self.record_power_failure();
+                    glog!(
+                        "Power: sudo refused for {} (failure {})",
+                        self.power_requester(),
+                        n,
+                    );
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     let msg = sudo_error_line(&stderr, self.confirmation_content_width());
                     self.show_error(&msg).await?;
@@ -761,14 +856,10 @@ impl TelnetSession {
         // one action here that leaves no screen behind to look at.  Written
         // *before* the goodbye, so the record exists even if the terminal is
         // gone by the time we try to say it.
-        let who = match self.peer_addr {
-            Some(ip) => ip.to_string(),
-            None => self.client_type_label().to_string(),
-        };
         glog!(
             "Power: {} requested from the session menu by {}",
             action.argv().join(" "),
-            who,
+            self.power_requester(),
         );
 
         // Past here the machine is going down, so say so and let every byte
@@ -875,20 +966,8 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line("").await?;
-        // `$USER` is an environment variable, so it can be anything -- a
-        // service account name is easily longer than a C64's whole row, and
-        // this was the one string on these screens with no width at all while
-        // the hostname ten lines up is carefully cut to 26.  16 leaves room
-        // for `  Password for ` and the `: `.
         let (_, user) = config::current_owner_identity();
-        let label = match user.as_deref().filter(|u| !u.trim().is_empty()) {
-            Some(u) => format!(
-                "  Password for {}: ",
-                crate::webbrowser::truncate_to_width(u, 16)
-            ),
-            None => "  Password: ".to_string(),
-        };
-        self.send(&label).await?;
+        self.send(&password_prompt_label(user.as_deref())).await?;
         self.flush().await?;
         let pw = self.get_password_input().await?;
         Ok(match pw {

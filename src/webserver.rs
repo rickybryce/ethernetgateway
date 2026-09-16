@@ -342,9 +342,9 @@ async fn handle_connection(
                     "Web: auth failed for {} (attempt {}/{})",
                     peer_ip,
                     count,
-                    telnet::AUTH_MAX_ATTEMPTS,
+                    telnet::MAX_AUTH_ATTEMPTS,
                 );
-                if count >= telnet::AUTH_MAX_ATTEMPTS {
+                if count >= telnet::MAX_AUTH_ATTEMPTS {
                     let body = b"429 Too Many Requests\nToo many failed logins. Try again later.\n";
                     write_locked_out(&mut stream, body).await?;
                     return Ok(());
@@ -5694,7 +5694,7 @@ mod tests {
     fn test_lockout_triggers_after_max_attempts() {
         // The web server reuses the same LockoutMap as telnet/SSH.
         // Verify that record_auth_failure crosses the threshold in
-        // exactly AUTH_MAX_ATTEMPTS calls and that is_locked_out
+        // exactly MAX_AUTH_ATTEMPTS calls and that is_locked_out
         // flips at that boundary — same contract the web auth path
         // depends on.
         use std::collections::HashMap;
@@ -5704,7 +5704,7 @@ mod tests {
         let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200));
         assert!(!telnet::is_locked_out(&lockouts, ip));
-        for _ in 0..telnet::AUTH_MAX_ATTEMPTS {
+        for _ in 0..telnet::MAX_AUTH_ATTEMPTS {
             telnet::record_auth_failure(&lockouts, ip);
         }
         assert!(telnet::is_locked_out(&lockouts, ip));

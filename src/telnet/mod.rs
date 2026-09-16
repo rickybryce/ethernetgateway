@@ -83,10 +83,10 @@ pub(crate) use cpm_emu::{place_bundled_terminals, DriveA};
 mod session;
 pub(crate) use session::is_backspace_key;
 // The main menu's optional items, as a named pair -- see its own comment for
-// why it is not two `bool` parameters.  Test-only: the product reaches it
-// through `session`'s own path, and a second route for the binary would be an
-// unused import.
-#[cfg(test)]
+// why it is not two `bool` parameters.  Named here rather than only in
+// `session` because `main_help_lines` below takes it too: the help page and
+// the menu it explains are told the same thing, or they can disagree about
+// which items exist.
 pub(in crate::telnet) use session::MenuItems;
 /// Shared with the web and desktop editors so all three surfaces describe a
 /// slave's missing credential in the same words.
@@ -250,7 +250,18 @@ const SERVER_ADDR_DISPLAY_CAP: usize = 3;
 /// an extra line at the bottom.  Named rather than inlined so the per-screen
 /// help tests can assert against the real limit instead of a copy of it.
 const HELP_MAX_CONTENT_LINES: usize = 15;
-const MAX_AUTH_ATTEMPTS: u32 = 3;
+/// How many failed credentials one address may submit before it is banned for
+/// [`LOCKOUT_DURATION`].
+///
+/// **One name, `pub(crate)`.**  There were two, differing only in the order of
+/// two words: this one, private, and a `pub(crate) const MAX_AUTH_ATTEMPTS =
+/// MAX_AUTH_ATTEMPTS` alias further down the file, added so `ssh.rs` and
+/// `webserver.rs` could name the ceiling in their own messages.  They could
+/// not disagree about the *value*, being one definition, but a reader could
+/// not tell that without finding both -- and the two spellings had already
+/// spread across four files and ended up a dozen lines apart inside one test
+/// module.  A security bound is the last thing that should have a synonym.
+pub(crate) const MAX_AUTH_ATTEMPTS: u32 = 3;
 /// Per-IP ban window after `MAX_AUTH_ATTEMPTS` failures.  `pub(crate)` so the
 /// slave reconnect loop's auth-backoff (serial.rs §9 #14) can be tested to
 /// exceed it — a shorter backoff would let a wrong-credential slave lock its
@@ -457,10 +468,32 @@ impl Menu {
 // protocol clears the lockout for that IP.
 pub(crate) type LockoutMap = Arc<Mutex<HashMap<IpAddr, (u32, std::time::Instant)>>>;
 
+/// Whether a failure recorded `age` ago is still inside the lockout window.
+///
+/// **A named rule taking an age, because `Instant` cannot be faked.**  The two
+/// callers below both wrote `when.elapsed() < LOCKOUT_DURATION` inline, and
+/// the only way a test could reach that was to backdate a live entry with
+/// `Instant::checked_sub` -- which returns `None` when the result would
+/// pre-date the platform's monotonic epoch, boot time on Linux.  So on a host
+/// up for less than `LOCKOUT_DURATION` (a fresh CI container) both of those
+/// tests took an early `return` and counted as passes, which is this project's
+/// own definition of a test that cannot go red.  Driven by a supplied
+/// `Duration` the rule is exercised on every machine, including its boundary:
+/// exactly at the window the entry has expired.
+pub(crate) fn within_lockout_window(age: std::time::Duration) -> bool {
+    age < LOCKOUT_DURATION
+}
+
+/// Whether `count` failures, the last of them `age` ago, mean this address is
+/// locked out right now.
+pub(crate) fn lockout_is_active(count: u32, age: std::time::Duration) -> bool {
+    count >= MAX_AUTH_ATTEMPTS && within_lockout_window(age)
+}
+
 pub(crate) fn is_locked_out(lockouts: &LockoutMap, ip: IpAddr) -> bool {
     let map = lockouts.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((count, when)) = map.get(&ip) {
-        *count >= MAX_AUTH_ATTEMPTS && when.elapsed() < LOCKOUT_DURATION
+        lockout_is_active(*count, when.elapsed())
     } else {
         false
     }
@@ -532,7 +565,7 @@ pub(crate) fn record_auth_failure(lockouts: &LockoutMap, ip: IpAddr) -> u32 {
     // instance.  After this sweep, every surviving entry is within the
     // active window, so a fresh `or_insert` below either reuses a
     // still-counting entry or starts a new one.
-    map.retain(|_, (_, when)| when.elapsed() < LOCKOUT_DURATION);
+    map.retain(|_, (_, when)| within_lockout_window(when.elapsed()));
     let entry = map
         .entry(ip)
         .or_insert((0, std::time::Instant::now()));
@@ -559,10 +592,6 @@ pub(crate) fn clear_lockout(lockouts: &LockoutMap, ip: IpAddr) {
     let mut map = lockouts.lock().unwrap_or_else(|e| e.into_inner());
     map.remove(&ip);
 }
-
-/// Constant used by callers that need to reference the lockout attempt
-/// ceiling when constructing their own user-visible messages.
-pub(crate) const AUTH_MAX_ATTEMPTS: u32 = MAX_AUTH_ATTEMPTS;
 
 /// Check an IPv4 address against private/loopback/link-local ranges and the
 /// router restriction.  Returns the rejection reason, or None if allowed.
@@ -1104,6 +1133,28 @@ pub(crate) struct TelnetSession {
     erase_char: u8,
     lockouts: LockoutMap,
     peer_addr: Option<IpAddr>,
+    /// Refused `sudo` passwords on the second page, for a session that has no
+    /// address.
+    ///
+    /// **The floor under the per-IP cap, for the sessions that cap cannot
+    /// see.**  `power.rs` counts a refusal against the shared `LockoutMap`,
+    /// which is keyed by `IpAddr` -- so a session with none (a caller on the
+    /// modem, a CP/M guest dialling `ATDT ethernetgateway`) was counted
+    /// nowhere and could guess the operator's *system* password without
+    /// bound.  A per-session field is exactly what the per-IP counter
+    /// replaced, and it is the wrong shape for an address -- reconnecting
+    /// resets it -- but a caller with no address has no cheaper way to
+    /// reconnect than the one they are already on, and three per connection
+    /// is what every session had before.
+    ///
+    /// Read only under `#[cfg(unix)]`, like `MenuItems::second_page` and for
+    /// the same reason: the page and everything on it are Unix-only, so off
+    /// Unix this field has no reader and `-D warnings` calls it dead.  The
+    /// attribute sits on the field rather than `cfg`-ing it away, because the
+    /// last field here that carried a `cfg` orphaned it onto its neighbour
+    /// when it was removed and failed the Windows build.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    power_password_failures: u32,
     transfer_subdir: String,
     xmodem_iac: bool,
     /// Outcome of the last transfer, drawn once by `render_file_transfer`
@@ -1266,6 +1317,7 @@ impl TelnetSession {
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr: None,
+            power_password_failures: 0,
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1329,6 +1381,7 @@ impl TelnetSession {
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr,
+            power_password_failures: 0,
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1408,6 +1461,7 @@ impl TelnetSession {
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr,
+            power_password_failures: 0,
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1538,16 +1592,39 @@ impl TelnetSession {
 
     /// Main-menu help (single width — fits 40 cols so it serves PETSCII too).
     ///
-    /// Built once into a `OnceLock` rather than written as a literal, because
-    /// the `M` entry is Unix-only (see `telnet/power.rs`) and it sits in the
-    /// middle of the list, not at the end.  A `cfg` pair of whole literals
-    /// would be twenty duplicated lines that can drift apart silently — the
-    /// exact shape this project has been bitten by — and every caller here
-    /// (three tests and `show_help_page`) wants a `&'static [&'static str]`,
-    /// which a `OnceLock` gives and a `Vec` return would not.
-    fn main_help_lines() -> &'static [&'static str] {
-        static LINES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-        LINES.get_or_init(|| {
+    /// **It draws the menu that is on the screen, not the menu this build
+    /// could draw.**  Two of the items are optional -- `K` when the CP/M
+    /// emulator is switched off, `2` where the second page has nothing on it
+    /// (and everywhere off Unix) -- and each is hidden from the menu, refused
+    /// by its key arm and left out of the error hint.  The help was the fourth
+    /// surface and it was not gated, so on a packaged installation, where
+    /// `NoNewPrivileges=yes` hides the second page entirely, `H` documented a
+    /// key that is not on the menu and does nothing when pressed.  A help
+    /// screen explaining an absent key is the same defect as an item an
+    /// operator cannot use.
+    ///
+    /// Built into a `OnceLock` per combination rather than written as a
+    /// literal: the entries sit inside the list rather than at the end, so a
+    /// `cfg`/`if` pair of whole literals would be twenty duplicated lines that
+    /// can drift apart silently -- the exact shape this project has been
+    /// bitten by -- and every caller here (the tests and `show_help_page`)
+    /// wants a `&'static [&'static str]`, which a `OnceLock` gives and a `Vec`
+    /// return would not.  Four cells and an explicit match, because the CP/M
+    /// flag comes from config and can change while the process runs: a single
+    /// cell would freeze whichever menu was drawn first.
+    fn main_help_lines(items: MenuItems) -> &'static [&'static str] {
+        type Cell = std::sync::OnceLock<Vec<&'static str>>;
+        static BOTH: Cell = Cell::new();
+        static CPM_ONLY: Cell = Cell::new();
+        static SECOND_ONLY: Cell = Cell::new();
+        static NEITHER: Cell = Cell::new();
+        let cell = match (items.cpm, items.second_page) {
+            (true, true) => &BOTH,
+            (true, false) => &CPM_ONLY,
+            (false, true) => &SECOND_ONLY,
+            (false, false) => &NEITHER,
+        };
+        cell.get_or_init(|| {
             let mut v: Vec<&'static str> = vec![
                 "  A  AI Chat: ask questions to an AI",
                 "  B  Browser: browse the web",
@@ -1559,9 +1636,15 @@ impl TelnetSession {
                 "  G  Serial Gateway: pick Port A or B",
                 "     and bridge to its wire (when",
                 "     that port is in console mode)",
-                "  K  CP/M System: run real CP/M .COM",
-                "     software on an emulated Z80",
             ];
+            // Gated with the row and the error hint: `cpm_emu_enabled = false`
+            // takes `K` off the menu, so it comes off this page too.
+            if items.cpm {
+                v.extend([
+                    "  K  CP/M System: run real CP/M .COM",
+                    "     software on an emulated Z80",
+                ]);
+            }
             v.extend([
                 "  R  Troubleshooting: diagnose",
                 "     terminal input issues",
@@ -1574,12 +1657,16 @@ impl TelnetSession {
             ]);
             // Listed last because the menu draws it last -- a help screen in a
             // different order from the screen it explains is a help screen the
-            // reader has to search.
+            // reader has to search.  `cfg` *and* the flag, exactly as
+            // `main_menu_rows` pushes the row, so no Windows build can grow it
+            // however the flag is set.
             #[cfg(unix)]
-            v.extend([
-                "  2  Second Menu: restart or shut",
-                "     down the whole computer",
-            ]);
+            if items.second_page {
+                v.extend([
+                    "  2  Second Menu: restart or shut",
+                    "     down the whole computer",
+                ]);
+            }
             v
         })
     }
@@ -2123,6 +2210,7 @@ pub fn start_server(
                                     erase_char: session::DEFAULT_ERASE_CHAR,
                                     lockouts: lo,
                                     peer_addr: Some(addr.ip()),
+                                    power_password_failures: 0,
                                     transfer_subdir: String::new(),
                                     // Start with IAC escaping off; session_read_byte
                                     // flips telnet_negotiated on as soon as the client

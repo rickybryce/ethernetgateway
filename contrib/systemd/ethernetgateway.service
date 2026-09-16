@@ -92,6 +92,16 @@ RestartSec=5s
 
 ; ── Hardening ─────────────────────────────────────────────
 ; All of these are defensive; remove any that break your deployment.
+; NoNewPrivileges=yes has one visible consequence, measured on a Pi
+; 2026-09-16: the second menu's "restart the computer" and "shut down the
+; computer" cannot work under it.  `sudo` is setuid and this flag forbids any
+; child gaining privilege, so no password can elevate.  The gateway reads the
+; flag at startup and hides those two items rather than offering what it cannot
+; do.  To have them, BOTH of these must hold: set this to `no`, and run the
+; service as an account that has a password and may use sudo -- the dedicated
+; user created below is locked (`useradd` with no `-p`) and could never answer
+; the prompt.  Manual section 5.5.1 covers that trade, and the simpler
+; alternative of a `systemctl --user` unit instead of this one.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ; PrivateDevices=yes gives a private /dev holding pseudo devices only, so

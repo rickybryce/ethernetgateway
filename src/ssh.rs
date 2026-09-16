@@ -999,11 +999,11 @@ impl russh::server::Handler for SshHandler {
         } else {
             if let Some(ip) = self.peer_addr {
                 let count = telnet::record_auth_failure(&self.lockouts, ip);
-                if count >= telnet::AUTH_MAX_ATTEMPTS {
+                if count >= telnet::MAX_AUTH_ATTEMPTS {
                     glog!(
                         "SSH: {} exceeded {} failed attempts; locked out",
                         ip,
-                        telnet::AUTH_MAX_ATTEMPTS,
+                        telnet::MAX_AUTH_ATTEMPTS,
                     );
                 }
             }
@@ -2096,7 +2096,7 @@ mod tests {
         .unwrap();
         let mut h = test_handler(session_count.clone(), Vec::new());
 
-        for _ in 0..(telnet::AUTH_MAX_ATTEMPTS + 2) {
+        for _ in 0..(telnet::MAX_AUTH_ATTEMPTS + 2) {
             let _ = h.auth_publickey("admin", key.public_key()).await.unwrap();
         }
         let ip = h.peer_addr.unwrap();
@@ -2106,7 +2106,7 @@ mod tests {
         );
 
         // Now lock the IP out the way that does count, and the key is refused.
-        for _ in 0..telnet::AUTH_MAX_ATTEMPTS {
+        for _ in 0..telnet::MAX_AUTH_ATTEMPTS {
             telnet::record_auth_failure(&h.lockouts, ip);
         }
         let mut h2 = test_handler(session_count.clone(), vec![key.public_key().clone()]);
@@ -2544,8 +2544,8 @@ mod tests {
         let ip: std::net::IpAddr = "10.0.0.7".parse().unwrap();
         let lockouts: telnet::LockoutMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        // Drive the IP into lockout (>= AUTH_MAX_ATTEMPTS failures).
-        for _ in 0..telnet::AUTH_MAX_ATTEMPTS {
+        // Drive the IP into lockout (>= MAX_AUTH_ATTEMPTS failures).
+        for _ in 0..telnet::MAX_AUTH_ATTEMPTS {
             telnet::record_auth_failure(&lockouts, ip);
         }
         assert!(telnet::is_locked_out(&lockouts, ip));
@@ -2606,7 +2606,7 @@ mod tests {
             counted: false,
             rate_limited: false,
         };
-        for _ in 0..telnet::AUTH_MAX_ATTEMPTS {
+        for _ in 0..telnet::MAX_AUTH_ATTEMPTS {
             let mut h = make();
             assert!(matches!(
                 h.auth_password("admin", "wrong").await.unwrap(),
@@ -2615,7 +2615,7 @@ mod tests {
         }
         assert!(
             telnet::is_locked_out(&lockouts, ip),
-            "IP must be locked out after AUTH_MAX_ATTEMPTS failures"
+            "IP must be locked out after MAX_AUTH_ATTEMPTS failures"
         );
         assert_eq!(
             session_count.load(Ordering::SeqCst),

@@ -1222,7 +1222,11 @@ impl TelnetSession {
     pub(in crate::telnet) async fn handle_main_command(&mut self, input: &str) -> Result<bool, std::io::Error> {
         match input {
             "h" => {
-                self.show_help_page("HELP", Self::main_help_lines()).await?;
+                // The live items, so the page explains the menu the operator
+                // just looked at -- a `K` that is switched off or a `2` this
+                // installation cannot offer is absent from both.
+                let items = MenuItems::live(config::get_config().cpm_emu_enabled);
+                self.show_help_page("HELP", Self::main_help_lines(items)).await?;
             }
             "r" => {
                 self.troubleshooting().await?;

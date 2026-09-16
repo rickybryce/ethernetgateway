@@ -31,8 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the one before it is true, so nothing on screen is ever a promise the next
   step can break &mdash; a full-screen confirmation first (nobody types a root
   password to find out what it was for), then the password, then the password
-  is *verified on its own* with `sudo -v`, which changes nothing, and only then
-  the goodbye and the command.  Running the command first and then trying to
+  is *verified on its own* with `sudo -v`, which runs no command, so a wrong
+  one costs a message and nothing else &mdash; and only then the goodbye and
+  the command.  Running the command first and then trying to
   say goodbye loses the race: systemd starts stopping units immediately and the
   socket dies mid-verse, which on a retro terminal is indistinguishable from a
   crash.  *The gateway is never elevated* &mdash; it shells out with the
@@ -103,6 +104,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyone lock out a neighbour's address by connecting and dropping.
 
 ### Fixed
+
+- **A session with no address could guess the operator's system password
+  without bound.**  Moving the second page's `sudo` attempt cap into the shared
+  per-IP lockout map left the sessions that map cannot key -- a caller on the
+  modem, a CP/M guest that dialled `ATDT&nbsp;ethernetgateway` -- counted
+  nowhere at all, where every session used to get three.  Each wrong answer is
+  a real PAM attempt against the host account, and the page simply kept asking.
+  The per-IP map remains the rule for an addressed session, because it is the
+  one a reconnect cannot reset; a session without an address now has a
+  per-session floor of the same three.  Its refusals are logged too &mdash;
+  that line was inside the same address test, so a refused system password from
+  the modem left no trace &mdash; and the two counters say different things
+  when they stop you, because an address is banned for five minutes and a
+  session floor clears only on a fresh connection.
+- **One name for the auth-attempt ceiling.**  There were two, differing only
+  in the order of two words &mdash; `MAX_AUTH_ATTEMPTS` inside the telnet
+  module and a `pub(crate)` `AUTH_MAX_ATTEMPTS` alias for `ssh.rs` and
+  `webserver.rs` &mdash; and the two spellings had spread across four files and
+  ended up a dozen lines apart in one test module.  One definition, so they
+  could never disagree about the value; a security bound should still not have
+  a synonym.
+- **The main help screen documented the second menu where the menu does not
+  draw it.**  Hiding restart and shutdown where the kernel forbids elevation
+  covered the two rows, the `2` entry, that key's arm and the error hint
+  &mdash; four surfaces &mdash; and missed the fifth: pressing `H` still
+  explained a `2` that is not on the menu and does nothing when pressed.  The
+  same gap applied to `K` with the CP/M emulator switched off.  The help page
+  is built from the same `MenuItems` the menu is drawn from, so the two cannot
+  disagree, and a new guard holds the direction the old one could not see
+  &mdash; every key the help explains must be a key the page draws.
+- **The second menu's "press..." hint and its page could only be checked in
+  whichever state the machine running the tests was in.**  Both read the live
+  kernel flag, so the text a packaged installation shows &mdash; the page with
+  no power items on it &mdash; was measured nowhere.  Both now take the flag as
+  a parameter, as the main menu's rows already did, and both states are
+  exercised everywhere the suite runs.
+- **The auth lockout's window rule is now tested where it cannot skip.**  Its
+  two tests backdate a live `Instant`, which is impossible on a host up for
+  less than the lockout window (a fresh CI container) &mdash; they returned
+  early and counted as passes.  The rule is a named function taking an age, so
+  the threshold and the boundary are pinned on every machine.
 
 - **A VPN's `0.0.0.0/1` was mistaken for the default route, which made
   `disable_gateway_connections` *weaker* rather than merely mislabelled.**  The
