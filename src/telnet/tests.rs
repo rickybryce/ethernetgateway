@@ -11131,24 +11131,66 @@ fn test_no_port_settings_row_builds_its_own_columns() {
         Some(start) => {
             // The function ends at the first `\n    }` -- a closing brace at
             // the impl's own indent -- after its signature.
+            //
+            // **Loud when it cannot find that.**  This used to be
+            // `.unwrap_or(code.len())`, which cut the scan back to everything
+            // *before* the helper and said nothing: the helper sits near the
+            // top of the file, so the surviving slice holds **zero**
+            // `format!` statements (measured), `offenders` comes out empty and
+            // the assertion at the bottom passes having read nothing at all.
+            // A negative assertion is only worth what its input is worth.
             let end = code[start..]
                 .find("\n    }")
                 .map(|o| start + o + 6)
-                .unwrap_or(code.len());
+                .unwrap_or_else(|| {
+                    panic!(
+                        "serial_menu_row's body has no `\\n    }}` to end it -- \
+                         the excision would silently swallow the rest of the \
+                         file and this guard would pass having scanned nothing"
+                    )
+                });
             let mut out = code[..start].to_string();
             out.push_str(&code[end..]);
             out
         }
         None => panic!("serial_menu_row went away; every row is hand-built again"),
     };
-    let mut offenders = Vec::new();
-    for chunk in code.split("format!(").skip(1) {
-        // One statement's worth: up to the `;` that ends it.
-        let stmt = chunk.split(';').next().unwrap_or("");
-        if stmt.matches("self.cyan(").count() >= 2 {
-            offenders.push(stmt.chars().take(120).collect::<String>());
-        }
+
+    /// Statements that colour two keys in one `format!` -- a row building its
+    /// own columns instead of going through `serial_menu_row`.
+    fn offenders_in(code: &str) -> Vec<String> {
+        code.split("format!(")
+            .skip(1)
+            // One statement's worth: up to the `;` that ends it.
+            .map(|chunk| chunk.split(';').next().unwrap_or(""))
+            .filter(|stmt| stmt.matches("self.cyan(").count() >= 2)
+            .map(|stmt| stmt.chars().take(120).collect())
+            .collect()
     }
+
+    // **Positive control 1: the detector detects.**  Run it over a statement
+    // that is exactly the defect, through the same code path as the real scan.
+    let sample = r#"rows.push(format!("  {}  {}", self.cyan("A"), self.cyan("B")));"#;
+    assert_eq!(
+        offenders_in(sample).len(),
+        1,
+        "the detector no longer recognises a hand-built two-column row, so \
+         the empty result below means nothing",
+    );
+
+    // **Positive control 2: the scan reached the real code.**  111 `format!`
+    // statements survive the excision today; the broken path above leaves 0.
+    // A floor well under the real number and far above zero distinguishes
+    // them without pinning a count that ordinary edits would move.
+    let scanned = code.matches("format!(").count();
+    assert!(
+        scanned >= 50,
+        "the scan examined only {scanned} `format!` statements in serial_ui.rs \
+         -- it is not reading the file, so an empty offender list proves \
+         nothing",
+    );
+
+    let offenders = offenders_in(&code);
     assert!(
         offenders.is_empty(),
         "{} row(s) build their own two columns instead of calling \
