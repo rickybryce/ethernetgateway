@@ -1202,16 +1202,6 @@ pub(crate) struct TelnetSession {
     // negotiate; callers fall back to TerminalType-driven defaults.
     window_width: Option<u16>,
     window_height: Option<u16>,
-    /// Wrong `sudo` passwords offered on the MORE page during this session.
-    ///
-    /// **A guess at the host account's password, bounded.**  It lives on the
-    /// session rather than on the page, so leaving the page and coming back
-    /// does not hand out a fresh three -- see
-    /// [`crate::telnet::power::MAX_PASSWORD_ATTEMPTS`], which explains why an
-    /// unbounded count is a way to lock the operator out of their own machine
-    /// from a telnet menu.  Unix only, like the page.
-    #[cfg(unix)]
-    power_password_failures: u8,
     /// Is the byte trace armed for this session?
     ///
     /// **Read once here, not per byte.**  It follows `gateway_debug`, whose
@@ -1300,8 +1290,6 @@ impl TelnetSession {
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
-            #[cfg(unix)]
-            power_password_failures: 0,
             trace_bytes: cpm_emu::keytrace_on(),
         }
     }
@@ -1365,8 +1353,6 @@ impl TelnetSession {
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
-            #[cfg(unix)]
-            power_password_failures: 0,
             trace_bytes: cpm_emu::keytrace_on(),
         }
     }
@@ -1446,8 +1432,6 @@ impl TelnetSession {
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
-            #[cfg(unix)]
-            power_password_failures: 0,
             trace_bytes: cpm_emu::keytrace_on(),
         }
     }
@@ -2170,9 +2154,7 @@ pub fn start_server(
                                     telnet_negotiated: false,
                                     window_width: None,
                                     window_height: None,
-                                    #[cfg(unix)]
-                                    power_password_failures: 0,
-                                    trace_bytes: cpm_emu::keytrace_on(),
+                                                            trace_bytes: cpm_emu::keytrace_on(),
                                 };
                                 if let Err(e) = session.run().await {
                                     if !is_normal_disconnect(&e) {

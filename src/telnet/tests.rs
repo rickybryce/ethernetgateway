@@ -769,8 +769,6 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         telnet_negotiated: false,
         window_width: None,
         window_height: None,
-        #[cfg(unix)]
-        power_password_failures: 0,
     }
 }
 
@@ -829,8 +827,6 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         telnet_negotiated: false,
         window_width: None,
         window_height: None,
-        #[cfg(unix)]
-        power_password_failures: 0,
     };
     (session, peer)
 }
@@ -10817,28 +10813,93 @@ fn test_more_menu_error_hint_fits_and_is_complete() {
     }
 }
 
-/// Three wrong passwords and the page stops asking for the life of the
-/// session.
+/// Three refused `sudo` passwords and the page stops asking -- **for the
+/// address, not for the connection**.
 ///
-/// The bound is on the **session**, not on a visit to the page: leaving and
-/// coming back must not hand out a fresh three, or the cap bounds nothing.
-/// This pins the constant and the field that carries it; the refusal itself is
-/// one `if` in `power_action`, which needs a live `sudo` to reach.
+/// This is the bound that matters, and the per-session field it replaced did
+/// not provide it.  With `security_enabled` off -- the default -- the second
+/// page is reachable with no credential at all, so a peer got three guesses at
+/// the operator's *system* password, hung up, and got three more. At the
+/// default `conn_rate_max` of 20 a minute that is sixty real PAM failures a
+/// minute, per address, and `pam_faillock` denies at three.
+///
+/// So the count goes in the shared `LockoutMap` -- the same one the telnet,
+/// SSH and web credentials use, already shared between them for exactly this
+/// reason. Asserted through the real `record_auth_failure` / `is_locked_out`
+/// pair rather than a copy, and across two sessions, because a counter that
+/// resets on reconnect is the defect.
 #[cfg(unix)]
 #[test]
-fn test_the_password_attempt_bound_is_small_and_lives_on_the_session() {
+fn test_the_sudo_attempt_bound_survives_a_reconnect() {
+    use std::net::{IpAddr, Ipv4Addr};
+    let lockouts: crate::telnet::LockoutMap = Default::default();
+    let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+    let other = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8));
+
     assert!(
-        (1..=5).contains(&crate::telnet::power::MAX_PASSWORD_ATTEMPTS),
+        !crate::telnet::is_locked_out(&lockouts, ip),
+        "a peer that has tried nothing must not be locked out",
+    );
+    // Three refusals, as if spread over three separate connections -- nothing
+    // here carries session state, which is the point.
+    for _ in 0..crate::telnet::AUTH_MAX_ATTEMPTS {
+        crate::telnet::record_auth_failure(&lockouts, ip);
+    }
+    assert!(
+        crate::telnet::is_locked_out(&lockouts, ip),
+        "the fourth attempt from this address must be refused, however many \
+         times it reconnected to make the first three",
+    );
+    assert!(
+        !crate::telnet::is_locked_out(&lockouts, other),
+        "the lockout is per address: a neighbour must be unaffected",
+    );
+    // And the bound is small enough to be a bound.
+    assert!(
+        (1..=5).contains(&crate::telnet::AUTH_MAX_ATTEMPTS),
         "the attempt bound is not a bound",
     );
-    let mut session = make_test_session(TerminalType::Ansi);
-    assert_eq!(session.power_password_failures, 0, "a fresh session starts clean");
-    session.power_password_failures = crate::telnet::power::MAX_PASSWORD_ATTEMPTS;
-    // A second session is unaffected -- the cap is per session, and a new one
-    // costs a connection, which `conn_rate_max` already bounds per address.
-    let other = make_test_session(TerminalType::Ansi);
-    assert_eq!(other.power_password_failures, 0);
-    assert!(session.power_password_failures >= crate::telnet::power::MAX_PASSWORD_ATTEMPTS);
+}
+
+/// ...and the power page is the thing that uses it.
+///
+/// The test above pins the `LockoutMap`, which is shared machinery that was
+/// already covered -- **it passes with the fix deleted**, proved by mutation.
+/// The rule this change actually makes is that `power.rs` records into that
+/// map and consults it, and the live path needs a real `sudo` to reach, so it
+/// is pinned by reading the module instead.  A source scan is weaker than a
+/// behavioural test and is what this file's other un-runnable paths already
+/// use; it can at least go red, which the test above cannot.
+///
+/// Comments are stripped first, or the scan reads the very explanation that
+/// names these functions.
+#[cfg(unix)]
+#[test]
+fn test_the_power_page_counts_against_the_shared_lockout() {
+    let src = include_str!("power.rs").replace('\r', "");
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        code.contains("record_auth_failure("),
+        "power.rs records no failure anywhere: a refused sudo password costs \
+         the peer nothing and they can reconnect for three more",
+    );
+    assert!(
+        code.contains("is_locked_out("),
+        "power.rs never consults the lockout, so recording into it bounds \
+         nothing -- and `authenticate` cannot do it here, because that runs \
+         only when security_enabled is on and this page is reachable when \
+         it is off",
+    );
+    assert!(
+        !code.contains("power_password_failures"),
+        "the per-session counter is back; it resets on reconnect, which is \
+         the whole defect this replaced",
+    );
 }
 
 /// The MORE help must point at the *other* restart, or the two stay

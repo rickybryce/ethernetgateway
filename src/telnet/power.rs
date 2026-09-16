@@ -326,28 +326,6 @@ pub(in crate::telnet) async fn run_elevated(
 /// indent in front of whatever it is given.
 pub(in crate::telnet) const MORE_MENU_HINT: &str = "Press R, S, H, or Q.";
 
-/// How many refused `sudo` attempts one session may make before the page
-/// stops asking.
-///
-/// **This bounds a guess at the host account's password, not at the
-/// gateway's.**  Without it a wrong answer simply returns to the menu, so a
-/// peer could try the operator's system password as fast as `sudo` will fork
-/// -- and each attempt is a real PAM failure, so on a machine running
-/// `pam_faillock` a stranger could lock the operator out of their own computer
-/// from a telnet menu.  Three, then the page refuses for the life of the
-/// session; starting a fresh one costs a connection, which `conn_rate_max`
-/// already bounds per address.
-///
-/// **It counts refusals, not wrong passwords**, and the screens say so.  Every
-/// non-zero exit from `sudo -v` lands here -- a right password from an account
-/// that is not in sudoers at all, a `requiretty` rule, a `shutdown` that is
-/// not on `secure_path`.  Telling those apart means reading sudo's English,
-/// which is locale-dependent; telling the operator "too many wrong passwords"
-/// when their password was right and their sudoers line is missing sends them
-/// looking in the wrong place, which is worse than a vaguer word.  The refusal
-/// itself is shown each time, and it names the real cause.
-pub(in crate::telnet) const MAX_PASSWORD_ATTEMPTS: u8 = 3;
-
 /// Reduce a failed command's stderr to the one line worth putting on a 40-col
 /// screen.
 ///
@@ -538,8 +516,32 @@ impl TelnetSession {
         // timestamp, because a machine with `timestamp_timeout=0` caches
         // nothing and the second call would then fail after the goodbye.
         let password = if elev == Elevate::SudoPassword {
-            if self.power_password_failures >= MAX_PASSWORD_ATTEMPTS {
-                self.show_error("Too many tries. Reconnect to retry.")
+            // **Per IP, not per session.**  The cap used to live on the
+            // `TelnetSession`, so hanging up reset it: with `security_enabled`
+            // off -- the default -- anyone who reaches the telnet port walks to
+            // this prompt with no credential, and three guesses per connection
+            // times `conn_rate_max` (20 a minute) is sixty PAM attempts a
+            // minute against the operator's *system* account, from as many
+            // addresses as the peer likes.  The comment on
+            // `MAX_PASSWORD_ATTEMPTS` offered `conn_rate_max` as the bound on
+            // exactly this, and it is a bound -- just not at the scale that
+            // matters, since `pam_faillock` denies at three.
+            //
+            // So it goes in the shared `LockoutMap`, the same counter the
+            // telnet, SSH and web credentials use, for the reason that map is
+            // already shared between them: a counter an attacker can reset by
+            // reconnecting is not a counter.  `MAX_AUTH_ATTEMPTS` is 3, as
+            // `MAX_PASSWORD_ATTEMPTS` was, so one session behaves exactly as
+            // before and only the reconnect changes.
+            //
+            // Checked here rather than in `authenticate`, because that runs
+            // only when `security_enabled` is on and this prompt is reachable
+            // when it is off -- which is the whole exposure.
+            if let Some(ip) = self.peer_addr
+                && crate::telnet::is_locked_out(&self.lockouts, ip)
+            {
+                glog!("Power: {} is locked out; not asking for a password", ip);
+                self.show_error("Too many tries. Try again later.")
                     .await?;
                 return Ok(true);
             }
@@ -566,12 +568,24 @@ impl TelnetSession {
             let out = run_elevated(elev, password.as_deref(), &["-v"]).await;
             match out {
                 Ok(o) if !o.status.success() => {
-                    // Counted on the session, not on this visit to the page:
-                    // leaving and coming back must not hand out three more.
-                    // Any refusal counts, not only a wrong password -- see
-                    // `MAX_PASSWORD_ATTEMPTS` for why that is deliberate.
-                    self.power_password_failures =
-                        self.power_password_failures.saturating_add(1);
+                    // Counted against the address, so leaving and coming back
+                    // does not hand out three more.
+                    //
+                    // **It counts refusals, not wrong passwords**, and the
+                    // screens say so.  Every non-zero exit from `sudo -v`
+                    // lands here -- a right password from an account that is
+                    // not in sudoers at all, a `requiretty` rule, a
+                    // `shutdown` that is not on `secure_path`.  Telling those
+                    // apart means reading sudo's English, which is
+                    // locale-dependent; saying "too many wrong passwords" to
+                    // an operator whose password was right and whose sudoers
+                    // line is missing sends them looking in the wrong place.
+                    // The refusal itself is shown each time and names the
+                    // real cause.
+                    if let Some(ip) = self.peer_addr {
+                        let n = crate::telnet::record_auth_failure(&self.lockouts, ip);
+                        glog!("Power: sudo refused for {} (failure {})", ip, n);
+                    }
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     let msg = sudo_error_line(&stderr, self.confirmation_content_width());
                     self.show_error(&msg).await?;
