@@ -2885,7 +2885,7 @@ fn test_main_menu_row_count() {
         let mut session = make_test_session(term);
         session.color_enabled = false;
         // The worst case the renderer can draw: a slave, emulator on.
-        let worst = session.main_menu_rows(true, Some("gateway.example.org"));
+        let worst = session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, Some("gateway.example.org"));
         let drawn = worst.len() + 1; // the prompt line
         assert!(
             drawn <= 22,
@@ -2912,10 +2912,10 @@ fn test_main_menu_row_count() {
         );
         // The ordinary case must leave the slave notice out, or the three
         // rows it costs are not conditional at all.
-        let plain = session.main_menu_rows(true, None);
+        let plain = session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, None);
         assert_eq!(plain.len() + 3, worst.len(), "the slave notice is not 3 rows");
         // Turning the emulator off drops exactly the CP/M item.
-        let no_cpm = session.main_menu_rows(false, None);
+        let no_cpm = session.main_menu_rows(MenuItems { cpm: false, second_page: cfg!(unix) }, None);
         assert_eq!(plain.len(), no_cpm.len() + 1, "the CP/M item is not one row");
         assert!(
             !no_cpm.iter().any(|r| r.contains("CP/M")),
@@ -2967,7 +2967,7 @@ fn test_main_menu_item_count() {
 #[test]
 fn test_main_menu_error_hint() {
     for cpm in [false, true] {
-        let hint = main_menu_key_hint(cpm);
+        let hint = main_menu_key_hint(MenuItems { cpm, second_page: cfg!(unix) });
         // **Measured as it is printed.**  `show_error` puts a two-space indent
         // in front of it, so the budget is 38 -- asserting against 40 is how
         // the literal this replaced overflowed a C64 row unnoticed on the
@@ -10751,7 +10751,7 @@ fn test_more_menu_rows_fit_the_screen() {
     ] {
         let mut session = make_test_session(term);
         session.color_enabled = false;
-        let rows = session.more_menu_rows();
+        let rows = session.more_menu_rows(true);
         // Plus one for the prompt line the loop writes under them.
         let drawn = rows.len() + 1;
         assert!(
@@ -10779,7 +10779,7 @@ fn test_more_menu_rows_fit_the_screen() {
         // helper that returned an empty string would leave a page of codes.
         // (Asserting the row *count* here would not fail -- `more_menu_rows`
         // pushes a fixed set and colour never varies it.)
-        let coloured = make_test_session(term).more_menu_rows().join("\n");
+        let coloured = make_test_session(term).more_menu_rows(true).join("\n");
         for want in ["Restart the computer", "Shut down the computer"] {
             assert!(
                 coloured.contains(want),
@@ -10797,18 +10797,30 @@ fn test_more_menu_rows_fit_the_screen() {
 #[test]
 fn test_more_menu_error_hint_fits_and_is_complete() {
     // `show_error` adds the two-space indent; see `main_menu_key_hint`.
-    let printed = format!("  {}", crate::telnet::power::MORE_MENU_HINT);
+    //
+    // The hint follows the page: where the computer cannot be restarted the
+    // two power keys are not drawn and are not accepted, so naming them in the
+    // hint would send an operator to keys that do nothing.  Both texts are
+    // checked, because the suite runs on machines of either kind.
+    let hint = crate::telnet::power::more_menu_hint();
+    let printed = format!("  {hint}");
     assert!(
         printed.chars().count() <= PETSCII_WIDTH,
-        "the MORE hint prints as {:?}, {} columns",
+        "the hint prints as {:?}, {} columns",
         printed,
         printed.chars().count(),
     );
-    for key in ["R", "S", "H", "Q"] {
-        assert!(
-            crate::telnet::power::MORE_MENU_HINT.contains(key),
-            "the MORE hint must mention {}",
-            key,
+    let always = ["H", "Q"];
+    let power = ["R", "S"];
+    for key in always {
+        assert!(hint.contains(key), "the hint must always mention {key}: {hint:?}");
+    }
+    let offers_power = crate::telnet::power::available();
+    for key in power {
+        assert_eq!(
+            hint.contains(key),
+            offers_power,
+            "the hint names {key} exactly when the page offers it: {hint:?}",
         );
     }
 }
@@ -11495,13 +11507,13 @@ fn test_every_menu_key_is_explained_in_that_pages_help() {
     #[allow(unused_mut)]
     let mut pages: Vec<(&str, Vec<String>, &'static [&'static str])> = vec![(
         "main menu",
-        session.main_menu_rows(true, None),
+        session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, None),
         TelnetSession::main_help_lines(),
     )];
     #[cfg(unix)]
     pages.push((
         "second menu",
-        session.more_menu_rows(),
+        session.more_menu_rows(true),
         TelnetSession::more_help_lines(),
     ));
 
@@ -11583,7 +11595,7 @@ fn test_the_manual_main_menu_matches_the_real_one() {
     let documented = items(&manual[open..close]);
     let mut session = make_test_session(TerminalType::Ansi);
     session.color_enabled = false;
-    let drawn = items(&session.main_menu_rows(true, None).join("\n"));
+    let drawn = items(&session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, None).join("\n"));
 
     // Positive control: an extractor that matched nothing would make the
     // comparison below trivially true on two empty lists.
@@ -11596,4 +11608,115 @@ fn test_the_manual_main_menu_matches_the_real_one() {
         "usermanual.html §5.5 does not match the menu the gateway draws.\n  \
          manual: {documented:?}\n  actual: {drawn:?}",
     );
+}
+
+/// `no_new_privs` is read from the kernel, and the field is parsed exactly.
+///
+/// The flag decides whether the second menu offers to restart the computer or
+/// explains that it cannot, so a sloppy parse either kills a working feature
+/// or restores the prompt that cannot be honoured.  Absent means false: a
+/// kernel that does not report the field does not enforce it either.
+#[cfg(unix)]
+#[test]
+fn test_the_no_new_privs_field_is_read_exactly() {
+    use crate::telnet::power::parse_no_new_privs;
+    // The real shape, as `/proc/self/status` writes it (tab-separated).
+    let set = "Name:\tethernetgateway\nUid:\t1000\t1000\nNoNewPrivs:\t1\nSeccomp:\t2\n";
+    let clear = "Name:\tethernetgateway\nUid:\t1000\t1000\nNoNewPrivs:\t0\nSeccomp:\t0\n";
+    assert!(parse_no_new_privs(set), "NoNewPrivs: 1 must read as set");
+    assert!(!parse_no_new_privs(clear), "NoNewPrivs: 0 must read as clear");
+    assert!(!parse_no_new_privs("Name:\tx\nSeccomp:\t0\n"), "absent means false");
+    assert!(!parse_no_new_privs(""), "an empty status means false");
+    // Not fooled by a field that merely starts the same way.
+    assert!(
+        !parse_no_new_privs("NoNewPrivsSomething:\t1\n"),
+        "a different field beginning with the same text is not this one",
+    );
+}
+
+/// The "cannot elevate here" screen says which setting, and fits a C64.
+///
+/// **It must not read as a password problem.**  Measured on the Pi: with the
+/// shipped unit's `NoNewPrivileges=yes`, sudo refused and the operator was
+/// shown sudo's *second* line -- a hint about container configuration -- after
+/// being asked for a password that could never work.  Naming the setting is
+/// what turns that into something an operator can act on.
+#[cfg(unix)]
+#[test]
+fn test_the_blocked_screen_names_the_setting_and_fits() {
+    let lines = crate::telnet::power::blocked_lines();
+    assert!(!lines.is_empty(), "the screen says nothing");
+    let joined = lines.join(" ");
+    assert!(
+        joined.contains("NoNewPrivileges"),
+        "the screen does not name the setting an operator would grep for: {joined}",
+    );
+    assert!(
+        joined.to_lowercase().contains("not your password"),
+        "the screen does not rule out the password, which is where the \
+         operator is already looking: {joined}",
+    );
+    for l in &lines {
+        // `show_error_lines` prints a two-space indent, like `show_error`.
+        assert!(
+            l.chars().count() + 2 <= PETSCII_WIDTH,
+            "{l:?} is {} columns with the indent, over {PETSCII_WIDTH}",
+            l.chars().count() + 2,
+        );
+    }
+}
+
+/// The second page is offered, hinted and drawn as one decision -- **in both
+/// states**.
+///
+/// Three surfaces gate on the same answer: the main menu's `2` row, the
+/// valid-key hint, and the page's own R/S rows.  The failure that matters is
+/// them disagreeing -- a row drawn for a key that is refused, or a key
+/// accepted with nothing on screen to say so.
+///
+/// **Driven, not observed.**  The first version of this test read the live
+/// `available()` and asserted the three agreed with it; on a machine where the
+/// feature works -- this one, and CI -- deleting the gating left everything
+/// present and still agreeing, so it **passed with the gating removed**, twice
+/// over, proved by mutation.  The answer comes from the kernel's
+/// `no_new_privs` and cannot be set for a test, which is why the flags are
+/// parameters now: `MenuItems` and `more_menu_rows` take them, so both states
+/// are exercised wherever the suite runs.
+#[cfg(unix)]
+#[test]
+fn test_the_second_page_is_offered_and_drawn_as_one_decision() {
+    use crate::telnet::MenuItems;
+    let mut session = make_test_session(TerminalType::Ansi);
+    session.color_enabled = false;
+
+    for offered in [true, false] {
+        let items = MenuItems { cpm: true, second_page: offered };
+        let menu = session.main_menu_rows(items, None).join("\n");
+        assert_eq!(
+            menu.contains("2  Second Menu"),
+            offered,
+            "second_page={offered}: the main menu row disagrees.\n{menu}",
+        );
+        let hint = crate::telnet::main_menu_key_hint(items);
+        assert_eq!(
+            hint.contains(" 2,"),
+            offered,
+            "second_page={offered}: the valid-key hint disagrees: {hint:?}",
+        );
+    }
+
+    for powered in [true, false] {
+        let page = session.more_menu_rows(powered).join("\n");
+        for (key, label) in [("R", "Restart the computer"), ("S", "Shut down the computer")] {
+            assert_eq!(
+                page.contains(label),
+                powered,
+                "powered={powered}: the page draws {key} when it should not, \
+                 or not when it should.\n{page}",
+            );
+        }
+        // Whatever else is true, the way out is always there -- a page with no
+        // items and no way back would strand the operator.
+        assert!(page.contains("Q=Back"), "powered={powered}: no way back:\n{page}");
+    }
 }

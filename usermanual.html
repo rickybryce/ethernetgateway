@@ -570,6 +570,14 @@ has no shell, no home directory, and write access only to
 </p>
 
 <p>
+<code>NoNewPrivileges</code> has one visible consequence:
+<strong>the second menu's restart and shutdown cannot work under this
+unit</strong>, because <code>sudo</code> is setuid and the flag forbids
+elevation. The gateway detects it at startup and hides those items rather than
+offering something it cannot do &mdash; see &sect;5.5.
+</p>
+
+<p>
 If you want to listen on privileged ports (telnet on 23 or SSH on 22), uncomment
 the <code>CapabilityBoundingSet=CAP_NET_BIND_SERVICE</code> and matching
 <code>AmbientCapabilities</code> lines in the unit.
@@ -1270,6 +1278,27 @@ one; the password is the one that answers
 own before anything is done, so a wrong one costs a message and nothing else.
 The gateway itself is never run elevated.  The item appears on Linux, macOS and
 the BSDs; it is absent from Windows builds.
+</p>
+
+<p>
+<strong>Under the shipped <code>systemd</code> unit these two items do not
+appear at all</strong>, and neither does the <code>2</code> entry that reaches
+them &mdash; exactly as on Windows.  That unit sets
+<code>NoNewPrivileges=yes</code>, a kernel flag that stops any child process
+gaining privilege, and <code>sudo</code> is a setuid binary, so it cannot
+elevate however correct the password is.  The gateway reads the flag from
+<code>/proc/self/status</code> once at startup and simply does not offer what
+it cannot do: an item an operator cannot use teaches them to distrust the
+menu, and a password prompt that no answer satisfies is worse still.  To
+enable the feature, either run the gateway outside that unit or set
+<code>NoNewPrivileges=no</code> &mdash; which weakens the sandbox for the whole
+service, so it is a deliberate trade rather than a default.
+</p>
+
+<p>
+The second page itself survives an empty power section: it is where future
+items that do not fit the main menu will live, and the <code>2</code> entry
+appears whenever the page has anything on it.
 </p>
 
 <aside class="note">

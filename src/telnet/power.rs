@@ -150,6 +150,102 @@ pub(in crate::telnet) enum Elevate {
     SudoQuiet,
     /// `sudo` wants the operator's password.
     SudoPassword,
+    /// **Nothing can elevate here, and no password would change that.**  The
+    /// kernel's `no_new_privs` flag is set on this process, so a setuid binary
+    /// -- which is what `sudo` is -- cannot gain privilege however correct the
+    /// password is.  systemd sets it from `NoNewPrivileges=yes`, which the
+    /// gateway's own shipped unit turns on, so this is the *ordinary* state of
+    /// a packaged installation rather than an exotic one.
+    ///
+    /// It is a separate answer from [`Elevate::SudoPassword`] because the page
+    /// must not ask: a password prompt is a promise that a right answer
+    /// restarts the machine, and here no answer can.  That is the same rule
+    /// the order of the steps exists to keep.
+    Blocked,
+}
+
+/// Whether this installation can change the computer's power state at all.
+///
+/// **Cached, because it is a property of the process and cannot change.**
+/// `no_new_privs` is set at exec and is one-way; the main menu asks this on
+/// every render, and reading `/proc/self/status` each time would be a syscall
+/// per menu draw for an answer that is fixed at startup.
+///
+/// Deliberately *not* `sudo -n -l`: that is a process spawn, which the menu
+/// cannot afford, and its answer can change under the operator's feet when
+/// they edit sudoers.  So this covers only what is cheap and certain; a
+/// machine where sudo is absent or refuses still reaches the refusal at the
+/// moment of use, which is where it can be reported accurately.
+pub(in crate::telnet) fn available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| !no_new_privs())
+}
+
+/// Whether the second page has anything on it.
+///
+/// **The page outlives its current contents.**  Restart and shutdown are all
+/// it carries today, so this is `available()` — but the page is where the next
+/// thing that does not fit the main menu will go, and when that lands this
+/// becomes `available() || that_thing`, one line, rather than a rediscovery of
+/// why the `2` entry is gated on a power setting at all.
+///
+/// Offering `2` to an empty page is worse than not offering it: the operator
+/// spends a keypress to learn there was nothing there.
+pub(in crate::telnet) fn second_page_has_items() -> bool {
+    available()
+}
+
+/// What the page says when nothing here can elevate.
+///
+/// A named seam so the width guard and the wording test read the real text
+/// rather than a copy, exactly as `more_menu_hint` and `confirm_body` do.
+/// It names `NoNewPrivileges` because that is the string an operator greps
+/// for in their unit file; "the system refused" would send them to their
+/// password instead, which is where they were already looking.
+pub(in crate::telnet) fn blocked_lines() -> Vec<&'static str> {
+    vec![
+        "This gateway cannot restart or shut",
+        "down the computer: it runs under a",
+        "sandbox that forbids gaining",
+        "privileges, so no password can work.",
+        "",
+        "It is NoNewPrivileges=yes in the",
+        "service unit, not your password.",
+    ]
+}
+
+/// Whether this process carries the kernel's `no_new_privs` flag.
+///
+/// **Read from the kernel, not from sudo's English.**  `probe_elevation`'s own
+/// comment declines to tell sudo's refusals apart by reading its messages
+/// because they are locale-dependent, and that reasoning holds here -- but the
+/// flag itself is a number in `/proc/self/status`, so it can be asked directly.
+/// Measured on the Pi: under `NoNewPrivileges=yes` sudo says *The "no new
+/// privileges" flag is set, which prevents sudo from running as root*, and the
+/// same command in a unit with `NoNewPrivileges=no` elevates.
+///
+/// Linux only in practice: the file does not exist on macOS or the BSDs, where
+/// `read_to_string` fails and this answers `false`, leaving their behaviour
+/// exactly as it was.
+fn no_new_privs() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .as_deref()
+        .map(parse_no_new_privs)
+        .unwrap_or(false)
+}
+
+/// The `NoNewPrivs:` field of a `/proc/<pid>/status`, or `false` if absent.
+///
+/// Split out so the rule is testable: the reading itself depends on the
+/// process the suite happens to run in, which is not a fixture anyone can set.
+/// **Absent means false**, which is the safe direction here -- a kernel too old
+/// to report the field is a kernel that does not enforce it either, and
+/// answering `true` would switch the feature off on a machine where it works.
+pub(in crate::telnet) fn parse_no_new_privs(status: &str) -> bool {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("NoNewPrivs:"))
+        .is_some_and(|v| v.trim() == "1")
 }
 
 /// Work out which of the three we are in, without changing anything.
@@ -199,6 +295,13 @@ pub(in crate::telnet) async fn probe_elevation(argv: &[&str]) -> Result<Elevate,
             Some(_) => Ok(Elevate::Direct),
             None => Err(format!("{} is not on this computer's PATH.", argv[0])),
         };
+    }
+    // Before sudo is consulted at all: a setuid binary cannot raise privilege
+    // under `no_new_privs`, so every answer below would be a guess at a
+    // question already settled.  After the root branch above, because a root
+    // session execs the command directly and the flag does not bear on that.
+    if no_new_privs() {
+        return Ok(Elevate::Blocked);
     }
     match tokio::process::Command::new("sudo")
         .args(["-n", "-l", "--"])
@@ -293,6 +396,15 @@ pub(in crate::telnet) async fn run_elevated(
             c.args(argv);
             c
         }
+        // Unreachable: `power_action` reports and returns before it gets here.
+        // An error rather than a panic, and rather than quietly running the
+        // command unprivileged -- which on a `shutdown` would fail anyway, but
+        // for a reason the operator would have to guess at.
+        Elevate::Blocked => {
+            return Err(std::io::Error::other(
+                "this process cannot elevate (no_new_privs)",
+            ));
+        }
     };
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -324,7 +436,13 @@ pub(in crate::telnet) async fn run_elevated(
 ///
 /// Budgeted against `PETSCII_WIDTH - 2`: `show_error` prints a two-space
 /// indent in front of whatever it is given.
-pub(in crate::telnet) const MORE_MENU_HINT: &str = "Press R, S, H, or Q.";
+pub(in crate::telnet) fn more_menu_hint() -> &'static str {
+    if available() {
+        "Press R, S, H, or Q."
+    } else {
+        "Press H or Q."
+    }
+}
 
 /// Reduce a failed command's stderr to the one line worth putting on a 40-col
 /// screen.
@@ -418,18 +536,25 @@ impl TelnetSession {
                     self.show_help_page("SECOND MENU HELP", Self::more_help_lines())
                         .await?;
                 }
-                "r" => {
+                // Gated with the rows and the hint, so a key that is not on
+                // the screen is not accepted either -- the same three layers
+                // the Windows build uses.  `power_action` keeps its own
+                // `Elevate::Blocked` arm behind these: a UI that hides an
+                // action and a routine that refuses to perform one are
+                // different jobs, and the safety one should not depend on the
+                // cosmetic one being right.
+                "r" if available() => {
                     if !self.power_action(PowerAction::Restart).await? {
                         return Ok(false);
                     }
                 }
-                "s" => {
+                "s" if available() => {
                     if !self.power_action(PowerAction::Shutdown).await? {
                         return Ok(false);
                     }
                 }
                 _ => {
-                    self.show_error(MORE_MENU_HINT).await?;
+                    self.show_error(more_menu_hint()).await?;
                 }
             }
         }
@@ -443,7 +568,7 @@ impl TelnetSession {
     /// reads nothing from this function and so could never have noticed a row
     /// being added.  This file is full of screens whose budget was found the
     /// hard way; a guard that cannot go red is worse than no guard.
-    pub(in crate::telnet) fn more_menu_rows(&self) -> Vec<String> {
+    pub(in crate::telnet) fn more_menu_rows(&self, powered: bool) -> Vec<String> {
         let sep = self.separator();
         let mut rows = vec![
             sep.clone(),
@@ -461,9 +586,15 @@ impl TelnetSession {
             rows.push(row);
             rows.push(String::new());
         }
-        rows.push(format!("  {}  Restart the computer", self.cyan("R")));
-        rows.push(format!("  {}  Shut down the computer", self.cyan("S")));
-        rows.push(String::new());
+        // Hidden, not shown-and-refused, exactly as they are on Windows: an
+        // item an operator cannot use teaches them to distrust the menu.  The
+        // `2` entry that reaches this page is gated on the same answer, so an
+        // empty page is not reachable from the menu either.
+        if powered {
+            rows.push(format!("  {}  Restart the computer", self.cyan("R")));
+            rows.push(format!("  {}  Shut down the computer", self.cyan("S")));
+            rows.push(String::new());
+        }
         rows.push(format!(
             "  {}  {}",
             self.action_prompt("Q", "Back"),
@@ -474,7 +605,7 @@ impl TelnetSession {
 
     async fn render_more_menu(&mut self) -> Result<(), std::io::Error> {
         self.clear_screen().await?;
-        for row in self.more_menu_rows() {
+        for row in self.more_menu_rows(available()) {
             self.send_line(&row).await?;
         }
         Ok(())
@@ -514,6 +645,24 @@ impl TelnetSession {
                 return Ok(true);
             }
         };
+
+        // **Say it cannot be done rather than asking for a password.**  Under
+        // `no_new_privs` no password can work, and the prompt would be a
+        // promise the next step cannot keep -- the rule the whole order of
+        // steps here exists to serve.  Reported before the password, and it
+        // names the setting so an operator can find it: measured on the Pi,
+        // where the shipped unit's `NoNewPrivileges=yes` made sudo refuse and
+        // the operator was shown sudo's *second* line, a hint about container
+        // configuration, and would reasonably have concluded they mistyped.
+        if elev == Elevate::Blocked {
+            self.show_error_lines(&blocked_lines()).await?;
+            glog!(
+                "Power: {} refused -- no_new_privs is set on this process \
+                 (systemd NoNewPrivileges=yes); no password can elevate",
+                action.argv().join(" "),
+            );
+            return Ok(true);
+        }
 
         // Held only as long as the two `sudo` calls need it: the check, and
         // the command itself.  It is re-fed rather than relying on sudo's

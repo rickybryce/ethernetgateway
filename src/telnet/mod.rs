@@ -82,6 +82,12 @@ pub(crate) fn is_normal_disconnect(e: &std::io::Error) -> bool {
 pub(crate) use cpm_emu::{place_bundled_terminals, DriveA};
 mod session;
 pub(crate) use session::is_backspace_key;
+// The main menu's optional items, as a named pair -- see its own comment for
+// why it is not two `bool` parameters.  Test-only: the product reaches it
+// through `session`'s own path, and a second route for the binary would be an
+// unused import.
+#[cfg(test)]
+pub(in crate::telnet) use session::MenuItems;
 /// Shared with the web and desktop editors so all three surfaces describe a
 /// slave's missing credential in the same words.
 pub(crate) use session::master_password_screen_lines;

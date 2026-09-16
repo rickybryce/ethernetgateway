@@ -211,15 +211,61 @@ pub(crate) fn master_password_screen_lines(host: &str, port: u16) -> Vec<String>
 /// already written as a range, so the notation is the screen's own.
 ///
 /// `test_main_menu_error_hint` holds every variant against the real budget.
-pub(in crate::telnet) fn main_menu_key_hint(cpm_enabled: bool) -> String {
+/// Which optional items the main menu is drawing.
+///
+/// **A named pair rather than two `bool` parameters.**  `main_menu_rows(true,
+/// true, None)` reads the same whichever way round the two are, and the
+/// compiler cannot tell -- the trap this codebase already avoided once by
+/// threading a `GatewayFilter` instead of a `petscii` bool beside a
+/// `translate` one.
+///
+/// It is also what makes the gating **testable**: both flags come from process
+/// state a test cannot set (`cpm_emu_enabled` from config, the second page
+/// from the kernel's `no_new_privs`), so a builder that reads them itself can
+/// only ever be exercised in whichever state the machine running the suite
+/// happens to be in.  A first version of the guard did exactly that and passed
+/// with the gating deleted.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::telnet) struct MenuItems {
+    /// The CP/M emulator item, from `cpm_emu_enabled`.
+    pub cpm: bool,
+    /// The second page, when it has anything on it.
+    ///
+    /// Read only under `#[cfg(unix)]`, because the page and every item on it
+    /// are Unix-only -- so on Windows this field has no reader and `-D
+    /// warnings` calls it dead.  Kept rather than cfg'd away so the struct has
+    /// one shape everywhere and the construction sites, including the tests',
+    /// do not each need their own `cfg`.  Same treatment as `router.rs`'s
+    /// Linux-only parsers.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub second_page: bool,
+}
+
+impl MenuItems {
+    /// What this installation actually offers, right now.
+    pub(in crate::telnet) fn live(cpm: bool) -> Self {
+        MenuItems {
+            cpm,
+            #[cfg(unix)]
+            second_page: crate::telnet::power::second_page_has_items(),
+            #[cfg(not(unix))]
+            second_page: false,
+        }
+    }
+}
+
+pub(in crate::telnet) fn main_menu_key_hint(items: MenuItems) -> String {
     let mut keys: Vec<&str> = vec!["A-C", "F", "G"];
-    if cpm_enabled {
+    if items.cpm {
         keys.push("K");
     }
     keys.extend(["R-T", "W", "X"]);
-    // After the letters, because that is where the row is.
+    // After the letters, because that is where the row is -- and only when
+    // the page it reaches has something on it.
     #[cfg(unix)]
-    keys.push("2");
+    if items.second_page {
+        keys.push("2");
+    }
     keys.push("H");
     format!("Press {}.", keys.join(", "))
 }
@@ -1077,7 +1123,7 @@ impl TelnetSession {
     /// be drawn without a config file.
     pub(in crate::telnet) fn main_menu_rows(
         &self,
-        cpm_enabled: bool,
+        items: MenuItems,
         slave_master: Option<&str>,
     ) -> Vec<String> {
         let sep = self.separator();
@@ -1133,7 +1179,7 @@ impl TelnetSession {
         // (on by default, bounded three ways -- see the key's doc comment in
         // config.rs -- but it does run arbitrary Z80 code).  Hidden when
         // disabled; the `k` handler and the error hint are gated the same way.
-        if cpm_enabled {
+        if items.cpm {
             rows.push(format!("  {}  CP/M System", self.cyan("K")));
         }
         // MORE -- the main menu's second page (restart / shut down the
@@ -1151,7 +1197,9 @@ impl TelnetSession {
         // feature letter, and it says which page it goes to, so a third page
         // would be `3` and need no new vocabulary.  Unix only, like the page.
         #[cfg(unix)]
-        rows.push(format!("  {}  Second Menu", self.cyan("2")));
+        if items.second_page {
+            rows.push(format!("  {}  Second Menu", self.cyan("2")));
+        }
         rows.push(String::new());
         rows.push(format!("  {}", self.action_prompt("H", "Help")));
         rows
@@ -1165,7 +1213,7 @@ impl TelnetSession {
         } else {
             None
         };
-        for row in self.main_menu_rows(cfg.cpm_emu_enabled, slave_master) {
+        for row in self.main_menu_rows(MenuItems::live(cfg.cpm_emu_enabled), slave_master) {
             self.send_line(&row).await?;
         }
         Ok(())
@@ -1216,9 +1264,10 @@ impl TelnetSession {
             "k" if config::get_config().cpm_emu_enabled => {
                 self.cpmemu_shell().await?;
             }
-            // Gated with the menu entry and the hint — Unix only.
+            // Gated with the menu entry and the hint — Unix only, and only
+            // while the second page has something to show.
             #[cfg(unix)]
-            "2" => {
+            "2" if crate::telnet::power::second_page_has_items() => {
                 if !self.more_menu().await? {
                     return Ok(false);
                 }
@@ -1234,9 +1283,9 @@ impl TelnetSession {
                 return Ok(false);
             }
             _ => {
-                self.show_error(&main_menu_key_hint(
+                self.show_error(&main_menu_key_hint(MenuItems::live(
                     config::get_config().cpm_emu_enabled,
-                ))
+                )))
                 .await?;
             }
         }

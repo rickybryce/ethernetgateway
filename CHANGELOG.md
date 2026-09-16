@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Restart and shutdown are hidden where they cannot work.**  The shipped
+  `systemd` unit sets `NoNewPrivileges=yes`, which stops `sudo` (a setuid
+  binary) elevating at all, so on a packaged installation those two items --
+  and the `2` entry that reaches them -- are simply absent, as they are on
+  Windows.  Before this they were offered, asked for a password no answer
+  could satisfy, and then showed a line of `sudo`'s output about container
+  configuration.  The second page itself survives an empty power section: it
+  is where future items will live.
 - **A second main-menu page, `2&nbsp;&nbsp;Second&nbsp;Menu`, that can restart or shut down
   the computer the gateway runs on.**  A headless gateway &mdash; a Pi on a
   shelf, reached from a C64 &mdash; had no way to be power-cycled from the
