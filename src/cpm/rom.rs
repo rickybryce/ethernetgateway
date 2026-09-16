@@ -387,7 +387,16 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), before, "two choices share a key");
-        for c in ROM_CHOICES.iter().filter_map(|c| c.rom.as_ref()) {
+        // The loop below is over a *filter*, so it checks nothing at all if no
+        // choice carries a ROM -- and the catalogue is one `off` entry plus a
+        // handful of real ones, so that is one deletion away.  Pinned rather
+        // than assumed.
+        let roms: Vec<_> = ROM_CHOICES.iter().filter_map(|c| c.rom.as_ref()).collect();
+        assert!(
+            !roms.is_empty(),
+            "no choice carries a ROM, so every assertion below is skipped",
+        );
+        for c in roms {
             assert_eq!(c.sha256.len(), 64, "{}: not a SHA-256", c.file);
             assert!(c.url.starts_with("https://"), "{}: {}", c.file, c.url);
             assert!(c.span.0 < c.span.1, "{}: empty window", c.file);
@@ -553,7 +562,11 @@ mod tests {
     /// two cannot disagree.
     #[test]
     fn test_every_rom_names_where_it_comes_from() {
-        for f in ROM_CHOICES.iter().filter_map(|c| c.rom.as_ref()) {
+        // Over a filter, so it is vacuous with no ROMs -- see
+        // `test_the_catalogue_is_well_formed`.
+        let roms: Vec<_> = ROM_CHOICES.iter().filter_map(|c| c.rom.as_ref()).collect();
+        assert!(!roms.is_empty(), "no ROMs to name a source for");
+        for f in roms {
             let src = f.source();
             assert_eq!(src, "github.com/dhansel/VDM1", "{}: {src}", f.file);
             assert!(!src.contains(' '), "a line-continued URL kept its indentation: {src}");
