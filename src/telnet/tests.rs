@@ -10901,6 +10901,27 @@ fn test_the_power_page_counts_against_the_shared_lockout() {
          the whole defect this replaced",
     );
 }
+/// The second menu's help fits one screen.
+///
+/// Not a rule for every help table -- the main menu's is 22 lines and
+/// paginates on purpose -- but this page offers two actions, and splitting a
+/// short explanation across two screens so the reader has to press a key to
+/// finish it is a worse answer than three words fewer.  It **was** split:
+/// adding the `Q  Back` entry took the table to 17 against a 15-line screen,
+/// and the live gateway said "Page 1/2".  Measured there, not here.
+#[cfg(unix)]
+#[test]
+fn test_the_second_menus_help_is_one_screen() {
+    let n = TelnetSession::more_help_lines().len();
+    assert!(
+        n <= crate::telnet::HELP_MAX_CONTENT_LINES,
+        "the second menu's help is {n} lines against a {}-line screen, so it \
+         paginates: shorten a line rather than making the reader page through \
+         an explanation of two keys",
+        crate::telnet::HELP_MAX_CONTENT_LINES,
+    );
+}
+
 
 /// The MORE help must point at the *other* restart, or the two stay
 /// confusable everywhere except the confirmation screen.

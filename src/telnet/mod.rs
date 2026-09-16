@@ -1595,11 +1595,14 @@ impl TelnetSession {
             "",
             "  Q  Back to the main menu.",
             "",
-            "  Both ask to be confirmed, then ask",
-            "  for a password if the computer",
-            "  wants one. To restart the GATEWAY",
-            "  and leave the computer running,",
-            "  use Configuration > Server > R.",
+            // Three lines, not five: adding the `Q` entry took this table to
+            // 17 and `HELP_MAX_CONTENT_LINES` is 15, so the screen split into
+            // two pages and the reader had to press a key to finish a short
+            // explanation.  Measured on the live gateway, which said
+            // "Page 1/2".
+            "  Both ask to confirm, then for a",
+            "  password. To restart the GATEWAY",
+            "  only: Configuration > Server > R.",
         ]
     }
 
