@@ -335,3 +335,106 @@ fn printable_excerpt(bytes: &[u8]) -> String {
         s
     }
 }
+
+/// The signal pair a desktop session sends must stop the binary, not restart it.
+///
+/// **The wiring, not the rule.**  `main`'s `reload_arms_restart` and
+/// `should_run_another_cycle` are pure and unit-tested, but they say nothing
+/// about which signal sets which flag: register `stop` to the wrong one and
+/// both of those still pass while the product hangs.  This drives the real
+/// binary with the real signals.
+///
+/// A systemd *session* scope -- where a launch from a desktop icon or a
+/// Startup Applications entry lands -- stops its processes with
+/// `SendSIGHUP=yes`, so it sends SIGTERM **and** SIGHUP.  SIGHUP is this
+/// program's reload signal, and arming the restart path on it made the gateway
+/// start a fresh server cycle in the middle of its own shutdown and survive.
+/// Measured on a Pi before the fix: every reboot took ~92 s (the scope's 90 s
+/// stop timeout, then SIGKILL) against 4 s with the gateway not running, and
+/// the SIGKILL skips the goodbye broadcast, the serial join and the staged
+/// image write.
+///
+/// The budget is generous on purpose: the exit path joins serial threads (3 s)
+/// and drops the runtime (2 s), and this has to fail for the reason it is
+/// about -- a process that never exits -- rather than because a loaded box was
+/// slow.
+#[test]
+fn test_a_desktop_sessions_signal_pair_stops_the_binary() {
+    let telnet_port = pick_free_port();
+    let tmp = std::env::temp_dir()
+        .join(format!("xmodem_sigterm_hup_e2e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let data_dir = tmp.join("ethernetgateway-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("egateway.conf"),
+        format!(
+            "telnet_enabled = true\n\
+             telnet_port = {telnet_port}\n\
+             ssh_enabled = false\n\
+             web_enabled = false\n\
+             enable_console = false\n\
+             security_enabled = false\n",
+        ),
+    )
+    .unwrap();
+
+    let binary = env!("CARGO_BIN_EXE_ethernetgateway");
+    let mut child = Command::new(binary)
+        .current_dir(&tmp)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn ethernetgateway");
+    let pid = child.id() as i32;
+
+    // Let it get as far as binding; the defect is in the exit path, so the
+    // test has to signal a process that is actually serving.
+    wait_for_port(telnet_port, Duration::from_secs(20));
+
+    // Exactly what the session scope does, in that order.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+        libc::kill(pid, libc::SIGHUP);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut exited = None;
+    while Instant::now() < deadline {
+        match child.try_wait().expect("try_wait failed") {
+            Some(status) => {
+                exited = Some(status);
+                break;
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    let outcome = exited;
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    assert!(
+        outcome.is_some(),
+        "the binary was still running 30 s after SIGTERM+SIGHUP -- a desktop \
+         session ending would sit out systemd's 90 s stop timeout and then \
+         SIGKILL it, losing the goodbye broadcast and the staged image write",
+    );
+}
+
+/// Wait until something is listening on `port`, or give up.
+///
+/// Returns quietly either way: the caller's own assertion is the verdict, and
+/// a bind that never happened shows up there as the process not exiting -- a
+/// worse message, but this helper panicking would hide it behind a different
+/// failure.
+fn wait_for_port(port: u16, budget: Duration) {
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

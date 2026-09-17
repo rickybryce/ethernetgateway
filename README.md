@@ -133,16 +133,31 @@ ships a SHA-256 checksum, an optional GPG signature, and a keyless
 verify a download against its GitHub Actions build with `cosign verify-blob`
 (v2.5 or newer).
 
-## Running as a Service
+## Starting It Automatically
 
-A hardened systemd unit is provided at
+**From the desktop**, which is how most installations run it: put a
+`.desktop` file in `~/.config/autostart/` — the list your desktop's *Startup
+Applications* tool edits. A template with the settings that matter is at
+[`contrib/desktop/ethernetgateway.desktop`](contrib/desktop/ethernetgateway.desktop).
+Started this way it runs as you, so the second menu can restart and shut down
+the computer. **Set `Path=`** to the directory you want the data in: everything
+the gateway creates lives in `ethernetgateway-data` one level below its working
+directory, and a desktop entry without `Path=` leaves that undefined.
+
+**As a service**, for a machine with no desktop session to wait for: a hardened
+systemd unit is provided at
 [`contrib/systemd/ethernetgateway.service`](contrib/systemd/ethernetgateway.service)
 (runs as a dedicated unprivileged user, `ProtectSystem=strict`, syscall
 filtering, memory cap). Installation and the port-below-1024 capability note are
-in the [manual](http://ethernetgateway.com/index.html#ch2-systemd).
+in the [manual](http://ethernetgateway.com/index.html#ch2-systemd). Note that
+its `NoNewPrivileges=yes` means restart and shutdown cannot work under it, and
+the gateway hides those items rather than offering what it cannot do — §5.5.1
+of the manual covers the trade.
 
-The server handles **SIGINT / SIGTERM / SIGHUP** for graceful shutdown,
-notifying connected sessions first.
+The server handles **SIGINT / SIGTERM** as a graceful shutdown, notifying
+connected sessions first, and **SIGHUP** as a config reload (`systemctl
+reload`). A stop always outranks a reload: the two arrive together when a
+desktop session ends.
 
 ## Configuration
 
