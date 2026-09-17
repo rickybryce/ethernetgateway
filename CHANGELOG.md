@@ -105,6 +105,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `sudo` that never answers no longer hangs the session.**  All three calls
+  on the second page &mdash; the probe, the `sudo -v` check and the command
+  itself &mdash; are bounded at 30 seconds, and an abandoned child is killed
+  rather than left running with the operator's password on a stdin nobody will
+  close.  `sudo` runs the machine's PAM stack, and a PAM stack that reaches a
+  network directory blocks for as long as that lookup takes; before this, that
+  hung the whole session's task with no key working.  This is the first
+  subprocess timeout in the codebase and is deliberately scoped to this module,
+  where a block is reachable from a page whose entire design is that no screen
+  promises what the next step cannot deliver.
 - **A refused `sudo` now says what its own message cannot.**  The screen showed
   `sudo`'s last line, which is right for a typo and misleading for the two
   cases retyping cannot fix: an account that is not in `sudoers`, and one with

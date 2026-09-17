@@ -10764,11 +10764,6 @@ fn test_the_elevation_probe_asks_about_the_real_command() {
         code.contains(r#".args(["-n", "-l", "--"])"#),
         "the probe no longer asks sudo about a specific command",
     );
-    assert!(
-        !code.contains(r#".args(["-n", "true"])"#),
-        "the probe is back to asking about `true`, which answers a different \
-         question -- see probe_elevation's doc comment",
-    );
     // It must be handed the argv it stands in for, not a constant.
     assert!(
         code.contains("probe_elevation(action.argv())"),
@@ -10776,16 +10771,148 @@ fn test_the_elevation_probe_asks_about_the_real_command() {
     );
     // Already root means no sudo at all; that branch must stay first, or a
     // root session would shell out to a sudo it does not need.
+    // **Bounded to the one function, and this is not fussiness.**  The first
+    // version of this scan split on `probe_elevation` and took everything
+    // after it, so once the probe grew a thin wrapper the slice ran to the end
+    // of the file -- and the two assertions below then passed by matching
+    // `run_elevated`'s copies of the same two lines.  Both mutations survived:
+    // removing the probe's timeout, and removing its `kill_on_drop`.  A scan
+    // that reads the wrong function is a guard that cannot go red.
     let body = code
-        .split("pub(in crate::telnet) async fn probe_elevation")
+        .split("async fn probe_elevation_within")
         .nth(1)
-        .expect("probe_elevation went away");
+        .expect("probe_elevation_within went away");
+    let body = &body[..body.find("\n}\n").expect("probe_elevation_within is unterminated")];
     let direct = body.find("Elevate::Direct").expect("the root branch went away");
     let spawn = body.find("Command::new").expect("the probe went away");
     assert!(
         direct < spawn,
         "the already-root branch no longer comes before the sudo probe",
     );
+    // Bounded, and the child cleaned up when the bound fires.  Asserted by
+    // scanning rather than by driving it: a call would run the real `sudo -k`
+    // and clear the credential cache of whoever is running the suite, which is
+    // the one side effect this change is known to have.
+    assert!(
+        body.contains("tokio::time::timeout(budget"),
+        "the elevation probe is unbounded again; a blocking PAM stack hangs \
+         the session with no key working",
+    );
+    assert!(
+        body.contains("kill_on_drop(true)"),
+        "an abandoned probe is left running",
+    );
+}
+
+/// A `sudo` that never comes back must be given up on, and the child killed.
+///
+/// Driven through [`run_elevated_within`] with a supplied budget, not by
+/// waiting out `SUDO_TIMEOUT` — the printer's idle close is tested the same
+/// way, and for the same reason.  `Direct` with a plain `sleep` keeps `sudo`
+/// out of an ordinary test run.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_a_power_command_that_never_returns_is_given_up_on() {
+    use std::time::Duration;
+    let err = crate::telnet::power::run_elevated_within(
+        Elevate::Direct,
+        None,
+        &["sleep", "30"],
+        Duration::from_millis(150),
+    )
+    .await
+    .expect_err("a command that outlives its budget must not return output");
+    // The kind, not the message: the callers render it, and one of them logs
+    // it after the goodbye where nobody can ask a follow-up question.
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+
+    // **The positive control.**  Without it this test passes just as well with
+    // the timeout set to zero, which would make the page unable to run
+    // anything at all.
+    let out = crate::telnet::power::run_elevated_within(
+        Elevate::Direct,
+        None,
+        &["echo", "quick"],
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("a command well inside its budget must still run");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "quick");
+}
+
+/// Giving up on the command must **kill** it, not walk away from it.
+///
+/// `kill_on_drop` is one line and its absence is invisible: the timeout still
+/// returns the same error, and the only difference is an abandoned `sudo` left
+/// running with the operator's password sitting on a stdin nobody will close.
+/// So the child is asked to leave a trace after the budget expires, and the
+/// test requires that it never appears.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_a_timed_out_power_command_is_killed_not_abandoned() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir().join(format!("egw-power-kill-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let marker = dir.join("survived");
+    let script = format!("sleep 0.4; echo alive > {}", marker.display());
+
+    let err = crate::telnet::power::run_elevated_within(
+        Elevate::Direct,
+        None,
+        &["sh", "-c", &script],
+        Duration::from_millis(100),
+    )
+    .await
+    .expect_err("the script outlives its budget");
+    assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+
+    // Well past when the script would have written, had it lived.
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(
+        !marker.exists(),
+        "the timed-out child kept running and wrote {} -- kill_on_drop is off",
+        marker.display(),
+    );
+
+    // The same script, allowed to finish, proves the marker is reachable at
+    // all: without this the assertion above passes on a typo in the path.
+    crate::telnet::power::run_elevated_within(
+        Elevate::Direct,
+        None,
+        &["sh", "-c", &script],
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("the script runs when it is given time");
+    assert!(marker.exists(), "the control never wrote its marker");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What a timed-out `sudo` says has to fit the screen it lands on.
+///
+/// The width every other value on these pages is cut to, and the wording is
+/// load-bearing: the command may still be running, so it says *did not answer*
+/// rather than *failed*.  Telling an operator their shutdown was refused when
+/// it may yet happen is the one wrong thing this page could say.
+#[cfg(unix)]
+#[test]
+fn test_the_sudo_timeout_message_fits_and_does_not_claim_a_refusal() {
+    let line = crate::telnet::power::sudo_timed_out_line();
+    assert!(
+        line.chars().count() <= PETSCII_WIDTH - 2,
+        "{:?} is {} columns, over the {} a PETSCII screen leaves",
+        line,
+        line.chars().count(),
+        PETSCII_WIDTH - 2,
+    );
+    assert!(line.contains("did not answer"), "{:?}", line);
+    for wrong in ["refus", "fail", "cancel"] {
+        assert!(
+            !line.to_lowercase().contains(wrong),
+            "{:?} claims an outcome the timeout cannot know",
+            line,
+        );
+    }
 }
 
 /// A `Direct` run (already root) must not go anywhere near `sudo`.

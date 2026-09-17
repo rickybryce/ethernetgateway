@@ -42,6 +42,47 @@
 
 use super::*;
 
+/// How long any one `sudo` here may take before the session gives up on it.
+///
+/// **The first subprocess timeout in this codebase, and deliberately scoped to
+/// this module.**  Everything else that shells out -- the live CP/M gates, the
+/// lrzsz and C-Kermit harnesses, the router probe -- either runs under a test
+/// or cannot block on a human-facing dependency.  These three calls can:
+/// `sudo` runs the machine's PAM stack, and a PAM stack that reaches a network
+/// directory blocks for as long as that lookup takes.  A blocked call here
+/// hangs the whole session's task with no key working, on a page whose entire
+/// design is that no screen promises what the next step cannot deliver.
+///
+/// Thirty seconds, chosen from what the two ends need rather than from taste:
+/// a healthy local PAM answers in milliseconds and even an unhappy LDAP lookup
+/// is seconds, so nothing working is cut off; and it is far inside the 900 s
+/// session idle timeout, so the operator gets the error rather than a silent
+/// disconnect.  It bounds each call separately, which is the useful unit --
+/// the operator is shown a screen between them.
+pub(in crate::telnet) const SUDO_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+/// The one text for a `sudo` that never came back.
+///
+/// Shared by the probe and [`run_elevated`] so the two cannot describe the
+/// same event differently, and written to fit the 40-column screen it lands
+/// on.  It says *did not answer* rather than *failed*: the command may well
+/// still be running, and telling an operator their shutdown was refused when
+/// it may yet happen is the one wrong thing this page could say.
+pub(in crate::telnet) fn sudo_timed_out_line() -> String {
+    format!("sudo did not answer in {}s.", SUDO_TIMEOUT.as_secs())
+}
+
+/// The same event as an [`std::io::Error`], for [`run_elevated`], whose
+/// callers already render one.
+///
+/// `TimedOut` rather than `other`, so a caller that ever wants to tell this
+/// apart from a spawn failure can, without matching on the message -- the same
+/// reason `probe_elevation` reads `NotFound` instead of sudo's English.
+fn sudo_timed_out_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, sudo_timed_out_line())
+}
+
 /// Which way the machine is being taken down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::telnet) enum PowerAction {
@@ -280,10 +321,24 @@ pub(in crate::telnet) fn parse_no_new_privs(status: &str) -> bool {
 /// saying nothing about whether `shutdown` is permitted, and *that* failure
 /// lands after the goodbye, where there is no screen left to report it on.
 ///
-/// `Err` carries a line to show the operator; the only case is a machine with
-/// no `sudo` at all, which is a fact about the installation and not something
-/// a retry will fix.
+/// `Err` carries a line to show the operator.  Two cases: a machine with no
+/// `sudo` at all, which is a fact about the installation and not something a
+/// retry will fix, and a probe that never came back -- see [`SUDO_TIMEOUT`].
 pub(in crate::telnet) async fn probe_elevation(argv: &[&str]) -> Result<Elevate, String> {
+    probe_elevation_within(argv, SUDO_TIMEOUT).await
+}
+
+/// [`probe_elevation`] with its bound supplied.
+///
+/// Split for the same reason [`run_elevated_within`] is, and **not** driven by
+/// a test here: a call shells out to the real `sudo` on every `cargo test`,
+/// which on a machine whose user is not in sudoers logs an authentication
+/// failure per run -- the reason the older guard here was a source scan too.
+/// The shape is held by a source scan instead.
+async fn probe_elevation_within(
+    argv: &[&str],
+    budget: std::time::Duration,
+) -> Result<Elevate, String> {
     if config::detect_elevation().0 {
         // **Root gets no help from sudo, including finding the binary.**  The
         // two sudo branches resolve `shutdown` through sudoers' `secure_path`,
@@ -309,15 +364,21 @@ pub(in crate::telnet) async fn probe_elevation(argv: &[&str]) -> Result<Elevate,
     if no_new_privs() {
         return Ok(Elevate::Blocked);
     }
-    match tokio::process::Command::new("sudo")
+    let mut probe = tokio::process::Command::new("sudo");
+    probe
         .args(["-n", "-l", "--"])
         .args(argv)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .await
-    {
+        // Or a probe abandoned by the timeout below leaves a `sudo` behind
+        // holding whatever it was blocked on.
+        .kill_on_drop(true);
+    let probe = match tokio::time::timeout(budget, probe.status()).await {
+        Ok(r) => r,
+        Err(_) => return Err(sudo_timed_out_line()),
+    };
+    match probe {
         Ok(st) if st.success() => Ok(Elevate::SudoQuiet),
         // Two different refusals arrive as the same non-zero status — "a
         // password is required" and "you may not run this at all" — and
@@ -375,6 +436,21 @@ pub(in crate::telnet) async fn run_elevated(
     password: Option<&str>,
     argv: &[&str],
 ) -> std::io::Result<std::process::Output> {
+    run_elevated_within(elev, password, argv, SUDO_TIMEOUT).await
+}
+
+/// [`run_elevated`] with its bound supplied, so the give-up can be measured
+/// rather than waited out.
+///
+/// The same shape as the printer's five-second idle close, which is tested
+/// against an injected clock: a guard that proves a thirty-second timeout by
+/// sitting through thirty seconds is a guard nobody will keep running.
+pub(in crate::telnet) async fn run_elevated_within(
+    elev: Elevate,
+    password: Option<&str>,
+    argv: &[&str],
+    budget: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
     use tokio::io::AsyncWriteExt;
 
     debug_assert!(
@@ -414,22 +490,36 @@ pub(in crate::telnet) async fn run_elevated(
     };
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        // **Load-bearing with the timeout below, not tidiness.**  When the
+        // timeout fires the `Child` is dropped, and without this the process
+        // survives -- an abandoned `sudo` still holding the operator's
+        // password on a stdin nobody will ever close.
+        .kill_on_drop(true);
 
-    let mut child = cmd.spawn()?;
-    {
-        // Dropped (and so closed) before the wait, or `sudo -S` sits on an
-        // open stdin waiting for a password that has already been sent.
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            std::io::Error::other("could not open stdin for the power command")
-        })?;
-        if let Some(pw) = password {
-            stdin.write_all(pw.as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
+    // Bounded as one unit: the spawn, the password, and the wait.  Splitting
+    // it would let a child that accepted its stdin and then blocked run out a
+    // fresh budget, which is the case the bound exists for.
+    let run = async {
+        let mut child = cmd.spawn()?;
+        {
+            // Dropped (and so closed) before the wait, or `sudo -S` sits on an
+            // open stdin waiting for a password that has already been sent.
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                std::io::Error::other("could not open stdin for the power command")
+            })?;
+            if let Some(pw) = password {
+                stdin.write_all(pw.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+            }
+            stdin.flush().await?;
         }
-        stdin.flush().await?;
+        child.wait_with_output().await
+    };
+    match tokio::time::timeout(budget, run).await {
+        Ok(r) => r,
+        Err(_) => Err(sudo_timed_out_error()),
     }
-    child.wait_with_output().await
 }
 
 /// The MORE page's valid-key hint.
