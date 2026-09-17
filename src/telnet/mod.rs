@@ -468,6 +468,40 @@ impl Menu {
 // protocol clears the lockout for that IP.
 pub(crate) type LockoutMap = Arc<Mutex<HashMap<IpAddr, (u32, std::time::Instant)>>>;
 
+/// Refused `sudo` attempts, per address, for the whole process.
+///
+/// Lives here rather than in `power.rs` because that module is Unix-only
+/// while `TelnetSession` -- which carries the field this backs -- is not.
+///
+/// **A gateway login is not permission to guess the machine's password, so
+/// this cannot be the map a login clears.**  These counters were the shared
+/// `LockoutMap` -- the one telnet, SSH and the web UI authenticate against --
+/// and `session.rs` clears an address from that map on every *successful*
+/// gateway login.  So with `security_enabled` on, the bound was three guesses
+/// per login rather than three per address: log in, spend them on the
+/// operator's *host* account, hang up, log in again.  At `conn_rate_max`
+/// that is the sixty PAM attempts a minute that moving off the per-session
+/// field was supposed to have ended, and it failed in the *hardened*
+/// configuration -- the default (`security_enabled` off) held only because
+/// there is no login to clear anything.
+///
+/// The two credentials are different things and now have different counters.
+/// Nothing clears this one: it expires on `LOCKOUT_DURATION` like any other
+/// entry, and that is the only way out.
+///
+/// **One map for the process, reached through a session field**, because it
+/// guards one thing -- this computer's own account -- and every listener that
+/// can reach the page must count into the same total.  Sessions default their
+/// `power_lockouts` from here, so no constructor can forget it; taking it
+/// from a field rather than calling this directly is what lets a test hand a
+/// session a map of its own instead of sharing one with every other test in
+/// the process.
+pub(crate) fn shared_power_lockouts() -> &'static LockoutMap {
+    static POWER_LOCKOUTS: std::sync::OnceLock<LockoutMap> =
+        std::sync::OnceLock::new();
+    POWER_LOCKOUTS.get_or_init(Default::default)
+}
+
 /// Whether a failure recorded `age` ago is still inside the lockout window.
 ///
 /// **A named rule taking an age, because `Instant` cannot be faked.**  The two
@@ -521,7 +555,37 @@ pub(crate) fn is_locked_out(lockouts: &LockoutMap, ip: IpAddr) -> bool {
 // operator watching a CP/M guest would trip any sane per-IP limit within the
 // first second.  That listener is gated by the private-IP allowlist
 // (`webserver::web_ip_rejection`) instead.
-pub(crate) type ConnRateMap = Arc<Mutex<HashMap<IpAddr, Vec<std::time::Instant>>>>;
+/// One address's recent connections, plus whether we have already said in the
+/// log that it is being refused.
+///
+/// **The flag is here because the log line was the amplifier.**  The refusal
+/// itself is careful -- counted, never stored -- but it used to `glog!`
+/// unconditionally, and `glog!` is a blocking `write_all` to the log file
+/// inline in the accept loop, which is the serialization the comment beside
+/// it warns against.  Worse, the log is a rolling 1 MB x 6: a flood loud
+/// enough to matter would push its own evidence out of the file.  One line
+/// per address per flood keeps the diagnostic and drops the amplifier.
+///
+/// It rides the entry that already exists rather than taking a map of its
+/// own, so a refusal still allocates nothing, and it is cleared whenever the
+/// address is accepted again -- a later flood is a new episode and says so.
+#[derive(Default)]
+pub(crate) struct ConnRate {
+    seen: Vec<std::time::Instant>,
+    refusal_logged: bool,
+}
+
+impl ConnRate {
+    /// How many connections are being held for this address.  Test-facing:
+    /// the cap on this is what stops the limiter becoming its own
+    /// memory-exhaustion vector.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.seen.len()
+    }
+}
+
+pub(crate) type ConnRateMap = Arc<Mutex<HashMap<IpAddr, ConnRate>>>;
 
 /// Record a connection from `ip` and report how many fall inside `window`,
 /// counting this one.  The caller refuses the connection when the answer
@@ -538,24 +602,32 @@ pub(crate) fn note_connection(
     ip: IpAddr,
     max: u32,
     window: std::time::Duration,
-) -> u32 {
+) -> (u32, bool) {
     let mut map = rates.lock().unwrap_or_else(|e| e.into_inner());
     let now = std::time::Instant::now();
     // Drop IPs with nothing left inside the window, so the map does not grow
     // one entry per distinct scanner for ever on a public instance -- the
     // same sweep `record_auth_failure` does, and for the same reason.
-    map.retain(|_, seen| {
-        seen.iter()
+    map.retain(|_, rate| {
+        rate.seen
+            .iter()
             .any(|t| now.duration_since(*t) < window)
     });
-    let seen = map.entry(ip).or_default();
-    seen.retain(|t| now.duration_since(*t) < window);
-    if seen.len() as u32 >= max {
+    let rate = map.entry(ip).or_default();
+    rate.seen.retain(|t| now.duration_since(*t) < window);
+    if rate.seen.len() as u32 >= max {
         // Over the limit: report it without storing, per the cap above.
-        return seen.len() as u32 + 1;
+        // `first` is true exactly once per flood, so the caller's log line
+        // cannot outpace the flood it is describing.
+        let first = !rate.refusal_logged;
+        rate.refusal_logged = true;
+        return (rate.seen.len() as u32 + 1, first);
     }
-    seen.push(now);
-    seen.len() as u32
+    // Back under the limit: a later refusal is a new episode and is allowed
+    // to say so again.
+    rate.refusal_logged = false;
+    rate.seen.push(now);
+    (rate.seen.len() as u32, false)
 }
 
 pub(crate) fn record_auth_failure(lockouts: &LockoutMap, ip: IpAddr) -> u32 {
@@ -1155,6 +1227,26 @@ pub(crate) struct TelnetSession {
     /// when it was removed and failed the Windows build.
     #[cfg_attr(not(unix), allow(dead_code))]
     power_password_failures: u32,
+    /// Refused `sudo` attempts per address, for the power page only.
+    ///
+    /// **Separate from `lockouts` because a gateway login is not permission
+    /// to guess the machine's password.**  `session.rs` clears an address
+    /// from `lockouts` on every *successful* gateway login, so while these
+    /// two shared one map the bound was three guesses per login rather than
+    /// three per address -- log in, spend them on the operator's *host*
+    /// account, hang up, log in again.  It failed in the hardened
+    /// configuration and held in the default one only because
+    /// `security_enabled` off means there is no login to clear anything.
+    ///
+    /// Defaulted from one process-wide map (`power::shared_power_lockouts`)
+    /// rather than threaded from `main`, so every listener counts into the
+    /// same total and no constructor can forget it -- while a test can still
+    /// hand a session a map of its own, which a bare global would not allow.
+    ///
+    /// Read only under `#[cfg(unix)]`, and carrying the attribute rather than
+    /// a `cfg` for the same reason as the field above it.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    power_lockouts: LockoutMap,
     transfer_subdir: String,
     xmodem_iac: bool,
     /// Outcome of the last transfer, drawn once by `render_file_transfer`
@@ -1318,6 +1410,7 @@ impl TelnetSession {
             lockouts,
             peer_addr: None,
             power_password_failures: 0,
+            power_lockouts: shared_power_lockouts().clone(),
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1382,6 +1475,7 @@ impl TelnetSession {
             lockouts,
             peer_addr,
             power_password_failures: 0,
+            power_lockouts: shared_power_lockouts().clone(),
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1462,6 +1556,7 @@ impl TelnetSession {
             lockouts,
             peer_addr,
             power_password_failures: 0,
+            power_lockouts: shared_power_lockouts().clone(),
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -2095,14 +2190,25 @@ pub fn start_server(
                             // Read fresh each accept, like the security flags
                             // below, so a change applies without a restart.
                             let (rate_max, rate_window) = config::get_conn_rate();
-                            if rate_max > 0
-                                && note_connection(&conn_rates, addr.ip(), rate_max, rate_window)
-                                    > rate_max
-                            {
-                                glog!(
-                                    "Telnet: rejected {} (more than {} connections in {}s)",
-                                    addr, rate_max, rate_window.as_secs()
-                                );
+                            let (rate_count, rate_say_so) = if rate_max > 0 {
+                                note_connection(&conn_rates, addr.ip(), rate_max, rate_window)
+                            } else {
+                                (0, false)
+                            };
+                            if rate_max > 0 && rate_count > rate_max {
+                                // Once per flood, not once per connection --
+                                // see `ConnRate`.  The write is blocking and
+                                // the log rolls, so an unconditional line
+                                // here is the amplifier the refusal itself
+                                // was written to avoid being.
+                                if rate_say_so {
+                                    glog!(
+                                        "Telnet: rejected {} (more than {} connections in {}s); \
+                                         further refusals from this address are not logged \
+                                         until it is under the limit again",
+                                        addr, rate_max, rate_window.as_secs()
+                                    );
+                                }
                                 // Dropped without a message: a scanner opening
                                 // a connection per guess is not reading our
                                 // replies, and spawning a bounded write per
@@ -2211,6 +2317,7 @@ pub fn start_server(
                                     lockouts: lo,
                                     peer_addr: Some(addr.ip()),
                                     power_password_failures: 0,
+                                    power_lockouts: shared_power_lockouts().clone(),
                                     transfer_subdir: String::new(),
                                     // Start with IAC escaping off; session_read_byte
                                     // flips telnet_negotiated on as soon as the client
@@ -2251,7 +2358,7 @@ pub fn start_server(
                                     telnet_negotiated: false,
                                     window_width: None,
                                     window_height: None,
-                                                            trace_bytes: cpm_emu::keytrace_on(),
+                                    trace_bytes: cpm_emu::keytrace_on(),
                                 };
                                 if let Err(e) = session.run().await {
                                     if !is_normal_disconnect(&e) {

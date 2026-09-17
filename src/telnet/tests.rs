@@ -174,10 +174,10 @@ fn test_the_rate_limit_allows_exactly_the_max_then_refuses() {
     // answer EXCEEDS max, so an off-by-one here would cost a real user their
     // last permitted connection.
     for n in 1..=5 {
-        assert_eq!(note_connection(&rates, ip, 5, w), n, "connection {n} of 5");
+        assert_eq!(note_connection(&rates, ip, 5, w).0, n, "connection {n} of 5");
     }
-    assert!(note_connection(&rates, ip, 5, w) > 5, "the 6th must be over");
-    assert!(note_connection(&rates, ip, 5, w) > 5, "and it stays over");
+    assert!(note_connection(&rates, ip, 5, w).0 > 5, "the 6th must be over");
+    assert!(note_connection(&rates, ip, 5, w).0 > 5, "and it stays over");
 }
 
 #[test]
@@ -189,10 +189,89 @@ fn test_the_rate_limit_is_per_ip() {
     for _ in 0..5 {
         note_connection(&rates, a, 5, w);
     }
-    assert!(note_connection(&rates, a, 5, w) > 5);
+    assert!(note_connection(&rates, a, 5, w).0 > 5);
     // A flooding neighbour must not spend this address's allowance -- the
     // whole point of keying on the IP.
-    assert_eq!(note_connection(&rates, b, 5, w), 1);
+    assert_eq!(note_connection(&rates, b, 5, w).0, 1);
+}
+
+/// **A refusal is logged once per flood, not once per connection.**
+///
+/// The refusal itself is careful -- counted, never stored -- but the log line
+/// beside it was unconditional, and `glog!` is a blocking `write_all` inline
+/// in the accept loop.  Worse, the log is a rolling 1 MB x 6: a flood loud
+/// enough to matter would push its own evidence out of the file, which is the
+/// one thing the limiter exists to record.
+#[test]
+fn test_only_the_first_refusal_of_a_flood_is_logged() {
+    let rates: ConnRateMap = Arc::new(Mutex::new(HashMap::new()));
+    let ip: IpAddr = "203.0.113.11".parse().unwrap();
+    let w = std::time::Duration::from_secs(60);
+
+    for n in 1..=3 {
+        let (count, say_so) = note_connection(&rates, ip, 3, w);
+        assert_eq!(count, n);
+        assert!(!say_so, "an ACCEPTED connection is not a refusal and says nothing");
+    }
+    let (_, first) = note_connection(&rates, ip, 3, w);
+    assert!(first, "the first refusal must be reported, or the limiter is silent");
+    for _ in 0..200 {
+        let (_, again) = note_connection(&rates, ip, 3, w);
+        assert!(
+            !again,
+            "every refused connection wrote a log line: a flood then rolls the \
+             log and destroys the evidence of itself",
+        );
+    }
+}
+
+/// ...and a later flood, after the address has behaved, is a new episode.
+///
+/// One line for ever per address would be the opposite defect: the operator
+/// would see the first incident and never learn of any that followed.
+///
+/// **This has to reach the reset through a surviving entry.**  The obvious
+/// version -- expire everything and flood again -- proves nothing: the sweep
+/// drops the address from the map entirely, so `or_default()` hands back a
+/// fresh `ConnRate` whose flag is already clear, and deleting the reset line
+/// leaves the test green.  It was written that way first and the mutation
+/// survived.  So the state is built directly: one timestamp old enough to
+/// have expired and one recent enough to keep the entry alive, with the flag
+/// already set, which is the only shape that exercises the line.
+#[test]
+fn test_an_address_that_recovers_may_be_reported_again() {
+    let rates: ConnRateMap = Arc::new(Mutex::new(HashMap::new()));
+    let ip: IpAddr = "203.0.113.12".parse().unwrap();
+    let w = std::time::Duration::from_secs(60);
+
+    for _ in 0..2 {
+        note_connection(&rates, ip, 2, w);
+    }
+    assert!(note_connection(&rates, ip, 2, w).1, "first flood reported");
+    assert!(!note_connection(&rates, ip, 2, w).1, "and only once");
+
+    // Age the address back under its allowance without sleeping for it, and
+    // *keep the entry in the map*: one expired timestamp, one still live, so
+    // the sweep retains it and the flag it is carrying.
+    {
+        let now = std::time::Instant::now();
+        let mut map = rates.lock().unwrap();
+        let rate = map.get_mut(&ip).expect("the flooding address is still held");
+        assert!(rate.refusal_logged, "the first flood must have set the flag");
+        rate.seen = vec![now - std::time::Duration::from_secs(90), now];
+    }
+
+    // One accepted connection -- seen is back under max -- which is what
+    // clears the flag.
+    assert!(
+        !note_connection(&rates, ip, 2, w).1,
+        "an accepted connection is not a refusal",
+    );
+    assert!(
+        note_connection(&rates, ip, 2, w).1,
+        "an address that came back under the limit and flooded again was \
+         never reported a second time",
+    );
 }
 
 #[test]
@@ -218,8 +297,8 @@ fn test_the_window_expires_and_the_map_is_pruned() {
     let rates: ConnRateMap = Arc::new(Mutex::new(HashMap::new()));
     let ip: IpAddr = "203.0.113.9".parse().unwrap();
     let zero = std::time::Duration::from_secs(0);
-    assert_eq!(note_connection(&rates, ip, 5, zero), 1);
-    assert_eq!(note_connection(&rates, ip, 5, zero), 1, "the previous one expired");
+    assert_eq!(note_connection(&rates, ip, 5, zero).0, 1);
+    assert_eq!(note_connection(&rates, ip, 5, zero).0, 1, "the previous one expired");
     let map = rates.lock().unwrap();
     assert!(map.len() <= 1, "expired IPs are pruned, not accumulated");
 }
@@ -791,6 +870,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
         power_password_failures: 0,
+        power_lockouts: Default::default(),
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -850,6 +930,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
         power_password_failures: 0,
+        power_lockouts: Default::default(),
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -11177,17 +11258,23 @@ fn test_the_sudo_attempt_bound_survives_a_reconnect() {
 ///
 /// The test above pins the `LockoutMap`, which is shared machinery that was
 /// already covered -- **it passes with the fix deleted**, proved by mutation.
-/// The rule this change actually makes is that `power.rs` records into that
-/// map and consults it, and the live path needs a real `sudo` to reach, so it
-/// is pinned by reading the module instead.  A source scan is weaker than a
-/// behavioural test and is what this file's other un-runnable paths already
-/// use; it can at least go red, which the test above cannot.
+/// The rule this change actually makes is that `power.rs` records into a
+/// lockout map and consults it, and the live path needs a real `sudo` to
+/// reach, so it is pinned by reading the module instead.  A source scan is
+/// weaker than a behavioural test and is what this file's other un-runnable
+/// paths already use; it can at least go red, which the test above cannot.
+///
+/// **Which map** is a separate rule, pinned behaviourally by
+/// `test_a_successful_gateway_login_does_not_restore_sudo_attempts`: it is
+/// deliberately *not* the shared auth map, because a successful gateway
+/// login clears that one and a gateway login is not permission to guess the
+/// machine's own password.
 ///
 /// Comments are stripped first, or the scan reads the very explanation that
 /// names these functions.
 #[cfg(unix)]
 #[test]
-fn test_the_power_page_counts_against_the_shared_lockout() {
+fn test_the_power_page_counts_against_a_lockout_map() {
     let src = include_str!("power.rs").replace('\r', "");
     let code: String = src
         .lines()
@@ -11202,7 +11289,7 @@ fn test_the_power_page_counts_against_the_shared_lockout() {
     );
     assert!(
         code.contains("is_locked_out("),
-        "power.rs never consults the lockout, so recording into it bounds \
+        "power.rs never consults a lockout, so recording into one bounds \
          nothing -- and `authenticate` cannot do it here, because that runs \
          only when security_enabled is on and this page is reachable when \
          it is off",
@@ -11220,17 +11307,17 @@ fn test_the_power_page_counts_against_the_shared_lockout() {
     );
 }
 
-/// An addressed session is bounded by the shared map, and a reconnect does not
+/// An addressed session is bounded by the power map, and a reconnect does not
 /// hand out three more.
 #[cfg(unix)]
 #[test]
 fn test_the_sudo_cap_uses_the_map_for_an_address() {
     let ip: IpAddr = "192.0.2.7".parse().unwrap();
-    let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
+    let power: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
 
     let mut session = make_test_session(TerminalType::Ansi);
     session.peer_addr = Some(ip);
-    session.lockouts = lockouts.clone();
+    session.power_lockouts = power.clone();
     assert!(!session.power_attempts_exhausted(), "a fresh session starts with attempts");
     for _ in 0..MAX_AUTH_ATTEMPTS {
         session.record_power_failure();
@@ -11238,7 +11325,8 @@ fn test_the_sudo_cap_uses_the_map_for_an_address() {
     assert!(session.power_attempts_exhausted(), "three refusals must stop the prompt");
     assert_eq!(
         session.power_password_failures, 0,
-        "an addressed session must not be counted in the per-session field --          that one resets on reconnect",
+        "an addressed session must not be counted in the per-session field -- \
+         that one resets on reconnect",
     );
 
     // The reconnect: a brand-new session from the same address, sharing the
@@ -11246,10 +11334,146 @@ fn test_the_sudo_cap_uses_the_map_for_an_address() {
     // could not do and why the map is the primary rule.
     let mut again = make_test_session(TerminalType::Ansi);
     again.peer_addr = Some(ip);
-    again.lockouts = lockouts;
+    again.power_lockouts = power;
     assert!(
         again.power_attempts_exhausted(),
         "hanging up and coming back handed out three more attempts",
+    );
+}
+
+/// **The attempt cap is checked before the probe, because the probe is the
+/// cost.**
+///
+/// It used to sit inside the branch that asks for a password, which is after
+/// `probe_elevation` -- so confirm-Y could be repeated all session, each
+/// iteration spawning a real `sudo -k -n -l`.  On a box whose service account
+/// is not in sudoers that is one authentication-failure line in the *host's*
+/// auth log per keypress, from an unauthenticated LAN user whenever
+/// `security_enabled` is off, which is the default.
+///
+/// Read from the source because the live path needs a real `sudo`, and
+/// **bounded to `power_action`'s own body**: the sudo scan in this file was
+/// once split on a name that became a thin wrapper, so the slice ran to
+/// end-of-file and the assertions passed by matching a different function's
+/// copy of the same lines.
+#[cfg(unix)]
+#[test]
+fn test_the_sudo_attempt_cap_is_checked_before_the_probe_is_spawned() {
+    let src = include_str!("power.rs").replace('\r', "");
+    let start = src
+        .find("async fn power_action(")
+        .expect("power_action moved or was renamed");
+    let rest = &src[start..];
+    let end = rest[1..]
+        .find("\n    /// ")
+        .map(|i| i + 1)
+        .unwrap_or(rest.len());
+    let body: String = rest[..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let cap = body
+        .find("power_attempts_exhausted()")
+        .expect("power_action no longer checks the attempt cap at all");
+    let probe = body
+        .find("probe_elevation(")
+        .expect("power_action no longer probes -- this scan is reading the wrong function");
+
+    assert!(
+        cap < probe,
+        "the attempt cap is consulted after the probe is spawned, so holding \
+         the confirm key spawns one real `sudo` per press and writes one \
+         authentication failure per press into the host's auth log",
+    );
+}
+
+/// **The gate must agree with the probe about whether this can work.**
+///
+/// `available()` decided on `no_new_privs` alone, while
+/// `probe_elevation_within` answers the *root* question first and returns
+/// `Elevate::Direct`.  `no_new_privs` stops a setuid binary gaining
+/// privilege, which is why `sudo` cannot work under it -- but a gateway
+/// already running as root gains nothing and needs no `sudo`.  So under a
+/// root unit with `NoNewPrivileges=yes`, an ordinary hardened container, the
+/// `2` entry, both rows, their key arms, the MORE hint and the help screen
+/// all vanished for a machine that would have restarted perfectly well.
+///
+/// A gate that disagrees with the probe is the same defect either way round:
+/// one direction hides a feature that works, the other offers one that
+/// cannot.  Tested as a pure rule because `available()` caches a reading of
+/// the live host and can only ever see one of these four combinations.
+#[cfg(unix)]
+#[test]
+fn test_the_power_gate_agrees_with_the_probe_about_root() {
+    use crate::telnet::power::power_is_possible;
+
+    // The case that was wrong: root, hardened unit.  sudo could not elevate,
+    // and nothing needed it to.
+    assert!(
+        power_is_possible(true, true),
+        "a root gateway under NoNewPrivileges=yes runs shutdown directly, but \
+         the menu hid every way of asking for it",
+    );
+    assert!(power_is_possible(true, false), "root with the flag clear is the easy case");
+    assert!(
+        power_is_possible(false, false),
+        "an ordinary account that can reach sudo is the common install",
+    );
+    // The case the feature was hidden for, and still must be: not root, and
+    // no password can elevate.
+    assert!(
+        !power_is_possible(false, true),
+        "offering a page no password can satisfy is the defect this gate \
+         exists to prevent",
+    );
+}
+
+/// **Logging in does not buy three more guesses at the machine's password.**
+///
+/// These counters were the shared auth `LockoutMap`, and `session.rs` clears
+/// an address from that map on every successful gateway login -- so with
+/// `security_enabled` on, the bound was three guesses *per login*: log in,
+/// spend them on the operator's host account, hang up, log in, repeat.  The
+/// default configuration held only by accident, there being no login to clear
+/// anything when security is off.
+///
+/// The two credentials are different things, so they are different counters.
+/// This is the assertion the reconnect test above cannot make: it never drives
+/// a successful auth, which is the exact step that wiped the entry.
+#[cfg(unix)]
+#[test]
+fn test_a_successful_gateway_login_does_not_restore_sudo_attempts() {
+    let ip: IpAddr = "192.0.2.8".parse().unwrap();
+    let auth: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
+    let power: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
+
+    let mut session = make_test_session(TerminalType::Ansi);
+    session.peer_addr = Some(ip);
+    session.lockouts = auth.clone();
+    session.power_lockouts = power.clone();
+
+    for _ in 0..MAX_AUTH_ATTEMPTS {
+        session.record_power_failure();
+    }
+    assert!(session.power_attempts_exhausted(), "three refusals must stop the prompt");
+
+    // Exactly what `session.rs` does when a gateway login succeeds.
+    clear_lockout(&auth, ip);
+
+    assert!(
+        session.power_attempts_exhausted(),
+        "a successful gateway login handed out three more guesses at the \
+         operator's *system* password -- the two credentials are different \
+         things and must not share a counter",
+    );
+    // And the reverse: the power page must not be able to lock an operator
+    // out of the gateway itself.
+    assert!(
+        !is_locked_out(&auth, ip),
+        "refused sudo attempts leaked into the auth lockout and banned the \
+         operator from logging in at all",
     );
 }
 
@@ -11924,6 +12148,74 @@ fn test_every_menu_key_is_explained_in_that_pages_help() {
                 wanted,
                 keys_of(&rows),
                 help.join("\n    "),
+            );
+        }
+    }
+}
+
+/// **Every key the SERVER CONFIGURATION page draws is explained in its help.**
+///
+/// That page is not in the guard above because it has no `*_rows()` helper --
+/// it renders straight to the wire with `send_line`, so nothing could hand a
+/// test its rows.  Which is exactly how `L  Conn rate` shipped drawn but
+/// unexplained: `H` on that screen listed every key except the new one.
+///
+/// So the keys are read out of the function's own source instead.  A scan is
+/// weaker than reading a rendered page and is what this file already uses for
+/// paths a test cannot drive -- it can at least go red.
+///
+/// **Bounded to `server_configuration`'s own body.**  A scan that runs to the
+/// end of the file reads every other screen's keys too and then fails on
+/// keys this help was never meant to carry; the same shape as the sudo scan
+/// that silently read `run_elevated` instead of the probe.
+#[test]
+fn test_every_server_config_key_is_explained_in_its_help() {
+    let src = include_str!("config_ui.rs").replace('\r', "");
+    let start = src
+        .find("async fn server_configuration(")
+        .expect("server_configuration moved or was renamed");
+    let rest = &src[start..];
+    // The next function at the same level ends this one.
+    let end = rest[1..]
+        .find("\n    pub(in crate::telnet) async fn ")
+        .expect("could not find the end of server_configuration");
+    let body = &rest[..end];
+
+    let mut keys: Vec<char> = Vec::new();
+    let marker = "self.cyan(\"";
+    let mut at = 0;
+    while let Some(i) = body[at..].find(marker) {
+        let k = &body[at + i + marker.len()..];
+        let c: Vec<char> = k.chars().collect();
+        if c.len() > 1 && c[1] == '"' && (c[0].is_ascii_uppercase() || c[0].is_ascii_digit()) {
+            keys.push(c[0]);
+        }
+        at += i + marker.len();
+    }
+    keys.sort_unstable();
+    keys.dedup();
+
+    // Positive control: a scan that found nothing would pass every assertion
+    // below without reading a single key.
+    assert!(
+        keys.len() >= 10,
+        "the key scan found only {keys:?} in server_configuration -- that page \
+         draws far more, so the scan is broken, not the help",
+    );
+
+    for petscii in [true, false] {
+        let help = TelnetSession::config_help_lines(petscii);
+        for key in &keys {
+            if *key == 'H' || *key == 'Q' {
+                continue; // the footer actions, explained by being pressed
+            }
+            let wanted = format!("  {}  ", key);
+            assert!(
+                help.iter().any(|l| l.starts_with(&wanted)),
+                "SERVER CONFIGURATION (petscii={petscii}): key {key:?} is drawn \
+                 on the screen but no help line starts with {wanted:?}. Every \
+                 key a page offers must be explained in that page's help.\n  \
+                 keys: {keys:?}",
             );
         }
     }

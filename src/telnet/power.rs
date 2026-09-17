@@ -231,8 +231,34 @@ pub(in crate::telnet) enum Elevate {
 /// moment of use, which is where it can be reported accurately.
 pub(in crate::telnet) fn available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| !no_new_privs())
+    // **The order is the probe's order, and it has to be.**  `no_new_privs`
+    // stops a *setuid* binary gaining privilege, which is why `sudo` cannot
+    // work under it -- but a gateway already running as root gains nothing
+    // and needs no `sudo`, so `probe_elevation_within` answers the root
+    // question first and returns `Elevate::Direct`.  Gating this on
+    // `no_new_privs` alone therefore hid a working feature: under a root unit
+    // with `NoNewPrivileges=yes` -- an ordinary hardened container -- the `2`
+    // entry, both rows, their key arms, the MORE hint and the help screen all
+    // vanished for a machine that would have restarted perfectly well.
+    //
+    // A gate that disagrees with the probe is the same defect either way
+    // round: one direction hides a feature that works, the other offers one
+    // that cannot.  So both read the two conditions in the same order.
+    *AVAILABLE.get_or_init(|| power_is_possible(config::detect_elevation().0, no_new_privs()))
 }
+
+/// The rule [`available`] caches, as a function of the two facts it reads.
+///
+/// Separated because `available` is a `OnceLock` over the *live* machine and
+/// so can only ever be tested on whatever host the suite runs on -- which is
+/// one of the four combinations, and never the one that was wrong.
+pub(in crate::telnet) fn power_is_possible(is_root: bool, no_new_privs: bool) -> bool {
+    // Root needs no `sudo`, so `no_new_privs` -- which only stops a *setuid*
+    // binary gaining privilege -- does not bear on it.  Same order as
+    // `probe_elevation_within`, deliberately: see the comment there.
+    is_root || !no_new_privs
+}
+
 
 /// Whether the second page has anything on it.
 ///
@@ -702,8 +728,8 @@ impl TelnetSession {
     /// Whether this session has spent its `sudo` attempts.
     ///
     /// **Two counters, because one of them cannot see every session.**  An
-    /// addressed session is held by the shared per-IP `LockoutMap`, which is
-    /// the counter an attacker cannot reset by reconnecting.  A session with
+    /// addressed session is held by a per-IP `LockoutMap`, which is the
+    /// counter an attacker cannot reset by reconnecting.  A session with
     /// no address -- a caller on the modem, a CP/M guest that dialled
     /// `ATDT ethernetgateway` -- is not in that map at any key, so it was
     /// bounded by nothing once the per-session field was removed: every wrong
@@ -712,7 +738,7 @@ impl TelnetSession {
     /// same three either way.
     pub(in crate::telnet) fn power_attempts_exhausted(&self) -> bool {
         match self.peer_addr {
-            Some(ip) => crate::telnet::is_locked_out(&self.lockouts, ip),
+            Some(ip) => crate::telnet::is_locked_out(&self.power_lockouts, ip),
             None => self.power_password_failures >= crate::telnet::MAX_AUTH_ATTEMPTS,
         }
     }
@@ -721,7 +747,7 @@ impl TelnetSession {
     /// the running total for the log.
     pub(in crate::telnet) fn record_power_failure(&mut self) -> u32 {
         match self.peer_addr {
-            Some(ip) => crate::telnet::record_auth_failure(&self.lockouts, ip),
+            Some(ip) => crate::telnet::record_auth_failure(&self.power_lockouts, ip),
             None => {
                 self.power_password_failures = self.power_password_failures.saturating_add(1);
                 self.power_password_failures
@@ -868,6 +894,56 @@ impl TelnetSession {
             return Ok(true);
         }
 
+        // **Per IP, not per session, and checked before anything is spent.**
+        // The cap used to live on the `TelnetSession`, so hanging up reset it:
+        // with `security_enabled` off -- the default -- anyone who reaches the
+        // telnet port walks to this prompt with no credential, and three
+        // guesses per connection times `conn_rate_max` (20 a minute) is sixty
+        // PAM attempts a minute against the operator's *system* account, from
+        // as many addresses as the peer likes.  `conn_rate_max` is a bound on
+        // that, just not at the scale that matters, since `pam_faillock`
+        // denies at three.
+        //
+        // Counted here rather than in `authenticate`, because that runs only
+        // when `security_enabled` is on and this prompt is reachable when it
+        // is off -- which is the whole exposure.  `MAX_AUTH_ATTEMPTS` is 3,
+        // as the per-session cap it replaced was, so one session behaves
+        // exactly as before and only the reconnect changes.
+        //
+        // **Before the probe, because the probe is itself the cost.**  This
+        // used to sit further down, inside the branch that asks for a
+        // password, so a caller could hold `y` and spawn one real
+        // `sudo -k -n -l` per keypress: on a box whose service account is not
+        // in sudoers that is one authentication-failure line in the *host's*
+        // auth log for each one, from an unauthenticated LAN user whenever
+        // `security_enabled` is off -- which is the default.  Refusing here
+        // costs a map lookup instead.
+        //
+        // Safe to ask this early only because the counter is now
+        // `power_lockouts` and nothing but a refused `sudo` on this page
+        // raises it.  Against the shared auth map it would have been wrong:
+        // a machine needing no password at all (a root gateway, `Direct`)
+        // would have been refused for telnet login failures it never made.
+        if self.power_attempts_exhausted() {
+            glog!(
+                "Power: {} has used its attempts; not asking for a password",
+                self.power_requester(),
+            );
+            // **The two counters expire differently, so they must not
+            // promise the same thing.**  An address is banned for
+            // `LOCKOUT_DURATION` and waiting really does clear it; a
+            // session floor has no clock at all and only a fresh
+            // connection resets it, so "try again later" would be a
+            // screen the next step cannot keep -- the rule the whole
+            // order of steps on this page exists to serve.
+            self.show_error(match self.peer_addr {
+                Some(_) => "Too many tries. Try again later.",
+                None => "Too many tries for this session.",
+            })
+            .await?;
+            return Ok(true);
+        }
+
         let elev = match probe_elevation(action.argv()).await {
             Ok(e) => e,
             Err(msg) => {
@@ -899,47 +975,6 @@ impl TelnetSession {
         // timestamp, because a machine with `timestamp_timeout=0` caches
         // nothing and the second call would then fail after the goodbye.
         let password = if elev == Elevate::SudoPassword {
-            // **Per IP, not per session.**  The cap used to live on the
-            // `TelnetSession`, so hanging up reset it: with `security_enabled`
-            // off -- the default -- anyone who reaches the telnet port walks to
-            // this prompt with no credential, and three guesses per connection
-            // times `conn_rate_max` (20 a minute) is sixty PAM attempts a
-            // minute against the operator's *system* account, from as many
-            // addresses as the peer likes.  The cap that used to
-            // live here offered `conn_rate_max` as the bound on exactly that,
-            // and it is a bound -- just not at the scale that matters, since
-            // `pam_faillock` denies at three.
-            //
-            // So it goes in the shared `LockoutMap`, the same counter the
-            // telnet, SSH and web credentials use, for the reason that map is
-            // already shared between them: a counter an attacker can reset by
-            // reconnecting is not a counter.  `MAX_AUTH_ATTEMPTS` is 3, as
-            // the per-session cap it replaced was, so one session behaves
-            // exactly as before and only the reconnect changes.
-            //
-            // Checked here rather than in `authenticate`, because that runs
-            // only when `security_enabled` is on and this prompt is reachable
-            // when it is off -- which is the whole exposure.
-            if self.power_attempts_exhausted() {
-                glog!(
-                    "Power: {} has used its attempts; not asking for a password",
-                    self.power_requester(),
-                );
-                // **The two counters expire differently, so they must not
-                // promise the same thing.**  An address is banned for
-                // `LOCKOUT_DURATION` and waiting really does clear it; a
-                // session floor has no clock at all and only a fresh
-                // connection resets it, so "try again later" would be a
-                // screen the next step cannot keep -- the rule the whole
-                // order of steps on this page exists to serve.
-                self.show_error(match self.peer_addr {
-                    Some(_) => "Too many tries. Try again later.",
-                    None => "Too many tries for this session.",
-                })
-                .await?;
-                return Ok(true);
-            }
-
             match self.power_prompt_password(action).await? {
                 Some(pw) => Some(pw),
                 None => return Ok(true),

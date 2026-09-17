@@ -610,17 +610,24 @@ impl russh::server::Server for SshServer {
         // both auth paths below, which is the same place the lockout is
         // enforced and costs an attacker russh's `auth_rejection_time`.
         let (rate_max, rate_window) = config::get_conn_rate();
-        let rate_limited = match peer_addr {
+        let (rate_limited, rate_say_so) = match peer_addr {
             Some(a) if rate_max > 0 => {
-                telnet::note_connection(&self.conn_rates, a.ip(), rate_max, rate_window)
-                    > rate_max
+                let (count, first) =
+                    telnet::note_connection(&self.conn_rates, a.ip(), rate_max, rate_window);
+                (count > rate_max, first)
             }
-            _ => false,
+            _ => (false, false),
         };
         if let Some(addr) = peer_addr {
-            if rate_limited {
+            // Once per flood, not once per connection -- see `ConnRate`.
+            // `glog!` is a blocking write inline here and the log rolls, so
+            // an unconditional line would push out the evidence it exists to
+            // record.
+            if rate_limited && rate_say_so {
                 glog!(
-                    "SSH: connection from {} over rate limit ({} in {}s)",
+                    "SSH: connection from {} over rate limit ({} in {}s); further \
+                     refusals from this address are not logged until it is under \
+                     the limit again",
                     addr, rate_max, rate_window.as_secs()
                 );
             } else {
