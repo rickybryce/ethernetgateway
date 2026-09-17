@@ -1323,6 +1323,21 @@ Two conditions have to hold, and the shipped unit deliberately meets neither
   <code>-p</code>, which leaves the account <em>locked</em> &mdash; a single
   <code>!</code> in <code>/etc/shadow</code>. There is no password that would
   satisfy the prompt, whatever <code>NoNewPrivileges</code> says.</li>
+</ul>
+
+<p><strong>Where it cannot work, it says so at the moment you try.</strong> The
+two items are hidden only where the answer is certain and cheap to read &mdash;
+Windows, and a process carrying the kernel's <code>no_new_privs</code> flag.
+Whether a particular account may run <code>sudo</code> is not knowable without
+asking <code>sudo</code>, and the answer changes whenever
+<code>sudoers</code> is edited, so that case is reported when you use it: the
+screen shows <code>sudo</code>'s own refusal, and adds that <em>if the password
+is right</em>, the account may not be permitted to use <code>sudo</code> or may
+have no password of its own. That second possibility is the one worth knowing
+about, because it is what the dedicated service account above is &mdash;
+turning <code>NoNewPrivileges</code> off and keeping that account leaves the
+items visible and a prompt no password can answer.</p>
+
 </ol>
 
 <p>

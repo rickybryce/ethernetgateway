@@ -11939,6 +11939,72 @@ fn test_the_sudo_password_prompt_fits_the_narrowest_screen() {
     assert!(!password_prompt_label(None).contains("for"));
 }
 
+/// A refused `sudo` says what its own last line cannot.
+///
+/// **sudo's message is right for a typo and misleading for the two cases that
+/// cannot be fixed by retyping**: an account that is not in sudoers, and one
+/// with no password at all -- which is what the shipped service user is
+/// (`useradd` with no `-p`), so an operator who turns `NoNewPrivileges` off
+/// and keeps that account is told *"1 incorrect password attempt"* about a
+/// password that cannot exist.  Measured on the Pi: that is the exact string
+/// sudo produces.  The hint is deliberately conditional, because telling the
+/// cases apart means reading sudo's English.
+#[cfg(unix)]
+#[test]
+fn test_the_sudo_refusal_names_what_retyping_cannot_fix() {
+    // The lines as the screen prints them -- read out of the module rather
+    // than copied, or this is a test comparing the source with itself.
+    let src = include_str!("power.rs").replace('\r', "");
+    let at = src
+        .find("sudo_error_line(&stderr, self.confirmation_content_width())")
+        .expect("the refusal path moved; this guard no longer reads it");
+    let call = &src[at..];
+    let end = call.find(".await?;").expect("the refusal no longer shows anything");
+    let shown = &call[..end];
+
+    // It must still show sudo's own line: the cause is often in there, and
+    // replacing it with our guess would lose "shutdown: command not found"
+    // and every other specific refusal.
+    assert!(
+        shown.contains("&msg"),
+        "the refusal no longer shows sudo's own line:\n{shown}",
+    );
+    // And it must name both of the things sudo's line does not.
+    for phrase in ["permitted to use", "no password"] {
+        assert!(
+            shown.contains(phrase),
+            "the refusal does not mention {phrase:?}, so an operator whose \
+             account can never answer this prompt is told to retype:\n{shown}",
+        );
+    }
+    // Conditional, not an accusation: it must not assert the password was wrong.
+    assert!(
+        shown.contains("If the password is right"),
+        "the hint reads as a verdict rather than a possibility:\n{shown}",
+    );
+
+    // Every added line fits a C64 with `show_error_lines`' two-space indent.
+    // (`test_show_error_literals_fit_petscii` scans this call too; this is the
+    // positive control that these particular lines were reached.)
+    let mut checked = 0;
+    for line in shown.lines().filter_map(|l| {
+        let t = l.trim();
+        t.strip_prefix('"').and_then(|r| r.strip_suffix("\",")).map(str::to_string)
+    }) {
+        assert!(
+            2 + line.chars().count() <= PETSCII_WIDTH,
+            "refusal line {line:?} prints as {} columns",
+            2 + line.chars().count(),
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 4,
+        "the line scan found {checked} literals -- it is not reading the \
+         screen it claims to measure",
+    );
+}
+
 /// The "cannot elevate here" screen says which setting, and fits a C64.
 ///
 /// **It must not read as a password problem.**  Measured on the Pi: with the

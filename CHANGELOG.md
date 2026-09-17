@@ -105,6 +105,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A refused `sudo` now says what its own message cannot.**  The screen showed
+  `sudo`'s last line, which is right for a typo and misleading for the two
+  cases retyping cannot fix: an account that is not in `sudoers`, and one with
+  no password at all &mdash; which is exactly what the shipped service user is
+  (`useradd` with no `-p` leaves it locked), so an operator who turns
+  `NoNewPrivileges` off and keeps that account was told *"1 incorrect password
+  attempt"* about a password that cannot exist.  The hint is conditional
+  (&ldquo;if the password is right&hellip;&rdquo;) because telling the cases
+  apart means reading `sudo`'s locale-dependent English, which this page
+  declines to do.
 - **A desktop-launched gateway survived its own shutdown, so every logout,
   reboot and shutdown waited 90 seconds and then killed it.**  A systemd
   *session* scope &mdash; where a launch from a desktop icon or a Startup

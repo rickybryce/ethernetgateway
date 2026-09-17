@@ -836,7 +836,39 @@ impl TelnetSession {
                     );
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     let msg = sudo_error_line(&stderr, self.confirmation_content_width());
-                    self.show_error(&msg).await?;
+                    // **sudo's own line, and then what it cannot say.**  Its
+                    // last line is right for the common case and misleading
+                    // for two others: an account that is not in sudoers, and
+                    // one with no password at all -- which is exactly what
+                    // the shipped service user is (`useradd` with no `-p`
+                    // leaves a locked `!` in `/etc/shadow`), so an operator
+                    // who turns `NoNewPrivileges` off and keeps that account
+                    // is told "1 incorrect password attempt" about a password
+                    // that cannot exist.  That is the same shape as the
+                    // container hint this page showed before it learned to
+                    // read the kernel flag: accurate, and pointing at the
+                    // wrong thing.
+                    //
+                    // **Conditional, because we cannot tell which it is.**
+                    // Distinguishing them means reading sudo's English, which
+                    // is locale-dependent and which `probe_elevation` already
+                    // refuses to do.  "If the password is right" costs a
+                    // fat-fingered operator nothing -- the condition simply
+                    // does not apply to them -- and names the real cause for
+                    // the one who cannot win by retyping.
+                    //
+                    // Written inline rather than built into a `Vec` first so
+                    // `test_show_error_literals_fit_petscii` still reads these
+                    // strings: that scan looks inside the call's parentheses.
+                    self.show_error_lines(&[
+                        &msg,
+                        "",
+                        "If the password is right, this",
+                        "account may not be permitted to use",
+                        "sudo, or may have no password of",
+                        "its own.",
+                    ])
+                    .await?;
                     return Ok(true);
                 }
                 Err(e) => {
