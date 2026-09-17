@@ -944,12 +944,28 @@ impl TelnetSession {
             return Ok(true);
         }
 
-        let elev = match probe_elevation(action.argv()).await {
-            Ok(e) => e,
-            Err(msg) => {
-                self.show_error(&msg).await?;
-                return Ok(true);
-            }
+        // **Probed once per session, because the probe is a process spawn.**
+        // The cap above counts refused *passwords*, and confirming and then
+        // cancelling submits none -- so without this, `R`, `Y`, Enter looped
+        // and spawned a real `sudo` every pass.  See `power_elevation` for
+        // why one answer is good for the whole session.
+        //
+        // Only a successful probe is remembered: an error can be the 30 s
+        // timeout, which is a statement about this moment rather than about
+        // the machine, and re-asking costs at most one spawn per attempt on a
+        // path that is already slow enough to bound itself.
+        let elev = match self.power_elevation {
+            Some(e) => e,
+            None => match probe_elevation(action.argv()).await {
+                Ok(e) => {
+                    self.power_elevation = Some(e);
+                    e
+                }
+                Err(msg) => {
+                    self.show_error(&msg).await?;
+                    return Ok(true);
+                }
+            },
         };
 
         // **Say it cannot be done rather than asking for a password.**  Under

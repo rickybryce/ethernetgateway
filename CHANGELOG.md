@@ -274,13 +274,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expires on its own window and that is the only way out.  The default
   configuration was never exposed, having no login to clear anything, so this
   failed only where the operator had turned security **on**.
-- **Holding the confirmation key spawned one real `sudo` per press.**  The
-  attempt cap was consulted after the elevation probe rather than before it,
-  so a caller could repeat confirm-and-refuse indefinitely within one session.
-  On a machine whose service account is not in sudoers, each one wrote an
-  authentication failure into the *host's* auth log -- reachable by an
-  unauthenticated LAN user whenever `security_enabled` is off, which is the
-  default.  The cap is checked first now, and costs a map lookup.
+- **Confirming and cancelling spawned one real `sudo` per pass.**  The
+  elevation probe is a process spawn, and nothing bounded how often it ran: a
+  caller could sit on `R`, `Y`, Enter indefinitely.  On a machine whose
+  service account is not in sudoers each pass wrote an authentication failure
+  into the *host's* auth log -- reachable by an unauthenticated LAN user
+  whenever `security_enabled` is off, which is the default.  Two things were
+  needed and the first alone was not enough.  The attempt cap now sits above
+  the probe rather than below it; but that cap counts refused **passwords**,
+  and cancelling submits none, so it never engaged on exactly the loop that
+  was cheapest to run.  A session therefore probes **once** and remembers the
+  answer -- sound because the probe asks about sudoers, root and
+  `no_new_privs`, none of which a session can change.
 - **A connection flood wrote one log line per refused connection.**  The
   refusal itself was careful -- counted, never stored -- but the line beside
   it was unconditional, and that write is a blocking one inline in the accept

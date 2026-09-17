@@ -871,6 +871,8 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         peer_addr: None,
         power_password_failures: 0,
         power_lockouts: Default::default(),
+        #[cfg(unix)]
+        power_elevation: None,
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -931,6 +933,8 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         peer_addr: None,
         power_password_failures: 0,
         power_lockouts: Default::default(),
+        #[cfg(unix)]
+        power_elevation: None,
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -11386,6 +11390,69 @@ fn test_the_sudo_attempt_cap_is_checked_before_the_probe_is_spawned() {
         "the attempt cap is consulted after the probe is spawned, so holding \
          the confirm key spawns one real `sudo` per press and writes one \
          authentication failure per press into the host's auth log",
+    );
+}
+
+/// **A cancelled confirmation cannot spawn a probe for ever.**
+///
+/// The ordering guard above pins only *where* the cap is checked, and that
+/// was not enough: the cap counts refused **passwords**, raised solely when a
+/// submitted one comes back refused, while `power_prompt_password` returns
+/// `None` for ESC and for a bare Enter and records nothing.  So `R`, `Y`,
+/// Enter looped indefinitely, spawning one real `sudo -k -n -l` per pass --
+/// one authentication failure in the *host's* auth log per keypress on a
+/// machine whose account is not in sudoers, reachable without authenticating
+/// at all while `security_enabled` is off.
+///
+/// The bound is that a session probes once and remembers the answer, so this
+/// pins the memo rather than the ordering: a second pass through the page
+/// must not re-ask.  No test may call the probe itself -- it shells out to
+/// the real `sudo` -- so the memo is driven directly, which is the whole
+/// reason the answer is a field and not a local.
+#[cfg(unix)]
+#[test]
+fn test_a_session_probes_for_elevation_only_once() {
+    use crate::telnet::power::Elevate;
+
+    let mut session = make_test_session(TerminalType::Ansi);
+    assert!(
+        session.power_elevation.is_none(),
+        "a fresh session must not claim to know how it would elevate",
+    );
+
+    // What a first successful probe leaves behind.
+    session.power_elevation = Some(Elevate::SudoPassword);
+
+    // Every later pass through the page reads this instead of spawning, so a
+    // cancel loop costs nothing.  If the memo were ignored -- or held a
+    // local rather than a field -- this is the assertion that goes red.
+    assert_eq!(
+        session.power_elevation,
+        Some(Elevate::SudoPassword),
+        "the probe's answer did not survive the page, so confirming and \
+         cancelling spawns a real sudo every time round",
+    );
+
+    // And the source must actually consult it: a memo nothing reads is a
+    // field, not a bound.  Bounded to `power_action`'s own body, for the
+    // reason the ordering guard states.
+    let src = include_str!("power.rs").replace('\r', "");
+    let start = src.find("async fn power_action(").expect("power_action renamed");
+    let rest = &src[start..];
+    let end = rest[1..].find("\n    /// ").map(|i| i + 1).unwrap_or(rest.len());
+    let body: String = rest[..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let memo = body
+        .find("self.power_elevation")
+        .expect("power_action never consults the probe memo, so every \
+                 confirmation spawns a fresh sudo");
+    let probe = body.find("probe_elevation(").expect("power_action no longer probes");
+    assert!(
+        memo < probe,
+        "the memo is read after the probe is spawned, which bounds nothing",
     );
 }
 

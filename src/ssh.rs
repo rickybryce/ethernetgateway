@@ -623,13 +623,22 @@ impl russh::server::Server for SshServer {
             // `glog!` is a blocking write inline here and the log rolls, so
             // an unconditional line would push out the evidence it exists to
             // record.
-            if rate_limited && rate_say_so {
-                glog!(
-                    "SSH: connection from {} over rate limit ({} in {}s); further \
-                     refusals from this address are not logged until it is under \
-                     the limit again",
-                    addr, rate_max, rate_window.as_secs()
-                );
+            // **Nested, not `&&`.**  With `rate_limited && rate_say_so` the
+            // second and later connections of a flood fall into the `else`
+            // and are logged as ordinary accepted connections -- one blocking
+            // write each, which is the amplifier this exists to remove, and
+            // mislabelled besides: an operator reading the log during a flood
+            // would see thousands of "connection from X" lines and one
+            // refusal.  A refused connection is never a normal one.
+            if rate_limited {
+                if rate_say_so {
+                    glog!(
+                        "SSH: connection from {} over rate limit ({} in {}s); further \
+                         refusals from this address are not logged until it is under \
+                         the limit again",
+                        addr, rate_max, rate_window.as_secs()
+                    );
+                }
             } else {
                 glog!("SSH: connection from {}", addr);
             }

@@ -1247,6 +1247,32 @@ pub(crate) struct TelnetSession {
     /// a `cfg` for the same reason as the field above it.
     #[cfg_attr(not(unix), allow(dead_code))]
     power_lockouts: LockoutMap,
+    /// What the elevation probe answered for this session, once it has.
+    ///
+    /// **The probe is a process spawn, and nothing else bounded how often it
+    /// ran.**  The attempt cap counts *refused passwords*, and a caller who
+    /// confirms and then cancels -- ESC, or a bare Enter -- submits nothing,
+    /// so it records nothing: `R`, `Y`, Enter looped indefinitely, spawning a
+    /// real `sudo -k -n -l` per pass.  On a machine whose service account is
+    /// not in sudoers each one writes an authentication failure into the
+    /// *host's* auth log, and with `security_enabled` off -- the default --
+    /// the peer need not have authenticated to do it.  Moving the cap above
+    /// the probe was necessary and not sufficient; this is the other half.
+    ///
+    /// Caching is sound because the probe asks about sudoers, root and
+    /// `no_new_privs`, none of which a session can change: within one session
+    /// the honest answer is the same every time.  An operator who edits
+    /// sudoers mid-session reconnects, which is what `available()` already
+    /// expects of them for the cheaper question it caches at startup.
+    ///
+    /// A real `cfg` rather than the `allow(dead_code)` its neighbours carry,
+    /// and necessarily so: `Elevate` is declared in `power.rs`, which does
+    /// not exist off Unix, so there is no type here to leave unread.  Keep
+    /// the attribute and this comment together if it is ever removed -- that
+    /// is what orphaned a doc onto a neighbour and failed the Windows build
+    /// before.
+    #[cfg(unix)]
+    power_elevation: Option<power::Elevate>,
     transfer_subdir: String,
     xmodem_iac: bool,
     /// Outcome of the last transfer, drawn once by `render_file_transfer`
@@ -1411,6 +1437,8 @@ impl TelnetSession {
             peer_addr: None,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
+            #[cfg(unix)]
+            power_elevation: None,
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1476,6 +1504,8 @@ impl TelnetSession {
             peer_addr,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
+            #[cfg(unix)]
+            power_elevation: None,
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1557,6 +1587,8 @@ impl TelnetSession {
             peer_addr,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
+            #[cfg(unix)]
+            power_elevation: None,
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -2318,6 +2350,8 @@ pub fn start_server(
                                     peer_addr: Some(addr.ip()),
                                     power_password_failures: 0,
                                     power_lockouts: shared_power_lockouts().clone(),
+                                    #[cfg(unix)]
+            power_elevation: None,
                                     transfer_subdir: String::new(),
                                     // Start with IAC escaping off; session_read_byte
                                     // flips telnet_negotiated on as soon as the client
