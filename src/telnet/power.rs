@@ -193,7 +193,13 @@ pub(in crate::telnet) fn confirm_body(action: PowerAction) -> &'static [&'static
 pub(in crate::telnet) enum Elevate {
     /// Already root — run the command directly, no `sudo` in the picture.
     Direct,
-    /// `sudo` answers without a password (NOPASSWD, or a live timestamp).
+    /// `sudo` answers without a password, because a **NOPASSWD sudoers rule**
+    /// says so.
+    ///
+    /// Deliberately not "or a live timestamp": the probe clears the timestamp
+    /// before it asks, for the reason [`probe_elevation`] spends a paragraph
+    /// on.  A cached credential earned in the operator's own shell is not a
+    /// statement that this page may skip the password.
     SudoQuiet,
     /// `sudo` wants the operator's password.
     SudoPassword,
@@ -321,6 +327,38 @@ pub(in crate::telnet) fn parse_no_new_privs(status: &str) -> bool {
 /// saying nothing about whether `shutdown` is permitted, and *that* failure
 /// lands after the goodbye, where there is no screen left to report it on.
 ///
+/// **`-k` first, because a cached timestamp is not a sudoers rule.**  `sudo`
+/// records a successful authentication in `/run/sudo/ts/<uid>` -- **one file
+/// per uid**, because neither a gateway session nor a systemd service has a
+/// tty for sudo's tty-scoped default to key on, so they all share the
+/// operator's record.  Without `-k` this probe answered [`Elevate::SudoQuiet`]
+/// for `timestamp_timeout` minutes after the operator ran *any* `sudo`
+/// anywhere on the machine, and the page then took the computer down **with no
+/// password at all**.  Measured on the Pi 2026-09-16 with a three-session
+/// control: a fresh session is refused, `sudo -v` in a *second* session makes a
+/// *third* one succeed.  It matters because `security_enabled` is off by
+/// default, so the menu this sits on asks for no credential of its own either
+/// -- for those fifteen minutes a visitor on the LAN reboots the machine
+/// having proved nothing.
+///
+/// `-k` makes this invocation ignore that record, so only a genuine NOPASSWD
+/// rule still answers quietly.
+///
+/// **And it costs the operator nothing, which was measured rather than
+/// assumed.**  `-k` *without* a command deletes the cached credential; `-k`
+/// **in conjunction with a command** -- which is what this is -- only causes
+/// sudo to ignore it, and sudo(8) is explicit that it "will not update the
+/// user's cached credentials" either.  So opening this page neither clears the
+/// credential the operator earned in their own shell nor extends it.  This
+/// file claimed the opposite for a while, as a deliberate trade; the trade was
+/// imaginary.  Measured on the Pi (sudo 1.9.16p2) by alternating the two forms
+/// five times against one live credential: the bare `-n -l` succeeded every
+/// time and the `-k -n -l` refused every time, so the record was neither
+/// consumed nor refreshed by either.
+///
+/// It is self-consistent for the same reason: the probe cannot write a
+/// timestamp, so the feature can never come to depend on one it created.
+///
 /// `Err` carries a line to show the operator.  Two cases: a machine with no
 /// `sudo` at all, which is a fact about the installation and not something a
 /// retry will fix, and a probe that never came back -- see [`SUDO_TIMEOUT`].
@@ -333,8 +371,10 @@ pub(in crate::telnet) async fn probe_elevation(argv: &[&str]) -> Result<Elevate,
 /// Split for the same reason [`run_elevated_within`] is, and **not** driven by
 /// a test here: a call shells out to the real `sudo` on every `cargo test`,
 /// which on a machine whose user is not in sudoers logs an authentication
-/// failure per run -- the reason the older guard here was a source scan too.
-/// The shape is held by a source scan instead.
+/// failure per run.  That was the older guard's reason too, and it is the only
+/// one -- the `-k` itself is harmless to the developer's credential cache, for
+/// the reason [`probe_elevation`] gives.  The shape is held by a source scan
+/// instead.
 async fn probe_elevation_within(
     argv: &[&str],
     budget: std::time::Duration,
@@ -366,7 +406,7 @@ async fn probe_elevation_within(
     }
     let mut probe = tokio::process::Command::new("sudo");
     probe
-        .args(["-n", "-l", "--"])
+        .args(["-k", "-n", "-l", "--"])
         .args(argv)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -466,15 +506,37 @@ pub(in crate::telnet) async fn run_elevated_within(
             c.args(&argv[1..]);
             c
         }
+        // **`-k` on every one of these, so no path here can ride a cached
+        // credential.**  It is not a tidiness rule -- without it on the
+        // `SudoPassword` branch the page asks for a password and then does not
+        // check it.  `power_action` verifies the typed password with `sudo -v`
+        // before it says goodbye, and `sudo -v` is satisfied by a live
+        // timestamp without ever reading stdin, so with the operator's own
+        // credential cached *any typed string* passed and the machine went
+        // down.  Measured on the Pi (sudo 1.9.16p2): `sudo -S -p "" -v` fed
+        // `not-the-password-xyzzy` was **ACCEPTED**, and the same call with
+        // `-k` was refused.
+        //
+        // That is worse than the hole it would otherwise have left, which is
+        // why it is here rather than only on the probe: a page that skips the
+        // prompt is at least honest about it, while a prompt that accepts
+        // anything is a screen promising a check that never happened -- the
+        // one thing the order of the steps on this page exists to prevent.
+        //
+        // `SudoQuiet` takes it too.  That branch only runs when the `-k` probe
+        // said NOPASSWD, so nothing there needs a cache -- but an invariant
+        // that holds on every path is one a later reader cannot breach by
+        // adding a fourth, and the two must not be able to disagree about
+        // whether a timestamp counts.
         Elevate::SudoQuiet => {
             let mut c = tokio::process::Command::new("sudo");
-            c.arg("-n");
+            c.args(["-k", "-n"]);
             c.args(argv);
             c
         }
         Elevate::SudoPassword => {
             let mut c = tokio::process::Command::new("sudo");
-            c.args(["-S", "-p", ""]);
+            c.args(["-k", "-S", "-p", ""]);
             c.args(argv);
             c
         }

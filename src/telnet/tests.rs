@@ -10761,8 +10761,26 @@ fn test_the_elevation_probe_asks_about_the_real_command() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        code.contains(r#".args(["-n", "-l", "--"])"#),
+        code.contains(r#".args(["-k", "-n", "-l", "--"])"#),
         "the probe no longer asks sudo about a specific command",
+    );
+    // **`-k` is the whole of the timestamp fix and is one character wide.**
+    // Without it the probe answers `SudoQuiet` off the operator's own cached
+    // credential -- `/run/sudo/ts/<uid>`, shared by every process of that user
+    // -- and the page takes the machine down with no password at all for
+    // `timestamp_timeout` minutes after they last ran sudo anywhere.  The
+    // positive assertion above would survive its removal if the spelling were
+    // matched loosely, so the pre-fix form is named and forbidden outright.
+    assert!(
+        !code.contains(r#".args(["-n", "-l", "--"])"#),
+        "the probe no longer clears sudo's timestamp first, so a credential \
+         cached in the operator's shell answers for this page -- see \
+         probe_elevation's doc comment",
+    );
+    assert!(
+        !code.contains(r#".args(["-n", "true"])"#),
+        "the probe is back to asking about `true`, which answers a different \
+         question -- see probe_elevation's doc comment",
     );
     // It must be handed the argv it stands in for, not a constant.
     assert!(
@@ -10802,6 +10820,52 @@ fn test_the_elevation_probe_asks_about_the_real_command() {
         body.contains("kill_on_drop(true)"),
         "an abandoned probe is left running",
     );
+}
+
+/// **Every** `sudo` this page runs must ignore a cached credential.
+///
+/// The `-k` fix was applied to the elevation probe first and that was only half
+/// of it: `power_action` verifies the typed password with `sudo -v`, and a
+/// `sudo -v` satisfied by a live timestamp never reads stdin at all.  Measured
+/// on the Pi (sudo 1.9.16p2) with the operator's own credential cached:
+/// `sudo -S -p "" -v` fed `not-the-password-xyzzy` was **accepted**, and the
+/// same call with `-k` was refused.  So a probe-only fix would have turned
+/// "reboots with no password" into "reboots on any password", which is worse
+/// -- a screen promising a check that did not happen.
+///
+/// Counted rather than spelled out: the assertion is that **no** `sudo` is
+/// spawned here without `-k`, so a fourth call site added later cannot quietly
+/// opt out.  Scanned rather than driven, for `probe_elevation_within`'s reason.
+#[cfg(unix)]
+#[test]
+fn test_no_sudo_on_this_page_can_ride_a_cached_credential() {
+    let src = include_str!("power.rs");
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//") && !l.trim_start().starts_with("///"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let spawns: Vec<&str> = code.match_indices(r#"Command::new("sudo")"#)
+        .map(|(i, _)| &code[i..(i + 240).min(code.len())])
+        .collect();
+    assert!(
+        spawns.len() >= 3,
+        "expected the probe, the quiet run and the password run; found {}",
+        spawns.len(),
+    );
+    for (n, window) in spawns.iter().enumerate() {
+        assert!(
+            window.contains(r#""-k""#),
+            "sudo spawn #{} does not pass -k, so a cached credential answers \
+             for it -- see this test's doc comment:\n{}",
+            n,
+            window,
+        );
+    }
+    // The pre-fix spellings, named so a revert cannot pass by matching loosely.
+    for gone in [r#"c.arg("-n");"#, r#".args(["-S", "-p", ""])"#] {
+        assert!(!code.contains(gone), "the pre-fix form {} is back", gone);
+    }
 }
 
 /// A `sudo` that never comes back must be given up on, and the child killed.

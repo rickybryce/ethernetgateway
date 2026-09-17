@@ -1414,13 +1414,41 @@ the ports, and the new one will bind nothing.
 <p>
 Whichever you choose, the gateway checks at startup and shows the items only
 where they can work &mdash; so if they are still missing after a change, the
-change did not take effect. The password is never optional: this feature
-deliberately has no passwordless route, because the telnet menu is reachable
-without a login when <code>security_enabled</code> is off
+change did not take effect. The gateway offers no setting that skips the
+password, and it will not take a cached credential in place of one &mdash; the
+only passwordless route is a <code>NOPASSWD</code> rule you write in
+<code>sudoers</code> yourself. That matters because the telnet menu is
+reachable without a login when <code>security_enabled</code> is off
 (&sect;5.4), and the <code>sudo</code> password is what stands between a
 visitor and the power button. Wrong answers count against the shared per-IP
 lockout (&sect;7.3).
 </p>
+
+<aside class="note">
+<span class="label">A cached sudo credential does not count</span>
+<code>sudo</code> remembers a successful password for
+<code>timestamp_timeout</code> minutes (15 by default), and it remembers it
+<em>per user account</em>, not per terminal &mdash; neither a gateway session
+nor a service has a terminal for <code>sudo</code>'s usual tty-scoped record to
+attach to, so they share the one belonging to the account. Up to and including
+version 1.0.0 that credential answered for this page: for fifteen minutes after
+you ran any <code>sudo</code> command anywhere on the machine, the restart and
+shutdown items took the computer down <strong>without asking for a password at
+all</strong>. The page now clears that record before it asks whether a password
+is needed, so only a <code>NOPASSWD</code> rule you wrote yourself still
+skips the prompt.
+<br><br>
+<strong>This costs you nothing.</strong> Clearing the record is what
+<code>sudo&nbsp;-k</code> does when it is run <em>on its own</em>; run
+alongside a command &mdash; which is how the gateway uses it &mdash; it only
+ignores the record for that one check, and does not refresh it either. So
+opening this page neither cancels nor extends a <code>sudo</code> credential
+you are part way through using in a terminal.
+<br><br>
+The same applies to the password you type <em>into</em> this page: it is
+checked against the system, never against a cached credential, so a password
+typed here is always really verified.
+</aside>
 
 <aside class="note">
 <span class="label">Commodore</span>

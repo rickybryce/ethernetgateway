@@ -105,6 +105,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cached `sudo` credential could restart the computer with no password at
+  all.**  `sudo` records a successful authentication in `/run/sudo/ts/<uid>`
+  &mdash; **one file per uid**, because neither a gateway session nor a
+  service has a tty for its usual tty-scoped record to attach to &mdash; so for
+  `timestamp_timeout` minutes (15 by default) after the operator ran *any*
+  `sudo` command anywhere on the machine, the elevation probe answered "no
+  password needed" and the second page took the machine down without asking
+  for one.  `security_enabled` is off by default, so the menu it sits on asks
+  for no credential either: for those fifteen minutes a visitor on the network
+  could reboot the machine having proved nothing.  Measured on a Pi with a
+  three-session control &mdash; a fresh session is refused, `sudo -v` in a
+  *second* session makes a *third* one succeed.  The probe now passes `sudo -k`
+  so the check ignores that record, and only a `NOPASSWD` rule the operator
+  wrote still skips the prompt.  **It costs the operator nothing**: `-k`
+  deletes the cached credential only when used *without* a command, and
+  alongside one it merely ignores it and does not refresh it either, so a
+  credential earned in the operator's own shell is neither cleared nor
+  extended by opening this page.  Measured on the Pi (sudo 1.9.16p2) by
+  alternating the two forms five times against one live credential.
+  **`-k` goes on every `sudo` this page runs, not just the probe**, and that
+  second half is the more serious one.  The typed password is verified with
+  `sudo -v` before the goodbye, and a `sudo -v` satisfied by a live timestamp
+  never reads stdin at all -- so a probe-only fix would have turned "reboots
+  with no password" into "reboots on *any* password", which is worse: a screen
+  promising a check that did not happen.  Measured the same way, with the
+  operator's credential cached: `sudo -S -p "" -v` fed
+  `not-the-password-xyzzy` was **accepted**, and the identical call with `-k`
+  was refused.
 - **A `sudo` that never answers no longer hangs the session.**  All three calls
   on the second page &mdash; the probe, the `sudo -v` check and the command
   itself &mdash; are bounded at 30 seconds, and an abandoned child is killed
