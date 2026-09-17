@@ -1,0 +1,36 @@
+# Start the gateway when the desktop session starts -- the arrangement most
+# people will want, and the one restart/shutdown needs.
+#
+# Copy to ~/.config/autostart/ethernetgateway.desktop, edit Exec= and Path=,
+# then log out and back in (or reboot).  On Raspberry Pi OS and most desktops
+# this is the same list the "Startup Applications" tool edits.
+#
+# This is NOT a service: nothing runs it until a graphical session exists, so
+# on a machine reached remotely you want the desktop to log in automatically.
+# For a headless box, use contrib/systemd/ethernetgateway.service instead --
+# and note that restart/shutdown cannot work under that unit's
+# NoNewPrivileges=yes (manual section 5.5.1).
+#
+# Started this way the gateway runs as you, with your password and no
+# NoNewPrivileges, so the second menu can restart and shut down the computer.
+
+[Desktop Entry]
+Type=Application
+Name=Ethernet Gateway
+Comment=Telnet/SSH gateway and Hayes AT modem emulator for retro terminals
+Exec=/home/YOURNAME/ethernetgateway/target/release/ethernetgateway
+Terminal=false
+Categories=Network;Utility;
+
+# **Set this, and set it to the directory you want the data in.**  Everything
+# the gateway creates lives in `ethernetgateway-data` one level below its
+# working directory, and the desktop-entry spec leaves that undefined when
+# Path= is absent -- it cannot say $HOME, because the value is a literal.
+# Without it the same program started two ways can build two data directories:
+# two configs, two SSH host keys, two transfer trees, and a second copy that
+# comes up on defaults while your real configuration sits untouched next door.
+# (The AppImage pins $HOME for you when no terminal is attached; a plain binary
+# started from a .desktop file has nothing to pin it.)
+Path=/home/YOURNAME
+
+X-GNOME-Autostart-enabled=true

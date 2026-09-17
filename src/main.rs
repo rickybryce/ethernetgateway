@@ -86,6 +86,8 @@ fn main() {
 
     // Shutdown and restart coordination (persist across restart cycles)
     let shutdown = Arc::new(AtomicBool::new(false));
+    // Set by SIGINT/SIGTERM only -- see `register_signal_handlers`.
+    let stop = Arc::new(AtomicBool::new(false));
     let restart = Arc::new(AtomicBool::new(false));
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let gui_ctx: GuiCtxSlot = Arc::new(Mutex::new(None));
@@ -93,6 +95,7 @@ fn main() {
     // Register POSIX signal handlers (SIGINT, SIGTERM, SIGHUP)
     register_signal_handlers(
         shutdown.clone(),
+        stop.clone(),
         restart.clone(),
         shutdown_notify.clone(),
         gui_ctx.clone(),
@@ -713,7 +716,16 @@ fn main() {
         shutdown_notify.notify_waiters();
         let _ = server_handle.join();
 
-        if restart.load(Ordering::SeqCst) {
+        // **`stop` is checked here as well as in the watcher, and that is not
+        // belt and braces -- it closes a race.**  SIGTERM can land after the
+        // watcher has read `stop` and before it arms `restart`, which would
+        // send us round again on a process that was asked to end.  This is the
+        // one place the decision to live another cycle is actually taken, so
+        // it is the place that has to honour the ask.
+        if should_run_another_cycle(
+            restart.load(Ordering::SeqCst),
+            stop.load(Ordering::SeqCst),
+        ) {
             // Reset flags and loop back to start fresh
             restart.store(false, Ordering::SeqCst);
             shutdown.store(false, Ordering::SeqCst);
@@ -728,9 +740,38 @@ fn main() {
     glog!("Server stopped.");
 }
 
+/// Whether a SIGHUP that has just been observed should arm the restart path.
+///
+/// **A stop outranks a reload.**  The two arrive together in ordinary use: a
+/// systemd *session* scope -- where a desktop launch lands, which is how most
+/// people run this -- stops its processes with `SendSIGHUP=yes`, so it sends
+/// SIGTERM *and* SIGHUP.  Treating the SIGHUP as a reload started a fresh
+/// server cycle in the middle of our own shutdown and the process survived it;
+/// systemd then waited out the scope's `TimeoutStopUSec` (90 s) and SIGKILLed
+/// us, which skips the goodbye broadcast, the serial join and the staged image
+/// write.  Measured on a Pi: `kill -TERM` alone exited in 2 s, `kill -TERM`
+/// then `kill -HUP` was still alive 40 s later, and every reboot of that
+/// machine took 92 s against 4 s with the gateway not running.
+///
+/// A free function so the rule is testable: everything around it is signal
+/// registration and a watcher thread, which a unit test cannot drive.
+pub(crate) fn reload_arms_restart(sighup_seen: bool, stop_requested: bool) -> bool {
+    sighup_seen && !stop_requested
+}
+
+/// Whether the main loop should start another server cycle.
+///
+/// The same rule one level up, and **not redundant with it**: SIGTERM can land
+/// after the watcher has read `stop_requested` and before it arms `restart`,
+/// and this is the one place where living another cycle is actually decided.
+pub(crate) fn should_run_another_cycle(restart: bool, stop_requested: bool) -> bool {
+    restart && !stop_requested
+}
+
 /// Register handlers for SIGINT, SIGTERM, and SIGHUP using signal-hook.
 fn register_signal_handlers(
     shutdown: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
     gui_ctx: GuiCtxSlot,
@@ -742,6 +783,16 @@ fn register_signal_handlers(
         .expect("Failed to register SIGINT handler");
     signal_hook::flag::register(SIGTERM, shutdown.clone())
         .expect("Failed to register SIGTERM handler");
+    // **And the same two signals into a flag of their own, because
+    // `shutdown` cannot tell who set it.**  The watcher below trips
+    // `shutdown` itself to unwind a reload, so by the time anything reads it
+    // the flag no longer says whether a human asked us to stop.  `stop` is
+    // written only by SIGINT and SIGTERM and never cleared, so "someone asked
+    // this process to end" survives every server cycle.
+    signal_hook::flag::register(SIGINT, stop.clone())
+        .expect("Failed to register SIGINT stop flag");
+    signal_hook::flag::register(SIGTERM, stop.clone())
+        .expect("Failed to register SIGTERM stop flag");
 
     // SIGHUP is a *reload* request, not a shutdown: systemd's ExecReload
     // (`kill -HUP`) sends it and expects the service to come back up with
@@ -771,7 +822,24 @@ fn register_signal_handlers(
             // A SIGHUP reload arms the restart path before we unwind the
             // server cycle; a plain SIGINT/SIGTERM leaves `restart` unset,
             // so the main loop exits instead of looping back.
-            if sighup.swap(false, Ordering::SeqCst) {
+            //
+            // **A stop outranks a reload, and the pair arrives together in
+            // ordinary use.**  A systemd *session* scope -- which is what a
+            // desktop launch lands in, the way most people will run this --
+            // stops its processes with `SendSIGHUP=yes`, so it sends SIGTERM
+            // *and* SIGHUP.  Arming `restart` on the SIGHUP made the gateway
+            // start a fresh server cycle in the middle of its own shutdown
+            // and survive: measured on a Pi, every logout, reboot and
+            // shutdown sat for the scope's `TimeoutStopUSec` (90 s) and then
+            // SIGKILLed us -- no goodbye broadcast, no serial join, no staged
+            // image write, the three things this path exists to do.  `kill
+            // -TERM` alone exited in 2 s; `kill -TERM` followed by `kill
+            // -HUP` was still alive 40 s later.
+            //
+            // The SIGHUP flag is consumed either way: leaving it set would
+            // trip the next loop into a restart nobody asked for.
+            let stopping = stop.load(Ordering::SeqCst);
+            if reload_arms_restart(sighup.swap(false, Ordering::SeqCst), stopping) {
                 restart.store(true, Ordering::SeqCst);
                 shutdown_watch.store(true, Ordering::SeqCst);
             }
@@ -817,6 +885,44 @@ fn register_signal_handlers(
 
 #[cfg(test)]
 mod tests {
+
+    /// A stop outranks a reload, in both places that decide it.
+    ///
+    /// **This is the rule a desktop launch depends on.**  A systemd session
+    /// scope stops its processes with `SendSIGHUP=yes` -- SIGTERM *and*
+    /// SIGHUP -- and arming the restart path on that SIGHUP made the gateway
+    /// start a fresh server cycle during its own shutdown and survive it.
+    /// Measured on a Pi before the fix: every reboot took 92 s (the scope's
+    /// 90 s stop timeout, then SIGKILL) against 4 s with the gateway not
+    /// running, and `kill -TERM` + `kill -HUP` left it alive 40 s later where
+    /// `kill -TERM` alone exited in 2 s.
+    #[test]
+    fn test_a_stop_outranks_a_reload() {
+        // The ordinary reload: SIGHUP alone, nobody asked us to stop.
+        assert!(
+            reload_arms_restart(true, false),
+            "a plain SIGHUP must still reload -- `systemctl reload` depends on it",
+        );
+        assert!(should_run_another_cycle(true, false));
+
+        // The pair a session scope sends.
+        assert!(
+            !reload_arms_restart(true, true),
+            "a SIGHUP arriving with a stop must not turn the shutdown into a restart",
+        );
+        assert!(
+            !should_run_another_cycle(true, true),
+            "the main loop must not start another cycle once a stop was asked for -- \
+             this is the race the watcher check alone cannot close",
+        );
+
+        // No signal at all changes nothing either way.
+        assert!(!reload_arms_restart(false, false));
+        assert!(!reload_arms_restart(false, true));
+        assert!(!should_run_another_cycle(false, false));
+        assert!(!should_run_another_cycle(false, true));
+    }
+
     use super::*;
 
     #[test]
@@ -836,11 +942,13 @@ mod tests {
     fn test_signal_handlers_register() {
         // Verify that signal registration doesn't panic
         let shutdown = Arc::new(AtomicBool::new(false));
+        // Written only by SIGINT/SIGTERM, so a reload cannot outrank a stop.
+        let stop = Arc::new(AtomicBool::new(false));
         let restart = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(tokio::sync::Notify::new());
         let gui_ctx: GuiCtxSlot = Arc::new(Mutex::new(None));
         // This should not panic — signals can be registered multiple times
-        register_signal_handlers(shutdown, restart, notify, gui_ctx);
+        register_signal_handlers(shutdown, stop, restart, notify, gui_ctx);
     }
 
     #[test]

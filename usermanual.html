@@ -1348,11 +1348,30 @@ usually the easier one:
   password to.</li>
 </ul>
 
+<p><strong>The simplest arrangement, and the one most downloads will want:
+start it from your desktop&rsquo;s Startup Applications list.</strong> That is not a
+service &mdash; it is a <code>.desktop</code> file in
+<code>~/.config/autostart/</code> that the desktop session launches when it starts,
+which is the same list the &ldquo;Startup Applications&rdquo; tool edits.  Started that
+way the gateway runs as you, with your password and no
+<code>NoNewPrivileges</code>, so restart and shutdown work with nothing to
+configure.  A template is in <code>contrib/desktop/ethernetgateway.desktop</code>.
+Two things to know: nothing runs it until a graphical session exists, so a
+machine you reach remotely should log in to its desktop automatically; and
+<strong>set <code>Path=</code></strong> to the directory you want the data in,
+because everything the gateway creates lives in
+<code>ethernetgateway-data</code> one level below its working directory and the
+desktop-entry spec leaves that undefined when <code>Path=</code> is absent
+(&sect;3.1) &mdash; without it you can end up with a second, empty data directory
+and default settings while your real configuration sits next door.  (An AppImage
+pins <code>$HOME</code> for you when no terminal is attached; a plain binary
+started from a <code>.desktop</code> file has nothing to pin it.)</p>
+
 <p>
-To have it come back after a reboot without being a system service, give it a
-<em>user</em> unit &mdash; <code>~/.config/systemd/user/ethernetgateway.service</code>
-&mdash; and enable lingering so the user manager starts at boot rather than at
-login:
+If you would rather it start before anyone logs in &mdash; a headless box on a
+shelf, with no desktop session to wait for &mdash; give it a <em>user</em> unit
+instead: <code>~/.config/systemd/user/ethernetgateway.service</code>, with
+lingering so the user manager starts at boot rather than at login:
 </p>
 
 <pre><code>systemctl --user enable --now ethernetgateway

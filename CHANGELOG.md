@@ -105,6 +105,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A desktop-launched gateway survived its own shutdown, so every logout,
+  reboot and shutdown waited 90 seconds and then killed it.**  A systemd
+  *session* scope &mdash; where a launch from a desktop icon or a Startup
+  Applications entry lands &mdash; stops its processes with
+  `SendSIGHUP=yes`, sending SIGTERM **and** SIGHUP.  SIGHUP is this program's
+  *reload* signal, so the watcher armed the restart path and the main loop
+  started a fresh server cycle in the middle of the shutdown; systemd then sat
+  out the scope's `TimeoutStopUSec` and `SIGKILL`ed us, which skips the goodbye
+  broadcast, the serial join and the staged image write &mdash; the three
+  things that path exists to do.  Measured on a Pi: `kill -TERM` alone exited
+  in 2&nbsp;s, `kill -TERM` then `kill -HUP` was still alive 40&nbsp;s later,
+  and reboots took 92&nbsp;s against 4&nbsp;s with the gateway not running.  A
+  stop now outranks a reload, checked both in the watcher and at the one place
+  that decides to live another cycle &mdash; the second is not redundant, it
+  closes the race where SIGTERM lands between the two.  A plain `systemctl
+  reload` still reloads.  Running as a *service* was never affected, because a
+  service unit sends SIGTERM alone.
 - **A session with no address could guess the operator's system password
   without bound.**  Moving the second page's `sudo` attempt cap into the shared
   per-IP lockout map left the sessions that map cannot key -- a caller on the
