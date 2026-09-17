@@ -105,34 +105,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A cached `sudo` credential could restart the computer with no password at
-  all.**  `sudo` records a successful authentication in `/run/sudo/ts/<uid>`
-  &mdash; **one file per uid**, because neither a gateway session nor a
-  service has a tty for its usual tty-scoped record to attach to &mdash; so for
-  `timestamp_timeout` minutes (15 by default) after the operator ran *any*
-  `sudo` command anywhere on the machine, the elevation probe answered "no
-  password needed" and the second page took the machine down without asking
-  for one.  `security_enabled` is off by default, so the menu it sits on asks
-  for no credential either: for those fifteen minutes a visitor on the network
-  could reboot the machine having proved nothing.  Measured on a Pi with a
-  three-session control &mdash; a fresh session is refused, `sudo -v` in a
-  *second* session makes a *third* one succeed.  The probe now passes `sudo -k`
-  so the check ignores that record, and only a `NOPASSWD` rule the operator
-  wrote still skips the prompt.  **It costs the operator nothing**: `-k`
-  deletes the cached credential only when used *without* a command, and
-  alongside one it merely ignores it and does not refresh it either, so a
-  credential earned in the operator's own shell is neither cleared nor
-  extended by opening this page.  Measured on the Pi (sudo 1.9.16p2) by
-  alternating the two forms five times against one live credential.
-  **`-k` goes on every `sudo` this page runs, not just the probe**, and that
-  second half is the more serious one.  The typed password is verified with
-  `sudo -v` before the goodbye, and a `sudo -v` satisfied by a live timestamp
-  never reads stdin at all -- so a probe-only fix would have turned "reboots
-  with no password" into "reboots on *any* password", which is worse: a screen
-  promising a check that did not happen.  Measured the same way, with the
-  operator's credential cached: `sudo -S -p "" -v` fed
-  `not-the-password-xyzzy` was **accepted**, and the identical call with `-k`
-  was refused.
+- **Restart and shutdown were hidden on a machine where they would have
+  worked.**  The menu gate asked only whether the kernel's `no_new_privs` was
+  set, while the probe that actually runs the command answers the *root*
+  question first: `no_new_privs` stops a **setuid** binary gaining privilege,
+  which is why `sudo` cannot work under it, but a gateway already running as
+  root gains nothing and needs no `sudo`.  So under a root unit with
+  `NoNewPrivileges=yes` -- an ordinary hardened container -- the `2` entry,
+  both rows, their key arms, the MORE hint and the help screen all vanished
+  for a computer that would have restarted perfectly well.  A gate that
+  disagrees with the probe is the same defect either way round: one direction
+  hides a feature that works, the other offers one that cannot.  Both now
+  read the two conditions in the same order.
+- **`L  Conn rate` was drawn on the SERVER CONFIGURATION screen and explained
+  nowhere.**  Pressing `H` there listed every other key.  That page has no
+  rows helper -- it renders straight to the wire -- so the guard that holds
+  every other menu's keys against its help could not see it; a scan bounded to
+  that one function now does.
+
 - **A `sudo` that never answers no longer hangs the session.**  All three calls
   on the second page &mdash; the probe, the `sudo -v` check and the command
   itself &mdash; are bounded at 30 seconds, and an abandoned child is killed
@@ -143,6 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subprocess timeout in the codebase and is deliberately scoped to this module,
   where a block is reachable from a page whose entire design is that no screen
   promises what the next step cannot deliver.
+
 - **A refused `sudo` now says what its own message cannot.**  The screen showed
   `sudo`'s last line, which is right for a typo and misleading for the two
   cases retyping cannot fix: an account that is not in `sudoers`, and one with
@@ -153,6 +144,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (&ldquo;if the password is right&hellip;&rdquo;) because telling the cases
   apart means reading `sudo`'s locale-dependent English, which this page
   declines to do.
+
 - **A desktop-launched gateway survived its own shutdown, so every logout,
   reboot and shutdown waited 90 seconds and then killed it.**  A systemd
   *session* scope &mdash; where a launch from a desktop icon or a Startup
@@ -170,19 +162,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closes the race where SIGTERM lands between the two.  A plain `systemctl
   reload` still reloads.  Running as a *service* was never affected, because a
   service unit sends SIGTERM alone.
-- **A session with no address could guess the operator's system password
-  without bound.**  Moving the second page's `sudo` attempt cap into the shared
-  per-IP lockout map left the sessions that map cannot key -- a caller on the
-  modem, a CP/M guest that dialled `ATDT&nbsp;ethernetgateway` -- counted
-  nowhere at all, where every session used to get three.  Each wrong answer is
-  a real PAM attempt against the host account, and the page simply kept asking.
-  The per-IP map remains the rule for an addressed session, because it is the
-  one a reconnect cannot reset; a session without an address now has a
-  per-session floor of the same three.  Its refusals are logged too &mdash;
-  that line was inside the same address test, so a refused system password from
-  the modem left no trace &mdash; and the two counters say different things
-  when they stop you, because an address is banned for five minutes and a
-  session floor clears only on a fresh connection.
+
 - **One name for the auth-attempt ceiling.**  There were two, differing only
   in the order of two words &mdash; `MAX_AUTH_ATTEMPTS` inside the telnet
   module and a `pub(crate)` `AUTH_MAX_ATTEMPTS` alias for `ssh.rs` and
@@ -190,6 +170,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ended up a dozen lines apart in one test module.  One definition, so they
   could never disagree about the value; a security bound should still not have
   a synonym.
+
 - **The main help screen documented the second menu where the menu does not
   draw it.**  Hiding restart and shutdown where the kernel forbids elevation
   covered the two rows, the `2` entry, that key's arm and the error hint
@@ -199,12 +180,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is built from the same `MenuItems` the menu is drawn from, so the two cannot
   disagree, and a new guard holds the direction the old one could not see
   &mdash; every key the help explains must be a key the page draws.
+
 - **The second menu's "press..." hint and its page could only be checked in
   whichever state the machine running the tests was in.**  Both read the live
   kernel flag, so the text a packaged installation shows &mdash; the page with
   no power items on it &mdash; was measured nowhere.  Both now take the flag as
   a parameter, as the main menu's rows already did, and both states are
   exercised everywhere the suite runs.
+
 - **The auth lockout's window rule is now tested where it cannot skip.**  Its
   two tests backdate a live `Instant`, which is impossible on a host up for
   less than the lockout window (a fresh CI container) &mdash; they returned
@@ -225,13 +208,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   found &mdash; the IPv6 one rejects a non-zero prefix length and the Windows
   one requires its netmask column to be `0.0.0.0`.  One rule in three places,
   disagreeing in one.
-
-- **`rustls` bumped to 0.23.45 for RUSTSEC-2026-0285** (published 2026-09-14,
-  medium): TLS 1.3 handshake messages accepted across encryption-level
-  boundaries.  It arrives through `ureq`, so it sat on the TLS path for the
-  text browser, the weather service, AI Chat and the CP/M sample-disk
-  downloader &mdash; and the advisory landed two days after 1.0.0 was tagged,
-  so the released binaries carry it.
 
 - **Three defects in the shipped systemd unit, each hit as a real failure
   while installing it on a Pi** (2026-09-14).  **(1)**
@@ -284,6 +260,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truth; it is deliberately no longer applied at save time, where it would
   override an operator who chose a device and then unticked the box before
   saving.  Telnet and the web were unaffected &mdash; they write immediately.
+
+### Security
+
+- **A successful gateway login handed out three more guesses at the
+  computer's own password.**  The restart/shutdown page counts refused `sudo`
+  attempts per address, but it counted them in the *shared* authentication
+  lockout -- the map a successful telnet, SSH or web login clears.  So with
+  `security_enabled` on, the bound was three guesses **per login** rather than
+  three per address: log in, spend them against the operator's *system*
+  account, hang up, log in again.  The two credentials are different things
+  and now have different counters, and nothing clears the new one -- it
+  expires on its own window and that is the only way out.  The default
+  configuration was never exposed, having no login to clear anything, so this
+  failed only where the operator had turned security **on**.
+- **Holding the confirmation key spawned one real `sudo` per press.**  The
+  attempt cap was consulted after the elevation probe rather than before it,
+  so a caller could repeat confirm-and-refuse indefinitely within one session.
+  On a machine whose service account is not in sudoers, each one wrote an
+  authentication failure into the *host's* auth log -- reachable by an
+  unauthenticated LAN user whenever `security_enabled` is off, which is the
+  default.  The cap is checked first now, and costs a map lookup.
+- **A connection flood wrote one log line per refused connection.**  The
+  refusal itself was careful -- counted, never stored -- but the line beside
+  it was unconditional, and that write is a blocking one inline in the accept
+  loop.  With a rolling log, a flood loud enough to matter pushed its own
+  evidence out of the file.  One line per address per flood now, and an
+  address that comes back under the limit may be reported again.
+
+- **A cached `sudo` credential could restart the computer with no password at
+  all.**  `sudo` records a successful authentication in `/run/sudo/ts/<uid>`
+  &mdash; **one file per uid**, because neither a gateway session nor a
+  service has a tty for its usual tty-scoped record to attach to &mdash; so for
+  `timestamp_timeout` minutes (15 by default) after the operator ran *any*
+  `sudo` command anywhere on the machine, the elevation probe answered "no
+  password needed" and the second page took the machine down without asking
+  for one.  `security_enabled` is off by default, so the menu it sits on asks
+  for no credential either: for those fifteen minutes a visitor on the network
+  could reboot the machine having proved nothing.  Measured on a Pi with a
+  three-session control &mdash; a fresh session is refused, `sudo -v` in a
+  *second* session makes a *third* one succeed.  The probe now passes `sudo -k`
+  so the check ignores that record, and only a `NOPASSWD` rule the operator
+  wrote still skips the prompt.  **It costs the operator nothing**: `-k`
+  deletes the cached credential only when used *without* a command, and
+  alongside one it merely ignores it and does not refresh it either, so a
+  credential earned in the operator's own shell is neither cleared nor
+  extended by opening this page.  Measured on the Pi (sudo 1.9.16p2) by
+  alternating the two forms five times against one live credential.
+  **`-k` goes on every `sudo` this page runs, not just the probe**, and that
+  second half is the more serious one.  The typed password is verified with
+  `sudo -v` before the goodbye, and a `sudo -v` satisfied by a live timestamp
+  never reads stdin at all -- so a probe-only fix would have turned "reboots
+  with no password" into "reboots on *any* password", which is worse: a screen
+  promising a check that did not happen.  Measured the same way, with the
+  operator's credential cached: `sudo -S -p "" -v` fed
+  `not-the-password-xyzzy` was **accepted**, and the identical call with `-k`
+  was refused.
+
+- **A session with no address could guess the operator's system password
+  without bound.**  Moving the second page's `sudo` attempt cap into the shared
+  per-IP lockout map left the sessions that map cannot key -- a caller on the
+  modem, a CP/M guest that dialled `ATDT&nbsp;ethernetgateway` -- counted
+  nowhere at all, where every session used to get three.  Each wrong answer is
+  a real PAM attempt against the host account, and the page simply kept asking.
+  The per-IP map remains the rule for an addressed session, because it is the
+  one a reconnect cannot reset; a session without an address now has a
+  per-session floor of the same three.  Its refusals are logged too &mdash;
+  that line was inside the same address test, so a refused system password from
+  the modem left no trace &mdash; and the two counters say different things
+  when they stop you, because an address is banned for five minutes and a
+  session floor clears only on a fresh connection.
+
+- **`rustls` bumped to 0.23.45 for RUSTSEC-2026-0285** (published 2026-09-14,
+  medium): TLS 1.3 handshake messages accepted across encryption-level
+  boundaries.  It arrives through `ureq`, so it sat on the TLS path for the
+  text browser, the weather service, AI Chat and the CP/M sample-disk
+  downloader &mdash; and the advisory landed two days after 1.0.0 was tagged,
+  so the released binaries carry it.
 
 ## [1.0.0] - 2026-09-12
 
