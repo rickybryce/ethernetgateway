@@ -960,6 +960,9 @@ impl TelnetSession {
             self.restart.clone(),
             self.lockouts.clone(),
             self.authenticated,
+            // The address too: the sudo cap keys on it, and a menu session
+            // without one falls back to a floor that a re-dial resets.
+            self.peer_addr,
         );
         // Join the inbound `CPM@<ip>` call pool (RAII-released on any exit).
         // `CPM@<ip>` is a single dialable address, but every modem-enabled

@@ -105,6 +105,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The refusal for a password-free machine names an action again.**  Taking
+  out its claim about what `security_enabled` was set to also took out the
+  instruction, leaving "reconnect on a listener that asks who you are" &mdash;
+  and on the default install, telnet only with SSH off, there is no such
+  listener.  It now says to set the key and reconnect, which is an
+  instruction rather than a claim about the key's present value, and a guard
+  holds both halves.
+
 - **The elevation probe was remembered per session, but it asks per
   command.**  `sudo -l -- shutdown -r now` and `-h now` are different
   questions, and sudoers rules are per-argument -- `NOPASSWD: /sbin/shutdown
@@ -278,6 +286,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saving.  Telnet and the web were unaffected &mdash; they write immediately.
 
 ### Security
+
+- **`ATDT ethernetgateway` reset the cap on guesses at the host password.**
+  Closing the trust hole on that dialled menu session carried the dialler's
+  *credential* across but not its *address* &mdash; and the `sudo` attempt cap
+  keys on the address, falling back to a per-session floor when there is
+  none.  So a caller who had spent their three guesses could press `K`, dial
+  the gateway's own menu from inside the emulator, and get three more real
+  PAM attempts against the operator's host account; hang up, dial again,
+  repeat, scriptably and without limit.  Every one of those refusals also
+  logged the caller as `Serial modem` with no originating address, which is
+  the audit trail the cap exists to make usable.  The address now travels
+  with the credential, and a guard pins both at each dial-out call site,
+  because this is the second time a fix here was undone by a value that was
+  not carried.
 
 - **`ATDT ethernetgateway` was a way to gain trust the caller never had.**
   The credential check added for a root or NOPASSWD machine derived "this

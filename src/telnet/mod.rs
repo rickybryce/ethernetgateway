@@ -1557,10 +1557,21 @@ impl TelnetSession {
             peer_addr,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
-            // `auth_password` is the only method offered and it runs whatever
-            // `security_enabled` says, so reaching here means a credential was
-            // checked.  Set here because `run`'s door is the telnet one and
-            // skips SSH entirely.
+            // **Sound, but not for the reason first written here.**  That
+            // said `auth_password` is the only method offered; it is not --
+            // `auth_publickey` accepts an enrolled relay key.  What makes
+            // this `true` correct is that `shell_request` *refuses* a
+            // key-authenticated connection ("a relay key is not a login"), so
+            // the only connection that reaches a session at all is one that
+            // passed the password, whatever `security_enabled` says.
+            //
+            // That invariant lives in `ssh.rs` and is tied to this line by
+            // nothing but the two comments, so
+            // `test_ssh_trust_rests_on_the_shell_refusing_a_relay_key` holds
+            // them together: relax that refusal to let a slave open a menu
+            // and an enrolled key would silently acquire power-page trust.
+            //
+            // Set here because `run`'s door is the telnet one and skips SSH.
             authenticated: true,
             #[cfg(unix)]
             power_elevation: Vec::new(),
@@ -1699,10 +1710,20 @@ impl TelnetSession {
     /// this defers to it.  It is not a slave relay though: `is_relay` is cleared
     /// so the Troubleshooting screen doesn't label the caller "Relay (slave)".
     ///
-    /// Like every `is_serial` session this one does not authenticate, and that
-    /// grants nothing: whoever dialed it is *already* inside a session that
-    /// passed the gate (telnet/SSH login, or the physical serial port's own
-    /// trust boundary) — reaching the CP/M emulator at all required that.
+    /// **It inherits its dialler's credential state and address; it decides
+    /// neither for itself.**  An earlier version of this comment argued that
+    /// an `is_serial` session needs no credential because "whoever dialed it
+    /// is already inside a session that passed the gate" -- and with
+    /// `security_enabled` off, the shipped default, no gate was passed.  That
+    /// reasoning is what let an unauthenticated peer reach the power page
+    /// through `K` on a root or NOPASSWD machine.
+    ///
+    /// The address travels for the same reason the credential does: the sudo
+    /// attempt cap keys on `peer_addr`, and a session without one falls back
+    /// to a per-session floor that a re-dial resets.  Passing `None` here
+    /// made `ATDT ethernetgateway` a way to buy three more guesses at the
+    /// operator's host account, as often as the guest cared to hang up and
+    /// dial again -- and put no originating address in the log.
     ///
     /// For the same reason it is neither counted against the telnet session cap
     /// nor registered in [`SessionWriters`], exactly as the physical modem's
@@ -1716,9 +1737,10 @@ impl TelnetSession {
         shutdown: Arc<AtomicBool>,
         restart: Arc<AtomicBool>,
         lockouts: LockoutMap,
+        peer_addr: Option<IpAddr>,
         authenticated: bool,
     ) -> Self {
-        let mut s = Self::new_relay(reader, writer, shutdown, restart, None, lockouts);
+        let mut s = Self::new_relay(reader, writer, shutdown, restart, peer_addr, lockouts);
         s.is_relay = false;
         // **Only as credentialed as whoever dialled it.**  This session is
         // built by `cpm_modem`'s `ATDT ethernetgateway`, from inside another

@@ -11395,6 +11395,97 @@ fn test_the_sudo_attempt_cap_is_checked_before_the_probe_is_spawned() {
     );
 }
 
+/// **`new_ssh`'s unconditional trust rests on the shell refusing a relay key.**
+///
+/// An SSH session is marked authenticated at construction, which is right
+/// because the only connection that reaches a session has passed the
+/// password -- `auth_publickey` does accept an enrolled relay key, but
+/// `shell_request` refuses a key-authenticated connection outright.
+///
+/// Those are two files with nothing between them.  If that refusal were ever
+/// relaxed -- to let a slave open a menu, say -- an enrolled relay key would
+/// silently acquire power-page trust on a root or NOPASSWD machine, and no
+/// test would go red.  This is that test.
+#[test]
+fn test_ssh_trust_rests_on_the_shell_refusing_a_relay_key() {
+    let src = include_str!("../ssh.rs").replace('\r', "");
+    let at = src
+        .find("async fn shell_request")
+        .expect("shell_request moved or was renamed");
+    let tail = &src[at..];
+    // Bounded to this method: the next `async fn` ends it.
+    let end = tail[1..]
+        .find("\n    async fn ")
+        .map(|i| i + 1)
+        .unwrap_or(tail.len());
+    let body: String = tail[..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        body.contains("if self.key_authed"),
+        "`shell_request` no longer refuses a key-authenticated connection, so \
+         an enrolled relay key can open a session -- and `new_ssh` marks \
+         every session authenticated, which would hand that key the power \
+         page on a root or NOPASSWD machine",
+    );
+    // And the refusal must come before a shell is handed over, or it refuses
+    // nothing.
+    let refuse = body.find("if self.key_authed").expect("checked above");
+    let grant = body
+        .find("duplex_writer")
+        .expect("shell_request no longer sets up a session -- wrong function");
+    assert!(
+        refuse < grant,
+        "the relay-key refusal lands after the session is set up",
+    );
+}
+
+/// **Both dial-out call sites must hand over their own state, not a literal.**
+///
+/// `set_menu_context` takes bare values, so either call site could pass
+/// `true` / `None` and reopen the hole with the whole suite green -- and this
+/// hole has been reopened by exactly that route once already, in the same
+/// commit that closed it.  A compiler guarantee would be better; failing
+/// that, this is the scan, the same shape as the one on `session.rs`'s door.
+///
+/// Both files, because a rule enforced at one of two call sites holds at one.
+#[test]
+fn test_the_dial_out_sites_pass_their_own_credential_and_address() {
+    for (name, src) in [
+        ("cpm_emu.rs", include_str!("cpm_emu.rs")),
+        ("cpm_boot_ui.rs", include_str!("cpm_boot_ui.rs")),
+    ] {
+        let code = src.replace('\r', "");
+        let at = code
+            .find("set_menu_context(")
+            .unwrap_or_else(|| panic!("{name} no longer gives the modem a menu context"));
+        let tail = &code[at..];
+        let end = tail.find(");").expect("unterminated call");
+        let args: String = tail[..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            args.contains("self.authenticated"),
+            "{name} passes something other than `self.authenticated` to \
+             set_menu_context -- a literal there lets `ATDT ethernetgateway` \
+             hand a dialled session trust its dialler never had.  Found: \
+             {args:?}",
+        );
+        assert!(
+            args.contains("self.peer_addr"),
+            "{name} passes something other than `self.peer_addr` to \
+             set_menu_context -- without the address the sudo attempt cap \
+             falls back to a floor that re-dialling resets.  Found: {args:?}",
+        );
+    }
+}
+
 /// ...and the door must actually ask that rule.
 ///
 /// Three links carry this: the rule, the door that applies it, and the page
@@ -11512,15 +11603,29 @@ fn test_each_session_kind_states_its_own_credential() {
     // And the one that must NOT decide for itself: a menu session dialled
     // from inside another session is exactly as credentialed as its parent,
     // both ways round.
+    let dialler: IpAddr = "192.0.2.77".parse().unwrap();
     for parent in [false, true] {
         let (r, w, s, rs, l) = parts();
-        let sess = TelnetSession::new_cpm_menu(r, w, s, rs, l, parent);
+        let sess = TelnetSession::new_cpm_menu(r, w, s, rs, l, Some(dialler), parent);
         assert!(sess.is_serial, "the premise: it looks like a serial session");
         assert_eq!(
             sess.authenticated, parent,
             "a dialled menu session did not inherit its parent's credential \
              state (parent authenticated = {parent}), so `ATDT \
              ethernetgateway` is a way to gain trust the dialler never had",
+        );
+        // **And its address, or the sudo cap is escapable.**  The cap keys on
+        // `peer_addr`; with `None` a session falls back to a per-session
+        // floor that starts at zero, so a locked-out caller could press `K`,
+        // dial the menu, and have three more real PAM attempts against the
+        // operator's host account -- then hang up and dial again, from inside
+        // the guest, indefinitely.  It also put no originating address in the
+        // log the refusals are supposed to be traceable through.
+        assert_eq!(
+            sess.peer_addr,
+            Some(dialler),
+            "a dialled menu session lost its dialler's address, so the sudo \
+             attempt cap falls back to a floor that re-dialling resets",
         );
     }
 }
@@ -11592,13 +11697,23 @@ fn test_a_password_free_machine_still_needs_an_authenticated_session() {
         "the refusal does not name the setting that would fix it: {lines:?}",
     );
     let screen = lines.join(" ").to_lowercase();
-    for claim in ["turn on", "is off", "switch on", "enable it"] {
+    // It must not assert what the setting currently *is*...
+    for claim in ["is off", "is not set", "turn on", "switch on"] {
         assert!(
             !screen.contains(claim),
             "the refusal says {claim:?}, which asserts a value for a setting \
              this path never reads: {lines:?}",
         );
     }
+    // ...and it must still tell the operator what to do about it.  Dropping
+    // the instruction along with the assertion left the default install --
+    // telnet only, SSH off -- told to "reconnect on a listener that asks who
+    // you are", of which there is none.  A screen that names no action is the
+    // other half of the same defect.
+    assert!(
+        screen.contains("set security_enabled"),
+        "the refusal names no action the operator can take: {lines:?}",
+    );
     for l in &lines {
         assert!(
             l.chars().count() <= PETSCII_WIDTH - 2,

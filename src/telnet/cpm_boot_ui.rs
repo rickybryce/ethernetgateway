@@ -899,6 +899,9 @@ impl TelnetSession {
             self.restart.clone(),
             self.lockouts.clone(),
             self.authenticated,
+            // The address too: the sudo cap keys on it, and a menu session
+            // without one falls back to a floor that a re-dial resets.
+            self.peer_addr,
         );
         // Joins the inbound `CPM@<ip>` pool for as long as the boot lasts, so a
         // booted guest is dialable exactly as an emulator session is.

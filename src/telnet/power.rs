@@ -307,15 +307,23 @@ pub(in crate::telnet) fn blocked_lines() -> Vec<&'static str> {
 /// same hole by a different route, and covering only the one that was
 /// reported would leave the other to be rediscovered.
 ///
-/// Named for the setting, because that is the thing the operator can act on.
+/// **Names the remedy without asserting the present state.**  Two wrongs are
+/// available here.  Saying "Turn on security_enabled" asserts that it is off,
+/// which this path never reads -- a session can be unauthenticated with it on,
+/// having begun before the operator switched it on, which is the very reason
+/// the flag is recorded at the door rather than derived.  But dropping the
+/// instruction with the assertion left "reconnect on a listener that asks who
+/// you are", and on the default install -- telnet only, SSH off -- there is no
+/// such listener to reconnect on, so the screen named no action at all.
+/// "Set X and reconnect" is an instruction, not a claim about X.
 pub(in crate::telnet) fn unverified_lines() -> Vec<&'static str> {
     vec![
         "This computer needs no password to",
         "restart, so this page needs a login",
         "and this session did not have one.",
         "",
-        "Reconnect on a listener that asks",
-        "who you are (security_enabled).",
+        "Set security_enabled and reconnect,",
+        "and the gateway will ask who you are.",
     ]
 }
 
