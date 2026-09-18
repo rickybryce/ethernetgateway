@@ -1420,9 +1420,23 @@ only passwordless route is a <code>NOPASSWD</code> rule you write in
 <code>sudoers</code> yourself. That matters because the telnet menu is
 reachable without a login when <code>security_enabled</code> is off
 (&sect;5.4), and the <code>sudo</code> password is what stands between a
-visitor and the power button. Wrong answers count against the shared per-IP
-lockout (&sect;7.3).
+visitor and the power button. Wrong answers are capped per IP (&sect;7.3).
 </p>
+
+<aside class="note">
+<span class="label">Where no password is wanted, a login is</span>
+On most installations <code>sudo</code> asks for a password and that is the
+check. Two arrangements ask for nothing: a <code>NOPASSWD</code> rule you
+wrote, and a gateway running as <strong>root</strong>, which needs no
+<code>sudo</code> at all. On those the password cannot be the thing standing
+between a visitor and the power button, because there is no password &mdash;
+so the page requires instead that the session have <em>logged in</em>, and
+refuses one that has not. If you run the gateway either of those ways, turn
+<code>security_enabled</code> on (&sect;5.4) or the restart and shutdown items
+will refuse every session. Up to and including version 1.0.0 they did not
+ask, so on such a machine with security off any visitor who reached the
+telnet port could take the computer down.
+</aside>
 
 <aside class="note">
 <span class="label">A cached sudo credential does not count</span>
@@ -2092,16 +2106,24 @@ between protocols to reset the counter.
 </p>
 
 <p>
-A refused <code>sudo</code> password on the second menu
-(&sect;5.5) counts here too, and it is the same three. That prompt asks for
-the password of the <em>host account</em>, not the gateway's, and every wrong
-answer is a real PAM attempt against it &mdash; so the cap has to survive a
-reconnect, or three guesses per connection is as many guesses as the peer
-cares to make. It counts refusals rather than wrong passwords: a right
-password from an account that is not in <code>sudoers</code> is refused too,
-and telling the two apart means reading <code>sudo</code>'s
-locale-dependent English. The web server responds to a
-locked-out client with <code>429 Too Many Requests</code> and a
+A refused <code>sudo</code> password on the second menu (&sect;5.5) is capped
+the same way &mdash; three, per IP, for five minutes &mdash; but in a
+<strong>counter of its own, not this one</strong>. That prompt asks for the
+password of the <em>host account</em>, not the gateway's, and every wrong
+answer is a real PAM attempt against it, so the cap has to survive a
+reconnect or three guesses per connection is as many guesses as the peer
+cares to make. It also has to survive a <em>login</em>: the table above is
+cleared for an address whenever that address logs in successfully, and up to
+and including version 1.0.0 the <code>sudo</code> cap shared it &mdash; so
+with <code>security_enabled</code> on, logging in wiped the record and bought
+three more guesses at the host account, as often as the operator cared to
+reconnect. A gateway login is not permission to guess the machine's own
+password, so the two are now separate and nothing clears the second one; it
+expires on its own five minutes and that is the only way out. It counts
+refusals rather than wrong passwords: a right password from an account that
+is not in <code>sudoers</code> is refused too, and telling the two apart
+means reading <code>sudo</code>'s locale-dependent English. The web server
+responds to a locked-out client with <code>429 Too Many Requests</code> and a
 <code>Retry-After: 300</code> header; telnet and SSH simply refuse the
 session.
 </p>
