@@ -6973,6 +6973,134 @@ mod tests {
     /// to omit keys. What it may not do is state one and be wrong. Compare with
     /// `telnet::tests::test_manual_describes_weather_as_worldwide`, which pins
     /// one prose claim; this pins every value.
+    /// **A link the README calls the manual goes to the manual.**
+    ///
+    /// `web/index.html` was the manual as a web page until 0.9.5, when it
+    /// became a *landing page* -- screenshots, what the project is, the
+    /// download links, and the reference pages at the bottom -- and the manual
+    /// became `usermanual.pdf`, which is what the landing page itself links
+    /// to.  Five README links kept the old target and the old label, so
+    /// "User Manual" and "see the manual for wiring" dropped the reader on a
+    /// page of download buttons; three of them carried a `#ch2-source` /
+    /// `#ch2-systemd` / `#ch3` fragment that exists only in `usermanual.html`,
+    /// which that site does not serve at all, so the fragment was silently
+    /// ignored and the reader landed at the top.
+    ///
+    /// One link to `index.html` is correct and stays: the sentence that says
+    /// everything else lives *at the site*.  So the rule is about the label,
+    /// not the count -- a link is checked when it calls itself the manual.
+    #[test]
+    fn test_every_readme_link_to_the_manual_goes_to_the_manual() {
+        let readme = include_str!("../README.md");
+        let mut checked = 0usize;
+        let mut wrong: Vec<String> = Vec::new();
+        let mut rest = readme;
+        while let Some(open) = rest.find('[') {
+            rest = &rest[open + 1..];
+            let Some(close) = rest.find(']') else { break };
+            let text = &rest[..close];
+            let after = &rest[close + 1..];
+            if !after.starts_with('(') {
+                continue;
+            }
+            let Some(paren) = after.find(')') else { continue };
+            let target = &after[1..paren];
+            if text.to_ascii_lowercase().contains("manual") {
+                checked += 1;
+                if !target.contains("usermanual") {
+                    wrong.push(format!("[{text}]({target})"));
+                }
+            }
+        }
+        // Positive control: a scan that parsed no links would report nothing.
+        assert!(
+            checked >= 4,
+            "the README link scan found only {checked} links labelled \"manual\" \
+             -- the scan is broken, not the README",
+        );
+        assert!(
+            wrong.is_empty(),
+            "these README links call themselves the manual and do not go to it \
+             (index.html is the landing page, and its #ch anchors do not exist \
+             there):\n  {}",
+            wrong.join("\n  "),
+        );
+    }
+
+    /// **The manual's lists and tables close with the tag they opened with.**
+    ///
+    /// The manual is a shipped artefact -- `usermanual.pdf` is regenerated from
+    /// this file with WeasyPrint and is what users are sent to -- so its markup
+    /// is not a browser's problem to shrug off.  An `<ol>` closed by `</ul>`
+    /// with a stray `</ol>` after the next paragraph shipped in 5.5.1 of this
+    /// very cycle: a browser recovers and renders the paragraph *inside* the
+    /// numbered list, and a print renderer is under no obligation to agree with
+    /// it.  Nothing here reads markup -- the existing manual guards read
+    /// `key = value` text and prose -- so the structure was covered nowhere.
+    ///
+    /// Scoped to the containers where a mismatch actually moves content:
+    /// lists and tables.  Inline tags are not worth the false positives, and
+    /// the void elements this manual uses (`<br>`, `<hr>`, `<img>`) are not in
+    /// the set.
+    #[test]
+    fn test_the_manuals_lists_and_tables_are_well_formed() {
+        let manual = include_str!("../usermanual.html");
+        let mut stack: Vec<(&str, usize)> = Vec::new();
+        let mut problems: Vec<String> = Vec::new();
+        let mut seen = 0usize;
+        let mut rest = manual;
+        let mut consumed = 0usize;
+        while let Some(at) = rest.find('<') {
+            consumed += at;
+            rest = &rest[at..];
+            let Some(end) = rest.find('>') else { break };
+            let tag = &rest[..=end];
+            let closing = tag.starts_with("</");
+            let name: String = tag
+                .trim_start_matches("</")
+                .trim_start_matches('<')
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if ["ol", "ul", "table", "tr", "td", "th"].contains(&name.as_str()) {
+                seen += 1;
+                let line = manual[..consumed].matches('\n').count() + 1;
+                if closing {
+                    match stack.pop() {
+                        None => problems.push(format!("line {line}: {tag} closes nothing")),
+                        Some((open, open_line)) if open != name => problems.push(format!(
+                            "line {line}: {tag} closes <{open}> opened at line {open_line}"
+                        )),
+                        Some(_) => {}
+                    }
+                } else if !tag.ends_with("/>") {
+                    // Leak the name for the stack; the manual is a `'static`
+                    // string, so this is the same lifetime it already has.
+                    let name: &'static str = Box::leak(name.into_boxed_str());
+                    stack.push((name, line));
+                }
+            }
+            consumed += end + 1;
+            rest = &rest[end + 1..];
+        }
+        for (open, line) in &stack {
+            problems.push(format!("<{open}> opened at line {line} is never closed"));
+        }
+        // Positive control: a scan that matched no tags would report nothing
+        // wrong with a manual full of tables.
+        assert!(
+            seen > 100,
+            "the markup scan found only {seen} list/table tags in the manual -- \
+             the scan is broken, not the manual",
+        );
+        assert!(
+            problems.is_empty(),
+            "usermanual.html has mismatched list/table markup:\n  {}",
+            problems.join("\n  "),
+        );
+    }
+
     #[test]
     fn test_the_manual_sample_config_matches_the_real_defaults() {
         let dir = std::env::temp_dir().join(format!("egw_manual_cfg_{}", std::process::id()));

@@ -113,6 +113,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The second page ran a `hostname` process on every keypress.**  Both of its
+  screens name the computer the two keys act on, and that page redraws each time
+  round its loop &mdash; so the name was looked up per drawn screen.  On Linux
+  that was a file read; on macOS and in containers, neither of which has
+  `/etc/hostname`, it is a **fork and exec**, taken synchronously inside an
+  async task, on the one page in this codebase carrying a subprocess timeout
+  precisely because a blocked call there hangs the session with no key working.
+  The name is read once for the process now, which is the same bargain the
+  availability check one screen over already makes.
+
 - **A relayed caller was refused with advice it could never follow.**  Once a
   relay session stopped claiming a login, the refusal on a password-free
   machine told it to set `security_enabled` and reconnect &mdash; but a relay

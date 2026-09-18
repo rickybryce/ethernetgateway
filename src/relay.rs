@@ -889,10 +889,46 @@ fn forget_master_password() {
 
 /// This machine's name, reduced to something worth writing in a file.
 ///
-/// Shared with the telnet MORE page, which names the computer its restart and
-/// shutdown keys act on -- one rule for "what is this machine called", because
-/// two would disagree.
+/// Shared with the telnet second page, which names the computer its restart
+/// and shutdown keys act on -- one rule for "what is this machine called",
+/// because two would disagree.
+///
+/// **Cached, and on one of its two callers that is load-bearing rather than
+/// tidy.**  This began as a once-per-enrolment call in the relay, and the
+/// second page then put it on a *render* path: `more_menu_rows` and
+/// `power_confirm` each name the computer, and that page redraws on every
+/// keypress.  The macOS/container branch below is a **fork and exec**, taken
+/// synchronously inside an async task, so uncached it was one `hostname`
+/// process per keypress on a tokio worker -- on the one page in this codebase
+/// that carries a subprocess timeout precisely because a blocked call there
+/// hangs the session with no key working.  Reading `/etc/hostname` every draw
+/// was merely wasteful; spawning was the defect.
+///
+/// The cost is that renaming the machine shows the old name until the gateway
+/// restarts.  That is the same bargain [`crate::telnet::power::available`]
+/// makes one screen over, and a rename is not a thing that happens while
+/// somebody is sitting on this menu.
 pub(crate) fn hostname_label() -> String {
+    static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LABEL.get_or_init(read_hostname_label).clone()
+}
+
+/// How many times [`read_hostname_label`] has actually run.
+///
+/// Test-only, and the only way to prove the cache from outside: the answer is
+/// identical either way, and the expensive branch is a `hostname` process that
+/// this host -- which has `/etc/hostname` -- never reaches, so a timing check
+/// could only ever be exercised on a machine that is not this one.  Counting
+/// the reads is host-independent.
+#[cfg(test)]
+pub(crate) static HOSTNAME_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// [`hostname_label`] without the cache, so the reading is a seam of its own
+/// and the `OnceLock` is not sitting in the middle of the three fallbacks.
+fn read_hostname_label() -> String {
+    #[cfg(test)]
+    HOSTNAME_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let raw = std::fs::read_to_string("/etc/hostname")
         .ok()
         .filter(|s| !s.trim().is_empty())

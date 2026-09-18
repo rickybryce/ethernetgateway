@@ -1289,7 +1289,9 @@ gaining privilege, and <code>sudo</code> is a setuid binary, so it cannot
 elevate however correct the password is.  The gateway reads the flag from
 <code>/proc/self/status</code> once at startup and simply does not offer what
 it cannot do: an item an operator cannot use teaches them to distrust the
-menu, and a password prompt that no answer satisfies is worse still.
+menu, and a password prompt that no answer satisfies is worse still.  (It asks
+whether it is already root first &mdash; see &sect;5.5.1 &mdash; because a root
+process needs no <code>sudo</code> and the flag does not bear on it.)
 </p>
 
 <p>
@@ -1323,11 +1325,20 @@ Two conditions have to hold, and the shipped unit deliberately meets neither
   <code>-p</code>, which leaves the account <em>locked</em> &mdash; a single
   <code>!</code> in <code>/etc/shadow</code>. There is no password that would
   satisfy the prompt, whatever <code>NoNewPrivileges</code> says.</li>
-</ul>
+</ol>
 
 <p><strong>Where it cannot work, it says so at the moment you try.</strong> The
 two items are hidden only where the answer is certain and cheap to read &mdash;
-Windows, and a process carrying the kernel's <code>no_new_privs</code> flag.
+Windows, and a <em>non-root</em> process carrying the kernel's
+<code>no_new_privs</code> flag.  The root exception is not a detail: that flag
+stops a <strong>setuid</strong> binary gaining privilege, which is why
+<code>sudo</code> cannot work under it, and a gateway already running as root
+needs no <code>sudo</code> at all &mdash; so under a root unit with
+<code>NoNewPrivileges=yes</code>, an ordinary hardened container, the items
+appear and work.  The menu gate and the check that actually runs the command
+read the two conditions in the same order, because a gate that disagrees with
+the check is the same defect either way round: one direction hides a feature
+that works, the other offers one that cannot.
 Whether a particular account may run <code>sudo</code> is not knowable without
 asking <code>sudo</code>, and the answer changes whenever
 <code>sudoers</code> is edited, so that case is reported when you use it: the
@@ -1337,8 +1348,6 @@ have no password of its own. That second possibility is the one worth knowing
 about, because it is what the dedicated service account above is &mdash;
 turning <code>NoNewPrivileges</code> off and keeping that account leaves the
 items visible and a prompt no password can answer.</p>
-
-</ol>
 
 <p>
 So there are two workable arrangements, and for this feature the second is

@@ -14,7 +14,7 @@ gateway's serial ports to another over SSH.
 
 ![Ethernet Gateway](web/screenshot.png)
 
-**[User Manual](http://ethernetgateway.com/index.html)**
+**[User Manual](https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf)**
 &nbsp;&middot;&nbsp;
 **[Releases](https://github.com/rickybryce/ethernetgateway/releases)**
 
@@ -65,7 +65,7 @@ machines can dial it with standard AT commands:
   through a true **RS232** module, and whether one is needed depends on how that
   module is wired.
 
-See the [manual](http://ethernetgateway.com/index.html) for wiring, DCD/carrier
+See the [manual](https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf) for wiring, DCD/carrier
 options, and the full AT command set.
 
 ## Features
@@ -123,8 +123,8 @@ Requires the **Rust toolchain** (rustc 1.92+), a **C toolchain**, `cmake`,
 cargo build --release   # binary at target/release/ethernetgateway
 ```
 
-Per-distro dependency one-liners (Debian/Fedora/Arch/macOS/Windows) are in the
-[manual](http://ethernetgateway.com/index.html#ch2-source).
+Per-distro dependency one-liners (Debian/Fedora/Arch/macOS/Windows) are in
+§2.2 of the [manual](https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf).
 
 Pre-built, signed binaries for Linux, macOS, and Windows are on the
 [Releases](https://github.com/rickybryce/ethernetgateway/releases) page. Each
@@ -149,7 +149,7 @@ systemd unit is provided at
 [`contrib/systemd/ethernetgateway.service`](contrib/systemd/ethernetgateway.service)
 (runs as a dedicated unprivileged user, `ProtectSystem=strict`, syscall
 filtering, memory cap). Installation and the port-below-1024 capability note are
-in the [manual](http://ethernetgateway.com/index.html#ch2-systemd). Note that
+in §2.3 of the [manual](https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf). Note that
 its `NoNewPrivileges=yes` means restart and shutdown cannot work under it, and
 the gateway hides those items rather than offering what it cannot do — §5.5.1
 of the manual covers the trade.
@@ -178,8 +178,8 @@ all writing the same file:
 Key settings include the telnet/SSH/web/Kermit listeners and ports, a unified
 `username` / `password` (shared by all authenticated interfaces), `transfer_dir`,
 the two serial ports (`serial_a_*` / `serial_b_*`), and per-protocol tunables.
-**The full annotated key reference is in the
-[manual](http://ethernetgateway.com/index.html#ch3).**
+**The full annotated key reference is chapter 3 of the
+[manual](https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf).**
 
 ## Security
 
@@ -208,13 +208,13 @@ even that as a trusted-environment tool.
 The master/slave relay lets a trusted slave reach the master's network. Only
 enable `master_accept_relays` for slaves you trust at that level. Full details,
 including the outbound and relay threat model, are in the
-[manual](http://ethernetgateway.com/index.html).
+[manual](https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf).
 
 ## Documentation
 
 Everything below the quick start is covered in depth online:
 
-- **[User Manual](http://ethernetgateway.com/index.html)** — installation,
+- **[User Manual](https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf)** — installation,
   configuration reference, every feature, AT command set + S-registers, telnet
   RFC compliance, and the Gateway Shell command set.
 - **[Kermit Reference](http://ethernetgateway.com/kermit.html)** — the full

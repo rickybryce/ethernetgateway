@@ -2333,3 +2333,44 @@ fn test_the_relay_status_the_credential_boxes_report() {
 
     reset();
 }
+
+/// **The machine's name is read once, not once per drawn screen.**
+///
+/// This began as a once-per-enrolment call here and the telnet second page
+/// then put it on a *render* path: `more_menu_rows` and `power_confirm` each
+/// name the computer, and that page redraws on every keypress.  On a Mac or a
+/// container -- neither of which has `/etc/hostname` -- the answer comes from
+/// a `hostname` **process**, spawned synchronously inside an async task, so
+/// uncached that was a fork and exec per keypress on a tokio worker.  It is
+/// the page that carries this codebase's only subprocess timeout, and for the
+/// reason that a blocked call there hangs the session with no key working.
+///
+/// **Counted rather than timed.**  The cached and uncached versions return the
+/// same string, and the branch that costs anything is the one this host (which
+/// has `/etc/hostname`) never takes -- so a timing assertion would be measuring
+/// a file read and would pass with the cache deleted.  The read counter is the
+/// same answer on every machine.
+///
+/// Order-independent on purpose: whatever ran before this, the first call here
+/// leaves the cache warm, so the second must not read again.
+#[test]
+fn test_the_machines_name_is_read_once_for_the_process() {
+    use std::sync::atomic::Ordering;
+
+    let first = super::hostname_label();
+    let reads = super::HOSTNAME_READS.load(Ordering::SeqCst);
+    assert!(
+        reads >= 1,
+        "the name was never read at all, so this test is measuring nothing",
+    );
+
+    let second = super::hostname_label();
+    assert_eq!(
+        super::HOSTNAME_READS.load(Ordering::SeqCst),
+        reads,
+        "the machine's name was read again; on a host without /etc/hostname \
+         that is a `hostname` fork per drawn screen, on a page that redraws \
+         every keypress",
+    );
+    assert_eq!(first, second, "the cache must not change the answer");
+}
