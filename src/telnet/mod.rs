@@ -468,6 +468,30 @@ impl Menu {
 // protocol clears the lockout for that IP.
 pub(crate) type LockoutMap = Arc<Mutex<HashMap<IpAddr, (u32, std::time::Instant)>>>;
 
+/// Everything a session dialled from inside another session inherits.
+///
+/// **One object, because carrying these by hand went wrong three times.**
+/// `ATDT ethernetgateway` builds a second `TelnetSession` from within the
+/// first, and each thing the power page reads had to travel with it: the
+/// credential, then the address, then the two counters.  Each was fixed on
+/// its own, each looked complete, and each time the test written alongside
+/// asked only about the value just added -- so the next one was found by the
+/// next review pass instead.  Grouping them means a new input is added here
+/// and every dial-out site carries it without being edited.
+#[derive(Clone)]
+pub(in crate::telnet) struct Inherited {
+    /// Whether the dialling session proved who it is (never decided afresh).
+    pub authenticated: bool,
+    /// The dialler's address; the sudo attempt cap keys on it.
+    pub peer_addr: Option<IpAddr>,
+    /// The refused-password floor, **shared** so a re-dial cannot reset it.
+    pub power_failures: Arc<std::sync::atomic::AtomicU32>,
+    /// The elevation memo, shared for the same reason: it is what stops a
+    /// re-dial spawning another real `sudo`.
+    #[cfg(unix)]
+    pub power_elevation: Arc<Mutex<Vec<(power::PowerAction, power::Elevate)>>>,
+}
+
 /// Whether a *telnet* session that got past the door has proved who it is.
 ///
 /// **Only the telnet door computes this; every other entry point states its
@@ -1250,7 +1274,7 @@ pub(crate) struct TelnetSession {
     /// last field here that carried a `cfg` orphaned it onto its neighbour
     /// when it was removed and failed the Windows build.
     #[cfg_attr(not(unix), allow(dead_code))]
-    power_password_failures: u32,
+    power_password_failures: Arc<std::sync::atomic::AtomicU32>,
     /// Refused `sudo` attempts per address, for the power page only.
     ///
     /// **Separate from `lockouts` because a gateway login is not permission
@@ -1322,7 +1346,7 @@ pub(crate) struct TelnetSession {
     /// is what orphaned a doc onto a neighbour and failed the Windows build
     /// before.
     #[cfg(unix)]
-    power_elevation: Vec<(power::PowerAction, power::Elevate)>,
+    power_elevation: Arc<Mutex<Vec<(power::PowerAction, power::Elevate)>>>,
     transfer_subdir: String,
     xmodem_iac: bool,
     /// Outcome of the last transfer, drawn once by `render_file_transfer`
@@ -1485,13 +1509,13 @@ impl TelnetSession {
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr: None,
-            power_password_failures: 0,
+            power_password_failures: Default::default(),
             power_lockouts: shared_power_lockouts().clone(),
             // A physical serial port is its own trust boundary -- the same
             // judgement `run` makes where it skips authentication for one.
             authenticated: true,
             #[cfg(unix)]
-            power_elevation: Vec::new(),
+            power_elevation: Default::default(),
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1555,7 +1579,7 @@ impl TelnetSession {
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr,
-            power_password_failures: 0,
+            power_password_failures: Default::default(),
             power_lockouts: shared_power_lockouts().clone(),
             // **Sound, but not for the reason first written here.**  That
             // said `auth_password` is the only method offered; it is not --
@@ -1574,7 +1598,7 @@ impl TelnetSession {
             // Set here because `run`'s door is the telnet one and skips SSH.
             authenticated: true,
             #[cfg(unix)]
-            power_elevation: Vec::new(),
+            power_elevation: Default::default(),
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1654,17 +1678,30 @@ impl TelnetSession {
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr,
-            power_password_failures: 0,
+            power_password_failures: Default::default(),
             power_lockouts: shared_power_lockouts().clone(),
-            // A relay session arrives from a master gateway over its own
-            // authenticated SSH channel.
+            // **A relay key is not a login, and this is where that rule was
+            // not being kept.**  `shell_request` refuses a key-authenticated
+            // connection precisely because "the interactive menu stays behind
+            // the password" -- but `exec_request` has no such gate, and
+            // `serial-relay <port>` defaults to the `menu` target, which
+            // builds a session right here.  So a holder of an enrolled relay
+            // key could reach the power page on a root or NOPASSWD master
+            // with no password anywhere in the story.
             //
-            // **`new_cpm_menu` overrides this**, because a locally dialled
-            // menu session is only as credentialed as the session that
-            // dialled it -- see there.
-            authenticated: true,
+            // The `menu` target is a designed feature, not the bug -- it is
+            // how a caller on a slave's serial port reaches the master's
+            // menu -- so the fix is not to refuse it.  It is that a relayed
+            // caller has not authenticated *to this gateway*: the slave has.
+            // That distinction costs nothing on an ordinary master, where
+            // `sudo` asks for a password exactly as before, and closes the
+            // no-password case, where nothing else would have asked.
+            //
+            // `new_cpm_menu` overrides this, because a locally dialled menu
+            // session is only as credentialed as the session that dialled it.
+            authenticated: false,
             #[cfg(unix)]
-            power_elevation: Vec::new(),
+            power_elevation: Default::default(),
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1731,16 +1768,31 @@ impl TelnetSession {
     /// second screen for a caller already counted once.  A shutdown still ends
     /// it — the shared `shutdown` flag is passed in, and the caller's own
     /// session is registered, so the goodbye reaches the human either way.
-    pub(crate) fn new_cpm_menu(
+    /// What a session dialled from inside this one inherits.
+    ///
+    /// The single place these are gathered, so a dial-out site cannot carry
+    /// some of them and leave the rest -- which is how the same hole was
+    /// reopened twice, once per value.
+    pub(in crate::telnet) fn inheritable(&self) -> Inherited {
+        Inherited {
+            authenticated: self.authenticated,
+            peer_addr: self.peer_addr,
+            power_failures: self.power_password_failures.clone(),
+            #[cfg(unix)]
+            power_elevation: self.power_elevation.clone(),
+        }
+    }
+
+    pub(in crate::telnet) fn new_cpm_menu(
         reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         writer: SharedWriter,
         shutdown: Arc<AtomicBool>,
         restart: Arc<AtomicBool>,
         lockouts: LockoutMap,
-        peer_addr: Option<IpAddr>,
-        authenticated: bool,
+        from: Inherited,
     ) -> Self {
-        let mut s = Self::new_relay(reader, writer, shutdown, restart, peer_addr, lockouts);
+        let mut s =
+            Self::new_relay(reader, writer, shutdown, restart, from.peer_addr, lockouts);
         s.is_relay = false;
         // **Only as credentialed as whoever dialled it.**  This session is
         // built by `cpm_modem`'s `ATDT ethernetgateway`, from inside another
@@ -1751,7 +1803,23 @@ impl TelnetSession {
         // power page through `K` and restart a root or NOPASSWD machine
         // having proved nothing.  `is_serial` says "does not speak telnet",
         // never "is trusted".
-        s.authenticated = authenticated;
+        s.authenticated = from.authenticated;
+        // **Shared, not copied, or a re-dial buys a fresh allowance.**  Two
+        // more per-session values feed the power page, and both were reset by
+        // building this session: the refused-password floor that bounds a
+        // caller with no address, and the elevation memo that bounds probe
+        // spawns.  So `ATDT ethernetgateway` -> `2` -> `R` handed out three
+        // more real PAM attempts and one more real `sudo` per dial, and
+        // `ATDT` dials are deliberately not counted against `conn_rate_max`.
+        //
+        // Copying would not do: the guest's guesses have to count against the
+        // caller who dialled, so returning from the menu cannot restore them.
+        // They share one allowance.
+        s.power_password_failures = from.power_failures;
+        #[cfg(unix)]
+        {
+            s.power_elevation = from.power_elevation;
+        }
         s
     }
 
@@ -2446,12 +2514,12 @@ pub fn start_server(
                                     erase_char: session::DEFAULT_ERASE_CHAR,
                                     lockouts: lo,
                                     peer_addr: Some(addr.ip()),
-                                    power_password_failures: 0,
+                                    power_password_failures: Default::default(),
                                     power_lockouts: shared_power_lockouts().clone(),
                                     // The telnet door computes this in `run`, once it has run.
                                     authenticated: false,
                                     #[cfg(unix)]
-                                    power_elevation: Vec::new(),
+                                    power_elevation: Default::default(),
                                     transfer_subdir: String::new(),
                                     // Start with IAC escaping off; session_read_byte
                                     // flips telnet_negotiated on as soon as the client

@@ -767,6 +767,8 @@ impl TelnetSession {
     /// password the machine does want -- after the farewell had been sent.
     pub(in crate::telnet) fn remembered_elevation(&self, action: PowerAction) -> Option<Elevate> {
         self.power_elevation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .find(|(a, _)| *a == action)
             .map(|(_, e)| *e)
@@ -786,7 +788,10 @@ impl TelnetSession {
     pub(in crate::telnet) fn power_attempts_exhausted(&self) -> bool {
         match self.peer_addr {
             Some(ip) => crate::telnet::is_locked_out(&self.power_lockouts, ip),
-            None => self.power_password_failures >= crate::telnet::MAX_AUTH_ATTEMPTS,
+            None => {
+                self.power_password_failures.load(std::sync::atomic::Ordering::Relaxed)
+                    >= crate::telnet::MAX_AUTH_ATTEMPTS
+            }
         }
     }
 
@@ -796,8 +801,9 @@ impl TelnetSession {
         match self.peer_addr {
             Some(ip) => crate::telnet::record_auth_failure(&self.power_lockouts, ip),
             None => {
-                self.power_password_failures = self.power_password_failures.saturating_add(1);
                 self.power_password_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    .saturating_add(1)
             }
         }
     }
@@ -1009,7 +1015,10 @@ impl TelnetSession {
             Some(e) => e,
             None => match probe_elevation(action.argv()).await {
                 Ok(e) => {
-                    self.power_elevation.push((action, e));
+                    self.power_elevation
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((action, e));
                     e
                 }
                 Err(msg) => {

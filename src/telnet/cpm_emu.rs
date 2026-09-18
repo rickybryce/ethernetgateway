@@ -959,10 +959,10 @@ impl TelnetSession {
             self.shutdown.clone(),
             self.restart.clone(),
             self.lockouts.clone(),
-            self.authenticated,
-            // The address too: the sudo cap keys on it, and a menu session
-            // without one falls back to a floor that a re-dial resets.
-            self.peer_addr,
+            // One object, so a dial-out site cannot carry the credential and
+            // forget the address, or the address and forget the counters --
+            // which is how this hole was reopened twice.
+            self.inheritable(),
         );
         // Join the inbound `CPM@<ip>` call pool (RAII-released on any exit).
         // `CPM@<ip>` is a single dialable address, but every modem-enabled

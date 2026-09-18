@@ -105,6 +105,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The booted-disk screen list called a locally dialled session a relay.**
+  Its label asked "serial, no local port, has an address?", which a menu
+  session dialled from inside the emulator now matches exactly &mdash; and
+  `new_cpm_menu` clears the relay flag precisely so that caller is not
+  labelled a slave.  It asks the flag rather than inferring from the address.
+
 - **The refusal for a password-free machine names an action again.**  Taking
   out its claim about what `security_enabled` was set to also took out the
   instruction, leaving "reconnect on a listener that asks who you are" &mdash;
@@ -286,6 +292,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saving.  Telnet and the web were unaffected &mdash; they write immediately.
 
 ### Security
+
+- **An enrolled relay key could restart a machine that asks for no password.**
+  `shell_request` refuses a key-authenticated SSH connection because "a relay
+  key is not a login" &mdash; but `exec_request` carries no such gate, and
+  `serial-relay &lt;port&gt;` defaults to the `menu` target, which builds a full
+  session.  That session was marked as having authenticated, so on a gateway
+  running as root or with a `NOPASSWD` rule, a holder of an enrolled relay key
+  reached restart and shutdown with no password anywhere in the story.  The
+  `menu` target is a designed feature &mdash; it is how a caller on a slave's
+  serial port reaches the master's menu &mdash; so the fix is not to refuse it:
+  a relayed caller simply has not authenticated to *this* gateway.  The slave
+  did.  Costs nothing on an ordinary master, where `sudo` asks for a password
+  exactly as before.
+- **Re-dialling the gateway's own menu bought a fresh allowance of guesses.**
+  Two more values bound the power page for a caller the per-IP map cannot key
+  &mdash; the refused-password floor and the elevation memo &mdash; and a
+  session dialled with `ATDT ethernetgateway` was built with both reset.  So
+  `2` &gt; `R` was worth three more real PAM attempts against the host account
+  and one more real `sudo` probe per dial, over a connection already open and
+  which `conn_rate_max` does not count.  Both are now shared with the dialling
+  session rather than copied, so guesses spent inside the emulator count
+  outside it and leaving the menu cannot restore them.
 
 - **`ATDT ethernetgateway` reset the cap on guesses at the host password.**
   Closing the trust hole on that dialled menu session carried the dialler's

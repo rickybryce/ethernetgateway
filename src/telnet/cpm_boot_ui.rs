@@ -51,17 +51,28 @@ fn screen_label(
     is_serial: bool,
     is_ssh: bool,
     port: Option<crate::config::SerialPortId>,
+    is_relay: bool,
 ) -> String {
     let from = if is_serial {
         match port {
             Some(crate::config::SerialPortId::A) => "serial port A".to_string(),
             Some(crate::config::SerialPortId::B) => "serial port B".to_string(),
-            // A relay session is serial in behaviour and arrives over IP, so it
-            // has a peer and no local port.  Naming the slave's address is the
-            // most useful thing available.
-            None => match peer {
-                Some(ip) => format!("relay {ip}"),
-                None => "serial".to_string(),
+            // A relay session is serial in behaviour and arrives over IP, so
+            // it has a peer and no local port.  Naming the slave's address is
+            // the most useful thing available.
+            //
+            // **Asks `is_relay`, not "has an address".**  A menu session
+            // dialled with `ATDT ethernetgateway` inherits its dialler's
+            // address, so "serial, no port, has a peer" now matches one of
+            // those too -- and `new_cpm_menu` clears `is_relay` precisely so
+            // the caller is not labelled a relay.  Testing for the address
+            // called it `relay <ip>` on this screen while Troubleshooting
+            // called it something else: the same mislabel the flag exists to
+            // prevent, one surface over.
+            None => match (is_relay, peer) {
+                (true, Some(ip)) => format!("relay {ip}"),
+                (false, Some(ip)) => format!("dialled from {ip}"),
+                (_, None) => "serial".to_string(),
             },
         }
     } else {
@@ -898,10 +909,10 @@ impl TelnetSession {
             self.shutdown.clone(),
             self.restart.clone(),
             self.lockouts.clone(),
-            self.authenticated,
-            // The address too: the sudo cap keys on it, and a menu session
-            // without one falls back to a floor that a re-dial resets.
-            self.peer_addr,
+            // One object, so a dial-out site cannot carry the credential and
+            // forget the address, or the address and forget the counters --
+            // which is how this hole was reopened twice.
+            self.inheritable(),
         );
         // Joins the inbound `CPM@<ip>` pool for as long as the boot lasts, so a
         // booted guest is dialable exactly as an emulator session is.
@@ -958,6 +969,7 @@ impl TelnetSession {
             self.is_serial,
             self.is_ssh,
             self.serial_port_id,
+            self.is_relay,
         ));
         // Logged rather than printed at the session: which screen is which is
         // an operator's question, asked from the browser, and the logs page is
@@ -1637,27 +1649,37 @@ mod tests {
         let ip: std::net::IpAddr = "10.0.0.9".parse().unwrap();
 
         assert_eq!(
-            screen_label("TDISK04.DSK", Some(ip), false, false, None),
+            screen_label("TDISK04.DSK", Some(ip), false, false, None, false),
             "TDISK04.DSK — telnet 10.0.0.9"
         );
         assert_eq!(
-            screen_label("TDISK04.DSK", Some(ip), false, true, None),
+            screen_label("TDISK04.DSK", Some(ip), false, true, None, false),
             "TDISK04.DSK — SSH 10.0.0.9"
         );
         assert_eq!(
-            screen_label("TDISK04.DSK", None, true, false, Some(SerialPortId::B)),
+            screen_label("TDISK04.DSK", None, true, false, Some(SerialPortId::B), false),
             "TDISK04.DSK — serial port B"
         );
         // A relay session behaves like a serial caller and arrives over IP, so
         // it has a peer and no local port.  Naming the slave's address is the
         // most useful thing there is.
         assert_eq!(
-            screen_label("TDISK04.DSK", Some(ip), true, false, None),
+            screen_label("TDISK04.DSK", Some(ip), true, false, None, true),
             "TDISK04.DSK — relay 10.0.0.9"
+        );
+        // **And the same shape that is NOT a relay.**  A menu session dialled
+        // with `ATDT ethernetgateway` inherits its dialler's address, so it is
+        // serial, has no port and has a peer -- exactly the relay test -- but
+        // `new_cpm_menu` clears `is_relay` so the caller is not labelled a
+        // slave.  Reading the address instead of the flag called it a relay
+        // here while Troubleshooting called it something else.
+        assert_eq!(
+            screen_label("TDISK04.DSK", Some(ip), true, false, None, false),
+            "TDISK04.DSK — dialled from 10.0.0.9"
         );
         // Nothing known about the caller still produces a usable name rather
         // than a dangling separator.
-        assert_eq!(screen_label("A.DSK", None, false, false, None), "A.DSK — telnet");
+        assert_eq!(screen_label("A.DSK", None, false, false, None, false), "A.DSK — telnet");
     }
 
     /// One session per image, and the claim comes back however the session

@@ -98,21 +98,13 @@ pub(in crate::telnet) struct MenuContext {
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lockouts: super::LockoutMap,
-    /// Whether the session that owns this modem proved who it is.
+    /// What a dialled menu session inherits from the session that owns this
+    /// modem -- credential, address and the two shared power counters.
     ///
-    /// Carried so a dialled menu session inherits it rather than claiming a
-    /// login of its own: it is built on `new_relay`, so it looks like a
-    /// serial session, and a rule that read that as trust let an
-    /// unauthenticated peer reach the power page through the emulator.
-    authenticated: bool,
-    /// The dialling session's address, carried for the same reason.
-    ///
-    /// The sudo attempt cap keys on `peer_addr`; a session without one falls
-    /// back to a per-session floor that a re-dial resets.  Losing it here
-    /// made `ATDT ethernetgateway` a way to buy three more guesses at the
-    /// host account per dial, and left the originating address out of the
-    /// log that is supposed to carry it.
-    peer_addr: Option<std::net::IpAddr>,
+    /// One field rather than four, because carrying them individually went
+    /// wrong once per value: a dialled session that decides any of them for
+    /// itself is a way to gain something the dialler never had.
+    inherited: super::Inherited,
 }
 
 impl CpmModem {
@@ -202,11 +194,9 @@ impl CpmModem {
         shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
         restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
         lockouts: super::LockoutMap,
-        authenticated: bool,
-        peer_addr: Option<std::net::IpAddr>,
+        inherited: super::Inherited,
     ) {
-        self.menu =
-            Some(MenuContext { shutdown, restart, lockouts, authenticated, peer_addr });
+        self.menu = Some(MenuContext { shutdown, restart, lockouts, inherited });
     }
 
     /// Reset AT state to power-on defaults (ATZ / AT&F).
@@ -580,8 +570,7 @@ impl CpmModem {
         let shutdown = ctx.shutdown.clone();
         let restart = ctx.restart.clone();
         let lockouts = ctx.lockouts.clone();
-        let authenticated = ctx.authenticated;
-        let peer_addr = ctx.peer_addr;
+        let inherited = ctx.inherited.clone();
 
         // Generous buffer: the guest drains its RX ring a batch at a time.
         let (session_side, modem_side) = tokio::io::duplex(65536);
@@ -595,8 +584,7 @@ impl CpmModem {
             shutdown,
             restart,
             lockouts,
-            peer_addr,
-            authenticated,
+            inherited,
         ));
 
         self.conn = Some(Box::new(modem_side));
@@ -828,8 +816,7 @@ fn menu_session(
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lockouts: super::LockoutMap,
-    peer_addr: Option<std::net::IpAddr>,
-    authenticated: bool,
+    inherited: super::Inherited,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         let mut session = super::TelnetSession::new_cpm_menu(
@@ -838,8 +825,7 @@ fn menu_session(
             shutdown,
             restart,
             lockouts,
-            peer_addr,
-            authenticated,
+            inherited,
         );
         if let Err(e) = session.run().await {
             // A hangup closes our end of the duplex, so the session's next
@@ -1109,8 +1095,13 @@ mod tests {
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-                false,
-                None,
+                crate::telnet::Inherited {
+                    authenticated: false,
+                    peer_addr: None,
+                    power_failures: Default::default(),
+                    #[cfg(unix)]
+                    power_elevation: Default::default(),
+                },
             );
             let out = m.service(format!("ATDT {kw}\r").into_bytes(), 65536, false).await;
             let s = String::from_utf8_lossy(&out).to_string();

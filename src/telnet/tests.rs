@@ -869,11 +869,11 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         erase_char: 0x7F,
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
-        power_password_failures: 0,
+        power_password_failures: Default::default(),
         power_lockouts: Default::default(),
         authenticated: false,
         #[cfg(unix)]
-        power_elevation: Vec::new(),
+        power_elevation: Default::default(),
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -932,11 +932,11 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         erase_char: 0x7F,
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
-        power_password_failures: 0,
+        power_password_failures: Default::default(),
         power_lockouts: Default::default(),
         authenticated: false,
         #[cfg(unix)]
-        power_elevation: Vec::new(),
+        power_elevation: Default::default(),
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -11330,7 +11330,8 @@ fn test_the_sudo_cap_uses_the_map_for_an_address() {
     }
     assert!(session.power_attempts_exhausted(), "three refusals must stop the prompt");
     assert_eq!(
-        session.power_password_failures, 0,
+        session.power_password_failures.load(std::sync::atomic::Ordering::Relaxed),
+        0,
         "an addressed session must not be counted in the per-session field -- \
          that one resets on reconnect",
     );
@@ -11443,47 +11444,155 @@ fn test_ssh_trust_rests_on_the_shell_refusing_a_relay_key() {
     );
 }
 
-/// **Both dial-out call sites must hand over their own state, not a literal.**
+/// **A re-dial does not buy a fresh allowance.**
 ///
-/// `set_menu_context` takes bare values, so either call site could pass
-/// `true` / `None` and reopen the hole with the whole suite green -- and this
-/// hole has been reopened by exactly that route once already, in the same
-/// commit that closed it.  A compiler guarantee would be better; failing
-/// that, this is the scan, the same shape as the one on `session.rs`'s door.
+/// Three values bound the power page for a caller the per-IP map cannot key,
+/// and each one had to be carried into a dialled menu session separately --
+/// the credential, the address, and now the two counters.  The first two were
+/// each fixed on their own and each looked complete, because the test written
+/// with them asked only about that one value.
 ///
-/// Both files, because a rule enforced at one of two call sites holds at one.
+/// A caller with no address (a physical modem caller, and anything it dials)
+/// is bounded by a per-session floor.  Rebuilt fresh, that floor made
+/// `ATDT ethernetgateway` -> `2` -> `R` worth three more real PAM attempts
+/// against the operator's host account per dial, over a connection already
+/// open and which `conn_rate_max` does not count.
+///
+/// **Shared, not copied**: the guest's guesses have to count against the
+/// caller who dialled it, so returning from the menu cannot restore them.
+#[cfg(unix)]
 #[test]
-fn test_the_dial_out_sites_pass_their_own_credential_and_address() {
-    for (name, src) in [
+fn test_a_dialled_menu_session_cannot_reset_the_sudo_allowance() {
+    use crate::telnet::power::{Elevate, PowerAction};
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::Ordering;
+
+    let mut parent = make_test_session(TerminalType::Ansi);
+    parent.peer_addr = None; // the case the per-IP map is blind to
+    parent.authenticated = true; // a serial caller: trusted, still bounded
+
+    for _ in 0..MAX_AUTH_ATTEMPTS {
+        parent.record_power_failure();
+    }
+    assert!(parent.power_attempts_exhausted(), "the premise: the floor is reached");
+    parent
+        .power_elevation
+        .lock()
+        .unwrap()
+        .push((PowerAction::Restart, Elevate::SudoPassword));
+
+    // What `ATDT ethernetgateway` builds, with everything it inherits.
+    let writer: SharedWriter =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(tokio::io::sink())));
+    let mut dialled = TelnetSession::new_cpm_menu(
+        Box::new(tokio::io::empty()),
+        writer,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        std::sync::Arc::new(StdMutex::new(HashMap::new())),
+        // **The whole point: what the dialler hands over, unedited.**
+        parent.inheritable(),
+    );
+
+    assert!(
+        dialled.power_attempts_exhausted(),
+        "dialling the menu from inside the emulator handed out a fresh three \
+         guesses at the operator's *system* password, and it can be re-dialled \
+         as often as the caller likes",
+    );
+    assert_eq!(
+        dialled.remembered_elevation(PowerAction::Restart),
+        Some(Elevate::SudoPassword),
+        "the dialled session re-probes, so each dial spawns another real \
+         `sudo` and writes another line into the host's auth log",
+    );
+
+    // And it is shared, not copied: a guess spent inside counts outside too,
+    // or leaving the menu restores it.
+    let before = parent.power_password_failures.load(Ordering::Relaxed);
+    dialled.record_power_failure();
+    assert_eq!(
+        parent.power_password_failures.load(Ordering::Relaxed),
+        before + 1,
+        "guesses spent in the dialled session do not count against the caller \
+         who dialled it, so returning from the menu restores them",
+    );
+}
+
+/// **Every dial-out call site must hand over its own state, not a literal.**
+///
+/// `set_menu_context` takes bare values, so any call site could pass `true` /
+/// `None` and reopen the hole with the whole suite green -- and this hole has
+/// been reopened by exactly that route twice now, each time in the commit
+/// that closed the previous one.
+///
+/// **Counted, not enumerated.**  The first version named two files and read
+/// only the first call in each, which is the failure its own comment warned
+/// about: a third site, or a second call in one of those files, was
+/// unguarded.  This sweeps `src/telnet/` and checks every occurrence, the
+/// same shape as `test_no_sudo_on_this_page_can_ride_a_cached_credential`.
+#[test]
+fn test_every_dial_out_site_passes_its_own_credential_and_address() {
+    let files: &[(&str, &str)] = &[
         ("cpm_emu.rs", include_str!("cpm_emu.rs")),
         ("cpm_boot_ui.rs", include_str!("cpm_boot_ui.rs")),
-    ] {
-        let code = src.replace('\r', "");
-        let at = code
-            .find("set_menu_context(")
-            .unwrap_or_else(|| panic!("{name} no longer gives the modem a menu context"));
-        let tail = &code[at..];
-        let end = tail.find(");").expect("unterminated call");
-        let args: String = tail[..end]
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join(" ");
+        ("cpm_modem.rs", include_str!("cpm_modem.rs")),
+        ("mod.rs", include_str!("mod.rs")),
+        ("session.rs", include_str!("session.rs")),
+        ("gateway.rs", include_str!("gateway.rs")),
+        ("kernel.rs", include_str!("kernel.rs")),
+        ("config_ui.rs", include_str!("config_ui.rs")),
+    ];
 
-        assert!(
-            args.contains("self.authenticated"),
-            "{name} passes something other than `self.authenticated` to \
-             set_menu_context -- a literal there lets `ATDT ethernetgateway` \
-             hand a dialled session trust its dialler never had.  Found: \
-             {args:?}",
-        );
-        assert!(
-            args.contains("self.peer_addr"),
-            "{name} passes something other than `self.peer_addr` to \
-             set_menu_context -- without the address the sudo attempt cap \
-             falls back to a floor that re-dialling resets.  Found: {args:?}",
-        );
+    let mut checked = 0;
+    for (name, src) in files {
+        let code = src.replace('\r', "");
+        let mut at = 0;
+        while let Some(i) = code[at..].find("set_menu_context(") {
+            let call_at = at + i;
+            // The declaration is not a call site.
+            let decl = code[..call_at].ends_with("fn ");
+            at = call_at + 1;
+            if decl {
+                continue;
+            }
+            let tail = &code[call_at..];
+            let end = tail.find(");").expect("unterminated call");
+            let args: String = tail[..end]
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            // The modem's own unit test builds a context with literals on
+            // purpose; it is not a dial-out site in the product.
+            if args.contains("AtomicBool::new(false)") && args.contains("HashMap::new()") {
+                continue;
+            }
+            checked += 1;
+            // **One accessor, not a list of values.**  These were four
+            // arguments and the hole was reopened twice by a site that
+            // carried some of them; `inheritable()` is the single place they
+            // are gathered, so a site either hands over the session's own
+            // state or it does not.  A new input added to `Inherited` then
+            // travels without any of these sites being edited -- which is
+            // the property the enumerated version could never have.
+            assert!(
+                args.contains("self.inheritable()"),
+                "{name}: a set_menu_context call builds its own context \
+                 instead of passing `self.inheritable()` -- that is how a \
+                 dialled session ends up with state its dialler never had, \
+                 which has happened twice.  Found: {args:?}",
+            );
+        }
     }
+
+    // Positive control: a sweep that matched nothing would pass silently.
+    assert!(
+        checked >= 2,
+        "the sweep found {checked} dial-out call sites; there are at least \
+         two, so it is the sweep that is broken, not the call sites",
+    );
 }
 
 /// ...and the door must actually ask that rule.
@@ -11596,9 +11705,24 @@ fn test_each_session_kind_states_its_own_credential() {
     let (r, w, s, rs, l) = parts();
     assert!(TelnetSession::new_serial(SerialPortId::A, r, w, s, rs, l).authenticated);
 
-    // A relay arrives over the master's authenticated SSH channel.
+    // **A relay session is NOT pre-authenticated, and this is the one that
+    // was wrong.**  `shell_request` refuses a key-authenticated connection
+    // because "a relay key is not a login" -- but `exec_request` has no such
+    // gate and `serial-relay <port>` defaults to the `menu` target, which
+    // builds a session through `new_relay`.  So while this was `true`, a
+    // holder of an enrolled relay key could reach the power page on a root or
+    // NOPASSWD master with no password anywhere in the story.
+    //
+    // The `menu` target is a designed feature -- it is how a caller on a
+    // slave's serial port reaches the master's menu -- so the answer is not
+    // to refuse it: it is that a relayed caller has not authenticated to
+    // *this* gateway.  The slave did.
     let (r, w, s, rs, l) = parts();
-    assert!(TelnetSession::new_relay(r, w, s, rs, None, l).authenticated);
+    assert!(
+        !TelnetSession::new_relay(r, w, s, rs, None, l).authenticated,
+        "a relay session claims a login, so an enrolled relay key reaches the \
+         power page on a machine where nothing else would ask for a password",
+    );
 
     // And the one that must NOT decide for itself: a menu session dialled
     // from inside another session is exactly as credentialed as its parent,
@@ -11606,7 +11730,20 @@ fn test_each_session_kind_states_its_own_credential() {
     let dialler: IpAddr = "192.0.2.77".parse().unwrap();
     for parent in [false, true] {
         let (r, w, s, rs, l) = parts();
-        let sess = TelnetSession::new_cpm_menu(r, w, s, rs, l, Some(dialler), parent);
+        let sess = TelnetSession::new_cpm_menu(
+            r,
+            w,
+            s,
+            rs,
+            l,
+            crate::telnet::Inherited {
+                authenticated: parent,
+                peer_addr: Some(dialler),
+                power_failures: Default::default(),
+                #[cfg(unix)]
+                power_elevation: Default::default(),
+            },
+        );
         assert!(sess.is_serial, "the premise: it looks like a serial session");
         assert_eq!(
             sess.authenticated, parent,
@@ -11744,14 +11881,18 @@ fn test_a_password_free_machine_still_needs_an_authenticated_session() {
 fn test_a_session_probes_for_elevation_only_once() {
     use crate::telnet::power::{Elevate, PowerAction};
 
-    let mut session = make_test_session(TerminalType::Ansi);
+    let session = make_test_session(TerminalType::Ansi);
     assert!(
-        session.power_elevation.is_empty(),
+        session.power_elevation.lock().unwrap().is_empty(),
         "a fresh session must not claim to know how it would elevate",
     );
 
     // What a first successful probe for *Shutdown* leaves behind.
-    session.power_elevation.push((PowerAction::Shutdown, Elevate::SudoQuiet));
+    session
+        .power_elevation
+        .lock()
+        .unwrap()
+        .push((PowerAction::Shutdown, Elevate::SudoQuiet));
 
     // **Keyed by action, because the probe is.**  Sudoers rules are
     // per-argument -- `NOPASSWD: /sbin/shutdown -h now` alone is ordinary --

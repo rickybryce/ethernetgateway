@@ -1420,7 +1420,9 @@ only passwordless route is a <code>NOPASSWD</code> rule you write in
 <code>sudoers</code> yourself. That matters because the telnet menu is
 reachable without a login when <code>security_enabled</code> is off
 (&sect;5.4), and the <code>sudo</code> password is what stands between a
-visitor and the power button. Wrong answers are capped per IP (&sect;7.3).
+visitor and the power button. Wrong answers are capped &mdash; per IP where
+there is one, and per session for a caller who has none, such as someone
+dialled in on a serial port (&sect;7.3).
 </p>
 
 <aside class="note">
@@ -1433,9 +1435,13 @@ between a visitor and the power button, because there is no password &mdash;
 so the page requires instead that the session have <em>logged in</em>, and
 refuses one that has not. If you run the gateway either of those ways, turn
 <code>security_enabled</code> on (&sect;5.4) or the restart and shutdown items
-will refuse every session. Up to and including version 1.0.0 they did not
-ask, so on such a machine with security off any visitor who reached the
-telnet port could take the computer down.
+will refuse every session <em>that arrives over the network</em> &mdash; a
+caller on a physically attached serial port is credentialed by the port
+itself (&sect;6), as it is everywhere else in the gateway, and is not refused.
+A relayed caller <em>is</em>: the slave authenticated to this master, the
+person at the far end did not. Up to and including version 1.0.0 none of
+them were asked, so on such a machine with security off any visitor who
+reached the telnet port could take the computer down.
 </aside>
 
 <aside class="note">
@@ -2107,8 +2113,13 @@ between protocols to reset the counter.
 
 <p>
 A refused <code>sudo</code> password on the second menu (&sect;5.5) is capped
-the same way &mdash; three, per IP, for five minutes &mdash; but in a
-<strong>counter of its own, not this one</strong>. That prompt asks for the
+the same way &mdash; three, for five minutes &mdash; but in a
+<strong>counter of its own, not this one</strong>. It is keyed on the address
+where there is one; a caller who has none &mdash; someone dialled in on a
+serial port, and anything that caller dials from inside the CP/M emulator
+&mdash; is held to three for the session instead, and a session dialled from
+within another <em>shares</em> that allowance rather than starting a fresh
+one, or hanging up and dialling again would buy three more. That prompt asks for the
 password of the <em>host account</em>, not the gateway's, and every wrong
 answer is a real PAM attempt against it, so the cap has to survive a
 reconnect or three guesses per connection is as many guesses as the peer
