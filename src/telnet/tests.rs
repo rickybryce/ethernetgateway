@@ -11939,6 +11939,78 @@ fn test_every_dial_out_site_passes_its_own_credential_and_address() {
     );
 }
 
+/// **And nothing downstream of the door may build an `Inherited` of its own.**
+///
+/// The sweep above guards one end of the chain (every `set_menu_context` call
+/// hands over `self.inheritable()`) and
+/// `test_a_dialled_menu_session_cannot_reset_the_sudo_allowance` guards the
+/// other (`new_cpm_menu` uses what it is given).  **The hops in between are
+/// guarded by neither**: `MenuContext` holds the object, `dial_gateway_menu`
+/// clones it out, and `menu_session` passes it on -- three places where
+/// `Inherited::fresh(false, None)` would compile, reset the credential, the
+/// address and both counters, and leave the whole suite green.  That is the
+/// precise shape the test below this one names: a chain needs a guard per
+/// link, not a guard per end, and this chain grew two new links when the
+/// values became one object.
+///
+/// So the rule is stated where it can be checked cheaply: **`Inherited` is
+/// constructed in exactly two places**, `mod.rs`'s `fresh` and `inheritable`,
+/// and nowhere else in the module.  Everything else receives one.  A test
+/// module may build one (they have no dialler to inherit from), so only
+/// product code is read -- by the same run-time directory walk the sweep above
+/// uses, because `include_str!` cannot enumerate and the file that reopens
+/// this will be one nobody listed.
+#[test]
+fn test_only_the_door_builds_an_inherited_context() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/telnet");
+    let mut files_seen = 0;
+    let mut offenders: Vec<String> = Vec::new();
+
+    for entry in std::fs::read_dir(dir).expect("src/telnet is not readable") {
+        let path = entry.expect("unreadable entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // `mod.rs` is where the two constructors live, and `tests.rs` is
+        // allowed to build one -- a test has no dialling session to inherit
+        // from.  Every other file in the module is downstream of the door.
+        if name == "mod.rs" || name == "tests.rs" {
+            continue;
+        }
+        files_seen += 1;
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // Product code only: these files carry their own `#[cfg(test)]`
+        // modules, which may legitimately build a context.
+        let product = src.split("\n#[cfg(test)]").next().unwrap_or(&src);
+        let code: String = product
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for shape in ["Inherited::fresh(", "Inherited {"] {
+            if code.contains(shape) {
+                offenders.push(format!("{name}: builds `{shape}`"));
+            }
+        }
+    }
+
+    // Positive control: a walk that read nothing would report nothing.
+    assert!(
+        files_seen >= 15,
+        "the walk read only {files_seen} files from {dir}; this module has far \
+         more, so the walk is broken rather than the code",
+    );
+    assert!(
+        offenders.is_empty(),
+        "these files build an `Inherited` instead of receiving one, which is \
+         how a dialled session ends up with a credential, an address or an \
+         allowance its dialler never had -- the hole this object exists to \
+         close, reopened twice already:\n  {}",
+        offenders.join("\n  "),
+    );
+}
+
 /// ...and the door must actually ask that rule.
 ///
 /// Three links carry this: the rule, the door that applies it, and the page
@@ -12558,6 +12630,24 @@ fn serial_menu_label_pairs() -> Vec<(String, String, String)> {
             lefts.push(lits[1].clone());
         }
     }
+    // **Every call site must have been parsed, and the caller's own control
+    // cannot tell.**  It asserts on the number of *pairs*, which is lefts x
+    // rights -- so one left label and four right-hand tuples clears a floor of
+    // four while three of the screen's four rows go unmeasured.  A call site
+    // whose label stops being a bare literal (a `format!`, a const, a wrapped
+    // line the `");"` split swallows) fails exactly that way, silently.  So the
+    // count is held against the source: one call per occurrence, less the
+    // definition.
+    let call_sites = code.matches("serial_menu_row(").count() - 1;
+    assert_eq!(
+        lefts.len(),
+        call_sites,
+        "the label scan parsed {} of {} `serial_menu_row(` call sites -- the \
+         rows it missed are aligned by nothing, and the pair count the caller \
+         checks cannot see the difference",
+        lefts.len(),
+        call_sites,
+    );
 
     // Right-hand pairs: every `Some(("K", "Label"))` in the file.
     let mut rights: Vec<(String, String)> = Vec::new();

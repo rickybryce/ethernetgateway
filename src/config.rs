@@ -6993,6 +6993,7 @@ mod tests {
     fn test_every_readme_link_to_the_manual_goes_to_the_manual() {
         let readme = include_str!("../README.md");
         let mut checked = 0usize;
+        let mut links = 0usize;
         let mut wrong: Vec<String> = Vec::new();
         let mut rest = readme;
         while let Some(open) = rest.find('[') {
@@ -7005,6 +7006,7 @@ mod tests {
             }
             let Some(paren) = after.find(')') else { continue };
             let target = &after[1..paren];
+            links += 1;
             if text.to_ascii_lowercase().contains("manual") {
                 checked += 1;
                 if !target.contains("usermanual") {
@@ -7012,11 +7014,21 @@ mod tests {
                 }
             }
         }
-        // Positive control: a scan that parsed no links would report nothing.
+        // **The control is on the parser, not on the filtered result.**  A
+        // floor on the number of *matching* links cannot tell a working scan
+        // from one that parses half the file: the same weakness the port
+        // settings alignment guard carried, where a pair count could be
+        // cleared by one row while three went unmeasured.  So the link parser
+        // is checked against the whole README, and the label filter against
+        // what it is for.
+        assert!(
+            links >= 20,
+            "the README link parser found only {links} links in the whole file \
+             -- the parser is broken, so the rule below checked nothing",
+        );
         assert!(
             checked >= 4,
-            "the README link scan found only {checked} links labelled \"manual\" \
-             -- the scan is broken, not the README",
+            "the README link scan found only {checked} links labelled \"manual\"",
         );
         assert!(
             wrong.is_empty(),
