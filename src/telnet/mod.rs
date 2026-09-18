@@ -479,7 +479,7 @@ pub(crate) type LockoutMap = Arc<Mutex<HashMap<IpAddr, (u32, std::time::Instant)
 /// next review pass instead.  Grouping them means a new input is added here
 /// and every dial-out site carries it without being edited.
 #[derive(Clone)]
-pub(in crate::telnet) struct Inherited {
+pub(crate) struct Inherited {
     /// Whether the dialling session proved who it is (never decided afresh).
     pub authenticated: bool,
     /// The dialler's address; the sudo attempt cap keys on it.
@@ -1497,6 +1497,7 @@ impl TelnetSession {
         shutdown: Arc<AtomicBool>,
         restart: Arc<AtomicBool>,
         lockouts: LockoutMap,
+        from: Inherited,
     ) -> Self {
         Self {
             reader,
@@ -1509,13 +1510,22 @@ impl TelnetSession {
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr: None,
-            power_password_failures: Default::default(),
+            power_password_failures: from.power_failures,
             power_lockouts: shared_power_lockouts().clone(),
             // A physical serial port is its own trust boundary -- the same
-            // judgement `run` makes where it skips authentication for one.
-            authenticated: true,
+            // judgement `run` makes where it skips authentication for one --
+            // but the *caller* supplies it, along with the power counters.
+            //
+            // **Because `ATDT ethernetgateway` on the physical modem builds
+            // one of these per dial.**  While this constructor made its own,
+            // every re-dial handed out a fresh allowance of guesses at the
+            // host password and a fresh elevation memo, which is the hole
+            // closed for the CP/M virtual modem by the sibling path.  The
+            // modem holds one `Inherited` for the life of the port and hands
+            // it over each time.
+            authenticated: from.authenticated,
             #[cfg(unix)]
-            power_elevation: Default::default(),
+            power_elevation: from.power_elevation,
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1737,6 +1747,21 @@ impl TelnetSession {
     }
 
 
+    /// What a session dialled from inside this one inherits.
+    ///
+    /// The single place these are gathered, so a dial-out site cannot carry
+    /// some of them and leave the rest -- which is how the same hole was
+    /// reopened twice, once per value.
+    pub(crate) fn inheritable(&self) -> Inherited {
+        Inherited {
+            authenticated: self.authenticated,
+            peer_addr: self.peer_addr,
+            power_failures: self.power_password_failures.clone(),
+            #[cfg(unix)]
+            power_elevation: self.power_elevation.clone(),
+        }
+    }
+
     /// Create a session for a call the **CP/M emulator's virtual modem** placed
     /// to this gateway's own menu (`ATDT ethernetgateway` from inside a CP/M
     /// terminal such as EGT8080).
@@ -1768,21 +1793,6 @@ impl TelnetSession {
     /// second screen for a caller already counted once.  A shutdown still ends
     /// it — the shared `shutdown` flag is passed in, and the caller's own
     /// session is registered, so the goodbye reaches the human either way.
-    /// What a session dialled from inside this one inherits.
-    ///
-    /// The single place these are gathered, so a dial-out site cannot carry
-    /// some of them and leave the rest -- which is how the same hole was
-    /// reopened twice, once per value.
-    pub(in crate::telnet) fn inheritable(&self) -> Inherited {
-        Inherited {
-            authenticated: self.authenticated,
-            peer_addr: self.peer_addr,
-            power_failures: self.power_password_failures.clone(),
-            #[cfg(unix)]
-            power_elevation: self.power_elevation.clone(),
-        }
-    }
-
     pub(in crate::telnet) fn new_cpm_menu(
         reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         writer: SharedWriter,

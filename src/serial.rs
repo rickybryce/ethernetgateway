@@ -753,6 +753,19 @@ struct ModemState {
     plus_count: u8,
     plus_start: Instant,
     cmd_buffer: String,
+    /// What a menu session dialled from this port inherits, **held across
+    /// dials**.
+    ///
+    /// `ATDT ethernetgateway` builds a fresh `TelnetSession` every time, and
+    /// while this was built there too, `+++ ATH` and a re-dial handed out
+    /// another three guesses at the operator's host password and another real
+    /// `sudo` probe -- indefinitely, from a caller no rate limit counts.  It
+    /// is the same hole that was closed for the CP/M emulator's virtual modem
+    /// one commit earlier, by this sibling path.
+    ///
+    /// The whole object rather than the two counters, so an input added to
+    /// `Inherited` travels here without this file being edited.
+    dialled: crate::telnet::Inherited,
     /// Previous byte seen in command mode, used to collapse a CR+LF / LF+CR
     /// line-ending pair into a single terminator (see `command_mode_tick`).
     /// Reset to 0 after a swallowed pair-partner so consecutive line endings
@@ -3587,6 +3600,17 @@ fn serial_thread(
 ) -> bool {
     let now = Instant::now();
     let mut state = ModemState {
+        // One allowance for the life of this port: a caller who spends their
+        // guesses cannot get more by hanging up and dialling again.  A
+        // physical port is its own trust boundary, hence `authenticated`, and
+        // a serial caller has no address for the per-IP map to key on.
+        dialled: crate::telnet::Inherited {
+            authenticated: true,
+            peer_addr: None,
+            power_failures: Default::default(),
+            #[cfg(unix)]
+            power_elevation: Default::default(),
+        },
         port_id: id,
         port,
         mode: ModemMode::Command,
@@ -5760,6 +5784,7 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
 
     // Spawn TelnetSession on the tokio runtime.
     let writer_for_task = writer_arc.clone();
+    let dialled = state.dialled.clone();
     state.handle.spawn(async move {
         // Serial sessions don't auth, so this lockout map is
         // intentionally empty and unshared — nothing to count.
@@ -5773,6 +5798,9 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
             shutdown,
             restart,
             lockouts,
+            // Held by the modem, not made here: a re-dial must not buy a
+            // fresh allowance of guesses at the host password.
+            dialled,
         );
         if let Err(e) = session.run().await {
             // A hangup closes our end, so the next write fails -- that is how

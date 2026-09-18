@@ -105,6 +105,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A relayed caller was refused with advice it could never follow.**  Once a
+  relay session stopped claiming a login, the refusal on a password-free
+  machine told it to set `security_enabled` and reconnect &mdash; but a relay
+  is a serial-behaviour session, and those skip authentication entirely, so
+  that step cannot happen however often it is taken.  It now names the route
+  that works: reach the gateway directly by telnet or SSH.
+
 - **The booted-disk screen list called a locally dialled session a relay.**
   Its label asked "serial, no local port, has an address?", which a menu
   session dialled from inside the emulator now matches exactly &mdash; and
@@ -292,6 +299,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saving.  Telnet and the web were unaffected &mdash; they write immediately.
 
 ### Security
+
+- **The physical modem's `ATDT ethernetgateway` still reset the cap on
+  guesses at the host password.**  The same hole as the CP/M emulator's, by
+  the sibling path: `dial_ethernet_gateway` builds a session per dial, and
+  that constructor made its own counters &mdash; so `+++ ATH` and a re-dial
+  bought another three real PAM attempts against the operator's account and
+  another `sudo` probe, indefinitely, from a caller no rate limit counts.
+  The modem now holds one allowance for the life of the port and hands it to
+  every dial.  It holds the whole context object rather than the two
+  counters, so a value added later travels this path without it being edited.
 
 - **An enrolled relay key could restart a machine that asks for no password.**
   `shell_request` refuses a key-authenticated SSH connection because "a relay

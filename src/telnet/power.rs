@@ -85,7 +85,7 @@ fn sudo_timed_out_error() -> std::io::Error {
 
 /// Which way the machine is being taken down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::telnet) enum PowerAction {
+pub(crate) enum PowerAction {
     Restart,
     Shutdown,
 }
@@ -190,7 +190,7 @@ pub(in crate::telnet) fn confirm_body(action: PowerAction) -> &'static [&'static
 
 /// How this process has to ask the system to change power state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::telnet) enum Elevate {
+pub(crate) enum Elevate {
     /// Already root — run the command directly, no `sudo` in the picture.
     Direct,
     /// `sudo` answers without a password, because a **NOPASSWD sudoers rule**
@@ -316,15 +316,29 @@ pub(in crate::telnet) fn blocked_lines() -> Vec<&'static str> {
 /// you are", and on the default install -- telnet only, SSH off -- there is no
 /// such listener to reconnect on, so the screen named no action at all.
 /// "Set X and reconnect" is an instruction, not a claim about X.
-pub(in crate::telnet) fn unverified_lines() -> Vec<&'static str> {
-    vec![
+pub(in crate::telnet) fn unverified_lines(is_relay: bool) -> Vec<&'static str> {
+    let mut lines = vec![
         "This computer needs no password to",
         "restart, so this page needs a login",
         "and this session did not have one.",
         "",
-        "Set security_enabled and reconnect,",
-        "and the gateway will ask who you are.",
-    ]
+    ];
+    if is_relay {
+        // **A relay can never satisfy the other advice, so it must not be
+        // given it.**  `run` skips both `authenticate` and the credential
+        // assignment for any `is_serial` session, and a relay is one -- so
+        // turning `security_enabled` on changes nothing for a caller arriving
+        // this way, however many times they reconnect.  Naming a step that
+        // cannot happen is the exact failure this page's order of steps
+        // exists to prevent.
+        lines.push("You are here over a relay, which");
+        lines.push("cannot log in. Reach this gateway");
+        lines.push("directly by telnet or SSH.");
+    } else {
+        lines.push("Set security_enabled and reconnect,");
+        lines.push("and the gateway will ask who you are.");
+    }
+    lines
 }
 
 /// Whether this process carries the kernel's `no_new_privs` flag.
@@ -1054,7 +1068,7 @@ impl TelnetSession {
         // before the password, in the same place and for the same reason: a
         // screen must not promise a step that cannot happen.
         if elev != Elevate::SudoPassword && !self.authenticated {
-            self.show_error_lines(&unverified_lines()).await?;
+            self.show_error_lines(&unverified_lines(self.is_relay)).await?;
             // **Says what was observed, not what the setting must be.**  The
             // first version of both this line and the screen asserted
             // "security_enabled is off", which the code never read.  A

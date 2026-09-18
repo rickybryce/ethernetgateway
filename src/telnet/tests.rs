@@ -5425,6 +5425,13 @@ fn test_telnet_session_new_serial_stores_port_id() {
         shutdown.clone(),
         restart.clone(),
         lockouts.clone(),
+        crate::telnet::Inherited {
+            authenticated: true,
+            peer_addr: None,
+            power_failures: Default::default(),
+            #[cfg(unix)]
+            power_elevation: Default::default(),
+        },
     );
     assert!(session_a.is_serial);
     assert_eq!(session_a.serial_port_id, Some(SerialPortId::A));
@@ -5440,6 +5447,13 @@ fn test_telnet_session_new_serial_stores_port_id() {
         shutdown,
         restart,
         lockouts,
+        crate::telnet::Inherited {
+            authenticated: true,
+            peer_addr: None,
+            power_failures: Default::default(),
+            #[cfg(unix)]
+            power_elevation: Default::default(),
+        },
     );
     assert_eq!(session_b.serial_port_id, Some(SerialPortId::B));
 
@@ -11520,38 +11534,89 @@ fn test_a_dialled_menu_session_cannot_reset_the_sudo_allowance() {
     );
 }
 
+/// **The physical modem holds its allowance across dials, too.**
+///
+/// The CP/M emulator's `ATDT ethernetgateway` was fixed first, and the
+/// physical modem's `dial_ethernet_gateway` is the sibling path: it builds a
+/// `TelnetSession` per dial, and while that constructor made its own
+/// counters, `+++ ATH` and a re-dial bought another three guesses at the
+/// operator's host password and another real `sudo` probe -- from a caller
+/// no rate limit counts.  Read from the source because driving a real serial
+/// port is not something a unit test can do.
+#[test]
+fn test_the_serial_modem_holds_one_power_allowance_across_dials() {
+    let src = include_str!("../serial.rs").replace('\r', "");
+
+    // The allowance is a field of the modem, which outlives a dial...
+    assert!(
+        src.contains("dialled: crate::telnet::Inherited"),
+        "the serial modem no longer holds an `Inherited` across dials, so \
+         hanging up and dialling the gateway's own menu again hands out a \
+         fresh allowance of guesses at the host password",
+    );
+
+    // ...and the dial hands that field over rather than building one.
+    let at = src
+        .find("fn dial_ethernet_gateway")
+        .expect("dial_ethernet_gateway moved or was renamed");
+    let tail = &src[at..];
+    let end = tail[1..].find("\nfn ").map(|i| i + 1).unwrap_or(tail.len());
+    let body: String = tail[..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        body.contains("state.dialled.clone()"),
+        "dial_ethernet_gateway builds its own session context instead of \
+         handing over the modem's, so each dial starts a fresh allowance",
+    );
+    assert!(
+        !body.contains("Inherited {"),
+        "dial_ethernet_gateway constructs an `Inherited` inline, which is how \
+         a re-dial gets counters nobody else shares",
+    );
+}
+
 /// **Every dial-out call site must hand over its own state, not a literal.**
 ///
-/// `set_menu_context` takes bare values, so any call site could pass `true` /
-/// `None` and reopen the hole with the whole suite green -- and this hole has
-/// been reopened by exactly that route twice now, each time in the commit
-/// that closed the previous one.
+/// `set_menu_context` takes a context object, so a call site could build one
+/// with literals and reopen the hole with the whole suite green -- and this
+/// hole has been reopened by exactly that route twice, each time in the
+/// commit that closed the previous one.
 ///
-/// **Counted, not enumerated.**  The first version named two files and read
-/// only the first call in each, which is the failure its own comment warned
-/// about: a third site, or a second call in one of those files, was
-/// unguarded.  This sweeps `src/telnet/` and checks every occurrence, the
-/// same shape as `test_no_sudo_on_this_page_can_ride_a_cached_credential`.
+/// **It reads the directory.**  The first version named two files; the
+/// second named eight of the nineteen in `src/telnet/` while its own doc
+/// claimed to sweep the directory, so a new dial-out site in any of the other
+/// eleven -- `cpm_mount_ui.rs` being the obvious next home -- would have
+/// passed silently, and the `checked >= 2` control could not have noticed
+/// either.  `include_str!` cannot enumerate a directory, so this reads it at
+/// run time, the way the manual guard reads `usermanual.html`.
 #[test]
 fn test_every_dial_out_site_passes_its_own_credential_and_address() {
-    let files: &[(&str, &str)] = &[
-        ("cpm_emu.rs", include_str!("cpm_emu.rs")),
-        ("cpm_boot_ui.rs", include_str!("cpm_boot_ui.rs")),
-        ("cpm_modem.rs", include_str!("cpm_modem.rs")),
-        ("mod.rs", include_str!("mod.rs")),
-        ("session.rs", include_str!("session.rs")),
-        ("gateway.rs", include_str!("gateway.rs")),
-        ("kernel.rs", include_str!("kernel.rs")),
-        ("config_ui.rs", include_str!("config_ui.rs")),
-    ];
-
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/telnet");
     let mut checked = 0;
-    for (name, src) in files {
-        let code = src.replace('\r', "");
+    let mut files_seen = 0;
+
+    for entry in std::fs::read_dir(dir).expect("src/telnet is not readable") {
+        let path = entry.expect("unreadable entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // This file is not a dial-out site; it also contains the literal
+        // being searched for, so reading it matches the scan's own source.
+        if name == "tests.rs" {
+            continue;
+        }
+        files_seen += 1;
+        let code = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .replace('\r', "");
+
         let mut at = 0;
         while let Some(i) = code[at..].find("set_menu_context(") {
             let call_at = at + i;
-            // The declaration is not a call site.
             let decl = code[..call_at].ends_with("fn ");
             at = call_at + 1;
             if decl {
@@ -11564,19 +11629,17 @@ fn test_every_dial_out_site_passes_its_own_credential_and_address() {
                 .filter(|l| !l.trim_start().starts_with("//"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            // The modem's own unit test builds a context with literals on
-            // purpose; it is not a dial-out site in the product.
-            if args.contains("AtomicBool::new(false)") && args.contains("HashMap::new()") {
+            // The modem's own unit test builds a context on purpose; it is
+            // not a dial-out site in the product.
+            if args.contains("AtomicBool::new(false)") {
                 continue;
             }
             checked += 1;
             // **One accessor, not a list of values.**  These were four
             // arguments and the hole was reopened twice by a site that
             // carried some of them; `inheritable()` is the single place they
-            // are gathered, so a site either hands over the session's own
-            // state or it does not.  A new input added to `Inherited` then
-            // travels without any of these sites being edited -- which is
-            // the property the enumerated version could never have.
+            // are gathered, so a new input travels without any of these
+            // sites being edited.
             assert!(
                 args.contains("self.inheritable()"),
                 "{name}: a set_menu_context call builds its own context \
@@ -11587,11 +11650,17 @@ fn test_every_dial_out_site_passes_its_own_credential_and_address() {
         }
     }
 
-    // Positive control: a sweep that matched nothing would pass silently.
+    // Positive controls: a sweep that read no files, or found no call sites,
+    // would pass every assertion above without reading anything.
+    assert!(
+        files_seen >= 15,
+        "the sweep read only {files_seen} files from {dir}; this module has \
+         far more, so the sweep is broken rather than the call sites",
+    );
     assert!(
         checked >= 2,
         "the sweep found {checked} dial-out call sites; there are at least \
-         two, so it is the sweep that is broken, not the call sites",
+         two, so it is the sweep that is broken",
     );
 }
 
@@ -11703,7 +11772,24 @@ fn test_each_session_kind_states_its_own_credential() {
 
     // A physical serial port is its own trust boundary.
     let (r, w, s, rs, l) = parts();
-    assert!(TelnetSession::new_serial(SerialPortId::A, r, w, s, rs, l).authenticated);
+    assert!(
+        TelnetSession::new_serial(
+            SerialPortId::A,
+            r,
+            w,
+            s,
+            rs,
+            l,
+            crate::telnet::Inherited {
+                authenticated: true,
+                peer_addr: None,
+                power_failures: Default::default(),
+                #[cfg(unix)]
+                power_elevation: Default::default(),
+            },
+        )
+        .authenticated
+    );
 
     // **A relay session is NOT pre-authenticated, and this is the one that
     // was wrong.**  `shell_request` refuses a key-authenticated connection
@@ -11828,7 +11914,7 @@ fn test_a_password_free_machine_still_needs_an_authenticated_session() {
     // screen that names a false cause sends the operator to a setting that is
     // already set.  Same rule as `sudo_timed_out_line`: say what was
     // observed, never an outcome the code did not check.
-    let lines = crate::telnet::power::unverified_lines();
+    let lines = crate::telnet::power::unverified_lines(false);
     assert!(
         lines.iter().any(|l| l.contains("security_enabled")),
         "the refusal does not name the setting that would fix it: {lines:?}",
@@ -11851,6 +11937,30 @@ fn test_a_password_free_machine_still_needs_an_authenticated_session() {
         screen.contains("set security_enabled"),
         "the refusal names no action the operator can take: {lines:?}",
     );
+
+    // **And a relay is told something it can actually do.**  `run` skips both
+    // `authenticate` and the credential assignment for any `is_serial`
+    // session, and a relay is one -- so "set security_enabled and reconnect"
+    // is a step that cannot happen however often it is followed, which is the
+    // failure this page's order of steps exists to prevent.
+    let relay = crate::telnet::power::unverified_lines(true);
+    let relay_screen = relay.join(" ").to_lowercase();
+    assert!(
+        !relay_screen.contains("set security_enabled"),
+        "a relayed caller is told to set security_enabled and reconnect, \
+         which can never make them authenticated: {relay:?}",
+    );
+    assert!(
+        relay_screen.contains("telnet") || relay_screen.contains("ssh"),
+        "the relay refusal names no route that works: {relay:?}",
+    );
+    for l in &relay {
+        assert!(
+            l.chars().count() <= PETSCII_WIDTH - 2,
+            "{l:?} is {} chars, too wide for a PETSCII screen",
+            l.chars().count(),
+        );
+    }
     for l in &lines {
         assert!(
             l.chars().count() <= PETSCII_WIDTH - 2,
