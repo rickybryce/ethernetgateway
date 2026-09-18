@@ -468,22 +468,28 @@ impl Menu {
 // protocol clears the lockout for that IP.
 pub(crate) type LockoutMap = Arc<Mutex<HashMap<IpAddr, (u32, std::time::Instant)>>>;
 
-/// Whether a session that got past the door has proved who it is.
+/// Whether a *telnet* session that got past the door has proved who it is.
 ///
-/// **A pure seam, because a scan on the consumer cannot see this.**  The
-/// power page refuses a no-password elevation to an unauthenticated session,
-/// and a guard reading *that* check passes just as well when the flag feeding
-/// it is hard-wired to `true` -- measured by mutation, which is exactly the
-/// "pin the bound, not the order" trap one review earlier.  So the rule that
-/// *sets* the flag is a function with its own test.
+/// **Only the telnet door computes this; every other entry point states its
+/// own answer at construction.**  The first version derived it as
+/// `is_serial || security_enabled`, and `is_serial` cannot carry a trust
+/// decision: it is set by `new_serial`, which really is a physical port, and
+/// *also* by `new_relay` -- which `new_cpm_menu` delegates to.  So a CP/M
+/// guest dialling `ATDT ethernetgateway` got a session claiming a login it
+/// never made, and on a root or NOPASSWD machine with `security_enabled` off
+/// an unauthenticated peer could reach the power page through `K` and restart
+/// the computer.  That is the hole this flag exists to close, reopened by
+/// another route in the same commit that closed it.
 ///
-/// A serial session counts as credentialed on the trust boundary
-/// `run_session` names where it skips authentication: it arrived over a
-/// physical port. Otherwise it is credentialed exactly when
-/// `security_enabled` made it authenticate, because that is the only
-/// condition under which `authenticate` ran at all.
-pub(crate) fn session_is_credentialed(is_serial: bool, security_enabled: bool) -> bool {
-    is_serial || security_enabled
+/// The lesson is about the flag's *name*: `is_serial` reads as "arrived over
+/// a serial port", and what it actually means is "does not speak telnet".
+/// Reason from what sets a flag, not from what it is called.
+///
+/// Telnet is the only path that runs `authenticate`, and it runs it exactly
+/// when `security_enabled` is on -- so for telnet that setting *is* the
+/// answer.
+pub(crate) fn telnet_session_is_credentialed(security_enabled: bool) -> bool {
+    security_enabled
 }
 
 /// Refused `sudo` attempts, per address, for the whole process.
@@ -1299,6 +1305,16 @@ pub(crate) struct TelnetSession {
     /// sudoers mid-session reconnects, which is what `available()` already
     /// expects of them for the cheaper question it caches at startup.
     ///
+    /// **Keyed by the action, because the probe is.**  `probe_elevation` asks
+    /// `sudo -l -- shutdown -r now` or `-h now`, and sudoers rules are
+    /// per-argument: `NOPASSWD: /sbin/shutdown -h now` alone is a perfectly
+    /// ordinary rule.  A memo keyed on the session alone would answer Restart
+    /// with what Shutdown was told -- skipping the password, clocking out the
+    /// farewell, and only then having `sudo` refuse, leaving the refusal in
+    /// the log and nowhere else.  That is precisely what this module's
+    /// order-of-steps rule exists to prevent, so the two actions get two
+    /// slots.
+    ///
     /// A real `cfg` rather than the `allow(dead_code)` its neighbours carry,
     /// and necessarily so: `Elevate` is declared in `power.rs`, which does
     /// not exist off Unix, so there is no type here to leave unread.  Keep
@@ -1306,7 +1322,7 @@ pub(crate) struct TelnetSession {
     /// is what orphaned a doc onto a neighbour and failed the Windows build
     /// before.
     #[cfg(unix)]
-    power_elevation: Option<power::Elevate>,
+    power_elevation: Vec<(power::PowerAction, power::Elevate)>,
     transfer_subdir: String,
     xmodem_iac: bool,
     /// Outcome of the last transfer, drawn once by `render_file_transfer`
@@ -1471,9 +1487,11 @@ impl TelnetSession {
             peer_addr: None,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
-            authenticated: false,
+            // A physical serial port is its own trust boundary -- the same
+            // judgement `run` makes where it skips authentication for one.
+            authenticated: true,
             #[cfg(unix)]
-            power_elevation: None,
+            power_elevation: Vec::new(),
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1539,9 +1557,13 @@ impl TelnetSession {
             peer_addr,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
-            authenticated: false,
+            // `auth_password` is the only method offered and it runs whatever
+            // `security_enabled` says, so reaching here means a credential was
+            // checked.  Set here because `run`'s door is the telnet one and
+            // skips SSH entirely.
+            authenticated: true,
             #[cfg(unix)]
-            power_elevation: None,
+            power_elevation: Vec::new(),
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1623,9 +1645,15 @@ impl TelnetSession {
             peer_addr,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
-            authenticated: false,
+            // A relay session arrives from a master gateway over its own
+            // authenticated SSH channel.
+            //
+            // **`new_cpm_menu` overrides this**, because a locally dialled
+            // menu session is only as credentialed as the session that
+            // dialled it -- see there.
+            authenticated: true,
             #[cfg(unix)]
-            power_elevation: None,
+            power_elevation: Vec::new(),
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
@@ -1688,9 +1716,20 @@ impl TelnetSession {
         shutdown: Arc<AtomicBool>,
         restart: Arc<AtomicBool>,
         lockouts: LockoutMap,
+        authenticated: bool,
     ) -> Self {
         let mut s = Self::new_relay(reader, writer, shutdown, restart, None, lockouts);
         s.is_relay = false;
+        // **Only as credentialed as whoever dialled it.**  This session is
+        // built by `cpm_modem`'s `ATDT ethernetgateway`, from inside another
+        // session, and it inherits `new_relay`'s raw-serial semantics -- so
+        // it also inherited `is_serial: true`, which the first version of the
+        // credential rule read as "trusted".  It is not: with
+        // `security_enabled` off, an unauthenticated peer could reach the
+        // power page through `K` and restart a root or NOPASSWD machine
+        // having proved nothing.  `is_serial` says "does not speak telnet",
+        // never "is trusted".
+        s.authenticated = authenticated;
         s
     }
 
@@ -2387,9 +2426,10 @@ pub fn start_server(
                                     peer_addr: Some(addr.ip()),
                                     power_password_failures: 0,
                                     power_lockouts: shared_power_lockouts().clone(),
+                                    // The telnet door computes this in `run`, once it has run.
                                     authenticated: false,
                                     #[cfg(unix)]
-            power_elevation: None,
+                                    power_elevation: Vec::new(),
                                     transfer_subdir: String::new(),
                                     // Start with IAC escaping off; session_read_byte
                                     // flips telnet_negotiated on as soon as the client

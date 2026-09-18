@@ -98,6 +98,13 @@ pub(in crate::telnet) struct MenuContext {
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lockouts: super::LockoutMap,
+    /// Whether the session that owns this modem proved who it is.
+    ///
+    /// Carried so a dialled menu session inherits it rather than claiming a
+    /// login of its own: it is built on `new_relay`, so it looks like a
+    /// serial session, and a rule that read that as trust let an
+    /// unauthenticated peer reach the power page through the emulator.
+    authenticated: bool,
 }
 
 impl CpmModem {
@@ -187,8 +194,9 @@ impl CpmModem {
         shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
         restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
         lockouts: super::LockoutMap,
+        authenticated: bool,
     ) {
-        self.menu = Some(MenuContext { shutdown, restart, lockouts });
+        self.menu = Some(MenuContext { shutdown, restart, lockouts, authenticated });
     }
 
     /// Reset AT state to power-on defaults (ATZ / AT&F).
@@ -562,6 +570,7 @@ impl CpmModem {
         let shutdown = ctx.shutdown.clone();
         let restart = ctx.restart.clone();
         let lockouts = ctx.lockouts.clone();
+        let authenticated = ctx.authenticated;
 
         // Generous buffer: the guest drains its RX ring a batch at a time.
         let (session_side, modem_side) = tokio::io::duplex(65536);
@@ -575,6 +584,7 @@ impl CpmModem {
             shutdown,
             restart,
             lockouts,
+            authenticated,
         ));
 
         self.conn = Some(Box::new(modem_side));
@@ -806,6 +816,7 @@ fn menu_session(
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     restart: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lockouts: super::LockoutMap,
+    authenticated: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         let mut session = super::TelnetSession::new_cpm_menu(
@@ -814,6 +825,7 @@ fn menu_session(
             shutdown,
             restart,
             lockouts,
+            authenticated,
         );
         if let Err(e) = session.run().await {
             // A hangup closes our end of the duplex, so the session's next
@@ -1083,6 +1095,7 @@ mod tests {
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                false,
             );
             let out = m.service(format!("ATDT {kw}\r").into_bytes(), 65536, false).await;
             let s = String::from_utf8_lossy(&out).to_string();

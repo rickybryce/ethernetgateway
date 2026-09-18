@@ -312,10 +312,10 @@ pub(in crate::telnet) fn unverified_lines() -> Vec<&'static str> {
     vec![
         "This computer needs no password to",
         "restart, so this page needs a login",
-        "and this session has not had one.",
+        "and this session did not have one.",
         "",
-        "Turn on security_enabled so the",
-        "gateway asks who you are first.",
+        "Reconnect on a listener that asks",
+        "who you are (security_enabled).",
     ]
 }
 
@@ -751,6 +751,19 @@ impl TelnetSession {
         }
     }
 
+    /// What the probe last said about **this action**, if it has been asked.
+    ///
+    /// Keyed by the action because `probe_elevation` is: sudoers rules are
+    /// per-argument, so `shutdown -h now` and `shutdown -r now` can honestly
+    /// differ, and answering one out of the other's slot would skip a
+    /// password the machine does want -- after the farewell had been sent.
+    pub(in crate::telnet) fn remembered_elevation(&self, action: PowerAction) -> Option<Elevate> {
+        self.power_elevation
+            .iter()
+            .find(|(a, _)| *a == action)
+            .map(|(_, e)| *e)
+    }
+
     /// Whether this session has spent its `sudo` attempts.
     ///
     /// **Two counters, because one of them cannot see every session.**  An
@@ -976,15 +989,19 @@ impl TelnetSession {
         // and spawned a real `sudo` every pass.  See `power_elevation` for
         // why one answer is good for the whole session.
         //
+        // Remembered **per action**, because sudoers rules are per-argument:
+        // see `power_elevation`.  Reusing Shutdown's answer for Restart would
+        // skip the password and then fail after the farewell.
+        //
         // Only a successful probe is remembered: an error can be the 30 s
         // timeout, which is a statement about this moment rather than about
         // the machine, and re-asking costs at most one spawn per attempt on a
         // path that is already slow enough to bound itself.
-        let elev = match self.power_elevation {
+        let elev = match self.remembered_elevation(action) {
             Some(e) => e,
             None => match probe_elevation(action.argv()).await {
                 Ok(e) => {
-                    self.power_elevation = Some(e);
+                    self.power_elevation.push((action, e));
                     e
                 }
                 Err(msg) => {
@@ -1021,9 +1038,17 @@ impl TelnetSession {
         // screen must not promise a step that cannot happen.
         if elev != Elevate::SudoPassword && !self.authenticated {
             self.show_error_lines(&unverified_lines()).await?;
+            // **Says what was observed, not what the setting must be.**  The
+            // first version of both this line and the screen asserted
+            // "security_enabled is off", which the code never read.  A
+            // session can be unauthenticated with it *on*: it may have
+            // started before the operator switched it on, which is the very
+            // reason this flag is recorded at the door instead of derived.
+            // Naming a cause that is false sends the operator to a setting
+            // that is already set.
             glog!(
-                "Power: {} refused -- {} needs no password and the session is \
-                 not authenticated (security_enabled is off)",
+                "Power: {} refused -- {} needs no password and this session \
+                 did not authenticate",
                 action.argv().join(" "),
                 match elev {
                     Elevate::Direct => "this gateway is root, so the command",

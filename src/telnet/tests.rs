@@ -873,7 +873,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         power_lockouts: Default::default(),
         authenticated: false,
         #[cfg(unix)]
-        power_elevation: None,
+        power_elevation: Vec::new(),
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -936,7 +936,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         power_lockouts: Default::default(),
         authenticated: false,
         #[cfg(unix)]
-        power_elevation: None,
+        power_elevation: Vec::new(),
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
@@ -11419,9 +11419,9 @@ fn test_the_door_sets_authenticated_from_the_rule_not_a_literal() {
     let end = tail.find(';').expect("unterminated assignment");
     let rhs = &tail[..end];
     assert!(
-        rhs.contains("session_is_credentialed"),
+        rhs.contains("telnet_session_is_credentialed"),
         "the door sets `authenticated` from something other than \
-         `session_is_credentialed` -- a literal or an inline copy of the rule \
+         `telnet_session_is_credentialed` -- a literal or an inline copy of it \
          means the rule's own test guards nothing that ships.  Found: {rhs:?}",
     );
     assert!(
@@ -11437,28 +11437,94 @@ fn test_the_door_sets_authenticated_from_the_rule_not_a_literal() {
 /// enough on its own: hard-wiring `self.authenticated = true` at the door
 /// leaves it green -- measured by mutation.  A guard on the consumer says
 /// nothing about the producer, the same trap as pinning an ordering instead
-/// of a bound.  So the rule that sets the flag is pure and tested here.
+/// of a bound.  So the producers are tested here, one per entry point.
+///
+/// **The first version of this rule was wrong and a third review pass caught
+/// it.**  It derived the answer as `is_serial || security_enabled`, and
+/// `is_serial` cannot carry trust: `new_relay` sets it too, and
+/// `new_cpm_menu` is built on `new_relay`.  So a CP/M guest dialling
+/// `ATDT ethernetgateway` arrived pre-trusted, and on a root or NOPASSWD
+/// machine with `security_enabled` off an unauthenticated peer could reach
+/// the power page through `K` and restart the computer -- the hole the flag
+/// was added to close, reopened by another route in the same commit.
+/// `is_serial` means "does not speak telnet", never "is trusted".
 #[test]
 fn test_what_counts_as_a_credentialed_session() {
-    use crate::telnet::session_is_credentialed;
+    use crate::telnet::telnet_session_is_credentialed;
 
-    // The case the power page's refusal exists for: telnet, security off, so
-    // `authenticate` never ran and nothing was proved.
+    // The telnet door: the only path that runs `authenticate`, and it runs it
+    // exactly when `security_enabled` is on.
     assert!(
-        !session_is_credentialed(false, false),
+        !telnet_session_is_credentialed(false),
         "a telnet session with security_enabled off proved nothing, and a \
          machine needing no password would then restart for any peer",
     );
     assert!(
-        session_is_credentialed(false, true),
+        telnet_session_is_credentialed(true),
         "security_enabled on means authenticate() ran and passed to get here",
     );
-    // Serial is credentialed on the physical-port trust boundary that
-    // `run_session` names where it skips authentication -- both ways round,
-    // since that skip does not consult security_enabled.
-    assert!(session_is_credentialed(true, false), "a serial caller arrived over a port");
-    assert!(session_is_credentialed(true, true), "and still has, with security on");
 }
+
+/// ...and every other entry point states its own answer at construction.
+#[test]
+fn test_each_session_kind_states_its_own_credential() {
+    use crate::config::SerialPortId;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    fn parts() -> (
+        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        SharedWriter,
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+        LockoutMap,
+    ) {
+        let writer: SharedWriter =
+            std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(tokio::io::sink())));
+        (
+            Box::new(tokio::io::empty()),
+            writer,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            std::sync::Arc::new(StdMutex::new(HashMap::new())),
+        )
+    }
+
+    // SSH always authenticates -- `auth_password` is the only method offered
+    // and it ignores `security_enabled` -- and `run`'s door skips SSH
+    // entirely, so this must be set at construction or the power page
+    // refuses the one session kind that always proved something.
+    let (r, w, s, rs, l) = parts();
+    assert!(
+        TelnetSession::new_ssh(r, w, s, rs, None, l).authenticated,
+        "an SSH session is refused by the power page although SSH is the one \
+         path that always checks a credential",
+    );
+
+    // A physical serial port is its own trust boundary.
+    let (r, w, s, rs, l) = parts();
+    assert!(TelnetSession::new_serial(SerialPortId::A, r, w, s, rs, l).authenticated);
+
+    // A relay arrives over the master's authenticated SSH channel.
+    let (r, w, s, rs, l) = parts();
+    assert!(TelnetSession::new_relay(r, w, s, rs, None, l).authenticated);
+
+    // And the one that must NOT decide for itself: a menu session dialled
+    // from inside another session is exactly as credentialed as its parent,
+    // both ways round.
+    for parent in [false, true] {
+        let (r, w, s, rs, l) = parts();
+        let sess = TelnetSession::new_cpm_menu(r, w, s, rs, l, parent);
+        assert!(sess.is_serial, "the premise: it looks like a serial session");
+        assert_eq!(
+            sess.authenticated, parent,
+            "a dialled menu session did not inherit its parent's credential \
+             state (parent authenticated = {parent}), so `ATDT \
+             ethernetgateway` is a way to gain trust the dialler never had",
+        );
+    }
+}
+
 
 /// **A machine that needs no password still needs a login.**
 ///
@@ -11511,12 +11577,28 @@ fn test_a_password_free_machine_still_needs_an_authenticated_session() {
     assert!(gate < run, "the refusal lands after the command has been run");
 
     // And the screen names the setting the operator can act on, on a 40-col
-    // display.
+    // display -- **without asserting what it is currently set to.**
+    //
+    // The first wording said "Turn on security_enabled", and the code never
+    // reads that setting: `authenticated` can be false with it *on*, for a
+    // session that began before the operator switched it on, which is the
+    // very reason the flag is recorded at the door rather than derived.  A
+    // screen that names a false cause sends the operator to a setting that is
+    // already set.  Same rule as `sudo_timed_out_line`: say what was
+    // observed, never an outcome the code did not check.
     let lines = crate::telnet::power::unverified_lines();
     assert!(
         lines.iter().any(|l| l.contains("security_enabled")),
         "the refusal does not name the setting that would fix it: {lines:?}",
     );
+    let screen = lines.join(" ").to_lowercase();
+    for claim in ["turn on", "is off", "switch on", "enable it"] {
+        assert!(
+            !screen.contains(claim),
+            "the refusal says {claim:?}, which asserts a value for a setting \
+             this path never reads: {lines:?}",
+        );
+    }
     for l in &lines {
         assert!(
             l.chars().count() <= PETSCII_WIDTH - 2,
@@ -11545,25 +11627,35 @@ fn test_a_password_free_machine_still_needs_an_authenticated_session() {
 #[cfg(unix)]
 #[test]
 fn test_a_session_probes_for_elevation_only_once() {
-    use crate::telnet::power::Elevate;
+    use crate::telnet::power::{Elevate, PowerAction};
 
     let mut session = make_test_session(TerminalType::Ansi);
     assert!(
-        session.power_elevation.is_none(),
+        session.power_elevation.is_empty(),
         "a fresh session must not claim to know how it would elevate",
     );
 
-    // What a first successful probe leaves behind.
-    session.power_elevation = Some(Elevate::SudoPassword);
+    // What a first successful probe for *Shutdown* leaves behind.
+    session.power_elevation.push((PowerAction::Shutdown, Elevate::SudoQuiet));
 
-    // Every later pass through the page reads this instead of spawning, so a
-    // cancel loop costs nothing.  If the memo were ignored -- or held a
-    // local rather than a field -- this is the assertion that goes red.
+    // **Keyed by action, because the probe is.**  Sudoers rules are
+    // per-argument -- `NOPASSWD: /sbin/shutdown -h now` alone is ordinary --
+    // so answering Restart out of Shutdown's slot would skip the password,
+    // clock out the farewell, and only then have sudo refuse.  An earlier
+    // version of this test asserted that a field kept the value just
+    // assigned to it, which is true of any field and could not go red.
     assert_eq!(
-        session.power_elevation,
-        Some(Elevate::SudoPassword),
-        "the probe's answer did not survive the page, so confirming and \
-         cancelling spawns a real sudo every time round",
+        session.remembered_elevation(PowerAction::Shutdown),
+        Some(Elevate::SudoQuiet),
+        "the answer for the action that was probed is not remembered, so a \
+         cancel loop spawns a real sudo every time round",
+    );
+    assert_eq!(
+        session.remembered_elevation(PowerAction::Restart),
+        None,
+        "Restart was answered out of Shutdown's slot: sudoers is \
+         per-argument, so that skips a password the machine does want and \
+         fails only after the farewell has been sent",
     );
 
     // And the source must actually consult it: a memo nothing reads is a
@@ -11579,7 +11671,7 @@ fn test_a_session_probes_for_elevation_only_once() {
         .collect::<Vec<_>>()
         .join("\n");
     let memo = body
-        .find("self.power_elevation")
+        .find("self.remembered_elevation(")
         .expect("power_action never consults the probe memo, so every \
                  confirmation spawns a fresh sudo");
     let probe = body.find("probe_elevation(").expect("power_action no longer probes");

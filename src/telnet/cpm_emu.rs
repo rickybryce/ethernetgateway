@@ -953,10 +953,13 @@ impl TelnetSession {
         let mut modem = CpmModem::new(access != crate::cpm::ModemAccess::Off);
         // Let the guest dial the gateway it is running inside
         // (`ATDT ethernetgateway`); that spawns a menu session of its own.
+        // Our own credential state goes with it: a dialled menu session must
+        // not be more trusted than the session dialling it.
         modem.set_menu_context(
             self.shutdown.clone(),
             self.restart.clone(),
             self.lockouts.clone(),
+            self.authenticated,
         );
         // Join the inbound `CPM@<ip>` call pool (RAII-released on any exit).
         // `CPM@<ip>` is a single dialable address, but every modem-enabled

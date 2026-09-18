@@ -999,11 +999,16 @@ impl TelnetSession {
             // and cannot re-derive it later: `security_enabled` is read fresh
             // and the operator may change it while this session is open.
             //
-            // A serial session counts as credentialed on the trust boundary
-            // named just above -- it arrived over a physical port -- which is
-            // the same judgement the authentication skip itself makes.
-            self.authenticated =
-                crate::telnet::session_is_credentialed(self.is_serial, cfg.security_enabled);
+            // **Telnet only.**  Every other entry point sets this in its own
+            // constructor, because only a telnet client reaches
+            // `authenticate` -- and because `is_serial` is not a statement
+            // about trust: it is also set by `new_relay`, which the CP/M
+            // menu session delegates to.  Deriving from it handed a guest
+            // dialling `ATDT ethernetgateway` a login it never made.
+            if !self.is_serial {
+                self.authenticated =
+                    crate::telnet::telnet_session_is_credentialed(cfg.security_enabled);
+            }
         }
 
         // The main menu render does its own clear + banner; emitting a

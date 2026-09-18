@@ -892,7 +892,14 @@ impl TelnetSession {
         // operator did not ask for a joystick must be left exactly as it was.
         machine.set_joystick(printer_cfg.cpm_joystick);
         let mut modem = CpmModem::new(matches!(attach, ModemAttach::Ports(_, _)));
-        modem.set_menu_context(self.shutdown.clone(), self.restart.clone(), self.lockouts.clone());
+        // Pass our own credential state down: a dialled menu session must not
+        // be more trusted than the session dialling it.
+        modem.set_menu_context(
+            self.shutdown.clone(),
+            self.restart.clone(),
+            self.lockouts.clone(),
+            self.authenticated,
+        );
         // Joins the inbound `CPM@<ip>` pool for as long as the boot lasts, so a
         // booted guest is dialable exactly as an emulator session is.
         let _peer_reg = cpm_peer_register(modem.enabled());

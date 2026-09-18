@@ -105,6 +105,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The elevation probe was remembered per session, but it asks per
+  command.**  `sudo -l -- shutdown -r now` and `-h now` are different
+  questions, and sudoers rules are per-argument -- `NOPASSWD: /sbin/shutdown
+  -h now` on its own is perfectly ordinary.  One memo for the session
+  answered Restart with what Shutdown had been told, so the password step was
+  skipped, the farewell was clocked out, and only then did `sudo` refuse:
+  the refusal existed in the log and nowhere else, which is the one thing
+  this page's order of steps exists to prevent.  The two actions get two
+  slots.
+- **A refusal no longer asserts a setting it never read.**  The screen said
+  "Turn on security_enabled" and the log said it was off; neither had looked.
+  A session can be unauthenticated with that setting *on* -- it may have begun
+  before the operator switched it on, which is the reason the flag is
+  recorded at the door rather than derived -- and naming a false cause sends
+  the operator to a setting that is already set.
+
 - **Restart and shutdown were hidden on a machine where they would have
   worked.**  The menu gate asked only whether the kernel's `no_new_privs` was
   set, while the probe that actually runs the command answers the *root*
@@ -262,6 +278,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saving.  Telnet and the web were unaffected &mdash; they write immediately.
 
 ### Security
+
+- **`ATDT ethernetgateway` was a way to gain trust the caller never had.**
+  The credential check added for a root or NOPASSWD machine derived "this
+  session proved who it is" from the session's `is_serial` flag -- and that
+  flag is set by `new_relay` as well as by a real serial port, with the CP/M
+  emulator's locally dialled menu session built on top of it.  So with
+  `security_enabled` off, an unauthenticated peer could reach the emulator
+  with `K`, dial the gateway's own menu from inside it, and arrive at the
+  power page pre-trusted: the exact hole the check was added to close,
+  reopened by another route in the same commit.  A dialled menu session now
+  inherits the credential state of the session that dialled it.  The flag
+  means "does not speak telnet", never "is trusted".
+- **SSH sessions were refused by that same check.**  The assignment sat
+  inside the branch that skips SSH, so the one entry point that *always*
+  verifies a credential -- `auth_password` is the only method offered, and it
+  runs whatever `security_enabled` says -- was left marked unauthenticated.
+  On a root or NOPASSWD machine an operator who had logged in over SSH was
+  refused, and told to change a setting SSH does not consult.  Every entry
+  point now states its own answer where it is constructed, and only the
+  telnet door computes one.
 
 - **A computer that needs no password to restart still needs a login.**  The
   page asks for the operator's system password when `sudo` wants one -- but
