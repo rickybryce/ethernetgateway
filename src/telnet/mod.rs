@@ -468,6 +468,24 @@ impl Menu {
 // protocol clears the lockout for that IP.
 pub(crate) type LockoutMap = Arc<Mutex<HashMap<IpAddr, (u32, std::time::Instant)>>>;
 
+/// Whether a session that got past the door has proved who it is.
+///
+/// **A pure seam, because a scan on the consumer cannot see this.**  The
+/// power page refuses a no-password elevation to an unauthenticated session,
+/// and a guard reading *that* check passes just as well when the flag feeding
+/// it is hard-wired to `true` -- measured by mutation, which is exactly the
+/// "pin the bound, not the order" trap one review earlier.  So the rule that
+/// *sets* the flag is a function with its own test.
+///
+/// A serial session counts as credentialed on the trust boundary
+/// `run_session` names where it skips authentication: it arrived over a
+/// physical port. Otherwise it is credentialed exactly when
+/// `security_enabled` made it authenticate, because that is the only
+/// condition under which `authenticate` ran at all.
+pub(crate) fn session_is_credentialed(is_serial: bool, security_enabled: bool) -> bool {
+    is_serial || security_enabled
+}
+
 /// Refused `sudo` attempts, per address, for the whole process.
 ///
 /// Lives here rather than in `power.rs` because that module is Unix-only
@@ -1247,6 +1265,22 @@ pub(crate) struct TelnetSession {
     /// a `cfg` for the same reason as the field above it.
     #[cfg_attr(not(unix), allow(dead_code))]
     power_lockouts: LockoutMap,
+    /// Whether this session actually proved a credential to get here.
+    ///
+    /// **Recorded, not derived, because a setting is not an outcome.**  The
+    /// obvious test is `cfg.security_enabled && !is_serial`, but
+    /// `security_enabled` is read fresh and can be changed while a session is
+    /// open: an operator turning it off would make a session that *did*
+    /// authenticate look as though it had not, and turning it on would let
+    /// one that never authenticated claim it had.  What matters is what
+    /// happened at the door, so the door writes it down.
+    ///
+    /// Used by the power page, where `Elevate::Direct` and
+    /// `Elevate::SudoQuiet` ask for no password at all -- so without this an
+    /// unauthenticated peer could restart the computer with no credential of
+    /// any kind.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    authenticated: bool,
     /// What the elevation probe answered for this session, once it has.
     ///
     /// **The probe is a process spawn, and nothing else bounded how often it
@@ -1437,6 +1471,7 @@ impl TelnetSession {
             peer_addr: None,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
+            authenticated: false,
             #[cfg(unix)]
             power_elevation: None,
             transfer_subdir: String::new(),
@@ -1504,6 +1539,7 @@ impl TelnetSession {
             peer_addr,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
+            authenticated: false,
             #[cfg(unix)]
             power_elevation: None,
             transfer_subdir: String::new(),
@@ -1587,6 +1623,7 @@ impl TelnetSession {
             peer_addr,
             power_password_failures: 0,
             power_lockouts: shared_power_lockouts().clone(),
+            authenticated: false,
             #[cfg(unix)]
             power_elevation: None,
             transfer_subdir: String::new(),
@@ -2350,6 +2387,7 @@ pub fn start_server(
                                     peer_addr: Some(addr.ip()),
                                     power_password_failures: 0,
                                     power_lockouts: shared_power_lockouts().clone(),
+                                    authenticated: false,
                                     #[cfg(unix)]
             power_elevation: None,
                                     transfer_subdir: String::new(),

@@ -293,6 +293,32 @@ pub(in crate::telnet) fn blocked_lines() -> Vec<&'static str> {
     ]
 }
 
+/// Why an unauthenticated session is refused when no password will be asked.
+///
+/// **The one path where nothing at all is proved.**  `Elevate::SudoPassword`
+/// asks for the operator's system password, so that session proves something
+/// before the machine moves.  `Elevate::Direct` (already root) and
+/// `Elevate::SudoQuiet` (a NOPASSWD sudoers rule) ask for nothing -- correctly,
+/// there being nothing to ask -- and `security_enabled` is **off by default**,
+/// so on such a machine any peer that reached the telnet port could restart
+/// the computer having presented no credential whatsoever.
+///
+/// Both no-password paths are covered, not just root: a NOPASSWD rule is the
+/// same hole by a different route, and covering only the one that was
+/// reported would leave the other to be rediscovered.
+///
+/// Named for the setting, because that is the thing the operator can act on.
+pub(in crate::telnet) fn unverified_lines() -> Vec<&'static str> {
+    vec![
+        "This computer needs no password to",
+        "restart, so this page needs a login",
+        "and this session has not had one.",
+        "",
+        "Turn on security_enabled so the",
+        "gateway asks who you are first.",
+    ]
+}
+
 /// Whether this process carries the kernel's `no_new_privs` flag.
 ///
 /// **Read from the kernel, not from sudo's English.**  `probe_elevation`'s own
@@ -982,6 +1008,27 @@ impl TelnetSession {
                 "Power: {} refused -- no_new_privs is set on this process \
                  (systemd NoNewPrivileges=yes); no password can elevate",
                 action.argv().join(" "),
+            );
+            return Ok(true);
+        }
+
+        // **Nothing would be proved on this path, so require a login.**
+        // `Direct` and `SudoQuiet` ask for no password -- rightly, there
+        // being none to ask -- and `security_enabled` ships off, so without
+        // this an unauthenticated peer could restart the machine having
+        // presented no credential at all.  Reported after `Blocked` and
+        // before the password, in the same place and for the same reason: a
+        // screen must not promise a step that cannot happen.
+        if elev != Elevate::SudoPassword && !self.authenticated {
+            self.show_error_lines(&unverified_lines()).await?;
+            glog!(
+                "Power: {} refused -- {} needs no password and the session is \
+                 not authenticated (security_enabled is off)",
+                action.argv().join(" "),
+                match elev {
+                    Elevate::Direct => "this gateway is root, so the command",
+                    _ => "a NOPASSWD sudoers rule means sudo",
+                },
             );
             return Ok(true);
         }

@@ -263,6 +263,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A computer that needs no password to restart still needs a login.**  The
+  page asks for the operator's system password when `sudo` wants one -- but
+  `sudo` does not always want one: a gateway already running as **root** runs
+  the command directly, and a **NOPASSWD** sudoers rule makes `sudo` answer
+  without asking.  On either, nothing at all was proved before the machine
+  moved, and `security_enabled` ships **off**, so any peer that reached the
+  telnet port could have restarted the computer having presented no credential
+  of any kind.  Both no-password paths now require a session that
+  authenticated, and the refusal names `security_enabled` rather than leaving
+  the operator to guess.  Whether a session proved anything is **recorded at
+  the door rather than re-derived later**, because `security_enabled` is read
+  fresh and can be changed while a session is open -- a setting is not an
+  outcome.
+
 - **A successful gateway login handed out three more guesses at the
   computer's own password.**  The restart/shutdown page counts refused `sudo`
   attempts per address, but it counted them in the *shared* authentication

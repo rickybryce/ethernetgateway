@@ -871,6 +871,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         peer_addr: None,
         power_password_failures: 0,
         power_lockouts: Default::default(),
+        authenticated: false,
         #[cfg(unix)]
         power_elevation: None,
         transfer_subdir: String::new(),
@@ -933,6 +934,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         peer_addr: None,
         power_password_failures: 0,
         power_lockouts: Default::default(),
+        authenticated: false,
         #[cfg(unix)]
         power_elevation: None,
         transfer_subdir: String::new(),
@@ -11391,6 +11393,137 @@ fn test_the_sudo_attempt_cap_is_checked_before_the_probe_is_spawned() {
          the confirm key spawns one real `sudo` per press and writes one \
          authentication failure per press into the host's auth log",
     );
+}
+
+/// ...and the door must actually ask that rule.
+///
+/// Three links carry this: the rule, the door that applies it, and the page
+/// that reads the result.  Each has its own mutation, and the middle one is
+/// invisible to both its neighbours -- hard-wiring the assignment to `true`
+/// leaves the pure-rule test *and* the power-page scan green, measured.  A
+/// chain needs a guard per link, not a guard per end.
+#[test]
+fn test_the_door_sets_authenticated_from_the_rule_not_a_literal() {
+    let src = include_str!("session.rs").replace('\r', "");
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let at = code
+        .find("self.authenticated")
+        .expect("run_session never records whether this session authenticated");
+    // Whatever follows the assignment, up to its semicolon, must be the rule.
+    let tail = &code[at..];
+    let end = tail.find(';').expect("unterminated assignment");
+    let rhs = &tail[..end];
+    assert!(
+        rhs.contains("session_is_credentialed"),
+        "the door sets `authenticated` from something other than \
+         `session_is_credentialed` -- a literal or an inline copy of the rule \
+         means the rule's own test guards nothing that ships.  Found: {rhs:?}",
+    );
+    assert!(
+        !code.contains("self.authenticated = true"),
+        "`authenticated` is hard-wired somewhere, which makes every session \
+         claim a login it never made",
+    );
+}
+
+/// **And the flag that gate reads must mean something.**
+///
+/// The guard below scans `power_action` for the refusal, and that is not
+/// enough on its own: hard-wiring `self.authenticated = true` at the door
+/// leaves it green -- measured by mutation.  A guard on the consumer says
+/// nothing about the producer, the same trap as pinning an ordering instead
+/// of a bound.  So the rule that sets the flag is pure and tested here.
+#[test]
+fn test_what_counts_as_a_credentialed_session() {
+    use crate::telnet::session_is_credentialed;
+
+    // The case the power page's refusal exists for: telnet, security off, so
+    // `authenticate` never ran and nothing was proved.
+    assert!(
+        !session_is_credentialed(false, false),
+        "a telnet session with security_enabled off proved nothing, and a \
+         machine needing no password would then restart for any peer",
+    );
+    assert!(
+        session_is_credentialed(false, true),
+        "security_enabled on means authenticate() ran and passed to get here",
+    );
+    // Serial is credentialed on the physical-port trust boundary that
+    // `run_session` names where it skips authentication -- both ways round,
+    // since that skip does not consult security_enabled.
+    assert!(session_is_credentialed(true, false), "a serial caller arrived over a port");
+    assert!(session_is_credentialed(true, true), "and still has, with security on");
+}
+
+/// **A machine that needs no password still needs a login.**
+///
+/// `Elevate::SudoPassword` asks for the operator's system password, so that
+/// session proves something before the computer moves.  `Elevate::Direct`
+/// (already root) and `Elevate::SudoQuiet` (a NOPASSWD sudoers rule) ask for
+/// nothing -- correctly, there being nothing to ask -- and `security_enabled`
+/// ships **off**, so on such a machine any peer reaching the telnet port
+/// could have restarted the computer having presented no credential at all.
+///
+/// Both no-password paths are covered, not just the root one that was
+/// reported: a NOPASSWD rule is the same hole by another route.
+#[cfg(unix)]
+#[test]
+fn test_a_password_free_machine_still_needs_an_authenticated_session() {
+    use crate::telnet::power::Elevate;
+
+    // The rule, stated once here and read out of the source below so the two
+    // cannot drift.
+    for elev in [Elevate::Direct, Elevate::SudoQuiet] {
+        assert!(
+            elev != Elevate::SudoPassword,
+            "{elev:?} is a no-password path, which is the premise of this test",
+        );
+    }
+
+    let src = include_str!("power.rs").replace('\r', "");
+    let start = src.find("async fn power_action(").expect("power_action renamed");
+    let rest = &src[start..];
+    let end = rest[1..].find("\n    /// ").map(|i| i + 1).unwrap_or(rest.len());
+    let body: String = rest[..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        body.contains("elev != Elevate::SudoPassword") && body.contains("!self.authenticated"),
+        "power_action no longer refuses a no-password elevation to an \
+         unauthenticated session, so a root or NOPASSWD machine can be \
+         restarted by any peer that reaches the telnet port",
+    );
+
+    // It must be refused BEFORE the password branch and the command: a screen
+    // must not promise a step that cannot happen.
+    let gate = body.find("!self.authenticated").expect("gate present");
+    let run = body
+        .find("run_elevated(")
+        .expect("power_action no longer runs anything -- wrong function");
+    assert!(gate < run, "the refusal lands after the command has been run");
+
+    // And the screen names the setting the operator can act on, on a 40-col
+    // display.
+    let lines = crate::telnet::power::unverified_lines();
+    assert!(
+        lines.iter().any(|l| l.contains("security_enabled")),
+        "the refusal does not name the setting that would fix it: {lines:?}",
+    );
+    for l in &lines {
+        assert!(
+            l.chars().count() <= PETSCII_WIDTH - 2,
+            "{l:?} is {} chars, too wide for a PETSCII screen",
+            l.chars().count(),
+        );
+    }
 }
 
 /// **A cancelled confirmation cannot spawn a probe for ever.**

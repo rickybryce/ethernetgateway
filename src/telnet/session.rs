@@ -994,6 +994,16 @@ impl TelnetSession {
             {
                 return Ok(());
             }
+            // **What happened at the door, written down at the door.**  The
+            // power page needs to know whether this session proved anything,
+            // and cannot re-derive it later: `security_enabled` is read fresh
+            // and the operator may change it while this session is open.
+            //
+            // A serial session counts as credentialed on the trust boundary
+            // named just above -- it arrived over a physical port -- which is
+            // the same judgement the authentication skip itself makes.
+            self.authenticated =
+                crate::telnet::session_is_credentialed(self.is_serial, cfg.security_enabled);
         }
 
         // The main menu render does its own clear + banner; emitting a
