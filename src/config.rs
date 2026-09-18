@@ -3322,6 +3322,16 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 
     content.push_str("# Maximum concurrent telnet sessions\n");
     write_kv(&mut content, "max_sessions", cfg.max_sessions);
+    content.push('\n');
+
+    // Its own heading: these arrived under `max_sessions`', which describes a
+    // cap on *concurrent sessions* and says nothing about connections per
+    // address -- so the generated file documented them as something they are
+    // not.  A comment in this file is the only explanation an operator editing
+    // `egateway.conf` by hand ever sees.
+    content.push_str(
+        "# Per-IP connection rate limit for telnet and SSH: at most\n         # conn_rate_max connections from one address inside\n         # conn_rate_window_secs seconds. 0 disables it. Not applied to the\n         # web server, whose own pages poll several times a second.\n",
+    );
     write_kv(&mut content, "conn_rate_max", cfg.conn_rate_max);
     write_kv(&mut content, "conn_rate_window_secs", cfg.conn_rate_window_secs);
     content.push('\n');

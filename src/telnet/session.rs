@@ -1197,20 +1197,25 @@ impl TelnetSession {
         if items.cpm {
             rows.push(format!("  {}  CP/M System", self.cyan("K")));
         }
-        // MORE -- the main menu's second page (restart / shut down the
-        // computer).  Unix only; on Windows the page has no items at all, so
-        // the entry is compiled out rather than shown and then refused.  See
-        // `telnet/power.rs`.
         rows.push(format!("  {}  Troubleshooting", self.cyan("R")));
         rows.push(format!("  {}  SSH Gateway", self.cyan("S")));
         rows.push(format!("  {}  Telnet Gateway", self.cyan("T")));
         rows.push(format!("  {}  Weather", self.cyan("W")));
         rows.push(format!("  {}  Exit", self.cyan("X")));
+        // The second page (restart / shut down the computer -- see
+        // `telnet/power.rs`).
+        //
         // **Page navigation, not a feature, so it sits below the features.**
         // As `M` it sat between `K` and `R` in the alphabetical list and read
         // as one more thing the gateway does; a digit cannot be mistaken for a
         // feature letter, and it says which page it goes to, so a third page
-        // would be `3` and need no new vocabulary.  Unix only, like the page.
+        // would be `3` and need no new vocabulary.
+        //
+        // Unix only, like the page: on Windows it has no items at all, so the
+        // entry is compiled out rather than shown and then refused.  (This
+        // paragraph described the entry from four rows higher up, where `M`
+        // used to sit, and stayed there when the entry moved -- so it read as
+        // a note about Troubleshooting.)
         #[cfg(unix)]
         if items.second_page {
             rows.push(format!("  {}  Second Menu", self.cyan("2")));

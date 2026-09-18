@@ -15,9 +15,14 @@
 //! from the module to the power items.
 //!
 //! **And on Unix the same items are hidden at run time** where the kernel's
-//! `no_new_privs` forbids elevation -- see [`available`].  Four surfaces carry
-//! that: the rows, the `2` entry, that key's arm, and both the menu hint and
-//! the main help screen.  A fifth would be a key documented and refused.
+//! `no_new_privs` forbids elevation -- see [`available`].  **Every surface
+//! that mentions a key follows the same answer**, which is the rule rather
+//! than a list, because the list has grown twice and the count in this comment
+//! did not: on the main menu the `2` row, its key arm, the invalid-key hint
+//! and the help screen; on this page the `R` and `S` rows, their key arms and
+//! this page's own hint.  A surface left out is a key documented and then
+//! refused -- which is exactly what the help screen was until it was gated
+//! too, one pass after the other four.
 //!
 //! **The gateway asks; it is never elevated.** Every path here shells out to
 //! `sudo` with the operator's own password, and the password reaches us
@@ -1014,18 +1019,27 @@ impl TelnetSession {
                 "Power: {} has used its attempts; not asking for a password",
                 self.power_requester(),
             );
-            // **The two counters expire differently, so they must not
-            // promise the same thing.**  An address is banned for
-            // `LOCKOUT_DURATION` and waiting really does clear it; a
-            // session floor has no clock at all and only a fresh
-            // connection resets it, so "try again later" would be a
-            // screen the next step cannot keep -- the rule the whole
-            // order of steps on this page exists to serve.
-            self.show_error(match self.peer_addr {
-                Some(_) => "Too many tries. Try again later.",
-                None => "Too many tries for this session.",
-            })
-            .await?;
+            // **One sentence, because both counters now promise the same
+            // thing -- and the second one outlived its own fix.**  There
+            // were two texts here.  The address-less floor used to have no
+            // clock at all, so "try again later" would have been a screen
+            // the next step could not keep and it said "for this session"
+            // instead; that was right at the time.  It has not been right
+            // since: the floor is stamped and expires on `LOCKOUT_DURATION`
+            // exactly as the per-IP branch always has (see
+            // `power_attempts_exhausted`), and a *reconnect* stopped
+            // clearing it, because the allowance belongs to the port and is
+            // shared by every dial from it.  So the surviving wording named
+            // the one remedy that does not work and withheld the one that
+            // does, to the operator standing at the machine's own serial
+            // console -- the branch that fix was written for.  The manual
+            // (7.3) had it right throughout: it expires on its own five
+            // minutes and that is the only way out.
+            //
+            // Kept as a literal at the call site so
+            // `test_show_error_literals_fit_petscii` still measures it --
+            // that scan reads inside `show_error`'s parentheses.
+            self.show_error("Too many tries. Try again later.").await?;
             return Ok(true);
         }
 

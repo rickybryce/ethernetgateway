@@ -1550,6 +1550,15 @@ impl TelnetSession {
             color_enabled: true,
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
+            // **Stated, not inherited, and that is the one field here that
+            // is.**  A physical port has no peer, so this is a fact about the
+            // constructor rather than something the context could tell us --
+            // `Inherited::fresh(.., None)` is what its only caller passes, and
+            // reading `from.peer_addr` here would invite a later caller to
+            // hand a serial session an address that does not exist.  Written
+            // down because the field *is* carried everywhere else, and an
+            // unexplained `None` beside five inherited values reads as the
+            // omission that has now been found twice.
             peer_addr: None,
             power_password_failures: from.power_failures,
             power_lockouts: shared_power_lockouts().clone(),

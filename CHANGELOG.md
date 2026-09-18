@@ -54,13 +54,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an operator would write for this (`NOPASSWD: /sbin/shutdown`) makes `true`
   fail &mdash; so the obvious probe would demand a password for an account that
   has none, on exactly the configuration it was set up for.  And **refused `sudo`
-  attempts are bounded per session** (three): each one is a real PAM failure,
-  so on a machine running `pam_faillock` an unbounded prompt is a way to lock
-  the operator out of their own computer from a telnet menu.  A fresh attempt
-  needs a new connection, which `conn_rate_max` already bounds.  It counts
-  *refusals* rather than wrong passwords deliberately &mdash; a right password
-  from an account with no sudoers line lands the same way, and telling that
-  operator "wrong password" would send them looking in the wrong place.
+  attempts are bounded** (three, then five minutes): each one is a real PAM
+  failure, so on a machine running `pam_faillock` an unbounded prompt is a way
+  to lock the operator out of their own computer from a telnet menu.  The bound
+  is **per address**, in a counter of its own that no gateway login clears; for
+  a caller who has no address &mdash; on the modem, or anything dialled from
+  inside the CP/M emulator &mdash; the allowance belongs to the **port** and is
+  shared by every session reached from it, so neither reconnecting nor
+  re-dialling hands out three more.  Waiting out the window is the only way
+  back, on both, and the screen says so.  It counts *refusals* rather than wrong
+  passwords deliberately &mdash; a right password from an account with no
+  sudoers line lands the same way, and telling that operator "wrong password"
+  would send them looking in the wrong place.
+  (Each of those properties has its own entry under **Security** below; this
+  paragraph described the bound as *per session*, which it has not been since
+  the first of them.)
 
 - **Every log line now carries a local-time stamp**, `[2026-09-13 06:46:31] `.
   A log doing security work that cannot say *when* is half a log: the survey of

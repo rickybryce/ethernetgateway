@@ -4099,13 +4099,67 @@ fn test_config_menu_row_count() {
     // addresses.
     let submenu_rows = 3 + (1 + SERVER_ADDR_DISPLAY_CAP + 1) + 1 + 8 + 1 + 1 + 1; // 20
     assert!(submenu_rows <= 22, "config submenu is {} rows, exceeds 22", submenu_rows);
-    // Server configuration: header(3) + 5 status (telnet, ssh,
-    // kermit, web, ip-safety) + blank + 7 item rows (T/P, S/O, K/J,
-    // W/B, I/R, C/D, and the new single M Master/Slave row) + Q/H +
-    // prompt = 18.  The address block moved to the CONFIGURATION menu,
-    // so this screen no longer grows with the detected-IP list.
-    let static_rows = 3 + 5 + 1 + 7 + 1 + 1; // 18
-    assert!(static_rows <= 22, "server config menu is {} rows, exceeds 22", static_rows);
+    // SERVER CONFIGURATION is counted by `test_server_config_screen_row_count`
+    // below, which reads the real rows.  The arithmetic that used to live here
+    // said 18 while the screen drew 20.
+}
+
+/// SERVER CONFIGURATION must fit a PETSCII screen, **counted from the rows it
+/// actually draws**.
+///
+/// **This replaced arithmetic over literals, which had gone two rows stale.**
+/// The old guard was `3 + 5 + 1 + 7 + 1 + 1` with a comment naming "7 item
+/// rows"; the screen draws eight, plus the `* open ports on firewall` line the
+/// sum never counted, so it claimed 18 against a real 20.  It still passed --
+/// a guard reporting four spare rows where there are two is not a guard, it is
+/// a number that happens to be under the limit, and this branch added a row to
+/// this very screen (`L  Conn rate`) without it noticing.  `main_menu_rows` and
+/// `more_menu_rows` were each converted to a rows helper for exactly this; this
+/// page renders straight to the wire and has none, so its source is read
+/// instead -- the same fallback, and for the same page, as
+/// `test_every_server_config_key_is_explained_in_its_help`.
+///
+/// **Bounded to the render block, not the function.**  `server_configuration`
+/// is a `loop` whose body is the screen *and* the key handler, and the handler
+/// writes plenty of its own lines (the port-test result, the confirmations).
+/// Counting the whole function would report a screen three times its size and
+/// fail for a reason that is not true -- the same mistake as the sudo scan that
+/// read `run_elevated` instead of the probe.  The render block is everything
+/// between the `clear_screen` and the prompt, which is precisely what a
+/// PETSCII terminal has to hold at once.
+#[test]
+fn test_server_config_screen_row_count() {
+    let src = include_str!("config_ui.rs").replace('\r', "");
+    let start = src
+        .find("async fn server_configuration(")
+        .expect("server_configuration moved or was renamed");
+    let body = &src[start..];
+    let from = body.find("self.clear_screen().await?;").expect("no clear_screen");
+    let to = body.find("let prompt = format!(").expect("no prompt");
+    assert!(from < to, "the prompt is drawn before the screen is cleared");
+    let screen = &body[from..to];
+
+    // One row per `send_line`, plus the prompt itself, which `send` writes and
+    // which sits on its own line -- the row the main menu's two guards
+    // disagreed about until 2026-09-14.
+    let rows = screen.matches("self.send_line(").count() + 1;
+
+    // Positive control: a scan that matched nothing would pass the budget
+    // assertion below without having read the screen at all.
+    assert!(
+        rows >= 10,
+        "the row scan found only {rows} rows in server_configuration's render \
+         block -- the scan is broken, not the screen",
+    );
+    assert!(
+        rows <= 22,
+        "SERVER CONFIGURATION draws {rows} rows; a PETSCII screen holds 22, \
+         and the 23rd scrolls the header off",
+    );
+    // What it is today, so the next row added has to be a deliberate act.
+    // Header(3) + 5 status + blank + 8 item rows + the firewall note + Q/H +
+    // prompt.
+    assert_eq!(rows, 20, "the screen grew or shrank; check it still fits and update this");
 }
 
 /// Master/Slave sub-screen row budget.  The status rows differ by role, so both
@@ -11576,6 +11630,109 @@ fn test_the_address_less_sudo_floor_expires() {
         1,
         "a failure after the window resumed the old count instead of starting \
          a new one, so one more mistype re-locks immediately",
+    );
+}
+
+/// **The screen that reports the cap must promise what both counters keep.**
+///
+/// There were two texts, chosen on `peer_addr`: "Too many tries. Try again
+/// later." for an address, and "Too many tries for this session." for a caller
+/// without one.  That split was correct when it was written -- the
+/// address-less floor had no clock, so offering a wait would have been a
+/// screen the next step could not keep.  It stopped being correct two commits
+/// later and nothing noticed, because no guard read either literal: the floor
+/// is stamped now and expires on `LOCKOUT_DURATION` like everything else here
+/// (the test above), while a *reconnect* stopped clearing it, the allowance
+/// having become the port's rather than the session's.  So the surviving
+/// sentence named the one remedy that does not work and withheld the one that
+/// does -- to the operator at the machine's own serial console, which is the
+/// branch that fix existed for.  The manual (7.3) said "it expires on its own
+/// five minutes and that is the only way out" throughout.
+///
+/// Two halves, and the behavioural one is the point: waiting has to work on
+/// **both** branches, or the single sentence is the wrong single sentence.
+#[cfg(unix)]
+#[test]
+fn test_the_exhausted_message_promises_a_wait_both_counters_keep() {
+    // (1) Waiting clears the per-IP branch.
+    let ip: IpAddr = "192.0.2.44".parse().unwrap();
+    let power: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
+    let mut addressed = make_test_session(TerminalType::Ansi);
+    addressed.peer_addr = Some(ip);
+    addressed.power_lockouts = power.clone();
+    for _ in 0..MAX_AUTH_ATTEMPTS {
+        addressed.record_power_failure();
+    }
+    assert!(addressed.power_attempts_exhausted(), "the premise: the address is capped");
+    // Backdating a live `Instant` is impossible on a host up for less than the
+    // window -- the trap `within_lockout_window` was extracted to escape -- so
+    // skip rather than pass vacuously, exactly as the sibling test does.
+    let aged = {
+        let mut map = power.lock().unwrap();
+        let entry = map.get_mut(&ip).expect("the failure was recorded");
+        match entry.1.checked_sub(LOCKOUT_DURATION + std::time::Duration::from_secs(1)) {
+            Some(t) => {
+                entry.1 = t;
+                true
+            }
+            None => false,
+        }
+    };
+    if aged {
+        assert!(
+            !addressed.power_attempts_exhausted(),
+            "waiting out the window did not clear the per-IP branch, so \
+             \"try again later\" is a promise this page cannot keep",
+        );
+    } else {
+        eprintln!("skipped the per-IP half: host uptime is under the lockout window");
+    }
+
+    // (2) And the address-less branch, which is the one the wording was wrong
+    // about.  Held here as well as in the test above so the two facts the one
+    // sentence rests on sit together.
+    let mut floor = make_test_session(TerminalType::Ansi);
+    floor.peer_addr = None;
+    for _ in 0..MAX_AUTH_ATTEMPTS {
+        floor.record_power_failure();
+    }
+    assert!(floor.power_attempts_exhausted(), "the premise: the floor is reached");
+    let aged = {
+        let mut f = floor.power_password_failures.lock().unwrap();
+        match f.1.checked_sub(LOCKOUT_DURATION + std::time::Duration::from_secs(1)) {
+            Some(t) => {
+                f.1 = t;
+                true
+            }
+            None => false,
+        }
+    };
+    if aged {
+        assert!(
+            !floor.power_attempts_exhausted(),
+            "the address-less floor does not expire, so the page must not \
+             tell that caller to wait",
+        );
+    }
+
+    // (3) One sentence on the screen, and the superseded one named outright so
+    // a revert cannot pass by matching loosely -- the shape the `sudo -k` scan
+    // uses.  Comments are stripped first, or this reads its own explanation.
+    let src = include_str!("power.rs");
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        code.contains(r#"show_error("Too many tries. Try again later.")"#),
+        "the cap's screen no longer offers the wait that both counters honour",
+    );
+    assert!(
+        !code.contains("Too many tries for this session."),
+        "the per-session wording is back: it tells a caller with no address to \
+         reconnect, which no longer clears the counter, and hides the wait that \
+         does -- see this test's doc comment",
     );
 }
 
