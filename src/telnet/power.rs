@@ -802,9 +802,19 @@ impl TelnetSession {
     pub(in crate::telnet) fn power_attempts_exhausted(&self) -> bool {
         match self.peer_addr {
             Some(ip) => crate::telnet::is_locked_out(&self.power_lockouts, ip),
+            // **Expires on the same clock as the per-IP branch.**  It did
+            // not, and that was a worse bargain than the one it was guarding
+            // against: the operator standing at the machine's own serial
+            // console, who has no other way in, lost restart and shutdown for
+            // the life of the process after three mistypes -- on a headless
+            // Pi reached from a C64 on that port, with nothing to do about it
+            // but power-cycle.  The address branch has always cleared after
+            // `LOCKOUT_DURATION`; there was never a reason for this one to be
+            // permanent, and an unbounded counter is a lockout, not a bound.
             None => {
-                self.power_password_failures.load(std::sync::atomic::Ordering::Relaxed)
-                    >= crate::telnet::MAX_AUTH_ATTEMPTS
+                let (count, when) =
+                    *self.power_password_failures.lock().unwrap_or_else(|e| e.into_inner());
+                crate::telnet::lockout_is_active(count, when.elapsed())
             }
         }
     }
@@ -815,9 +825,17 @@ impl TelnetSession {
         match self.peer_addr {
             Some(ip) => crate::telnet::record_auth_failure(&self.power_lockouts, ip),
             None => {
-                self.power_password_failures
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    .saturating_add(1)
+                let mut f =
+                    self.power_password_failures.lock().unwrap_or_else(|e| e.into_inner());
+                // A failure outside the window starts the count again, exactly
+                // as `record_auth_failure` sweeps a stale entry before
+                // counting.
+                if !crate::telnet::within_lockout_window(f.1.elapsed()) {
+                    f.0 = 0;
+                }
+                f.0 = f.0.saturating_add(1);
+                f.1 = std::time::Instant::now();
+                f.0
             }
         }
     }
@@ -1068,7 +1086,7 @@ impl TelnetSession {
         // before the password, in the same place and for the same reason: a
         // screen must not promise a step that cannot happen.
         if elev != Elevate::SudoPassword && !self.authenticated {
-            self.show_error_lines(&unverified_lines(self.is_relay)).await?;
+            self.show_error_lines(&unverified_lines(self.power_arrived_by_relay)).await?;
             // **Says what was observed, not what the setting must be.**  The
             // first version of both this line and the screen asserted
             // "security_enabled is off", which the code never read.  A

@@ -2115,11 +2115,14 @@ between protocols to reset the counter.
 A refused <code>sudo</code> password on the second menu (&sect;5.5) is capped
 the same way &mdash; three, for five minutes &mdash; but in a
 <strong>counter of its own, not this one</strong>. It is keyed on the address
-where there is one; a caller who has none &mdash; someone dialled in on a
+where there is one. A caller who has none &mdash; someone dialled in on a
 serial port, and anything that caller dials from inside the CP/M emulator
-&mdash; is held to three for the session instead, and a session dialled from
-within another <em>shares</em> that allowance rather than starting a fresh
-one, or hanging up and dialling again would buy three more. That prompt asks for the
+&mdash; is held to three by a counter belonging to the <em>port</em> rather
+than to any one session, and every session reached from it <em>shares</em>
+that one allowance: dialling this gateway's own menu with
+<code>ATDT&nbsp;ethernetgateway</code>, hanging up, and dialling again does
+not hand out three more. Up to and including version 1.0.0 each of those was a
+separate way to reset it. That prompt asks for the
 password of the <em>host account</em>, not the gateway's, and every wrong
 answer is a real PAM attempt against it, so the cap has to survive a
 reconnect or three guesses per connection is as many guesses as the peer

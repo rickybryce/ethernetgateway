@@ -1095,13 +1095,7 @@ mod tests {
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-                crate::telnet::Inherited {
-                    authenticated: false,
-                    peer_addr: None,
-                    power_failures: Default::default(),
-                    #[cfg(unix)]
-                    power_elevation: Default::default(),
-                },
+                crate::telnet::Inherited::fresh(false, None),
             );
             let out = m.service(format!("ATDT {kw}\r").into_bytes(), 65536, false).await;
             let s = String::from_utf8_lossy(&out).to_string();

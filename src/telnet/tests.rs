@@ -869,9 +869,10 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         erase_char: 0x7F,
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
-        power_password_failures: Default::default(),
+        power_password_failures: Arc::new(std::sync::Mutex::new((0, std::time::Instant::now()))),
         power_lockouts: Default::default(),
         authenticated: false,
+        power_arrived_by_relay: false,
         #[cfg(unix)]
         power_elevation: Default::default(),
         transfer_subdir: String::new(),
@@ -932,9 +933,10 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         erase_char: 0x7F,
         lockouts: Arc::new(Mutex::new(HashMap::new())),
         peer_addr: None,
-        power_password_failures: Default::default(),
+        power_password_failures: Arc::new(std::sync::Mutex::new((0, std::time::Instant::now()))),
         power_lockouts: Default::default(),
         authenticated: false,
+        power_arrived_by_relay: false,
         #[cfg(unix)]
         power_elevation: Default::default(),
         transfer_subdir: String::new(),
@@ -5425,13 +5427,7 @@ fn test_telnet_session_new_serial_stores_port_id() {
         shutdown.clone(),
         restart.clone(),
         lockouts.clone(),
-        crate::telnet::Inherited {
-            authenticated: true,
-            peer_addr: None,
-            power_failures: Default::default(),
-            #[cfg(unix)]
-            power_elevation: Default::default(),
-        },
+        crate::telnet::Inherited::fresh(true, None),
     );
     assert!(session_a.is_serial);
     assert_eq!(session_a.serial_port_id, Some(SerialPortId::A));
@@ -5447,13 +5443,7 @@ fn test_telnet_session_new_serial_stores_port_id() {
         shutdown,
         restart,
         lockouts,
-        crate::telnet::Inherited {
-            authenticated: true,
-            peer_addr: None,
-            power_failures: Default::default(),
-            #[cfg(unix)]
-            power_elevation: Default::default(),
-        },
+        crate::telnet::Inherited::fresh(true, None),
     );
     assert_eq!(session_b.serial_port_id, Some(SerialPortId::B));
 
@@ -11344,7 +11334,7 @@ fn test_the_sudo_cap_uses_the_map_for_an_address() {
     }
     assert!(session.power_attempts_exhausted(), "three refusals must stop the prompt");
     assert_eq!(
-        session.power_password_failures.load(std::sync::atomic::Ordering::Relaxed),
+        session.power_password_failures.lock().unwrap().0,
         0,
         "an addressed session must not be counted in the per-session field -- \
          that one resets on reconnect",
@@ -11480,7 +11470,6 @@ fn test_a_dialled_menu_session_cannot_reset_the_sudo_allowance() {
     use crate::telnet::power::{Elevate, PowerAction};
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::Ordering;
 
     let mut parent = make_test_session(TerminalType::Ansi);
     parent.peer_addr = None; // the case the per-IP map is blind to
@@ -11524,13 +11513,107 @@ fn test_a_dialled_menu_session_cannot_reset_the_sudo_allowance() {
 
     // And it is shared, not copied: a guess spent inside counts outside too,
     // or leaving the menu restores it.
-    let before = parent.power_password_failures.load(Ordering::Relaxed);
+    let before = parent.power_password_failures.lock().unwrap().0;
     dialled.record_power_failure();
     assert_eq!(
-        parent.power_password_failures.load(Ordering::Relaxed),
+        parent.power_password_failures.lock().unwrap().0,
         before + 1,
         "guesses spent in the dialled session do not count against the caller \
          who dialled it, so returning from the menu restores them",
+    );
+}
+
+/// **The address-less floor expires, like every other lockout here.**
+///
+/// It did not, and that was a worse bargain than the attack it guarded
+/// against: the operator standing at the machine's own serial console -- who
+/// on a headless Pi reached from a C64 has no other way in -- lost restart
+/// and shutdown for the life of the process after three mistypes, with
+/// nothing to do about it but power-cycle.  The per-IP branch has always
+/// cleared after `LOCKOUT_DURATION`; there was no reason for this one to be
+/// permanent, and an unbounded counter is a lockout rather than a bound.
+///
+/// Driven by backdating the stamp rather than by sleeping, which is how this
+/// file reaches every other clock.
+#[cfg(unix)]
+#[test]
+fn test_the_address_less_sudo_floor_expires() {
+    let mut session = make_test_session(TerminalType::Ansi);
+    session.peer_addr = None;
+
+    for _ in 0..MAX_AUTH_ATTEMPTS {
+        session.record_power_failure();
+    }
+    assert!(session.power_attempts_exhausted(), "three refusals must stop the prompt");
+
+    // Age the last failure past the window.  `checked_sub` can fail on a host
+    // up for less than the window -- the trap `within_lockout_window`'s own
+    // comment records -- so skip rather than pass vacuously if it does.
+    let aged = {
+        let mut f = session.power_password_failures.lock().unwrap();
+        match f.1.checked_sub(crate::telnet::LOCKOUT_DURATION + std::time::Duration::from_secs(1))
+        {
+            Some(t) => {
+                f.1 = t;
+                true
+            }
+            None => false,
+        }
+    };
+    if !aged {
+        eprintln!("skipped: host uptime is under the lockout window");
+        return;
+    }
+
+    assert!(
+        !session.power_attempts_exhausted(),
+        "the floor never expires, so an operator at the machine's own serial \
+         console loses restart and shutdown until the gateway is restarted",
+    );
+    // And the count starts again rather than resuming at three.
+    assert_eq!(
+        session.record_power_failure(),
+        1,
+        "a failure after the window resumed the old count instead of starting \
+         a new one, so one more mistype re-locks immediately",
+    );
+}
+
+/// **A relay caller who dials the menu still gets advice a relay can follow.**
+///
+/// `new_cpm_menu` clears `is_relay` so the caller is not *labelled* a slave,
+/// which is a different question from how they reached the gateway -- and
+/// while the power page read the label, a relay caller who pressed `K` and
+/// typed `ATDT ethernetgateway` was handed the telnet advice ("set
+/// `security_enabled` and reconnect") that their session can never satisfy.
+/// The same defect surviving one hop, which is why these inputs are one
+/// object.
+#[cfg(unix)]
+#[test]
+fn test_the_relay_refusal_survives_a_hop_through_the_emulator() {
+    let mut relay = make_test_session(TerminalType::Ansi);
+    relay.is_relay = true;
+    relay.power_arrived_by_relay = true;
+
+    let writer: SharedWriter =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(tokio::io::sink())));
+    let dialled = TelnetSession::new_cpm_menu(
+        Box::new(tokio::io::empty()),
+        writer,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        relay.inheritable(),
+    );
+
+    assert!(
+        !dialled.is_relay,
+        "the premise: the dialled session is deliberately not labelled a relay",
+    );
+    assert!(
+        dialled.power_arrived_by_relay,
+        "how the human reached the gateway did not survive the hop, so the \
+         power page gives a relayed caller advice they can never act on",
     );
 }
 
@@ -11575,6 +11658,35 @@ fn test_the_serial_modem_holds_one_power_allowance_across_dials() {
         !body.contains("Inherited {"),
         "dial_ethernet_gateway constructs an `Inherited` inline, which is how \
          a re-dial gets counters nobody else shares",
+    );
+
+    // **And it is built above the reopen loop, not inside it.**  That loop
+    // exists to reopen a device that disappears -- a socat or USB-serial
+    // bridge that exits when the attached terminal closes -- so an allowance
+    // created inside it is rebuilt whenever the device drops, which is the
+    // same hole reached by unplugging instead of `+++ ATH`.  A guard on
+    // `dial_ethernet_gateway` alone cannot see this: the mutation that moved
+    // it back inside left that assertion green.
+    let call = src
+        .find("let lost = serial_thread(")
+        .expect("serial_thread call moved or was renamed");
+    let call_end = src[call..].find(");").expect("unterminated call") + call;
+    let args = &src[call..call_end];
+    assert!(
+        args.contains("dialled.clone()"),
+        "serial_thread is handed something other than the allowance held \
+         above the reopen loop, so a device that drops and reopens starts a \
+         fresh one.  Found: {args:?}",
+    );
+    let hoisted = src
+        .find("let dialled = crate::telnet::Inherited::fresh(")
+        .expect("the serial allowance is no longer built at all");
+    let loop_at = src[..call].rfind("while !shutdown.load").expect("reopen loop not found");
+    assert!(
+        hoisted < loop_at,
+        "the serial allowance is built inside the reopen loop, so dropping \
+         the device hands the caller a fresh three guesses at the host \
+         password",
     );
 }
 
@@ -11631,7 +11743,13 @@ fn test_every_dial_out_site_passes_its_own_credential_and_address() {
                 .join(" ");
             // The modem's own unit test builds a context on purpose; it is
             // not a dial-out site in the product.
-            if args.contains("AtomicBool::new(false)") {
+            //
+            // **Both clauses.**  This was loosened to the first one alone
+            // while its commit message said the guard had been tightened, and
+            // the first alone would skip any future call site that happened
+            // to build its own shutdown flag -- unchecked, with `checked >= 2`
+            // still satisfied by the other sites.
+            if args.contains("AtomicBool::new(false)") && args.contains("HashMap::new()") {
                 continue;
             }
             checked += 1;
@@ -11780,13 +11898,7 @@ fn test_each_session_kind_states_its_own_credential() {
             s,
             rs,
             l,
-            crate::telnet::Inherited {
-                authenticated: true,
-                peer_addr: None,
-                power_failures: Default::default(),
-                #[cfg(unix)]
-                power_elevation: Default::default(),
-            },
+            crate::telnet::Inherited::fresh(true, None),
         )
         .authenticated
     );
@@ -11822,13 +11934,7 @@ fn test_each_session_kind_states_its_own_credential() {
             s,
             rs,
             l,
-            crate::telnet::Inherited {
-                authenticated: parent,
-                peer_addr: Some(dialler),
-                power_failures: Default::default(),
-                #[cfg(unix)]
-                power_elevation: Default::default(),
-            },
+            crate::telnet::Inherited::fresh(parent, Some(dialler)),
         );
         assert!(sess.is_serial, "the premise: it looks like a serial session");
         assert_eq!(

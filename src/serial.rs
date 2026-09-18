@@ -1471,6 +1471,18 @@ fn serial_manager(
                     None
                 };
                 let mut reported_down = false;
+                // **Above the reopen loop, not inside it.**  This loop exists to
+                // reopen a device that disappears -- its own comment names a socat
+                // or USB-serial bridge that exits when the attached terminal closes
+                // -- so a `ModemState` built inside it is rebuilt whenever the
+                // device drops.  With the power allowance in there, a caller who
+                // had spent their guesses at the operator's host password could
+                // close the terminal, wait for the reopen, and have three more:
+                // the hole `+++ ATH` used to open, reached by unplugging instead.
+                //
+                // It is the caller at this port being bounded, and they outlive an
+                // open.
+                let dialled = crate::telnet::Inherited::fresh(true, None);
                 while !shutdown.load(Ordering::SeqCst)
                     && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
                 {
@@ -1490,6 +1502,7 @@ fn serial_manager(
                                 handle.clone(),
                                 shutdown.clone(),
                                 restart.clone(),
+                                dialled.clone(),
                             );
                             if !lost {
                                 break; // clean end: shutdown or config restart
@@ -3597,20 +3610,13 @@ fn serial_thread(
     handle: tokio::runtime::Handle,
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
+    dialled: crate::telnet::Inherited,
 ) -> bool {
     let now = Instant::now();
     let mut state = ModemState {
-        // One allowance for the life of this port: a caller who spends their
-        // guesses cannot get more by hanging up and dialling again.  A
-        // physical port is its own trust boundary, hence `authenticated`, and
-        // a serial caller has no address for the per-IP map to key on.
-        dialled: crate::telnet::Inherited {
-            authenticated: true,
-            peer_addr: None,
-            power_failures: Default::default(),
-            #[cfg(unix)]
-            power_elevation: Default::default(),
-        },
+        // Handed in from above the reopen loop, so one allowance covers the
+        // caller at this port across both `+++ ATH` and the device dropping.
+        dialled,
         port_id: id,
         port,
         mode: ModemMode::Command,

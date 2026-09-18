@@ -482,14 +482,45 @@ pub(crate) type LockoutMap = Arc<Mutex<HashMap<IpAddr, (u32, std::time::Instant)
 pub(crate) struct Inherited {
     /// Whether the dialling session proved who it is (never decided afresh).
     pub authenticated: bool,
+    /// Whether the caller reached this gateway over a relay.
+    ///
+    /// **Here because the power page reads it, and it did not travel.**  The
+    /// refusal on a password-free machine gives a relayed caller different
+    /// advice, because a relay can never become authenticated -- but
+    /// `new_cpm_menu` clears `is_relay` on the session it builds, so a relay
+    /// caller who pressed `K` and typed `ATDT ethernetgateway` was handed the
+    /// advice meant for a telnet client: set `security_enabled` and
+    /// reconnect, which that session can never satisfy either.  The same
+    /// defect surviving one hop, which is the whole reason these inputs are
+    /// one object.
+    pub is_relay: bool,
     /// The dialler's address; the sudo attempt cap keys on it.
     pub peer_addr: Option<IpAddr>,
-    /// The refused-password floor, **shared** so a re-dial cannot reset it.
-    pub power_failures: Arc<std::sync::atomic::AtomicU32>,
+    /// The refused-password floor, **shared** so a re-dial cannot reset it,
+    /// and stamped so it expires like every other lockout in the product.
+    pub power_failures: Arc<Mutex<(u32, std::time::Instant)>>,
     /// The elevation memo, shared for the same reason: it is what stops a
     /// re-dial spawning another real `sudo`.
     #[cfg(unix)]
     pub power_elevation: Arc<Mutex<Vec<(power::PowerAction, power::Elevate)>>>,
+}
+
+impl Inherited {
+    /// A context for a session nothing dialled: a fresh, unspent allowance.
+    ///
+    /// The one way to build one from nothing, so a caller cannot half-fill it
+    /// -- which is the defect this struct was introduced to end, and which
+    /// reappeared twice more after it was.
+    pub(crate) fn fresh(authenticated: bool, peer_addr: Option<IpAddr>) -> Self {
+        Self {
+            authenticated,
+            peer_addr,
+            is_relay: false,
+            power_failures: Arc::new(Mutex::new((0, std::time::Instant::now()))),
+            #[cfg(unix)]
+            power_elevation: Default::default(),
+        }
+    }
 }
 
 /// Whether a *telnet* session that got past the door has proved who it is.
@@ -1274,7 +1305,7 @@ pub(crate) struct TelnetSession {
     /// last field here that carried a `cfg` orphaned it onto its neighbour
     /// when it was removed and failed the Windows build.
     #[cfg_attr(not(unix), allow(dead_code))]
-    power_password_failures: Arc<std::sync::atomic::AtomicU32>,
+    power_password_failures: Arc<Mutex<(u32, std::time::Instant)>>,
     /// Refused `sudo` attempts per address, for the power page only.
     ///
     /// **Separate from `lockouts` because a gateway login is not permission
@@ -1311,6 +1342,16 @@ pub(crate) struct TelnetSession {
     /// any kind.
     #[cfg_attr(not(unix), allow(dead_code))]
     authenticated: bool,
+    /// How the human reached this gateway, for the power page's refusal only.
+    ///
+    /// Distinct from `is_relay`, which `new_cpm_menu` clears so the caller is
+    /// not *labelled* a slave: this one answers "can this person act on the
+    /// advice we are about to give them?", and a relayed caller cannot become
+    /// authenticated however they reconnect.  Two questions that were sharing
+    /// one field, so a relay caller who dialled the menu from inside the CP/M
+    /// emulator got advice that could never work.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    power_arrived_by_relay: bool,
     /// What the elevation probe answered for this session, once it has.
     ///
     /// **The probe is a process spawn, and nothing else bounded how often it
@@ -1524,6 +1565,7 @@ impl TelnetSession {
             // modem holds one `Inherited` for the life of the port and hands
             // it over each time.
             authenticated: from.authenticated,
+            power_arrived_by_relay: from.is_relay,
             #[cfg(unix)]
             power_elevation: from.power_elevation,
             transfer_subdir: String::new(),
@@ -1589,7 +1631,7 @@ impl TelnetSession {
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr,
-            power_password_failures: Default::default(),
+            power_password_failures: Arc::new(Mutex::new((0, std::time::Instant::now()))),
             power_lockouts: shared_power_lockouts().clone(),
             // **Sound, but not for the reason first written here.**  That
             // said `auth_password` is the only method offered; it is not --
@@ -1607,6 +1649,7 @@ impl TelnetSession {
             //
             // Set here because `run`'s door is the telnet one and skips SSH.
             authenticated: true,
+            power_arrived_by_relay: false,
             #[cfg(unix)]
             power_elevation: Default::default(),
             transfer_subdir: String::new(),
@@ -1688,7 +1731,7 @@ impl TelnetSession {
             erase_char: session::DEFAULT_ERASE_CHAR,
             lockouts,
             peer_addr,
-            power_password_failures: Default::default(),
+            power_password_failures: Arc::new(Mutex::new((0, std::time::Instant::now()))),
             power_lockouts: shared_power_lockouts().clone(),
             // **A relay key is not a login, and this is where that rule was
             // not being kept.**  `shell_request` refuses a key-authenticated
@@ -1710,6 +1753,7 @@ impl TelnetSession {
             // `new_cpm_menu` overrides this, because a locally dialled menu
             // session is only as credentialed as the session that dialled it.
             authenticated: false,
+            power_arrived_by_relay: true,
             #[cfg(unix)]
             power_elevation: Default::default(),
             transfer_subdir: String::new(),
@@ -1756,6 +1800,7 @@ impl TelnetSession {
         Inherited {
             authenticated: self.authenticated,
             peer_addr: self.peer_addr,
+            is_relay: self.is_relay,
             power_failures: self.power_password_failures.clone(),
             #[cfg(unix)]
             power_elevation: self.power_elevation.clone(),
@@ -1814,6 +1859,12 @@ impl TelnetSession {
         // having proved nothing.  `is_serial` says "does not speak telnet",
         // never "is trusted".
         s.authenticated = from.authenticated;
+        // `is_relay` is cleared above so the Troubleshooting and screen-list
+        // labels do not call this caller a slave -- but the power page needs
+        // to know how the human actually reached the gateway, because a relay
+        // cannot act on the advice a telnet client is given.  Two different
+        // questions that were sharing one field.
+        s.power_arrived_by_relay = from.is_relay;
         // **Shared, not copied, or a re-dial buys a fresh allowance.**  Two
         // more per-session values feed the power page, and both were reset by
         // building this session: the refused-password floor that bounds a
@@ -2524,10 +2575,11 @@ pub fn start_server(
                                     erase_char: session::DEFAULT_ERASE_CHAR,
                                     lockouts: lo,
                                     peer_addr: Some(addr.ip()),
-                                    power_password_failures: Default::default(),
+                                    power_password_failures: Arc::new(Mutex::new((0, std::time::Instant::now()))),
                                     power_lockouts: shared_power_lockouts().clone(),
                                     // The telnet door computes this in `run`, once it has run.
                                     authenticated: false,
+                                    power_arrived_by_relay: false,
                                     #[cfg(unix)]
                                     power_elevation: Default::default(),
                                     transfer_subdir: String::new(),
