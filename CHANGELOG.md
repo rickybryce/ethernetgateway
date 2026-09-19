@@ -123,6 +123,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Backspacing a menu number left the single-key commands dead.**  Typing a
+  digit at a menu prompt opens a collector, because a list can run past nine
+  and `10` has to be typable &mdash; but the collector accepted only more
+  digits, and erasing the number did not leave it.  On the CP/M boot picker
+  that meant pressing `9`, changing your mind, pressing backspace, and then
+  finding `N` and `P` dead with no way to change page short of leaving the
+  screen.  Every one of the **37** menus that reads keys this way had it, not
+  just that one, because they share a single input loop.  An erase that empties
+  the prompt now hands the next key back to the menu, so a letter is a command
+  again and a digit starts a fresh number.  The line-erase key (Ctrl-U, and the
+  telnet EL a linemode client sends) reaches the same empty prompt and had been
+  dropped outright inside the collector; it leaves by the same door now.
+
 - **The second page ran a `hostname` process on every keypress.**  Both of its
   screens name the computer the two keys act on, and that page redraws each time
   round its loop &mdash; so the name was looked up per drawn screen.  On Linux

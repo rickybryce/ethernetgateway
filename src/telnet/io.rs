@@ -850,7 +850,7 @@ impl TelnetSession {
         // — bridge directly into the ZMODEM receive flow so the upload
         // succeeds without the user having to navigate the menu first.
         let mut zmodem_state: u8 = 0;
-        loop {
+        'menu: loop {
             let byte = match self.read_byte_filtered().await? {
                 Some(b) => b,
                 None => return Ok(None),
@@ -950,7 +950,38 @@ impl TelnetSession {
                             self.echo_backspace().await?;
                             self.flush().await?;
                         }
+                        if input.is_empty() {
+                            // **Erasing the last digit is leaving the number,
+                            // not typing a shorter one.**  A digit opens this
+                            // collector because a list can run past 9, and
+                            // while a number is being typed a letter is not a
+                            // menu key -- but once the prompt is empty again
+                            // the screen is back to the state it was in before
+                            // the digit, and the next key has to be dispatched
+                            // fresh.  Staying here silently ate every letter:
+                            // on the CP/M boot picker, `9` then backspace left
+                            // `N` and `P` dead and no way to change page
+                            // (reported 2026-09-19).  The user's own words for
+                            // the rule: on a backspace, check again whether
+                            // they are entering a menu item or choosing a list
+                            // item.
+                            continue 'menu;
+                        }
                         continue;
+                    }
+
+                    if b2 == LINE_ERASE_BYTE {
+                        // RFC 854 EL, the same key `get_line_input` honours.
+                        // It reaches the same place a full backspace does --
+                        // an empty prompt -- so it has to leave by the same
+                        // door, or "clear what I typed" is the one erase key
+                        // that strands the user.
+                        while !input.is_empty() {
+                            input.pop();
+                            self.echo_backspace().await?;
+                        }
+                        self.flush().await?;
+                        continue 'menu;
                     }
 
                     if b2 < 0x20 {

@@ -13713,3 +13713,99 @@ fn test_the_second_page_is_offered_and_drawn_as_one_decision() {
     }
 }
 
+/// **Erasing the last digit must put the user back at a fresh prompt.**
+///
+/// `get_menu_input(false)` opens a digit collector on the first digit,
+/// because a list can run past nine and `10` has to be typable.  The
+/// collector accepted only more digits, so a letter arriving inside it was
+/// dropped -- and backspacing the number away did not leave it.  Reported
+/// 2026-09-19 from the CP/M boot picker: `9`, then a change of mind, then
+/// backspace, and `N`/`P` were dead with no way to change page short of
+/// leaving the screen.  Every one of the 37 menus that reads keys this way
+/// had it, not just that one.
+///
+/// The three cases are one test because they are one rule: a letter typed
+/// at an empty prompt is a menu key, whether or not a digit was typed and
+/// erased first; a digit typed there still opens a collector.
+///
+/// **The failure is a wrong answer, not a hang.** The feed ends in EOF, so
+/// a collector that never lets go runs out of input and returns `None` --
+/// which is what the unfixed code does here, and is why this can go red.
+#[tokio::test]
+async fn test_backspacing_a_digit_returns_to_the_menu_keys() {
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::AsyncWriteExt;
+
+    /// Feed `keys` to one session's menu prompt and return what it read.
+    async fn menu_input_for(keys: &[u8]) -> Option<String> {
+        let (mut client, reader) = tokio::io::duplex(4096);
+        let (_sink, writer_inner) = tokio::io::duplex(65536);
+        let writer: SharedWriter =
+            std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(writer_inner)));
+        let lockouts: LockoutMap = std::sync::Arc::new(StdMutex::new(HashMap::new()));
+        let mut session = TelnetSession::new_ssh(
+            Box::new(reader),
+            writer,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            lockouts,
+        );
+        client.write_all(keys).await.expect("feed");
+        client.flush().await.expect("flush");
+        // Close the far end so a collector that never lets go hits EOF and
+        // answers `None` rather than hanging the suite.
+        drop(client);
+        session.get_menu_input(false).await.expect("menu input")
+    }
+
+    // The reported sequence: a digit, a change of mind, then a nav key.
+    assert_eq!(
+        menu_input_for(b"9\x08n").await,
+        Some("n".to_string()),
+        "after backspacing the digit away, N must be the menu key again"
+    );
+
+    // The rubout spelling of the same key, because a terminal picks one.
+    assert_eq!(
+        menu_input_for(b"9\x7fp").await,
+        Some("p".to_string()),
+        "0x7F erases the digit the same way 0x08 does"
+    );
+
+    // Positive control: the collector still collects, or the assertions
+    // above would pass just as well with the digit path deleted outright.
+    assert_eq!(
+        menu_input_for(b"12\r").await,
+        Some("12".to_string()),
+        "a multi-digit entry must still be collected and submitted"
+    );
+
+    // And it re-opens: a digit after the erase starts a fresh number.
+    assert_eq!(
+        menu_input_for(b"9\x085\r").await,
+        Some("5".to_string()),
+        "a digit typed after the erase must start a new number, not resume 9"
+    );
+
+    // The line-erase key reaches the same empty prompt, so it leaves by the
+    // same door.  `get_line_input` has honoured it all along; the collector
+    // dropped it as just another control byte.
+    assert_eq!(
+        menu_input_for(b"12\x15n").await,
+        Some("n".to_string()),
+        "line-erase must clear the number and hand the next key to the menu"
+    );
+
+    // **An erased prompt is an untouched prompt, Enter included.**  The
+    // collector used to answer `Some("")` for a bare Enter once the digits
+    // were gone, and three screens read the empty answer as Back -- so
+    // `9`, backspace, Enter left the screen, while the same Enter at a prompt
+    // nobody had typed at was ignored.  The two are the same state now.
+    assert_eq!(
+        menu_input_for(b"9\x08\rn").await,
+        Some("n".to_string()),
+        "Enter after the erase must be ignored, as it is at a fresh prompt"
+    );
+}
