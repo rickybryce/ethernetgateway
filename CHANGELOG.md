@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-19
+
 ### Added
+
+- **A short note under the User Manual link saying what to type.**  On both the
+  web UI and the desktop editor, between the manual link and the verse:
+  <code>ATDT &lt;host&gt;:&lt;port&gt;</code> reaches a BBS or another host out
+  on the internet, and <code>ATDT ethernetgateway</code> reaches this gateway
+  itself &mdash; your own computer, not anywhere external.  The typed half of
+  each line is bold and in the console green both palettes already carry, so it
+  reads as something to type rather than something to know.  One list feeds
+  both surfaces, for the reason the manual URL is one constant.
 
 - **A welcome page on the first connection, explaining that this gateway is
   your own machine.**  Someone typing `ATDT ethernetgateway` on a Commodore 64
@@ -141,6 +152,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyone lock out a neighbour's address by connecting and dropping.
 
 ### Changed
+
+- **The header says what to type instead of what to know.**  It read
+  `Server IP: 192.168.1.64`; it now reads <code>telnet 192.168.1.64 2323</code>
+  &mdash; a command, with the **port** in it, which the old line left out
+  entirely and which is the half that matters the moment it is not 2323.  Same
+  line on the web UI and the desktop, from one helper.
 
 - **The telnet menu prompt now reads `gateway>` instead of `ethernet>`.**  The
   prompt is a path from the main menu, so every screen beneath it moved with
@@ -7685,7 +7702,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.2
 [1.0.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.1
 [1.0.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0
 [1.0.0-RC2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0-RC2

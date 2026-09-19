@@ -5632,17 +5632,27 @@ impl eframe::App for App {
                             self.close_prompt_open = true;
                         }
                         ui.add_space(16.0);
+                        // **What to type, not what to know.**  This said
+                        // "Server IP: <ip>", which left the reader to turn a
+                        // fact into a command and omitted the port -- the half
+                        // that is configurable, and the half that matters the
+                        // moment it is not 2323.  Same line the web header
+                        // shows, from the same helper.
+                        //
+                        // The port comes from the edited config rather than
+                        // the running one, so it follows the box above it: the
+                        // Server section already says its changes need a
+                        // restart, and showing the old port beside a new one
+                        // the operator has just typed would read as a bug.
                         ui.label(
-                            egui::RichText::new(&self.local_ip)
-                                .color(AMBER)
-                                .monospace()
-                                .size(16.0),
-                        );
-                        ui.label(
-                            egui::RichText::new("Server IP:")
-                                .color(AMBER)
-                                .monospace()
-                                .size(16.0),
+                            egui::RichText::new(crate::webserver::telnet_command(
+                                &self.local_ip,
+                                self.cfg.telnet_port,
+                            ))
+                            .strong()
+                            .color(CONSOLE_TEXT)
+                            .monospace()
+                            .size(16.0),
                         );
                     });
                 });
@@ -6165,6 +6175,11 @@ impl eframe::App for App {
                     col_a.max(col_b)
                 });
                 self.config_row_h[2] = row2.inner;
+                // **Where the block under the panels begins.**  The logo is
+                // top-aligned to this, so it rises to just under the panel
+                // border instead of starting level with the verse -- see the
+                // negative space in the logo column below.
+                let block_top = ui.cursor().top();
                 ui.add_space(6.0);
 
                 // ── User Manual button ────────────────────────
@@ -6183,6 +6198,56 @@ impl eframe::App for App {
                         ));
                     }
                 });
+
+                // ── How to use it ────────────────────────────
+                // The same two lines the web page shows, from the same
+                // constants -- see `webserver::USAGE_INTRO`.  The typed half
+                // is bold and in the console green, which is the colour both
+                // palettes already use for text a terminal produced.
+                ui.add_space(8.0);
+                // **Bounded, so the prose wraps instead of running on.**  A
+                // label lays out to `available_width`, which inside this
+                // scroll area is not the width of the content column -- so the
+                // longer of the two lines ran past the panel, was clipped at
+                // the edge, and pushed the logo below it down.  `set_max_width`
+                // on a scoped `Ui` is the same cure `POPUP_CONTENT_W` applies
+                // to the More windows, and it means the wording can grow
+                // without anyone having to re-measure it.
+                ui.scope(|ui| {
+                    ui.set_max_width(avail);
+                    ui.label(
+                        egui::RichText::new(crate::webserver::USAGE_INTRO)
+                            .italics()
+                            .size(14.0)
+                            .color(AMBER_DIM),
+                    );
+                    for (typed, does) in crate::webserver::USAGE_COMMANDS {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            ui.label(
+                                egui::RichText::new(*typed)
+                                    .strong()
+                                    .monospace()
+                                    .size(14.0)
+                                    .color(CONSOLE_TEXT),
+                            );
+                            // **`Label::wrap()`, not the layout's default.**
+                            // `set_max_width` bounds the box but a plain
+                            // `ui.label` still laid the sentence out past it
+                            // and the tail was clipped at the panel edge --
+                            // measured, twice.  This is the idiom the More
+                            // popups already use.
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(*does)
+                                        .size(14.0)
+                                        .color(TEXT_PRIMARY),
+                                )
+                                .wrap(),
+                            );
+                        });
+                    }
+                });
                 ui.add_space(20.0);
                 // ── Scripture (left) + Logo (right) ──────────
                 // The PNG ships at exactly the logical-pixel display
@@ -6196,6 +6261,7 @@ impl eframe::App for App {
                 // smooth without introducing the mipmap-bleed problem.
                 let logo_w = 366.0_f32;
                 let logo_h = 183.0_f32;
+                let row_top = ui.cursor().top();
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(
                         egui::vec2(half, logo_h),
@@ -6226,7 +6292,17 @@ impl eframe::App for App {
                         egui::vec2(half, logo_h + 32.0),
                         egui::Layout::top_down(egui::Align::Max),
                         |ui| {
-                            ui.add_space(-32.0);
+                            // **Top-aligned to the block, not nudged by a
+                            // constant.**  This was `-32.0`, a hand-tuned
+                            // overlap into the gap above; the help note then
+                            // pushed the whole row down and the logo hung into
+                            // the console.  Measuring back to `block_top`
+                            // puts the artwork just under the panel border and
+                            // keeps it there however the note is reworded.
+                            // Taken in this frame, never remembered from the
+                            // last: a one-repaint layout memo is what grew
+                            // this window without limit before.
+                            ui.add_space(-(row_top - block_top));
                             ui.add(
                                 egui::Image::new(egui::include_image!("../eglogobrightsmall.png"))
                                     .texture_options(egui::TextureOptions {

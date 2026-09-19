@@ -2362,6 +2362,47 @@ fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool)
 pub(crate) const MANUAL_URL: &str =
     "https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf";
 
+/// The short note under the User Manual link that says what the two `ATDT`
+/// forms do, shown on this page and in the desktop GUI.
+///
+/// **One list, not two**, for the reason [`MANUAL_URL`] is one constant: both
+/// surfaces describe the same two commands, and two copies drift.  The pairs
+/// are (what you type, what it does) so each surface can style the typed half
+/// -- bold, and in the console green both palettes already carry -- without
+/// either of them having to know how the sentence is put together.
+pub(crate) const USAGE_INTRO: &str = "Dialling from a terminal on a serial port:";
+
+/// What to type to reach this gateway's telnet server: `telnet <ip> <port>`.
+///
+/// Shared for the reason [`MANUAL_URL`] and [`USAGE_COMMANDS`] are: the
+/// desktop header shows the same line, and two surfaces that disagreed about
+/// the address would send an operator to the wrong machine.
+///
+/// It replaced "Server IP: <ip>", which stated a fact the reader then had to
+/// turn into a command -- and left out the port, which is the half that is
+/// actually configurable and the half a non-default value makes essential.
+pub(crate) fn telnet_command(ip: &str, telnet_port: u16) -> String {
+    format!("telnet {ip} {telnet_port}")
+}
+
+/// See [`USAGE_INTRO`].
+pub(crate) const USAGE_COMMANDS: &[(&str, &str)] = &[
+    (
+        "ATDT <host>:<port>",
+        "reaches a BBS or another host out on the internet.",
+    ),
+    (
+        "ATDT ethernetgateway",
+        // **One line, deliberately.**  The fuller wording ("and opens the same
+        // menus a telnet or SSH client sees") wrapped to a second line on the
+        // desktop and pushed the logo down -- measured on screen, twice, once
+        // clipped and once wrapped.  The sentence that has to land is that the
+        // machine answering is theirs; what the menus are is on the menus.
+        "reaches this gateway itself \u{2014} your own computer, not anywhere \
+         external.",
+    ),
+];
+
 fn render_header(cfg: &Config) -> String {
     let ip = local_ip();
     format!(
@@ -2371,13 +2412,13 @@ fn render_header(cfg: &Config) -> String {
         // operator may be part-way through filling in -- navigating away from
         // it in place would discard their edits.
         "<header><h1>Ethernet Gateway v{ver}</h1>\
-         <div class=\"server-ip\">Server IP: <code>{ip}</code> \
+         <div class=\"server-ip\"><code class=\"usage-cmd\">{connect}</code> \
          <a class=\"linkbtn\" href=\"{manual}\" target=\"_blank\" \
          rel=\"noopener\">User Manual</a></div>\
          </header>\
          <div class=\"hint\">Telnet: {tport} &middot; SSH: {sport} &middot; Kermit: {kport} &middot; Web: {wport}</div>",
         ver = env!("CARGO_PKG_VERSION"),
-        ip = html_escape(&ip),
+        connect = html_escape(&telnet_command(&ip, cfg.telnet_port)),
         manual = MANUAL_URL,
         tport = cfg.telnet_port,
         sport = cfg.ssh_port,
@@ -2860,16 +2901,46 @@ fn frame_general(cfg: &Config) -> String {
     )
 }
 
+/// The usage note, between the settings and the verse.
+///
+/// The typed half is escaped like anything else that reaches this page:
+/// `ATDT <host>:<port>` contains angle brackets, and unescaped they would be
+/// parsed as a tag and vanish from the rendering.
+fn render_usage_help() -> String {
+    let mut out = String::from("<div class=\"usage\"><div class=\"usage-intro\">");
+    out.push_str(&html_escape(USAGE_INTRO));
+    out.push_str("</div>");
+    for (typed, does) in USAGE_COMMANDS {
+        out.push_str("<div class=\"usage-row\"><code class=\"usage-cmd\">");
+        out.push_str(&html_escape(typed));
+        out.push_str("</code> ");
+        out.push_str(&html_escape(does));
+        out.push_str("</div>");
+    }
+    out.push_str("</div>");
+    out
+}
+
+/// The note, the verse and the logo as one row.
+///
+/// **The logo shares a column boundary with them rather than following them.**
+/// It used to be its own row after the verse, so every line added above pushed
+/// it down -- which is what the help note did, leaving it hanging into the
+/// console panel.  Top-aligned beside the text it now rises to the same place
+/// the desktop puts it, with no offset to keep in step by hand.
 fn render_scripture_and_logo() -> String {
-    String::from(
+    format!(
         "<div class=\"verse-row\">\
+         <div class=\"verse-col\">{usage}\
          <div class=\"verse\">\
          \u{201c}For God so loved the world, that he gave his only begotten Son, \
          that whosoever believeth in him should not perish, but have everlasting life.\u{201d}\
          <div class=\"verse-cite\">\u{2014} John 3:16, KJV</div>\
          </div>\
+         </div>\
          <div class=\"logo-wrap\"><img src=\"/logo.png\" alt=\"Ethernet Gateway\" class=\"logo\"></div>\
          </div>",
+        usage = render_usage_help(),
     )
 }
 
@@ -4762,11 +4833,19 @@ button.more.alert { color: #ff5a4a; border-color: #ff5a4a; }
   padding-top: 8px;
   border-top: 1px solid var(--border);
 }
+.verse-col { flex: 1; min-width: 280px; }
+.usage { color: var(--text); font-size: 14px; }
+.usage-intro { color: var(--amber-dim); font-style: italic; margin-bottom: 4px; }
+.usage-row { margin: 2px 0; }
+.usage-cmd {
+  color: var(--console-text); font-weight: bold;
+  font-family: ui-monospace, Consolas, monospace;
+}
 .verse-row { display: flex; gap: 16px; align-items: flex-start; margin-top: 14px; flex-wrap: wrap; }
 .verse {
   color: var(--scripture);
   font-style: italic; font-weight: bold;
-  font-size: 16px; flex: 1; min-width: 280px;
+  font-size: 16px; margin-top: 14px;
 }
 .verse-cite { font-size: 14px; margin-top: 4px; }
 .logo-wrap { flex: 0 0 auto; }
@@ -8268,4 +8347,140 @@ mod tests {
         );
     }
 
+}
+
+#[cfg(test)]
+mod usage_help_tests {
+    use super::*;
+
+    /// **The help text reaches the page, escaped, and its classes are styled.**
+    ///
+    /// Three things, each of which has gone wrong on this page before.  The
+    /// typed commands must actually appear; `ATDT <host>:<port>` must be
+    /// *escaped*, or the browser reads `<host>` as a tag and silently drops
+    /// it, which is the one command most likely to be mistyped as a result;
+    /// and every class used here must have a real CSS rule, since a class with
+    /// no rule behind it is how this page has quietly lost styling before.
+    #[test]
+    fn test_the_usage_help_is_rendered_escaped_and_styled() {
+        let html = render_usage_help();
+        let css = STYLE;
+
+        assert!(
+            html.contains(&html_escape(USAGE_INTRO)),
+            "the intro line is missing: {html}"
+        );
+        assert!(
+            !USAGE_COMMANDS.is_empty(),
+            "no commands to describe — the shared list is empty"
+        );
+        for (typed, does) in USAGE_COMMANDS {
+            assert!(
+                html.contains(&html_escape(typed)),
+                "typed command {typed:?} is missing from the page: {html}"
+            );
+            assert!(
+                html.contains(&html_escape(does)),
+                "the description of {typed:?} is missing: {html}"
+            );
+        }
+
+        // The angle brackets specifically: unescaped, `<host>` is a tag.
+        assert!(
+            html.contains("&lt;host&gt;:&lt;port&gt;"),
+            "the placeholder must be escaped or the browser eats it: {html}"
+        );
+        assert!(
+            !html.contains("<host>"),
+            "a raw <host> reached the page and will be parsed as a tag: {html}"
+        );
+
+        for class in ["usage", "usage-intro", "usage-row", "usage-cmd"] {
+            assert!(
+                html.contains(&format!("class=\"{class}\"")),
+                "class {class:?} is not used by the renderer"
+            );
+            assert!(
+                css.contains(&format!(".{class} ")) || css.contains(&format!(".{class} {{")),
+                "class {class:?} has no CSS rule — a class with no rule is how \
+                 this page has silently lost styling before"
+            );
+        }
+
+        // The typed half is what carries the styling, so it must be the thing
+        // inside the styled element rather than next to it.
+        assert!(
+            html.contains("<code class=\"usage-cmd\">ATDT ethernetgateway</code>"),
+            "the typed command must sit inside the styled element: {html}"
+        );
+    }
+
+    /// **The header tells you what to type, and both surfaces agree.**
+    ///
+    /// It used to read "Server IP: 192.168.1.64" -- a fact the reader had to
+    /// turn into a command, with the port missing entirely, which is the half
+    /// that matters the moment it is not 2323.
+    #[test]
+    fn test_the_header_shows_the_telnet_command_with_the_configured_port() {
+        assert_eq!(
+            telnet_command("192.168.1.64", 2323),
+            "telnet 192.168.1.64 2323"
+        );
+        // A non-default port is the case the old line could not express.
+        assert_eq!(telnet_command("10.0.0.5", 9999), "telnet 10.0.0.5 9999");
+
+        let cfg = Config {
+            telnet_port: 2424,
+            ..Config::default()
+        };
+        let head = render_header(&cfg);
+        assert!(
+            head.contains("2424"),
+            "the header must show the configured telnet port: {head}"
+        );
+        assert!(
+            head.contains("telnet "),
+            "the header must show it as a command: {head}"
+        );
+        assert!(
+            !head.contains("Server IP:"),
+            "the old label is still there: {head}"
+        );
+        assert!(
+            head.contains("class=\"usage-cmd\""),
+            "the command must carry the styling every other typed command \
+             here does: {head}"
+        );
+
+        let gui = include_str!("gui.rs");
+        assert!(
+            gui.contains("webserver::telnet_command"),
+            "the desktop header builds its own copy — the two can now disagree"
+        );
+        assert!(
+            !gui.contains("\"Server IP:\""),
+            "the desktop header still shows the old label"
+        );
+    }
+
+    /// **Both surfaces read the same list.**
+    ///
+    /// The desktop GUI draws this note too.  It is one constant for the reason
+    /// `MANUAL_URL` is one constant -- two copies of the same two sentences
+    /// drift, and the one that drifts is the one nobody is looking at.
+    #[test]
+    fn test_the_desktop_gui_draws_the_same_usage_text() {
+        let gui = include_str!("gui.rs");
+        for name in ["USAGE_INTRO", "USAGE_COMMANDS"] {
+            assert!(
+                gui.contains(&format!("webserver::{name}")),
+                "gui.rs does not use {name} — the two surfaces can now disagree"
+            );
+        }
+        assert!(
+            !gui.contains("ATDT ethernetgateway\""),
+            "gui.rs carries its own copy of the command text instead of the \
+             shared list"
+        );
+    }
 }
