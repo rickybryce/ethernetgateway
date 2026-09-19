@@ -7696,6 +7696,16 @@ mod tests {
     /// `shutdown` would pass for a function that restarts.
     #[test]
     fn test_quit_stops_the_server_where_a_restart_would_bring_it_back() {
+        // **This test writes to the shared log buffer, so it takes the lock.**
+        // `quit` logs "Quit requested — stopping the server...", and
+        // `save_and_restart_all` logs too.  Without the lock those lines can
+        // land inside `test_poll_logs_trims_oldest`'s window -- between its
+        // `logger::log("newest")` and its `poll_logs()` -- and that test then
+        // finds someone else's line as the newest one.  Measured: it failed
+        // exactly that way on the Windows job of a release cut, on a commit
+        // that had passed the same job minutes earlier, which is what a race
+        // in a global looks like from the outside.
+        let _guard = LOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut app = test_app();
         app.quit();
         assert!(app.shutdown.load(Ordering::SeqCst), "quit must unwind the server cycle");
