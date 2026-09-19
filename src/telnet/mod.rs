@@ -2059,9 +2059,6 @@ impl TelnetSession {
         })
     }
 
-    /// MORE page help.  Unix only, for the same reason the page is -- see
-    /// `telnet/power.rs`.
-    #[cfg(unix)]
     /// The first-connection welcome page's body.
     ///
     /// **Associated fn so the fit test reads the REAL lines**, like every
@@ -2100,6 +2097,9 @@ impl TelnetSession {
         ]
     }
 
+    /// MORE page help.  Unix only, for the same reason the page is -- see
+    /// `telnet/power.rs`.
+    #[cfg(unix)]
     fn more_help_lines() -> &'static [&'static str] {
         &[
             "  The second menu, reached with 2",
