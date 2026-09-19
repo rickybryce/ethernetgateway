@@ -1147,6 +1147,23 @@ pub fn looks_bootable(payload: &[u8]) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// The measured list ships with LF endings, like the catalogue beside it.
+    ///
+    /// **Pinned precisely because a CRLF checkout would NOT break it.**
+    /// `str::lines` strips the carriage return and the reason is trimmed, so
+    /// the parse survives and nothing else would ever tell you the file had
+    /// been rewritten — which is the definition of a change that goes
+    /// unnoticed until it matters somewhere else. `repodisks.txt` has the same
+    /// guard for the opposite reason: its shape *is* the product and it breaks
+    /// loudly. Both are pinned in `.gitattributes`; this is what says so.
+    #[test]
+    fn test_the_nonbooting_list_ships_with_unix_line_endings() {
+        assert!(
+            !super::nonbooting().contains('\r'),
+            "nonbooting.txt has CRLF: the .gitattributes `text eol=lf` pin is missing or lost"
+        );
+    }
+
     /// **Every surface that draws the boot list must also offer a way past
     /// it.**
     ///

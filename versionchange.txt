@@ -174,6 +174,32 @@ web/diskreference.html       # <title>, .hdr-version, footer
 #      kind of wrong that still looks right.  It is also pinned to LF in
 #      .gitattributes, because its shape is the product.
 #
+#      `src/cpm/nonbooting.txt` is its partner and goes stale the same way:
+#      the disks MEASURED never to reach a sign-on, which the three boot
+#      pickers withhold and which repodisks.txt explains.  Produced by the
+#      #[ignore] `record_nonbooting`, which BOOTS every image rather than
+#      reading a sector -- the reason it exists is that the IMSAI disks all
+#      pass the sector test and then run into a controller nothing answers:
+#
+#        NONBOOTING_RECORD=1 cargo test --release record_nonbooting \
+#          -- --ignored --nocapture
+#
+#      **THE ORDER MATTERS AND IT IS NOT OBVIOUS.**  nonbooting.txt is
+#      compiled in with include_str!, and record_repodisks reads it through
+#      image_can_boot -- so a rebuild has to sit BETWEEN the two:
+#
+#        1. record_nonbooting      (writes nonbooting.txt)
+#        2. cargo build --release  (compiles the new table in)
+#        3. record_repodisks       (writes repodisks.txt from it)
+#
+#      Run them the other way round and the catalogue is regenerated against
+#      the PREVIOUS list, so it goes on marking a disk "boots" that the
+#      pickers have already stopped offering -- the exact disagreement between
+#      the catalogue and the picker that this pair was built to end, arriving
+#      by way of the fix for it.  Re-run both when a controller is added
+#      (disks withheld for wanting it start booting), when a collection joins
+#      REPOS, or when those repos gain disks.
+#
 # ── On release (separate step) ──────────────────────────────────
 CHANGELOG.md            # Pre-release, the next version's notes accumulate under a
 #                         "## [X.Y.Z] - Unreleased" heading. At release time:

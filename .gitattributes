@@ -29,6 +29,15 @@ EGT8080/EGT80.COM          binary
 # fails loudly if it ever arrives otherwise.
 src/cpm/repodisks.txt      text eol=lf
 
+# The measured non-booting list is compiled in with include_str! and is parsed
+# by shape — a 64-character hex field, then a size, then a name, then the
+# reason.  A CRLF checkout would not break that parse (`str::lines` strips the
+# carriage return and the reason is trimmed anyway), which is exactly why it is
+# pinned: the one that cannot fail loudly is the one to pin, because nothing
+# would tell you it had changed.  Generated and diffed like repodisks.txt, so
+# it is kept consistent with it.
+src/cpm/nonbooting.txt     text eol=lf
+
 # The disk manifest is compiled in with include_str! and is TAB-separated —
 # a Windows checkout that rewrote its line endings would not break the parse,
 # but the file is generated and diffed like repodisks.txt, so pin it the same
