@@ -2093,7 +2093,10 @@ impl TelnetSession {
             "  SSH Gateway from the menu.",
             "",
             "  This page stops appearing seven",
-            "  days after you first saw it.",
+            // "after it first appeared", not "after you first saw it": the
+            // stamp is one per gateway, not one per caller, so the second
+            // person to connect on day six would be told something untrue.
+            "  days after it first appeared.",
         ]
     }
 

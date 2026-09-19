@@ -1243,6 +1243,26 @@ that lifts it. So to reach the web UI from a non-private address you must set
 
 <h2>5.5 The Main Menu</h2>
 
+<p>
+<strong>On a new installation a welcome page comes first.</strong> It says, in
+plain words, that the machine answering is your own computer and not a bulletin
+board somewhere on the internet &mdash; which is not obvious to someone who has
+just typed <code>ATDT ethernetgateway</code> on a Commodore 64, dialled what
+feels like a modem, and landed at a menu. It also points at the Telnet and SSH
+Gateways as the way <em>out</em> to a real board. Any key continues to the menu
+below.
+</p>
+
+<p>
+The page appears on every connection for <strong>seven days</strong> and then
+stops by itself, so it cannot become furniture. The clock starts the first time
+the page is <em>shown</em>, and the moment is recorded in
+<code>egateway.conf</code> as <code>welcome_first_shown</code> (a Unix time in
+seconds; see &sect;3.3). Set that key back to <code>0</code> to see the page
+again &mdash; useful before handing the gateway to somebody new. It is a marker
+rather than a setting, so no configuration screen shows it.
+</p>
+
 <pre><code>  A  AI Chat
   B  Simple Browser
   C  Configuration

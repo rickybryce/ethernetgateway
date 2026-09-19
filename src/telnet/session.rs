@@ -1011,6 +1011,32 @@ impl TelnetSession {
             }
         }
 
+        // **One arm for every step that sits waiting on a person.**  An idle
+        // timeout is not a fault, it is how an abandoned session ends -- but
+        // only `run_menu_loop` used to be inside the arm that says so.  A
+        // session left on the welcome page or at the master-password prompt
+        // closed with no goodbye on the screen *and* logged "session error:
+        // idle timeout", because `is_normal_disconnect` deliberately does not
+        // count `TimedOut`.  The welcome page made that the common case rather
+        // than a corner: it is the first screen, and it asks to be read.
+        match self.session_body().await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                let _ = self
+                    .send_line("\r\n\r\nDisconnected: idle timeout.")
+                    .await;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Everything after the door: the orientation page, the master-password
+    /// offer, then the menu.
+    ///
+    /// Split out so `run`'s single timeout arm covers all three -- see its
+    /// comment.  Each step keeps its `?`: a real I/O failure still propagates.
+    async fn session_body(&mut self) -> Result<(), std::io::Error> {
         // **Where you are, before anything asks you to decide.**  Someone
         // typing `ATDT ethernetgateway` on a C64 has just dialled a modem and
         // landed at a menu, and nothing on that menu says the machine
@@ -1027,16 +1053,7 @@ impl TelnetSession {
         // behind a menu item would mean they had to already know.
         self.offer_master_password().await?;
 
-        match self.run_menu_loop().await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                let _ = self
-                    .send_line("\r\n\r\nDisconnected: idle timeout.")
-                    .await;
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
+        self.run_menu_loop().await
     }
 
     /// Draw the orientation page, if it is still within its window.

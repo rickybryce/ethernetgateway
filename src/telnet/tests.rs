@@ -13952,3 +13952,87 @@ fn test_the_welcome_page_fits_a_petscii_screen() {
         );
     }
 }
+
+/// **An abandoned session says goodbye, wherever it was abandoned.**
+///
+/// An idle timeout is how a session that nobody is sitting at ends, not a
+/// fault: `run` turns it into "Disconnected: idle timeout." and returns `Ok`,
+/// and `is_normal_disconnect` deliberately does NOT count `TimedOut`, so
+/// anything that escapes that arm is logged as a session error.
+///
+/// Only `run_menu_loop` used to be inside it.  Adding the welcome page put a
+/// blocking read *before* it and made that reachable for everyone -- it is the
+/// first screen, and it is the one that asks to be read, so it is exactly
+/// where somebody walks away.  The master-password prompt had the same hole
+/// the whole time and nobody had hit it.
+///
+/// An SSH session is used because `run` skips terminal detection and the login
+/// for one, which puts the welcome page first with no scripted input in the
+/// way.  The stamp is set to *now* rather than left at `0` so the page is due
+/// without the session writing a config file as a side effect.
+#[tokio::test]
+async fn test_a_session_abandoned_on_the_welcome_page_still_says_goodbye() {
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::AsyncReadExt;
+
+    let _cfg_lock = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let previous = crate::config::get_config().welcome_first_shown;
+    crate::config::update_config_value("welcome_first_shown", &unix_now().to_string());
+
+    // Held open and never written to: the session waits for a key that never
+    // comes, which is what an abandoned terminal looks like.
+    let (_client, reader) = tokio::io::duplex(4096);
+    let (mut peer, writer_inner) = tokio::io::duplex(65536);
+    let writer: SharedWriter =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(writer_inner)));
+    let lockouts: LockoutMap = std::sync::Arc::new(StdMutex::new(HashMap::new()));
+    let mut session = TelnetSession::new_ssh(
+        Box::new(reader),
+        writer,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        lockouts,
+    );
+    session.idle_timeout = std::time::Duration::from_millis(150);
+
+    let outcome = session.run().await;
+
+    // Drain until the pipe goes quiet: one `read_buf` returns the first chunk
+    // only, which here was the clear-screen and the first separator -- enough
+    // to look like the page was never drawn.
+    let mut drained = Vec::new();
+    loop {
+        let mut chunk = vec![0u8; 4096];
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            peer.read(&mut chunk),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(n)) => drained.extend_from_slice(&chunk[..n]),
+            Ok(Err(_)) => break,
+        }
+    }
+    let seen = String::from_utf8_lossy(&drained).to_string();
+
+    crate::config::update_config_value("welcome_first_shown", &previous.to_string());
+
+    assert!(
+        outcome.is_ok(),
+        "an idle timeout on the welcome page must be handled, not returned as \
+         a session error (callers log anything that is not a normal \
+         disconnect, and TimedOut is not one): {outcome:?}"
+    );
+    assert!(
+        seen.contains("WELCOME TO YOUR ETHERNET GATEWAY"),
+        "the welcome page should have been drawn first; got: {seen:?}"
+    );
+    assert!(
+        seen.contains("idle timeout"),
+        "the goodbye must reach the screen the caller was left looking at; \
+         got: {seen:?}"
+    );
+}
