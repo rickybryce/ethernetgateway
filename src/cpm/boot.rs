@@ -185,23 +185,48 @@ pub fn measured_not_booting(path: &std::path::Path) -> Option<&'static str> {
     verdict
 }
 
-/// Why this image will not boot here, in words an operator can act on.
+/// Why this image will not boot here, in words a person can act on.
 ///
-/// The two reasons a disk is kept off the pickers, in one place so the
-/// catalogue, the screens and [`image_can_boot`] cannot give three answers:
-/// it was **booted here and never spoke** (`nonbooting.txt`), or its loader
-/// drives a **board this gateway does not have**, which is the one case the
-/// measured list cannot cover because it catches disks nobody here has tried.
+/// The two reasons a disk is kept off the pickers, worded once: it was
+/// **booted here and never spoke** (`nonbooting.txt`), or its loader drives a
+/// **board this gateway does not have**, which is the one case the measured
+/// list cannot cover because it can only name disks somebody here has tried.
 ///
 /// `None` is "no reason to withhold it", which is deliberately **not** the
 /// same as "it boots" — see `nonbooting.txt` for why the rule runs that way
 /// round.
-pub fn will_not_boot_here(path: &std::path::Path) -> Option<String> {
+///
+/// **The catalogue is what reads this, not a screen.** A withheld disk that is
+/// *set* already resolves to [`BootTarget::NotBootable`] and carries
+/// `boot_setting_mark`'s `(not bootable)` on all four surfaces, which is the
+/// answer at the width those rows have — 15 characters out of a 26-column
+/// PETSCII row. The sentence goes where there is room for it: `repodisks.txt`,
+/// in the operator's own images folder, one line under the disk it is about.
+/// An earlier version of this comment claimed the screens used it, which they
+/// do not.
+#[cfg(test)]
+pub(crate) fn will_not_boot_here(path: &std::path::Path) -> Option<String> {
     if let Some(why) = measured_not_booting(path) {
         return Some(why.to_string());
     }
     let bytes = std::fs::read(path).ok()?;
-    super::detect::image_drives_imsai_fif(&bytes)
+    why_not_from(path, &bytes)
+}
+
+/// [`will_not_boot_here`] for a caller that has already read the image.
+///
+/// **The rule stays in one place and the image is read once.** The first
+/// version of this had `image_can_boot` call `will_not_boot_here`, which reads
+/// the file for the port scan, and then read it *again* itself for
+/// `bootability` — so every picker draw on a cold cache read the whole folder
+/// twice, 4.9 MB at a time for a hard disk. That is the exact cost
+/// [`image_can_boot`]'s own comment exists to watch, and the fix is a seam
+/// rather than a second copy of the rule.
+fn why_not_from(path: &std::path::Path, bytes: &[u8]) -> Option<String> {
+    if let Some(why) = measured_not_booting(path) {
+        return Some(why.to_string());
+    }
+    super::detect::image_drives_imsai_fif(bytes)
         .then(|| super::detect::IMSAI_FIF_REASON.to_string())
 }
 
@@ -262,14 +287,11 @@ pub fn image_can_boot(path: &std::path::Path) -> bool {
     // load themselves, and it fires on 7 of 60 images with no false positives.
     // The BROAD version ("writes to a port nobody answers") is used nowhere —
     // it flagged nine disks that boot perfectly well.
-    let verdict = if will_not_boot_here(path).is_some() {
-        false
-    } else {
-        match std::fs::read(path) {
-            Err(_) => false,
-            Ok(bytes) => {
-                super::boot_machine::BootMachine::bootability(bytes, &machine, &cpu).offer()
-            }
+    let verdict = match std::fs::read(path) {
+        Err(_) => false,
+        Ok(bytes) => {
+            why_not_from(path, &bytes).is_none()
+                && super::boot_machine::BootMachine::bootability(bytes, &machine, &cpu).offer()
         }
     };
     if let Ok(mut c) = cache.lock() {
@@ -1125,6 +1147,50 @@ pub fn looks_bootable(payload: &[u8]) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// **Every surface that draws the boot list must also offer a way past
+    /// it.**
+    ///
+    /// The list withholds disks measured never to start here, which is what
+    /// stops it being a catalogue of disappointments — and it means an
+    /// operator with a boot disk of their own has no entry to choose. A filter
+    /// with no door in it is a wall, and a door on two surfaces out of three is
+    /// the shape this project keeps finding: the one left out is always the one
+    /// somebody is actually sitting at.
+    ///
+    /// Scanned from source because the three doors *cannot* share an
+    /// implementation — one is a telnet prompt, one an HTML input, one a native
+    /// file dialog. What they share is the key they write, which is the other
+    /// half of this: a door that invented `cpm_boot_image_typed` as a setting
+    /// would be a second source of truth for what CP/M runs.
+    ///
+    /// **The `boot_choices` assertion is the positive control**, not decoration.
+    /// A source scan pointed at the wrong file, or at a file that has been
+    /// renamed, passes every other check in this test at once and reports that
+    /// three surfaces are fine when it has read none of them — which is exactly
+    /// how the README-link guard and the port-settings guard both went quiet.
+    #[test]
+    fn test_every_boot_picker_offers_a_way_past_the_list() {
+        for (surface, src, door) in [
+            ("telnet", include_str!("../telnet/config_ui.rs"), "cpm_name_a_boot_disk"),
+            ("web", include_str!("../webserver.rs"), "cpm_boot_image_typed"),
+            ("desktop", include_str!("../gui.rs"), "spawn_boot_disk_picker"),
+        ] {
+            assert!(
+                src.contains("boot_choices"),
+                "the {surface} source does not draw the boot list at all — this scan is \
+                 reading the wrong file, and would pass on an empty one"
+            );
+            assert!(
+                src.contains(door),
+                "{surface} draws the boot list and offers no way past it — `{door}` is gone"
+            );
+            assert!(
+                src.contains("cpm_boot_image"),
+                "{surface}'s way past the list must write `cpm_boot_image`, not a key of its own"
+            );
+        }
+    }
+
     /// **A positive control on the parser, not on what it concluded.**
     ///
     /// If the file's shape drifts and rows stop matching, the table quietly

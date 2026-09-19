@@ -198,10 +198,9 @@ const IMSAI_FIF_PORT: u8 = 0xFD;
 
 /// What an operator is told about a disk whose loader wants the FIF.
 ///
-/// One string, because the recorder writes it into `nonbooting.txt`, the
-/// catalogue prints it, and [`crate::cpm::boot::will_not_boot_here`] hands it
-/// to the screens -- three surfaces describing one fact, which is the shape
-/// this project keeps getting wrong when it is spelled three times.
+/// One string, because the recorder writes it into `nonbooting.txt` and the
+/// catalogue prints it -- two generators describing one fact, which is the
+/// shape this project keeps paying for when it is spelled twice.
 pub const IMSAI_FIF_REASON: &str =
     "needs the IMSAI FIF disk controller (port FDh), not emulated here";
 

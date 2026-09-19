@@ -1546,12 +1546,25 @@ impl TelnetSession {
         })
         .await
         .unwrap_or(false);
+        // **Warned, not refused**, and the difference is a whole workflow.
+        // Naming a disk before copying it into the folder is a legitimate
+        // order to do things in, and `(missing)` already says so on every
+        // surface afterwards -- a setting is not an outcome.  Refusing was also
+        // the odd one out: the web box and the desktop's Browse both take what
+        // they are given, and one control behaving three ways across three
+        // screens is the defect this project keeps finding.
         if !there {
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.red("No such file in the images folder."))).await?;
-            self.send_line(&format!("  {}", self.dim("Nothing was changed."))).await?;
-            self.wait_for_key().await?;
-            return Ok(());
+            self.send_line(&format!("  {}", self.dim("It will show as (missing) until"))).await?;
+            self.send_line(&format!("  {}", self.dim("the disk is put there."))).await?;
+            self.send_line("").await?;
+            self.send(&format!("  Set it anyway? {}: ", self.cyan("y/N"))).await?;
+            self.flush().await?;
+            let answer = self.get_line_input().await?.unwrap_or_default();
+            if !answer.trim().eq_ignore_ascii_case("y") {
+                return Ok(());
+            }
         }
         let chosen = name.clone();
         tokio::task::spawn_blocking(move || {

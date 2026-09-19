@@ -1178,6 +1178,46 @@ mod generate {
     #[cfg(test)]
     mod tests {
         use super::describe_contents;
+    /// `hang` wraps to the catalogue's width and keeps every word.
+    ///
+    /// **What the width guard structurally cannot see.** That guard wants short
+    /// lines, so a wrap that dropped a word, reordered one, or put its
+    /// continuation at the left margin would sail through it — the file would
+    /// simply describe the disk wrongly, in a reference an operator is sent to
+    /// precisely because they cannot see the disk.
+    #[test]
+    fn test_the_hanging_wrap_keeps_every_word_and_its_indent() {
+        let head = "   (imsaisim)  ";
+        let body = "mount only -- IMDOS (IMSAI CP/M), BASIC, development tools, 44 files";
+        let out = super::hang(head, body);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.len() > 1, "this is the entry that forced the wrap: {out:?}");
+        for l in &lines {
+            assert!(l.len() <= 80, "{l:?} is {} columns", l.len());
+        }
+        assert!(lines[0].starts_with(head), "the tag stays on the first line");
+        for l in &lines[1..] {
+            assert!(
+                l.starts_with(&" ".repeat(head.len())),
+                "a continuation hangs under the text, not at the margin: {l:?}"
+            );
+        }
+        let got: Vec<&str> = out.split_whitespace().collect();
+        let mut want: Vec<&str> = head.split_whitespace().collect();
+        want.extend(body.split_whitespace());
+        assert_eq!(got, want, "the wrap lost or reordered a word");
+
+        // One that fits is left alone rather than wrapped for the sake of it.
+        assert_eq!(super::hang(head, "boots -- CP/M 2.2, 42 files").lines().count(), 1);
+
+        // The summary's later lines are already written to fit and at their own
+        // indent -- re-wrapping them would move a note that is deliberately at
+        // six columns.
+        let noted = super::hang(head, "mount only -- x\n      does not boot here:\n      why");
+        assert_eq!(noted.lines().nth(1), Some("      does not boot here:"));
+        assert_eq!(noted.lines().nth(2), Some("      why"));
+    }
+
 
         fn files(names: &[&str]) -> Vec<String> {
             names.iter().map(|n| n.to_string()).collect()
