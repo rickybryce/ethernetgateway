@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-19
+
 ### Added
 
 - **Restart and shutdown are hidden where they cannot work.**  The shipped
@@ -7656,7 +7658,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.1
 [1.0.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0
 [1.0.0-RC2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0-RC2
 [1.0.0-RC1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0-RC1

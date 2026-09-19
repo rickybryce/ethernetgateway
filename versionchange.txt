@@ -164,7 +164,19 @@ web/diskreference.html       # <title>, .hdr-version, footer
 #      which mounts every image through the product's own path and reads its
 #      real directory:
 #
-#        cargo test --bin ethernetgateway -- --ignored --nocapture record_repodisks
+#        REPODISKS_RECORD=1 cargo test --release --bin ethernetgateway \
+#          -- --ignored --nocapture record_repodisks
+#
+#      **THE ENV VAR IS NOT OPTIONAL AND ITS ABSENCE IS SILENT.**  This
+#      line lacked it until 2026-09-19, and without it the test prints
+#      "REPODISKS_RECORD=1 not set; skipping" and passes in 0.00s --
+#      so a release check that runs the documented command, diffs the
+#      file and finds it unchanged has proved nothing at all.  That is
+#      the same shape as the six interop gates that spent an unknown
+#      period passing without running: demand positive evidence in the
+#      output ("wrote src/cpm/repodisks.txt: N disks"), never the pass.
+#      Its partner above shows `NONBOOTING_RECORD=1` correctly, which is
+#      why only this one went unnoticed.
 #
 #      Re-run it when a disk format is added (a disk we could not read before
 #      will now list its files instead of saying it has no CP/M filesystem),
