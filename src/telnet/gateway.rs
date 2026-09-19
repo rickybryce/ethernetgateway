@@ -2694,7 +2694,7 @@ impl TelnetSession {
             }
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))
                 .await?;
-            let prompt = format!("{}> ", self.cyan("ethernet/gateway"));
+            let prompt = format!("{}> ", self.cyan("gateway/gateway"));
             self.send(&prompt).await?;
             self.flush().await?;
 

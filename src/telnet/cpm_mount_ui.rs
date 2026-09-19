@@ -357,7 +357,7 @@ impl TelnetSession {
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))
                 .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm/disks"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/cpm/disks"));
             self.send(&prompt).await?;
             self.flush().await?;
 

@@ -833,8 +833,8 @@ fn test_reject_insecure_ip_link_local_dot_one_follows_the_flag() {
 
 #[test]
 fn test_menu_paths() {
-    assert_eq!(Menu::Main.path(), "ethernet");
-    assert_eq!(Menu::FileTransfer.path(), "ethernet/xfer");
+    assert_eq!(Menu::Main.path(), "gateway");
+    assert_eq!(Menu::FileTransfer.path(), "gateway/xfer");
 }
 
 // ─── Color helpers ───────────────────────────────────
@@ -5221,31 +5221,158 @@ fn test_file_transfer_help_screen_row_count() {
     );
 }
 
-/// The breadcrumb prompts for the File Transfer submenu and each
-/// per-protocol page must fit PETSCII width (40 cols) when the
-/// "> " suffix is appended.
+/// **Every menu prompt fits a C64, and every path-shaped one hangs off the
+/// main menu's root.**
+///
+/// This replaced a hand-copied list of four breadcrumbs.  There are 33 prompt
+/// literals in `src/telnet/`, so that list covered an eighth of them and its
+/// own comment asked the next person to keep it in sync -- the same shape as
+/// the `show_error` list whose per-file hole is documented above.  It reads
+/// the directory instead, because `include_str!` cannot enumerate one and a
+/// named list of files is a hole that opens the day a file is added.
+///
+/// **Two families of prompt, and the scan found that out rather than assuming
+/// it.**  A *breadcrumb* is a path from the main menu (`gateway/config/cpm`);
+/// a *field* prompt is one word naming what is being asked for (`baud`,
+/// `runs`, `image`).  The first version of this test required a root of every
+/// prompt it found and went red on `baud`, which is correct as written.  So
+/// the root rule is scoped to the ones that are paths, and the width rule --
+/// the one a 40-column PETSCII screen enforces by silently cutting the tail --
+/// applies to all of them.
+///
+/// The root rule is what a rename breaks: renaming the root on the main menu
+/// and leaving a child screen saying something else makes the prompt lie about
+/// where the user is, which is the whole job it does.  (`xmodem` -> `ethernet`
+/// once before, `ethernet` -> `gateway` on 2026-09-19.)
+///
+/// **The third pass is the one that closes the hole**, and it is why this
+/// scans literals rather than only the `format!` call.  Two breadcrumbs --
+/// `gateway/config/xfer/xmodem` and `.../ymodem` -- are *arguments* to the
+/// shared `xmodem_family_settings` page, so they never appear next to a
+/// `format!` and the first two passes could not see them at all.  Sweeping
+/// every path-shaped literal catches those, and catches a new screen that
+/// invents a different root wherever its string is written.  Exactly two
+/// path-shaped literals in `src/telnet/` are not prompts, and they are named
+/// below rather than pattern-matched away: an allowlist that has to be edited
+/// on purpose is a hole somebody has to dig, which a looser regex is not.
+///
+/// `Menu::path()` is called rather than copied.  The genuinely dynamic prompts
+/// -- `prompt_str`'s transfer subdirectory and the serial pages' per-port
+/// labels -- are built at run time from the same root and cannot be read
+/// statically.
 #[test]
-fn test_file_transfer_breadcrumbs_fit_petscii() {
-    // These mirror the literal strings passed to `self.cyan(...)`
-    // in the submenu and per-protocol pages.  Keep this list in
-    // sync with the code; a rename in one place will trigger a
-    // test failure if not updated here.
-    let breadcrumbs = [
-        "ethernet/config/xfer",
-        "ethernet/config/xfer/xmodem",
-        "ethernet/config/xfer/ymodem",
-        "ethernet/config/xfer/zmodem",
+fn test_every_menu_prompt_fits_petscii_and_shares_the_main_menu_root() {
+    // The root the main menu itself prints.  Taken from the code, so this
+    // test cannot disagree with the screen about what the root is.
+    let root = Menu::Main.path();
+
+    // Path-shaped literals in `src/telnet/` that are not menu prompts.
+    const NOT_PROMPTS: &[&str] = &[
+        "km/h", // weather.rs, a unit
+        "n/a",  // config_ui.rs, an empty-value marker
     ];
-    for b in &breadcrumbs {
-        let prompt = format!("{}> ", b);
+
+    let fits = |label: &str, path: &str| {
+        let prompt = format!("{}> ", path);
         assert!(
             prompt.len() <= PETSCII_WIDTH,
-            "breadcrumb prompt '{}' is {} chars, exceeds {}",
-            prompt,
+            "{label}: prompt '{prompt}' is {} chars, exceeds {PETSCII_WIDTH}",
             prompt.len(),
-            PETSCII_WIDTH,
         );
+    };
+    let rooted = |label: &str, path: &str| {
+        assert!(
+            path == root || path.starts_with(&format!("{root}/")),
+            "{label}: path prompt '{path}' does not hang off the main menu root '{root}'",
+        );
+    };
+
+    // The three top-level menus, called rather than copied.
+    fits("Menu::Main", Menu::Main.path());
+    rooted("Menu::Main", Menu::Main.path());
+    fits("Menu::FileTransfer", Menu::FileTransfer.path());
+    rooted("Menu::FileTransfer", Menu::FileTransfer.path());
+    fits("Menu::Browser", Menu::Browser.path());
+    rooted("Menu::Browser", Menu::Browser.path());
+
+    /// Is `lit` shaped like a menu path -- lowercase segments joined by `/`?
+    fn path_shaped(lit: &str) -> bool {
+        lit.contains('/')
+            && lit.split('/').all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            })
     }
+
+    const NEEDLE: &str = r#"format!("{}> ", self.cyan(""#;
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/telnet");
+    let mut inline_prompts = 0;
+    let mut path_literals = 0;
+    let mut files_seen = 0;
+
+    for entry in std::fs::read_dir(dir).expect("src/telnet is not readable") {
+        let path = entry.expect("unreadable entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // This file contains the needle itself, a few lines above.
+        if name == "tests.rs" {
+            continue;
+        }
+        files_seen += 1;
+        let code = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .replace('\r', "");
+
+        // Pass one: the literal written straight into a prompt.  Every one
+        // of these is a prompt whatever its shape, so the width rule applies
+        // to all of them and the root rule to the ones that are paths.
+        let mut at = 0;
+        while let Some(i) = code[at..].find(NEEDLE) {
+            let lit_at = at + i + NEEDLE.len();
+            at = lit_at;
+            let Some(close) = code[lit_at..].find('"') else {
+                panic!("{name}: unterminated prompt literal at byte {lit_at}");
+            };
+            let lit = &code[lit_at..lit_at + close];
+            inline_prompts += 1;
+            fits(&name, lit);
+            if path_shaped(lit) {
+                rooted(&name, lit);
+            }
+        }
+
+        // Pass two: every path-shaped literal anywhere in the file, which is
+        // how the two breadcrumbs passed as arguments are reached.
+        for lit in code.split('"').skip(1).step_by(2) {
+            if !path_shaped(lit) || NOT_PROMPTS.contains(&lit) {
+                continue;
+            }
+            path_literals += 1;
+            fits(&name, lit);
+            rooted(&name, lit);
+        }
+    }
+
+    // Positive controls.  Without these a needle that matched nothing -- a
+    // reformatted `format!`, a renamed helper -- would pass having checked
+    // only the three `Menu::path()` arms above, which is exactly how the list
+    // this test replaced went stale.
+    assert!(
+        files_seen >= 10,
+        "only {files_seen} telnet source files read; the directory scan is not working"
+    );
+    assert!(
+        inline_prompts >= 30,
+        "only {inline_prompts} inline prompt literals found; the scan pattern has stopped matching"
+    );
+    assert!(
+        path_literals >= 25,
+        "only {path_literals} path-shaped literals found; the literal sweep has stopped matching"
+    );
 }
 
 /// Every per-protocol settings page must render its status rows
@@ -5971,7 +6098,7 @@ fn test_max_file_size() {
 
 #[test]
 fn test_browser_menu_path() {
-    assert_eq!(Menu::Browser.path(), "ethernet/web");
+    assert_eq!(Menu::Browser.path(), "gateway/web");
 }
 
 #[test]
@@ -13585,3 +13712,4 @@ fn test_the_second_page_is_offered_and_drawn_as_one_decision() {
         assert!(page.contains("Q=Back"), "powered={powered}: no way back:\n{page}");
     }
 }
+

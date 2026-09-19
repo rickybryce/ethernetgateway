@@ -142,7 +142,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/dialup"));
+            let prompt = format!("{}> ", self.cyan("gateway/dialup"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -376,7 +376,7 @@ impl TelnetSession {
                 self.action_prompt("H", "Help")
             ))
             .await?;
-            let prompt = format!("{}> ", self.cyan("ethernet/serial"));
+            let prompt = format!("{}> ", self.cyan("gateway/serial"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -678,11 +678,11 @@ impl TelnetSession {
             .await?;
 
             let prompt_label = if kermit_mode {
-                format!("ethernet/kermit-{}", id.label().to_ascii_lowercase())
+                format!("gateway/kermit-{}", id.label().to_ascii_lowercase())
             } else if console_mode {
-                format!("ethernet/console-{}", id.label().to_ascii_lowercase())
+                format!("gateway/console-{}", id.label().to_ascii_lowercase())
             } else {
-                format!("ethernet/modem-{}", id.label().to_ascii_lowercase())
+                format!("gateway/modem-{}", id.label().to_ascii_lowercase())
             };
             let prompt = format!("{}> ", self.cyan(&prompt_label));
             self.send(&prompt).await?;

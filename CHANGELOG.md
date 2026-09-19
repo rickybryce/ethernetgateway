@@ -111,6 +111,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session is still **not** recorded as a failed guess: doing so would let
   anyone lock out a neighbour's address by connecting and dropping.
 
+### Changed
+
+- **The telnet menu prompt now reads `gateway>` instead of `ethernet>`.**  The
+  prompt is a path from the main menu, so every screen beneath it moved with
+  the root: `gateway/config`, `gateway/config/cpm/boot`, `gateway/xfer` and the
+  rest.  Renaming only the main menu would have left each child screen
+  disagreeing with the screen it was reached from, which is the one job the
+  prompt does.  (It was renamed `xmodem` &rarr; `ethernet` once before, when
+  the project stopped being an XMODEM gateway.)
+
 ### Fixed
 
 - **The second page ran a `hostname` process on every keypress.**  Both of its

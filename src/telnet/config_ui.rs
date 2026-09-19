@@ -204,7 +204,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config"));
+            let prompt = format!("{}> ", self.cyan("gateway/config"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -417,7 +417,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/other"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/other"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -838,7 +838,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/cpm"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -1008,7 +1008,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/log"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/log"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -1178,7 +1178,7 @@ impl TelnetSession {
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))
                 .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm/modem"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/cpm/modem"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -1290,7 +1290,7 @@ impl TelnetSession {
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm/printer"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/cpm/printer"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -1717,7 +1717,7 @@ impl TelnetSession {
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm/boot"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/cpm/boot"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -1950,7 +1950,7 @@ impl TelnetSession {
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/cpm/rom"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/cpm/rom"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -2060,7 +2060,7 @@ impl TelnetSession {
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/resolve"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/resolve"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -2224,7 +2224,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/security"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/security"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -2623,7 +2623,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/server"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/server"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -3019,7 +3019,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/relay"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/relay"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -3590,7 +3590,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/server/gateway"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/server/gateway"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -4339,7 +4339,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/xfer"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/xfer"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -4462,7 +4462,7 @@ impl TelnetSession {
     pub(in crate::telnet) async fn xmodem_settings(&mut self) -> Result<(), std::io::Error> {
         self.xmodem_family_settings(
             "XMODEM SETTINGS",
-            "ethernet/config/xfer/xmodem",
+            "gateway/config/xfer/xmodem",
             "XMODEM family",
         )
         .await
@@ -4471,7 +4471,7 @@ impl TelnetSession {
     pub(in crate::telnet) async fn ymodem_settings(&mut self) -> Result<(), std::io::Error> {
         self.xmodem_family_settings(
             "YMODEM SETTINGS",
-            "ethernet/config/xfer/ymodem",
+            "gateway/config/xfer/ymodem",
             "XMODEM family (shared)",
         )
         .await
@@ -4692,7 +4692,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/xfer/zmodem"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/xfer/zmodem"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -4902,7 +4902,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/xfer/punter"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/xfer/punter"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -5190,7 +5190,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/xfer/kermit"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/xfer/kermit"));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -5295,7 +5295,7 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/config/xfer/kermit"));
+            let prompt = format!("{}> ", self.cyan("gateway/config/xfer/kermit"));
             self.send(&prompt).await?;
             self.flush().await?;
 

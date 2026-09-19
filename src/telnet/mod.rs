@@ -453,9 +453,9 @@ enum KermitPageNav {
 impl Menu {
     fn path(&self) -> &'static str {
         match self {
-            Menu::Main => "ethernet",
-            Menu::FileTransfer => "ethernet/xfer",
-            Menu::Browser => "ethernet/web",
+            Menu::Main => "gateway",
+            Menu::FileTransfer => "gateway/xfer",
+            Menu::Browser => "gateway/web",
         }
     }
 }

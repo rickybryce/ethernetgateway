@@ -858,10 +858,10 @@ impl TelnetSession {
             // covers the three top-level menus only, so this page spells its
             // own the way `configuration()` does.
             // Named for the page, like every other prompt in the product
-            // (`ethernet/config`, `ethernet/serial`): "more" was the old
+            // (`gateway/config`, `gateway/serial`): "more" was the old
             // item's word and stopped naming anything when it became
             // "Second Menu".  Found by reading the live screen, not the code.
-            let prompt = format!("{}> ", self.cyan("ethernet/second"));
+            let prompt = format!("{}> ", self.cyan("gateway/second"));
             self.send(&prompt).await?;
             self.flush().await?;
 
