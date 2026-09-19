@@ -29,10 +29,24 @@ echo "--- select $P on both"
 ( R $RECEIVER "xfer.py proto $P" > $OUT/pm 2>&1 ) &
 ( R $SENDER   "xfer.py proto $P" > $OUT/ps 2>&1 ) &
 wait
-echo "--- receiver, then sender 10s later"
-( R $RECEIVER "xfer.py recv $P $NAME" > $OUT/r 2>&1 ) & RP=$!
-sleep 10
-( R $SENDER   "xfer.py send $P puntest" > $OUT/s 2>&1 ) & SP=$!
-wait $RP $SP
+# **Arm, start, then LEAVE THE MONITOR ALONE.**  Reading a screen goes through
+# VICE's remote monitor, and entering the monitor *pauses the emulated machine*.
+# These two steps used to run in parallel with a 10 s offset, so the receiver
+# was still being read when the sender began -- a stopped C64 on the far end of
+# a handshake.  Measured 2026-09-19 on the two-hop path: with the overlap,
+# Punter moved 179 bytes of a 1775-byte payload and stalled with 50-73 s
+# silences on both wires; run sequentially, with nothing touching the monitor
+# afterwards, the same path moved 1938 bytes and graded byte-identical.
+#
+# XMODEM survived the overlap and Punter did not, which is why this looked
+# like a protocol or a relay defect for an afternoon.  It was the instrument:
+# a screen read is not a passive observation here, it is a stop.
+echo "--- receiver armed (to completion), then sender (to completion)"
+R $RECEIVER "xfer.py recv $P $NAME" > $OUT/r 2>&1
+R $SENDER   "xfer.py send $P puntest" > $OUT/s 2>&1
+# The transfer runs with no monitor access at all.  Sized for the slowest cell
+# measured (2400 baud, ~1.8 KB payload, ~60 s) with room over.
+echo "--- quiet window: not touching VICE for ${QUIET:-180}s"
+sleep "${QUIET:-180}"
 echo "=== RECEIVER ==="; tail -9 $OUT/r
 echo "=== SENDER ==="; tail -9 $OUT/s
