@@ -770,10 +770,12 @@ fn spawn_folder_picker(
 fn spawn_boot_disk_picker(
     images_dir: std::path::PathBuf,
 ) -> std::sync::mpsc::Receiver<Option<std::path::PathBuf>> {
-    let start = if images_dir.is_dir() {
-        images_dir
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    // Absolute, because a relative directory is resolved against whatever the
+    // process's working directory happens to be and `transfer_dir` is relative
+    // by default.
+    let start = match images_dir.canonicalize() {
+        Ok(d) if d.is_dir() => d,
+        _ => std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
     };
     let (tx, rx) = std::sync::mpsc::channel();
     picker_runtime().spawn(async move {
@@ -1560,7 +1562,19 @@ impl App {
                         crate::cpm::image::images_dir(&crate::cpm::layout::cpm_dir(
                             &self.cfg.transfer_dir,
                         ));
-                    if path.parent() != Some(images.as_path()) {
+                    // **Both sides resolved before they are compared.**
+                    // `transfer_dir` defaults to the *relative*
+                    // `ethernetgateway-data/transfer` and a file dialog hands
+                    // back an absolute path, so the bare comparison could never
+                    // match and warned about every disk picked out of the
+                    // images folder -- the normal case, and the one this button
+                    // exists for. If either side will not resolve, say nothing:
+                    // a warning we cannot stand behind is worse than silence.
+                    let here = path.parent().and_then(|p| p.canonicalize().ok());
+                    let want = images.canonicalize().ok();
+                    if let (Some(here), Some(want)) = (here, want)
+                        && here != want
+                    {
                         logger::log(format!(
                             "CP/M boot disk: {} is not in {} — copy it there, or the \
                              setting will show as missing.",

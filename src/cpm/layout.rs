@@ -236,8 +236,12 @@ while an image is mounted, and they come straight back when you unmount it.
 repodisks.txt beside this file lists what is on every disk in the
 collections this gateway is known to run, so you can tell which one you
 want before you go and find it.  Every disk is listed once by name, and
-each line says whether that disk BOOTS or is MOUNT ONLY.  The disks
-themselves are not ours to ship - that file says where each comes from.
+each line says whether that disk BOOTS or is MOUNT ONLY.  That answer is
+measured by actually booting it here, so a disk that carries a boot
+program and then runs into silence says so, on its own line, with the
+reason - it is not offered as a boot disk, and the boot pickers leave it
+out for the same reason.  The disks themselves are not ours to ship -
+that file says where each comes from.
 
 
 MOUNTING IS NOT BOOTING
