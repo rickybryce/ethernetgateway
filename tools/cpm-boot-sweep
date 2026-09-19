@@ -1,0 +1,43 @@
+#!/bin/sh
+# Boot every disk the gateway offers as bootable, with a companion of its own
+# board mounted beside it, across every collection this machine has.
+#
+# The gate itself is `test_every_bootable_disk_boots_and_sees_a_companion_on_
+# its_board`, which takes ONE folder in `CPM_BOOT_DIR` -- like every other
+# survey in `boot_machine.rs`.  This drives it once per collection, because a
+# per-collection report is what makes a regression locatable: "seven disks went
+# quiet" is a puzzle, "the imsaisim seven went quiet" is an answer.
+#
+# The collection list is deliberately the same one `layout.rs`'s REPOS holds
+# for the catalogue -- if a collection is added there it belongs here too, or
+# the catalogue starts describing disks no sweep has booted.
+#
+#   usage:  tools/cpm-boot-sweep <output-folder>
+#
+# Release, because each disk runs hundreds of millions of instructions.
+set -u
+OUT=${1:?usage: tools/cpm-boot-sweep <output-folder>}
+mkdir -p "$OUT"
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$REPO"
+
+for spec in \
+  "hansel:$HOME/AltairRepos/Altair8800/disks" \
+  "duino:$HOME/AltairRepos/AltairDuino-Disks/original" \
+  "duino-extra:$HOME/AltairRepos/AltairDuino-Disks/extra" \
+  "altairsim:$HOME/z80pack/altairsim/disks/library" \
+  "cpmsim:$HOME/z80pack/cpmsim/disks/library" \
+  "cromemcosim:$HOME/z80pack/cromemcosim/disks/library" \
+  "imsaisim:$HOME/z80pack/imsaisim/disks/library" ; do
+  tag=${spec%%:*}; dir=${spec#*:}
+  [ -d "$dir" ] || { echo "SKIP $tag -- no $dir"; continue; }
+  echo "===== $tag ($dir) ====="
+  CPM_BOOT_DIR="$dir" cargo test --release \
+    test_every_bootable_disk_boots_and_sees_a_companion_on_its_board \
+    -- --ignored --nocapture --test-threads=1 > "$OUT/$tag.txt" 2>&1
+  echo "exit=$? -> $OUT/$tag.txt"
+  grep 'offered as bootable --' "$OUT/$tag.txt" || true
+done
+echo
+echo "===== every collection ====="
+grep -h 'offered as bootable --' "$OUT"/*.txt

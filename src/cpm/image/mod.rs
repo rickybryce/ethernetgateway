@@ -598,6 +598,60 @@ pub fn available_images(cpm_base: &Path) -> Vec<String> {
     out
 }
 
+/// Every file on one image, as the disk's own directory has it.
+///
+/// `None` when the image has no CP/M filesystem we can read — a disk that
+/// boots its own operating system (Altair DOS, Disk BASIC) keeps its files
+/// in a layout that is that system's business, not CP/M's. Saying so is
+/// more use than an empty list, which reads as "an empty disk".
+///
+/// **Here rather than beside either caller**, because there are two now: the
+/// `repodisks.txt` generator in [`crate::cpm::layout`] writes it down, and the
+/// boot sweep in [`crate::cpm::boot_machine`] uses it as an *oracle* — the
+/// list a booted guest's own `DIR` is checked against.  Those two must never
+/// be able to disagree about what is on a disk.
+#[cfg(test)]
+pub(crate) fn files_on(path: &std::path::Path) -> Option<Vec<String>> {
+    use crate::cpm::image::{fs::ImageFs, identify, media::FileMedia, media::Media};
+    let size = std::fs::metadata(path).ok()?.len();
+    let filename = path.file_name()?.to_string_lossy().to_string();
+    let mut probe = FileMedia::open(path, true).ok()?;
+    let ident = identify::identify(&filename, size, |fmt| {
+        let mut dir = Vec::with_capacity(fmt.maxdir as usize * 32);
+        for rec in 0..fmt.dir_records() {
+            let off = fmt.data_record_offset(rec)?;
+            let mut buf = [0u8; 128];
+            Media::read_at(&mut probe, off, &mut buf).ok()?;
+            dir.extend_from_slice(&buf);
+        }
+        (!dir.is_empty()).then_some(dir)
+    })
+    .ok()?;
+    drop(probe);
+    let media = FileMedia::open(path, true).ok()?;
+    let fs = ImageFs::mount(Box::new(media), ident.format, true).ok()?;
+
+    // Every user area, not just 0: a disk that keeps its tools on user 1
+    // would otherwise look half empty. The area is named only when it is
+    // not the ordinary one, so the common case stays uncluttered.
+    let mut names: Vec<String> = Vec::new();
+    for user in 0..16u8 {
+        // `????????.???` — the same wildcard `DIR` builds, through the
+        // same matcher, so this listing cannot disagree with what the
+        // operator sees on the drive.
+        let mut raw = [0u8; 36];
+        raw[1..12].fill(b'?');
+        let fcb = crate::cpm::fcb::Fcb::from_bytes(&raw);
+        for (name, ext) in fs.matching(user, &fcb) {
+            let n = String::from_utf8_lossy(&name).trim_end().to_string();
+            let e = String::from_utf8_lossy(&ext).trim_end().to_string();
+            let full = if e.is_empty() { n } else { format!("{n}.{e}") };
+            names.push(if user == 0 { full } else { format!("{full}  (user {user})") });
+        }
+    }
+    Some(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

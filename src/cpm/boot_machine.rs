@@ -4132,6 +4132,378 @@ mod tests {
         assert!(spoke > 0, "no image in {dir} said anything");
     }
 
+    /// The one file on an image a booted guest can be *asked about*, and how
+    /// many it has in all.
+    ///
+    /// Read through the product's own mount path, so the question put to the
+    /// guest and the catalogue in `repodisks.txt` cannot disagree about what is
+    /// on a disk.  `None` when there is nothing to ask: no CP/M filesystem we
+    /// can read, or no name a CCP would accept.  User area 0 only -- a name
+    /// `files_on` had to annotate is not a name that can be typed.
+    #[cfg(test)]
+    fn oracle_file(path: &std::path::Path) -> (Option<String>, usize) {
+        let files = crate::cpm::image::files_on(path).unwrap_or_default();
+        let pick = files
+            .iter()
+            .find(|f| {
+                !f.contains("(user ")
+                    && f.split_once('.').map(|(n, e)| {
+                        !n.is_empty()
+                            && n.len() <= 8
+                            && !e.is_empty()
+                            && e.len() <= 3
+                            && f.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+                    }) == Some(true)
+            })
+            .cloned();
+        (pick, files.len())
+    }
+
+    /// Let a guest finish arriving before typing at it.
+    ///
+    /// [`run_until_quiet`] returns at the first long silence, which on some
+    /// disks falls *between* the sign-on banner and the prompt: TDISK01 was
+    /// still drawing `A>` when the first version of the sweep typed at it, and
+    /// its CCP received `IR B:CHASE.ASM` and quite correctly answered `IR?`.
+    /// Keep asking until the guest has nothing more to say.
+    #[cfg(test)]
+    fn settle(m: &mut BootMachine, cpu: &mut Cpu, budget: u64) -> String {
+        let mut all = String::new();
+        for _ in 0..4 {
+            let more = printable(&run_until_quiet(m, cpu, budget));
+            if more.is_empty() {
+                break;
+            }
+            all.push_str(&more);
+        }
+        all
+    }
+
+    /// What a VDM-1 guest has painted, through the shipped publish path.
+    ///
+    /// Arm, publish, read -- the order a browser's poll causes, because
+    /// `publish_screen` does nothing for a screen nobody has asked about and a
+    /// sweep that skipped the arming step would read every card as blank.
+    #[cfg(test)]
+    fn vdm_text(m: &mut BootMachine, live: &crate::cpm::screen::Screen) -> String {
+        use crate::cpm::{screen, vdm};
+        let _ = screen::look(live.id());
+        m.publish_screen(live);
+        match screen::look(live.id()) {
+            screen::Look::Frame(snap) => {
+                vdm::frame_text(&vdm::frame(&snap.vdm.window, snap.vdm.scroll))
+                    .iter()
+                    .map(|l| format!("{}\n", l.trim_end()))
+                    .collect()
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Did the guest's own directory listing name this file?
+    ///
+    /// **The echo is not an answer, and this is the whole reason the check is a
+    /// function.**  Every CCP here echoes the command line, so the `CHASE.ASM`
+    /// we typed is in the output before the guest has looked at anything.  A
+    /// first version searched for the name and counted that echo: it scored
+    /// `mits-basic40.dsk` as having listed `BYE.COM` when what the disk
+    /// actually said was `SYNTAX ERROR` -- it is Altair BASIC and has no `DIR`
+    /// at all.
+    ///
+    /// What separates the two is the **separator**.  A CCP prints a directory
+    /// entry as the 8.3 fields padded apart (`CHASE    ASM`, `B: BYE      COM`);
+    /// the command line we sent carries the dot.  So the name must be followed
+    /// by at least one space and then the extension -- which the echo can never
+    /// satisfy, on any of the three CCP layouts measured here.
+    #[cfg(test)]
+    fn listed_by_the_guest(out: &str, name: &str, ext: &str) -> bool {
+        let up = out.to_ascii_uppercase();
+        let name = name.to_ascii_uppercase();
+        let ext = ext.to_ascii_uppercase();
+        up.match_indices(name.as_str()).any(|(at, _)| {
+            let rest = &up[at + name.len()..];
+            let gap = rest.len() - rest.trim_start_matches(' ').len();
+            gap > 0 && rest[gap..].starts_with(ext.as_str())
+        })
+    }
+
+    /// The echo must never satisfy [`listed_by_the_guest`], and a real listing
+    /// always must -- on each of the three CCP layouts this sweep meets.
+    ///
+    /// **Mutation-checked, and the first mutation I reached for was the wrong
+    /// one.**  Dropping `gap > 0` leaves every case passing, because what
+    /// actually turns the echo away is the **dot**: after `BYE` the echo has
+    /// `.COM`, which does not start with `COM` whether or not spaces were
+    /// required.  The mutation that kills this test is the naive matcher the
+    /// sweep really shipped with at first -- `up.contains(name) &&
+    /// up.contains(ext)` -- and that one fails on the very first assertion.
+    /// `gap > 0` earns its place on the last case instead: a guest that ran the
+    /// two fields together would otherwise read as a listing.  **A mutation
+    /// that a test survives is a statement about the mutation, not a verdict on
+    /// the test** -- but it does mean the comment claiming otherwise was a
+    /// guess, and this one is measured.
+    #[test]
+    fn test_a_command_echo_is_not_a_directory_listing() {
+        // What Altair BASIC actually answered, echo and all.
+        assert!(
+            !listed_by_the_guest("DIR B:BYE.COM. SYNTAX ERROR. . MEMORY SIZE?", "BYE", "COM"),
+            "the echoed command line is our question, not the guest's answer"
+        );
+        // The same trap with the dot removed by a line break rather than by the
+        // guest: still not a listing, because a listing pads.
+        assert!(!listed_by_the_guest("DIR B:CHASE.ASM.. IR?. . A>", "CHASE", "ASM"));
+        // The three real layouts, all of which must read as listed.
+        assert!(listed_by_the_guest("DIR B:CHASE.ASM.. B: CHASE    ASM. A>", "CHASE", "ASM"));
+        assert!(listed_by_the_guest(
+            "DIR B:CHASE.ASM. CHASE     ASM     9K  . *** 1 Files", "CHASE", "ASM"
+        ));
+        assert!(listed_by_the_guest("DIR B:BYE.COM.. B: BYE      COM. A>", "BYE", "COM"));
+        // And what `gap > 0` is for: fields run together are not two fields.
+        assert!(!listed_by_the_guest("BYECOM", "BYE", "COM"));
+    }
+    /// **Every disk offered as bootable, booted with a companion of its own
+    /// board mounted beside it.**
+    ///
+    /// Two questions in one run, and they are deliberately not one question.
+    /// *Does each disk still reach its own sign-on* is the bring-up survey
+    /// above.  *Does the operating system that comes up then see the second
+    /// disk* is what an operator does the moment the first one works, and
+    /// nothing measured it across the corpus: the single-pair gate
+    /// [`test_a_guest_writes_a_mounted_disk_and_it_reaches_the_file`] proves it
+    /// for one pair of Altair floppies and says nothing about the other
+    /// ninety-six disks or the other four boards.
+    ///
+    /// The companion is chosen through the product's own
+    /// [`BootMachine::board_for`], on the machine the boot disk resolved to,
+    /// because **"another disk this controller takes" is a fact about the
+    /// board** -- not about the filename, the collection, or the size on its
+    /// own.  Asking the board is also the only way this stays right when a
+    /// fifth controller is added.
+    ///
+    /// **The oracle is the companion's own directory**, read through the mount
+    /// path before the machine starts, and the guest is asked about **one named
+    /// file** off that list rather than for a listing to be scored.  `DIR B:`
+    /// would have to be parsed out of whatever columns that guest's CCP draws;
+    /// `DIR B:PIP.COM` is answered by every CP/M with the name or with `NO
+    /// FILE`, so the reading is exact.  A survey that can only score a
+    /// hypothesis sits at "nearly right" indefinitely -- the Altair mapping did
+    /// exactly that for four wrong hypotheses.
+    ///
+    /// **A same-board companion can still be laid out differently**, and the
+    /// booted BIOS applies its *own* parameters to B:.  So three outcomes are
+    /// reported and they are not interchangeable:
+    ///
+    /// * `listed` -- the guest read the companion's directory and named the
+    ///   file that is really on it.
+    /// * `not found` -- the drive was selected and the file was not there.  The
+    ///   board carried the disk and the filesystem on it is not the one this
+    ///   BIOS lays down; that is a fact about the pair, not a defect in either.
+    /// * `no drive` -- `Bdos Err On B: Select`.  This guest's BIOS has fewer
+    ///   drives than the board has slots, which is stock Altair CP/M being
+    ///   right about its own hardware (it knows four) and not something to fix.
+    ///
+    /// What it *asserts* is the pair the corpus turns on: every disk
+    /// [`crate::cpm::boot::image_can_boot`] offers must reach a sign-on -- a
+    /// catalogue and a picker that offer a disk the machine cannot start is the
+    /// disagreement this exists to stop -- and that the pairing actually
+    /// happened, because a run that paired nothing would otherwise pass in
+    /// silence on a folder holding one disk.
+    ///
+    /// Ignored -- set `CPM_BOOT_DIR` to a folder of `.dsk` files.
+    #[test]
+    #[ignore]
+    fn test_every_bootable_disk_boots_and_sees_a_companion_on_its_board() {
+        let Ok(dir) = std::env::var("CPM_BOOT_DIR") else {
+            eprintln!("set CPM_BOOT_DIR to run this");
+            return;
+        };
+        let root = std::path::Path::new(&dir);
+        let mut names: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".dsk"))
+            .collect();
+        names.sort();
+        assert!(!names.is_empty(), "no .dsk images in {dir}");
+
+        // Everything cheap, once, for every disk: its size, the product's own
+        // verdict on whether it offers it (a boot *sector* reading, not a boot),
+        // and the file this disk could be an oracle for.  A companion has to be
+        // choosable for every disk without re-walking the folder each time.
+        let sizes: Vec<u64> = names
+            .iter()
+            .map(|n| std::fs::metadata(root.join(n)).map(|m| m.len()).unwrap_or(0))
+            .collect();
+        let offered: Vec<bool> =
+            names.iter().map(|n| crate::cpm::boot::image_can_boot(&root.join(n))).collect();
+        let oracle: Vec<(Option<String>, usize)> =
+            names.iter().map(|n| oracle_file(&root.join(n))).collect();
+
+        let configured = std::env::var("CPM_BOOT_MACHINE")
+            .unwrap_or_else(|_| crate::cpm::console::AUTO_MACHINE.to_string());
+        let live = crate::cpm::screen::register("boot sweep");
+
+        let mut never_spoke: Vec<String> = Vec::new();
+        let (mut listed, mut missing, mut no_drive, mut unclear) = (0u32, 0u32, 0u32, 0u32);
+        let (mut alone, mut no_oracle, mut not_ccp) = (0u32, 0u32, 0u32);
+        let mut pairable = 0u32;
+
+        for (i, name) in names.iter().enumerate() {
+            if !offered[i] {
+                continue;
+            }
+            let bytes = std::fs::read(root.join(name)).unwrap();
+            let (machine, _why) = crate::cpm::detect::machine_for(&configured, &bytes);
+            let board = BootMachine::board_for(Some(&machine), sizes[i]);
+            // A VDM-1 guest prints to no port at all -- its sign-on goes into
+            // screen memory at `CC00`.  Asked of the disk in advance, exactly as
+            // the boot banner asks it, so a silent console can be read as the
+            // card working rather than as the disk failing.
+            let on_a_card = crate::cpm::detect::image_drives_vdm(&bytes);
+
+            // **A companion without a readable directory is not a companion**,
+            // because it leaves nothing to ask the guest about.  Three tiers,
+            // and the first version had only the middle one: it paired 22 of the
+            // 30 Altair floppies with `DISK0B.DSK`, which has no CP/M filesystem
+            // at all, and reported them as checked when nothing had been asked.
+            // Within a tier, deterministic by sorted name -- a survey whose
+            // pairing moves between runs cannot be compared with its own last
+            // run.
+            let same_board = |j: usize| {
+                j != i && sizes[j] > 0 && BootMachine::board_for(Some(&machine), sizes[j]) == board
+            };
+            let has_oracle = |j: usize| oracle[j].0.is_some();
+            let companion = (0..names.len())
+                .find(|&j| same_board(j) && has_oracle(j) && !offered[j])
+                .or_else(|| (0..names.len()).find(|&j| same_board(j) && has_oracle(j)))
+                .or_else(|| (0..names.len()).find(|&j| same_board(j)));
+            if companion.is_some() {
+                pairable += 1;
+            }
+
+            let mut m = BootMachine::new();
+            m.set_machine(&machine);
+            m.insert(0, bytes, true).unwrap_or_else(|e| {
+                panic!("{name}: offered as bootable, and then no board took it: {e}")
+            });
+
+            let mut companion_name = String::new();
+            let mut ask: Option<String> = None;
+            let mut on_disk = 0usize;
+            if let Some(j) = companion {
+                let path = root.join(&names[j]);
+                match m.insert(1, std::fs::read(&path).unwrap(), true) {
+                    Ok(()) => {
+                        companion_name = names[j].clone();
+                        ask = oracle[j].0.clone();
+                        on_disk = oracle[j].1;
+                    }
+                    Err(e) => println!("  {name}: companion {} refused slot 1: {e}", names[j]),
+                }
+            }
+
+            let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
+            if let Err(e) = m.boot(&mut cpu, 0) {
+                never_spoke.push(format!("{name}: refused to boot: {e}"));
+                continue;
+            }
+            let mut banner = settle(&mut m, &mut cpu, 200_000_000);
+            let mut card = String::new();
+            if banner.trim().is_empty() && on_a_card {
+                card = vdm_text(&mut m, &live);
+                banner = card.clone();
+            }
+            if banner.trim().is_empty() {
+                never_spoke.push(format!(
+                    "{name}: silent, pc={:#06x} stuck_polls={}{}",
+                    cpu.registers().pc(),
+                    m.stuck_polls(),
+                    if on_a_card { " (and nothing on the card either)" } else { "" }
+                ));
+                continue;
+            }
+
+            let board_name = board.unwrap_or("?");
+            let on = if card.is_empty() { "" } else { " [on the VDM-1]" };
+            if companion_name.is_empty() {
+                alone += 1;
+                println!("  {name} [{board_name}]{on}  booted; no other disk here on that board");
+                continue;
+            }
+            let Some(ask) = ask else {
+                no_oracle += 1;
+                println!(
+                    "  {name} [{board_name}]{on} + {companion_name}  booted; no disk on that \
+                     board here has a readable CP/M directory to check against"
+                );
+                continue;
+            };
+
+            let mut seen = type_at(&mut m, &mut cpu, format!("DIR B:{ask}\r").as_bytes(), 400_000_000);
+            seen.push_str(&settle(&mut m, &mut cpu, 100_000_000));
+            if !card.is_empty() {
+                seen = vdm_text(&mut m, &live);
+            }
+            let (stem, ext) = ask.split_once('.').unwrap_or((ask.as_str(), ""));
+            let up = seen.to_ascii_uppercase();
+            // **`DIR` is a CCP command, and not every disk here boots a CCP.**
+            // Altair Disk Extended BASIC answers it with `SYNTAX ERROR`, and a
+            // disk still asking `RECONFIGURE (Y, N, L)?` has not got as far as
+            // a prompt at all -- neither is an answer about drive B:, and
+            // filing both under "unclear" made twenty-two disks look like one
+            // unexamined lump.  What tells them apart is where the guest was
+            // *before* the question: a CCP had drawn its `A>`.
+            let at_ccp = banner.trim_end().ends_with('>');
+            let verdict = if listed_by_the_guest(&seen, stem, ext) {
+                listed += 1;
+                format!("listed {ask} (1 of {on_disk} on the disk)")
+            } else if up.contains("SELECT") {
+                no_drive += 1;
+                "no drive -- this BIOS has fewer drives than the board has slots".to_string()
+            } else if up.contains("NO FILE") {
+                missing += 1;
+                format!("NOT FOUND -- {ask} IS on the disk and the guest did not see it")
+            } else if !at_ccp {
+                not_ccp += 1;
+                let tail: String = banner.trim_end().chars().rev().take(46).collect();
+                format!(
+                    "not at a CP/M prompt, so DIR is not its language -- it was at \"{}\"",
+                    tail.chars().rev().collect::<String>().trim()
+                )
+            } else {
+                unclear += 1;
+                "unclear -- at a CCP prompt and the answer reads as neither".to_string()
+            };
+            println!("  {name} [{board_name}]{on} + {companion_name} -> {verdict}");
+            println!("      DIR B:{ask} => {}", seen.replace('\n', " ").trim());
+        }
+
+        let count = offered.iter().filter(|b| **b).count();
+        println!(
+            "\n{dir}: {count} offered as bootable -- companion listed {listed}, not found \
+             {missing}, no drive {no_drive}, not a CP/M prompt {not_ccp}, unclear {unclear}, \
+             no oracle {no_oracle}, unpaired {alone}"
+        );
+        assert!(
+            never_spoke.is_empty(),
+            "offered as bootable and never signed on:\n  {}",
+            never_spoke.join("\n  ")
+        );
+        // **A positive control on the scan, not on what it concluded.**  Every
+        // disk that COULD be paired must have reached a verdict: an accounting
+        // identity rather than a threshold, because `> 0` cleared on one
+        // successful pair while the other twenty-two went unmeasured, and that
+        // is exactly how the first version of this passed while measuring
+        // almost nothing.
+        assert_eq!(
+            listed + missing + no_drive + not_ccp + unclear + no_oracle,
+            pairable,
+            "{pairable} disks had a companion and only {} reached a verdict",
+            listed + missing + no_drive + not_ccp + unclear + no_oracle
+        );
+    }
+
     /// **What every bootable image in a folder does with each spelling of
     /// Backspace.**
     ///
