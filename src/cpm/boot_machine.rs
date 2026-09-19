@@ -4390,6 +4390,7 @@ mod tests {
         let mut never_spoke: Vec<String> = Vec::new();
         let (mut listed, mut missing, mut no_drive, mut unclear) = (0u32, 0u32, 0u32, 0u32);
         let (mut alone, mut no_oracle, mut not_ccp) = (0u32, 0u32, 0u32);
+        let mut refused = 0u32;
         let mut pairable = 0u32;
 
         for (i, name) in names.iter().enumerate() {
@@ -4442,7 +4443,18 @@ mod tests {
                         ask = oracle[j].0.clone();
                         on_disk = oracle[j].1;
                     }
-                    Err(e) => println!("  {name}: companion {} refused slot 1: {e}", names[j]),
+                    Err(e) => {
+                        // Counted, because the identity below is `every disk
+                        // that HAD a companion reached a verdict` and this is
+                        // the one way a disk can have had one and not be
+                        // classified. Leaving it out made the guard fail for
+                        // its own reasons, which teaches a reader to discount
+                        // it; folding it into the count where the companion was
+                        // *chosen* made the identity tautological, which is
+                        // worse -- it could no longer go red at all.
+                        refused += 1;
+                        println!("  {name}: companion {} refused slot 1: {e}", names[j]);
+                    }
                 }
             }
 
@@ -4529,8 +4541,9 @@ mod tests {
         // almost nothing.
         assert_eq!(
             listed + missing + no_drive + not_ccp + unclear + no_oracle,
-            pairable,
-            "{pairable} disks had a companion and only {} reached a verdict",
+            pairable - refused,
+            "{pairable} disks had a companion ({refused} of them refused the slot), and \
+             only {} reached a verdict",
             listed + missing + no_drive + not_ccp + unclear + no_oracle
         );
     }

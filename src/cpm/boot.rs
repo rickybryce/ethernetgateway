@@ -1259,7 +1259,12 @@ pub(crate) mod tests {
         let path = dir.join("mine.dsk");
         // Deliberately a length the table DOES have, so this exercises the hash
         // rather than merely the size pre-filter: same size, different bytes.
-        let len = super::nonbooting_table().keys().map(|(s, _)| *s).next().unwrap_or(337_568);
+        // The SMALLEST size in the table, not whichever one the map hands over
+        // first: `HashMap` iteration order is not stable, so `next()` wrote a
+        // 256 KB file on some runs and a 4 MB one on others, for a test that
+        // only needs the size to match.
+        let len =
+            super::nonbooting_table().keys().map(|(s, _)| *s).min().unwrap_or(337_568);
         std::fs::write(&path, vec![0x5A_u8; len as usize]).unwrap();
         assert_eq!(
             super::measured_not_booting(&path),
