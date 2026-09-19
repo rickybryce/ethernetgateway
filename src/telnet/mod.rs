@@ -143,6 +143,31 @@ pub(crate) use weather::{GeoResult, WeatherUnits, resolve_weather_units, format_
     parse_geo_results};
 
 // ─── Telnet protocol (RFC 854/855) ──────────────────────────
+/// How long the first-connection welcome page keeps appearing.
+pub(in crate::telnet) const WELCOME_SHOW_DAYS: u64 = 7;
+
+/// Should the welcome page be shown to this caller?
+///
+/// **Pure, because the interesting cases are clocks.**  `first_shown` is the
+/// stamp in the config (`0` = nobody has seen it yet) and `now` is unix time.
+///
+/// A stamp in the *future* -- a box whose clock was wrong when it was written,
+/// then corrected -- makes `now - first` underflow, so this saturates and the
+/// page keeps showing until real time catches up.  That is the right way to be
+/// wrong: the cost of showing it is one keypress, and the cost of hiding it is
+/// the operator never learning what this machine is.
+pub(in crate::telnet) fn welcome_is_due(first_shown: u64, now: u64) -> bool {
+    first_shown == 0 || now.saturating_sub(first_shown) < WELCOME_SHOW_DAYS * 86_400
+}
+
+/// Unix time in seconds, or `0` if the host clock predates the epoch.
+pub(in crate::telnet) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 const IAC: u8 = 0xFF;
 const SE: u8 = 0xF0;
 const BRK: u8 = 0xF3;
@@ -2037,6 +2062,41 @@ impl TelnetSession {
     /// MORE page help.  Unix only, for the same reason the page is -- see
     /// `telnet/power.rs`.
     #[cfg(unix)]
+    /// The first-connection welcome page's body.
+    ///
+    /// **Associated fn so the fit test reads the REAL lines**, like every
+    /// `*_help_lines` beside it -- a hand-copied list is the one that goes on
+    /// passing about text the product no longer prints.
+    ///
+    /// Budget: the renderer adds a separator, a title, a separator, a blank
+    /// and the prompt, so 22 rows on a PETSCII screen leaves 17 for this and
+    /// it uses 16.  40 columns, counted by the same test.
+    fn welcome_lines() -> &'static [&'static str] {
+        &[
+            "",
+            // **No capitals for emphasis here.**  `send_line` case-swaps for
+            // PETSCII, so "YOUR OWN" reaches a C64 as lowercase and the one
+            // sentence that has to land arrives de-emphasised.  Measured on a
+            // live PETSCII session.  Titles stay capitalised because every
+            // other screen's does, and that inverts consistently.
+            "  This gateway runs on your own",
+            "  computer -- it is your machine",
+            "  answering, not a BBS elsewhere.",
+            "",
+            "  From the menu you can set this",
+            "  gateway up and use its tools: file",
+            "  transfer, a text web browser, the",
+            "  weather, AI chat and CP/M.",
+            "",
+            "  To reach a BBS or another machine,",
+            "  choose the Telnet Gateway or the",
+            "  SSH Gateway from the menu.",
+            "",
+            "  This page stops appearing seven",
+            "  days after you first saw it.",
+        ]
+    }
+
     fn more_help_lines() -> &'static [&'static str] {
         &[
             "  The second menu, reached with 2",

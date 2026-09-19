@@ -122,6 +122,12 @@ fn test_binary_telnet_browser_e2e() {
     // telnet_port, disable GUI/SSH/auth, and point the transfer dir somewhere
     // harmless.
     //
+    // `welcome_first_shown = 1` dates the orientation page far outside its
+    // seven-day window so the session opens on the main menu.  Left at the
+    // default `0` every connection starts on that page and waits for a key,
+    // which is right for a person and shifts every scripted keystroke here by
+    // one -- this test ended up in the Serial Gateway asking for a web page.
+    //
     // The directory name is spelled out rather than imported because this is
     // an integration test and the crate is a binary with no lib to import
     // `config::DATA_DIR` from.  If it ever moves again, this test fails the
@@ -142,6 +148,7 @@ fn test_binary_telnet_browser_e2e() {
          enable_console = false\n\
          security_enabled = false\n\
          disable_ip_safety = true\n\
+         welcome_first_shown = 1\n\
          transfer_dir = {}\n",
         telnet_port,
         xfer.display()
@@ -375,7 +382,8 @@ fn test_a_desktop_sessions_signal_pair_stops_the_binary() {
              ssh_enabled = false\n\
              web_enabled = false\n\
              enable_console = false\n\
-             security_enabled = false\n",
+             security_enabled = false\n\
+             welcome_first_shown = 1\n",
         ),
     )
     .unwrap();

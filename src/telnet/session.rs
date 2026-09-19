@@ -1011,6 +1011,13 @@ impl TelnetSession {
             }
         }
 
+        // **Where you are, before anything asks you to decide.**  Someone
+        // typing `ATDT ethernetgateway` on a C64 has just dialled a modem and
+        // landed at a menu, and nothing on that menu says the machine
+        // answering is their own -- it reads like a board.  This page says so,
+        // and then gets out of the way for good after a week.
+        self.show_welcome_if_due().await?;
+
         // The main menu render does its own clear + banner; emitting a
         // separate welcome banner here would just flash on screen before
         // being wiped, which is especially painful at 1200 baud on a C64.
@@ -1030,6 +1037,56 @@ impl TelnetSession {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Draw the orientation page, if it is still within its window.
+    ///
+    /// **The stamp is written before the page is drawn, not after.**  The
+    /// window opens when the page is first *shown*, so a caller who reads it
+    /// and hangs up has still started the clock.  Recording it after the
+    /// keypress instead would mean anyone who never pressed a key saw it for
+    /// ever, which is the one outcome a notice that is meant to expire must
+    /// not have.
+    ///
+    /// Any key continues, though the prompt names SPACE: this is the standard
+    /// press-a-key pattern here (`wait_for_key`), and a retro terminal whose
+    /// user presses RETURN must not appear to have hung.
+    pub(in crate::telnet) async fn show_welcome_if_due(
+        &mut self,
+    ) -> Result<(), std::io::Error> {
+        let first_shown = config::get_config().welcome_first_shown;
+        let now = unix_now();
+        if !welcome_is_due(first_shown, now) {
+            return Ok(());
+        }
+        if first_shown == 0 {
+            tokio::task::spawn_blocking(move || {
+                config::update_config_value("welcome_first_shown", &now.to_string());
+            })
+            .await
+            .ok();
+        }
+
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow("WELCOME TO YOUR ETHERNET GATEWAY")
+        ))
+        .await?;
+        self.send_line(&sep).await?;
+        for line in Self::welcome_lines() {
+            self.send_line(line).await?;
+        }
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.cyan("Press SPACE for the main menu")
+        ))
+        .await?;
+        self.flush().await?;
+        self.wait_for_key().await
     }
 
     /// Inner menu loop, separated so that idle timeout errors from any

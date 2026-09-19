@@ -220,6 +220,14 @@ where
 /// drives a complete session (detect → menu → quit) over raw bytes.
 #[tokio::test]
 async fn test_master_relay_runs_full_session_over_loopback() {
+    // **Put the welcome page out of its window first.**  A fresh config has
+    // `welcome_first_shown = 0`, so every session opens on the orientation
+    // page and waits for a key -- correct for a person, and not what this
+    // test is about.  Dating the stamp well past its seven days sends the
+    // session straight to the menu, which is the contract being exercised.
+    let _guard = crate::config::CONFIG_TEST_LOCK.lock().await;
+    crate::config::update_config_value("welcome_first_shown", "1");
+
     // The relay transport: one end is the master's intake, the other is
     // the test playing the remote device.
     let (master_stream, device_stream) = tokio::io::duplex(64 * 1024);
@@ -275,8 +283,13 @@ async fn test_master_relay_runs_full_session_over_loopback() {
 
     // 3. The main menu renders over the relay — the heart of P1: the
     // master handed the relay stream to the real session machinery.
+    // **Not "ETHERNET GATEWAY".**  That string is a substring of the welcome
+    // page's own title, so when that page was added this assertion passed on
+    // the wrong screen -- the test then spent its `x` dismissing the page and
+    // failed three lines later looking for a farewell that had never been
+    // asked for.  `X  Exit` is a menu row and nothing else draws it.
     assert!(
-        read_until(&mut dev_read, &mut acc, "ETHERNET GATEWAY").await,
+        read_until(&mut dev_read, &mut acc, "X  Exit").await,
         "master should render the main menu over the relay; got: {}",
         String::from_utf8_lossy(&acc)
     );

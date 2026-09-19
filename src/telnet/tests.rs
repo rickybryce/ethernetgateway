@@ -13853,3 +13853,102 @@ async fn test_backspacing_a_digit_returns_to_the_menu_keys() {
         "a letter typed mid-number is still dropped; only an empty prompt frees it"
     );
 }
+
+/// **The welcome page's window, which is all clocks.**
+///
+/// `welcome_is_due` is pure so the cases that matter can be stated instead of
+/// waited for.  The one worth keeping is the stamp in the future: a box whose
+/// clock was wrong when the stamp was written and then corrected makes
+/// `now - first` underflow, and an unsaturated subtraction would wrap to an
+/// enormous number and hide the page for ever.
+#[test]
+fn test_the_welcome_page_shows_for_seven_days_and_then_stops() {
+    const DAY: u64 = 86_400;
+    let t0: u64 = 1_800_000_000;
+
+    assert!(
+        welcome_is_due(0, t0),
+        "a stamp of 0 means nobody has seen it yet, so it is due"
+    );
+    assert!(welcome_is_due(t0, t0), "the moment it is first shown");
+    assert!(
+        welcome_is_due(t0, t0 + WELCOME_SHOW_DAYS * DAY - 1),
+        "one second inside the window"
+    );
+    assert!(
+        !welcome_is_due(t0, t0 + WELCOME_SHOW_DAYS * DAY),
+        "exactly {WELCOME_SHOW_DAYS} days is outside the window, not inside it"
+    );
+    assert!(
+        !welcome_is_due(t0, t0 + 365 * DAY),
+        "long past the window"
+    );
+    assert!(
+        welcome_is_due(t0 + DAY, t0),
+        "a stamp in the future must keep showing the page, not wrap and hide \
+         it for ever"
+    );
+}
+
+/// **The welcome page fits a C64, counting the chrome the renderer adds.**
+///
+/// The body is read from `welcome_lines()` rather than copied, like every
+/// other fit test here.  The surrounding rows are *counted out of the
+/// renderer's own source* instead of being a number written here: the two
+/// main-menu row guards disagreed about whether the prompt line counts until
+/// 2026-09-14, and the one that forgot it reported a spare row that did not
+/// exist.  A row added to `show_welcome_if_due` moves this number by itself.
+#[test]
+fn test_the_welcome_page_fits_a_petscii_screen() {
+    let src = include_str!("session.rs");
+    let start = src
+        .find("async fn show_welcome_if_due")
+        .expect("show_welcome_if_due not found — this scan needs renaming");
+    let after = &src[start..];
+    let end = after
+        .find("\n    /// Inner menu loop")
+        .expect("the renderer's end marker moved — the scan would run on");
+    let body = &after[..end];
+
+    // Every `send_line` the renderer makes.  One of them is inside the loop
+    // over `welcome_lines()`, so it is not chrome.
+    let emitted = body.matches("self.send_line(").count();
+    assert!(
+        emitted >= 4,
+        "only {emitted} send_line calls found in the renderer — the scan has \
+         stopped matching"
+    );
+    let chrome = emitted - 1;
+
+    let lines = TelnetSession::welcome_lines();
+    let rows = lines.len() + chrome;
+    assert!(
+        rows <= 22,
+        "the welcome page draws {rows} rows ({} body + {chrome} chrome), and a \
+         PETSCII screen holds 22",
+        lines.len(),
+    );
+
+    for line in lines {
+        assert!(
+            line.len() <= PETSCII_WIDTH,
+            "welcome line {line:?} is {} chars, exceeds {PETSCII_WIDTH}",
+            line.len(),
+        );
+    }
+
+    // The two literals the renderer prints itself, read out of it rather than
+    // restated here, and measured with the two-space indent it adds.
+    for literal in ["WELCOME TO YOUR ETHERNET GATEWAY", "Press SPACE for the main menu"] {
+        assert!(
+            body.contains(literal),
+            "the renderer no longer prints {literal:?} — this test is measuring \
+             text the product does not show"
+        );
+        assert!(
+            literal.len() + 2 <= PETSCII_WIDTH,
+            "{literal:?} plus its indent is {} chars, exceeds {PETSCII_WIDTH}",
+            literal.len() + 2,
+        );
+    }
+}

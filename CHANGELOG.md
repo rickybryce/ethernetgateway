@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A welcome page on the first connection, explaining that this gateway is
+  your own machine.**  Someone typing `ATDT ethernetgateway` on a Commodore 64
+  has just dialled a modem and landed at a menu, and nothing on that menu says
+  the computer answering is theirs &mdash; it reads exactly like a board
+  somewhere on the internet.  The page says so in plain words, points at the
+  Telnet and SSH Gateways as the way *out* to a real BBS, and any key continues
+  to the main menu.
+  It appears on every connection for **seven days** and then stops by itself,
+  so it cannot become furniture.  The clock starts the first time the page is
+  *shown*, not the first time somebody dismisses it: recording the stamp after
+  the keypress would mean anyone who never pressed a key saw it for ever, which
+  is the one thing a notice meant to expire must not do.  The stamp lives in
+  `egateway.conf` as `welcome_first_shown` (unix seconds); setting it back to
+  `0` brings the page back, and a stamp in the *future* &mdash; a machine whose
+  clock was wrong and was then corrected &mdash; keeps showing it rather than
+  hiding it for ever.
+  It is a marker rather than a setting, so it is on no configuration screen,
+  the same posture as `setup_wizard_completed`.  Sized to the narrowest
+  terminal this gateway serves: 21 of the 22 rows a PETSCII screen holds, and
+  40 columns, with the count taken from the renderer's own source so a row
+  added later moves it.  The wording deliberately uses no capitals for
+  emphasis &mdash; PETSCII output is case-swapped, so "YOUR OWN" reaches a C64
+  as lowercase and the one sentence that has to land would arrive
+  de-emphasised.
+
 ## [1.0.1] - 2026-09-19
 
 ### Added

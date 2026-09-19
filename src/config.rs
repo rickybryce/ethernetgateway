@@ -271,6 +271,17 @@ const DEFAULT_ENABLE_CONSOLE: bool = true;
 /// two directions are deliberately different, and
 /// `test_missing_wizard_key_in_existing_file_reads_completed` pins it.
 const DEFAULT_SETUP_WIZARD_COMPLETED: bool = false;
+/// Unix time the telnet welcome page was first shown; `0` = never yet.
+///
+/// **Deliberately NOT asymmetric, unlike [`DEFAULT_SETUP_WIZARD_COMPLETED`].**
+/// That key reads `true` when missing from an existing file, because dropping
+/// an upgrading operator into a modal wizard that owns the window and rewrites
+/// their config is a real harm.  This page costs one keypress and explains a
+/// thing worth knowing, so an upgrade showing it for a week is a feature
+/// announcement rather than a regression -- and the machine cannot tell a
+/// fresh install from an upgrade without that trick, so not using it means a
+/// missing key simply starts the clock.
+const DEFAULT_WELCOME_FIRST_SHOWN: u64 = 0;
 const DEFAULT_SECURITY_ENABLED: bool = false;
 /// When `security_enabled` is false, the telnet listener restricts
 /// inbound connections to RFC 1918 / loopback / link-local / ULA
@@ -1000,6 +1011,15 @@ pub struct Config {
     /// See [`DEFAULT_SETUP_WIZARD_COMPLETED`] for why a missing key in an
     /// existing file reads as `true` while the struct default is `false`.
     pub setup_wizard_completed: bool,
+    /// Unix time, in seconds, when the telnet welcome page was first shown to
+    /// anyone; `0` means it never has been.  See
+    /// [`DEFAULT_WELCOME_FIRST_SHOWN`].
+    ///
+    /// **A marker, not a setting** -- the same posture as
+    /// [`Config::setup_wizard_completed`] and `open_screen_after_restart`, so
+    /// it is on no configuration screen.  The gateway writes it once and reads
+    /// it to decide whether the orientation page has outlived its welcome.
+    pub welcome_first_shown: u64,
     pub security_enabled: bool,
     /// When true, the telnet listener accepts connections from every
     /// source IP, including public addresses and `*.*.*.1` gateway
@@ -1452,6 +1472,7 @@ impl std::fmt::Debug for Config {
             .field("gateway_term_height", &self.gateway_term_height)
             .field("enable_console", &self.enable_console)
             .field("setup_wizard_completed", &self.setup_wizard_completed)
+            .field("welcome_first_shown", &self.welcome_first_shown)
             .field("security_enabled", &self.security_enabled)
             .field("disable_ip_safety", &self.disable_ip_safety)
             .field("username", &self.username)
@@ -1561,6 +1582,7 @@ impl Default for Config {
             gateway_term_height: DEFAULT_GATEWAY_TERM_HEIGHT,
             enable_console: DEFAULT_ENABLE_CONSOLE,
             setup_wizard_completed: DEFAULT_SETUP_WIZARD_COMPLETED,
+            welcome_first_shown: DEFAULT_WELCOME_FIRST_SHOWN,
             security_enabled: DEFAULT_SECURITY_ENABLED,
             disable_ip_safety: DEFAULT_DISABLE_IP_SAFETY,
             username: DEFAULT_USERNAME.into(),
@@ -2322,6 +2344,10 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .get("setup_wizard_completed")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(true),
+        welcome_first_shown: map
+            .get("welcome_first_shown")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_WELCOME_FIRST_SHOWN),
         security_enabled: map
             .get("security_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -3254,6 +3280,14 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 # such key is treated as already-configured, so upgrades never see the wizard.
 ");
     write_kv(&mut content, "setup_wizard_completed", cfg.setup_wizard_completed);
+    content.push('\n');
+
+    content.push_str("# Unix time the telnet welcome page was first shown (0 = not yet).  The page
+# explains that this gateway is the operator's own machine rather than a BBS,
+# and stops appearing seven days after this stamp.  Set it back to 0 to see it
+# again; a time in the future simply shows it until that time passes.
+");
+    write_kv(&mut content, "welcome_first_shown", cfg.welcome_first_shown);
     content.push('\n');
 
     content.push_str("# Security: set to true to require username/password login\n");
@@ -4232,6 +4266,14 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "idle_timeout_secs" => {
             if let Ok(v) = value.parse() {
                 cfg.idle_timeout_secs = v;
+            }
+        }
+        // 0 is a legal value here -- it means "never shown", which is how an
+        // operator asks to see the welcome page again -- so this parses
+        // without a lower bound.
+        "welcome_first_shown" => {
+            if let Ok(v) = value.parse() {
+                cfg.welcome_first_shown = v;
             }
         }
         // 0 is a legal value here -- it disables the rate limit -- so this
@@ -5931,6 +5973,10 @@ mod tests {
             // other key and a roundtrip test that skipped it would not notice
             // it being dropped from the writer.
             open_screen_after_restart: true,
+            // Likewise a marker, and deliberately not the default `0`: a
+            // stamp that round-tripped as zero would read as "never shown"
+            // and put the welcome page back on every connection.
+            welcome_first_shown: 1_800_000_000,
             cpm_boot_machine: "console_04_cuter".to_string(),
             // Likewise not the default: `rubout` is what a CP/M 1.x operator
             // sets, and it has to survive a write/read cycle to be worth having.
