@@ -4132,6 +4132,49 @@ mod tests {
         assert!(spoke > 0, "no image in {dir} said anything");
     }
 
+    /// Boot slot 0, let the guest arrive, and hand back what it said.
+    ///
+    /// `Err` is the reason it never spoke, already worded for a report.  The
+    /// bool says the answer came off the **VDM-1** rather than out of a port.
+    ///
+    /// **Shared by the sweep and by `record_nonbooting`, and that is the
+    /// point.**  The list the three pickers withhold disks by is only as
+    /// honest as the measurement behind it, so a recorder carrying its own
+    /// copy of "did it sign on" would be a second opinion nobody compares --
+    /// which is the catalogue-versus-picker disagreement this whole list
+    /// exists to end.
+    #[cfg(test)]
+    fn signon_of(
+        m: &mut BootMachine,
+        cpu: &mut Cpu,
+        on_a_card: bool,
+        live: &crate::cpm::screen::Screen,
+    ) -> Result<(String, bool), String> {
+        if let Err(e) = m.boot(cpu, 0) {
+            return Err(format!("refused to boot: {e}"));
+        }
+        let said = settle(m, cpu, 200_000_000);
+        if !said.trim().is_empty() {
+            return Ok((said, false));
+        }
+        // A VDM-1 guest prints to no port at all -- its sign-on goes into
+        // screen memory at CC00.  Calling that silent is calling the card a
+        // fault, and it is how TDISK04 and `cpm14-vdm.dsk` were first reported
+        // as disks that never booted.
+        if on_a_card {
+            let card = vdm_text(m, live);
+            if !card.trim().is_empty() {
+                return Ok((card, true));
+            }
+        }
+        Err(format!(
+            "silent, pc={:#06x} stuck_polls={}{}",
+            cpu.registers().pc(),
+            m.stuck_polls(),
+            if on_a_card { " (and nothing on the card either)" } else { "" }
+        ))
+    }
+
     /// The one file on an image a booted guest can be *asked about*, and how
     /// many it has in all.
     ///
@@ -4404,28 +4447,16 @@ mod tests {
             }
 
             let mut cpu = BootMachine::new_cpu_for(&survey_cpu());
-            if let Err(e) = m.boot(&mut cpu, 0) {
-                never_spoke.push(format!("{name}: refused to boot: {e}"));
-                continue;
-            }
-            let mut banner = settle(&mut m, &mut cpu, 200_000_000);
-            let mut card = String::new();
-            if banner.trim().is_empty() && on_a_card {
-                card = vdm_text(&mut m, &live);
-                banner = card.clone();
-            }
-            if banner.trim().is_empty() {
-                never_spoke.push(format!(
-                    "{name}: silent, pc={:#06x} stuck_polls={}{}",
-                    cpu.registers().pc(),
-                    m.stuck_polls(),
-                    if on_a_card { " (and nothing on the card either)" } else { "" }
-                ));
-                continue;
-            }
+            let (banner, on_card) = match signon_of(&mut m, &mut cpu, on_a_card, &live) {
+                Ok(v) => v,
+                Err(why) => {
+                    never_spoke.push(format!("{name}: {why}"));
+                    continue;
+                }
+            };
 
             let board_name = board.unwrap_or("?");
-            let on = if card.is_empty() { "" } else { " [on the VDM-1]" };
+            let on = if on_card { " [on the VDM-1]" } else { "" };
             if companion_name.is_empty() {
                 alone += 1;
                 println!("  {name} [{board_name}]{on}  booted; no other disk here on that board");
@@ -4442,7 +4473,7 @@ mod tests {
 
             let mut seen = type_at(&mut m, &mut cpu, format!("DIR B:{ask}\r").as_bytes(), 400_000_000);
             seen.push_str(&settle(&mut m, &mut cpu, 100_000_000));
-            if !card.is_empty() {
+            if on_card {
                 seen = vdm_text(&mut m, &live);
             }
             let (stem, ext) = ask.split_once('.').unwrap_or((ask.as_str(), ""));
@@ -4501,6 +4532,139 @@ mod tests {
             pairable,
             "{pairable} disks had a companion and only {} reached a verdict",
             listed + missing + no_drive + not_ccp + unclear + no_oracle
+        );
+    }
+
+    /// **Re-measure which disks never reach a sign-on, and rewrite
+    /// `src/cpm/nonbooting.txt`.**
+    ///
+    /// The three boot pickers withhold what this records, so this is the one
+    /// place where "does it boot" is answered by *booting* rather than by
+    /// reading a sector -- which is the only way to answer it, because the
+    /// IMSAI disks all pass the sector test and then run into a controller
+    /// nothing here answers.
+    ///
+    /// It walks the same [`crate::cpm::layout::REPOS`] the catalogue does --
+    /// one list, or the two would be describing different corpora -- and asks
+    /// the **static** test first, because a disk nothing offers was never going
+    /// to be on a picker and does not belong in a list of things withheld from
+    /// one.
+    ///
+    /// **The static test, never `image_can_boot`.** That function consults the
+    /// very file this is regenerating, so asking it here would let the list
+    /// defend itself: a disk withheld once would never be booted again and
+    /// could never come back off, and a board we later implement would leave
+    /// its disks withheld for ever.
+    ///
+    /// Guarded by an environment variable because it REWRITES a checked-in
+    /// file, and slow because it boots seventy operating systems.
+    ///
+    ///     NONBOOTING_RECORD=1 REPODISKS_HOME=~ \
+    ///       cargo test --release record_nonbooting -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn record_nonbooting() {
+        let home = std::env::var("REPODISKS_HOME")
+            .or_else(|_| std::env::var("HOME"))
+            .expect("a home folder");
+        let out =
+            std::env::var("NONBOOTING_OUT").unwrap_or_else(|_| "src/cpm/nonbooting.txt".into());
+        if std::env::var("NONBOOTING_RECORD").ok().as_deref() != Some("1") {
+            eprintln!("NONBOOTING_RECORD=1 not set; skipping (this test REWRITES {out})");
+            return;
+        }
+        // The prose above the column line is a person's, and is kept verbatim.
+        let existing = std::fs::read_to_string(&out).expect("the file to refresh");
+        let at = existing.find("  sha256").expect("the column line");
+        let header = existing[..at].to_string();
+
+        let live = crate::cpm::screen::register("record_nonbooting");
+        let machine_setting = crate::cpm::console::AUTO_MACHINE;
+        let cpu_setting = crate::cpm::cpu::DEFAULT_CPU;
+        let mut rows: Vec<String> = Vec::new();
+        let (mut looked, mut offered) = (0usize, 0usize);
+
+        for (_tag, name, rel, _from, only) in crate::cpm::layout::REPOS {
+            let dir = std::path::Path::new(&home).join(rel);
+            if !dir.is_dir() {
+                eprintln!("skipping {name}: no {}", dir.display());
+                continue;
+            }
+            let mut images: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                .expect("readable")
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("dsk")).unwrap_or(false))
+                .filter(|p| {
+                    only.is_empty()
+                        || p.file_name()
+                            .map(|n| only.contains(&n.to_string_lossy().as_ref()))
+                            .unwrap_or(false)
+                })
+                .collect();
+            images.sort();
+            for image in images {
+                looked += 1;
+                let Ok(bytes) = std::fs::read(&image) else { continue };
+                if !BootMachine::bootability(bytes.clone(), machine_setting, cpu_setting).offer() {
+                    continue;
+                }
+                offered += 1;
+                let file = image.file_name().unwrap().to_string_lossy().to_string();
+                let (machine, _why) = crate::cpm::detect::machine_for(machine_setting, &bytes);
+                let on_a_card = crate::cpm::detect::image_drives_vdm(&bytes);
+                let mut m = BootMachine::new();
+                m.set_machine(&machine);
+                if let Err(e) = m.insert(0, bytes.clone(), true) {
+                    println!("  skipped  {file}: {e}");
+                    continue;
+                }
+                let mut cpu = BootMachine::new_cpu_for(cpu_setting);
+                match signon_of(&mut m, &mut cpu, on_a_card, &live) {
+                    Ok(_) => println!("  boots    {file}"),
+                    Err(why) => {
+                        // The reason an operator can act on, where we have one.
+                        // `image_drives_imsai_fif` explains rather than decides
+                        // -- the decision was the boot that just failed.
+                        // The reason is read by an OPERATOR, in the catalogue
+                        // and on a screen, so it says what happened and not
+                        // where the program counter stopped.  `why` carries the
+                        // pc and the stuck-poll count and is printed to the run
+                        // log below, where a maintainer is the one reading.
+                        let reason = if crate::cpm::detect::image_drives_imsai_fif(&bytes) {
+                            crate::cpm::detect::IMSAI_FIF_REASON.to_string()
+                        } else {
+                            "loads, and then reaches no sign-on here".to_string()
+                        };
+                        println!("           ({why})");
+                        println!("  SILENT   {file}: {reason}");
+                        rows.push(format!(
+                            "{}  {}  {file}  {reason}",
+                            crate::cpm::fetch::sha256(&bytes),
+                            bytes.len()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(offered > 0, "no images found under {home} -- set REPODISKS_HOME");
+        rows.sort();
+        // Byte-identical disks exist across these collections -- `duino`'s
+        // `HDSK04.DSK` is `hansel`'s `DISK12.DSK` exactly -- and the key is the
+        // hash, so a repeat would be one map entry against two rows and would
+        // fail the parser's own accounting guard.
+        rows.dedup();
+        let body = rows.join("\n");
+        std::fs::write(
+            &out,
+            format!(
+                "{header}  sha256                                                            bytes  name  why\n\n{body}\n"
+            ),
+        )
+        .expect("rewritable");
+        println!(
+            "\n{looked} images seen, {offered} offered by the static test, {} withheld -> {out}",
+            rows.len()
         );
     }
 

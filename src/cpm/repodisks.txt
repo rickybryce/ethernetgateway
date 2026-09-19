@@ -19,19 +19,28 @@ catalogue.
 Every line begins with what the disk can DO, which is the choice
 you are making.  Booting and mounting are different things:
 
-  boots        it carries a boot program -- set it as the boot
-               disk and its own operating system takes the
-               machine.  It can also be mounted.
-  mount only   no boot program, but it has a CP/M filesystem --
-               mount it on a drive letter.  A disk of programs
-               FOR another disk is one to mount, not to boot.
-  neither      no boot program and no CP/M filesystem: data in
-               some other system's format, which this gateway
-               can do nothing with.
+  boots        it was BOOTED here and reached its sign-on. Set
+               it as the boot disk and its own operating system
+               takes the machine.  It can also be mounted.
+  mount only   it has a CP/M filesystem -- mount it on a drive
+               letter.  A disk of programs FOR another disk is
+               one to mount, not to boot.
+  neither      no CP/M filesystem either: data in some other
+               system's format, which this gateway can do
+               nothing with.
 
-Those are two separate readings of the same file -- the boot marker
-is sector 0, the file list is the CP/M directory -- so neither is
-guessed from the other.
+A disk that carries a boot program which does NOT start here says
+so on its own line, under the summary, with the reason.  Twelve do.
+They are still listed and still mountable -- they are simply not
+offered as boot disks, because a picker full of disks that will not
+start is worse than a short one: nothing tells you which is which
+until you have spent a session on each.
+
+Those are THREE separate readings of the same file -- the boot
+marker is sector 0, the file list is the CP/M directory, and
+whether it boots is the machine actually running it -- so none of
+them is guessed from the others.  The third is why this file and
+the three boot pickers cannot disagree: they read the same list.
 
 
 
@@ -122,13 +131,17 @@ THE DISKS, A TO Z
       boots -- CP/M 2.2, 38 files
 
   cpm22.dsk  (imsaisim)
-      boots -- CP/M 2.2, development tools, 44 files
+      mount only -- CP/M 2.2, development tools, 44 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 
   cpm3-1.dsk  (cpmsim)
       boots -- CP/M 3.0, 31 files
 
   cpm3-1.dsk  (imsaisim)
-      boots -- CP/M 3.0, 29 files
+      mount only -- CP/M 3.0, 29 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 
   cpm3-2.dsk  (cpmsim)
       mount only -- CP/M 3.0, development tools, 25 files
@@ -226,10 +239,14 @@ THE DISKS, A TO Z
       boots -- CP/M 2.2, BASIC, development tools, 35 files
 
   hd-tools.dsk  (cpmsim)
-      boots -- assorted CP/M files, 345 files
+      mount only -- assorted CP/M files, 345 files
+      does not boot here:
+      loads, and then reaches no sign-on here
 
   hd-toolsrc.dsk  (cpmsim)
-      boots -- source and listings, 17 files
+      mount only -- source and listings, 17 files
+      does not boot here:
+      loads, and then reaches no sign-on here
 
   HDSK01.DSK  (hansel)
       boots -- its own operating system, no CP/M filesystem
@@ -256,16 +273,24 @@ THE DISKS, A TO Z
       mount only -- CPU exercisers, 8 files
 
   imdos202.dsk  (imsaisim)
-      boots -- BASIC, 33 files
+      mount only -- BASIC, 33 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 
   imdos205r0-1.dsk  (imsaisim)
-      boots -- IMDOS (IMSAI CP/M), BASIC, development tools, 44 files
+      mount only -- IMDOS (IMSAI CP/M), BASIC, development tools, 44 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 
   imdos205r0-2.dsk  (imsaisim)
-      boots -- graphics demos, 16 files
+      mount only -- graphics demos, 16 files
+      does not boot here:
+      loads, and then reaches no sign-on here
 
   imsai-cpm13.dsk  (imsaisim)
-      boots -- CP/M 2.2, graphics demos, 33 files
+      mount only -- CP/M 2.2, graphics demos, 33 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 
   itc-cpm.dsk  (cromemcosim)
       boots -- CP/M 2.2, development tools, 79 files
@@ -322,13 +347,17 @@ THE DISKS, A TO Z
       neither -- data in another system's format
 
   ucsd-i5-interp.dsk  (altairsim)
-      boots -- its own operating system, no CP/M filesystem
+      neither -- data in another system's format
+      does not boot here:
+      loads, and then reaches no sign-on here
 
   ucsd-iv-1.dsk  (cpmsim)
       boots -- its own operating system, no CP/M filesystem
 
   ucsd-iv-1.dsk  (imsaisim)
-      boots -- its own operating system, no CP/M filesystem
+      neither -- data in another system's format
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 
   ucsd-iv-2.dsk  (cpmsim)
       neither -- data in another system's format
@@ -343,10 +372,14 @@ THE DISKS, A TO Z
       neither -- data in another system's format
 
   um-cpm13.dsk  (imsaisim)
-      boots -- CP/M 2.2, graphics demos, 33 files
+      mount only -- CP/M 2.2, graphics demos, 33 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 
   vbasic.dsk  (imsaisim)
-      boots -- BASIC, 10 files
+      mount only -- BASIC, 10 files
+      does not boot here:
+      loads, and then reaches no sign-on here
 
   vdm-stuff.dsk  (altairsim)
       mount only -- games, 26 files
@@ -960,7 +993,9 @@ XSUB.COM
 
 
 >> cpm22.dsk
-   (imsaisim)  boots -- CP/M 2.2, development tools, 44 files
+   (imsaisim)  mount only -- CP/M 2.2, development tools, 44 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 ASM.COM
 AUTO.SUB
 BIOS.ASM
@@ -1043,7 +1078,9 @@ VT100DYN.COM
 
 
 >> cpm3-1.dsk
-   (imsaisim)  boots -- CP/M 3.0, 29 files
+   (imsaisim)  mount only -- CP/M 3.0, 29 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 BYE.COM
 CCP.COM
 CLS.COM
@@ -1600,7 +1637,9 @@ XSUB.COM
 
 
 >> hd-tools.dsk
-   (cpmsim)  boots -- assorted CP/M files, 345 files
+   (cpmsim)  mount only -- assorted CP/M files, 345 files
+      does not boot here:
+      loads, and then reaches no sign-on here
 ASM.COM
 BVIEW.COM
 BYE.COM
@@ -1949,7 +1988,9 @@ ZORK3.DAT  (user 8)
 
 
 >> hd-toolsrc.dsk
-   (cpmsim)  boots -- source and listings, 17 files
+   (cpmsim)  mount only -- source and listings, 17 files
+      does not boot here:
+      loads, and then reaches no sign-on here
 BYE.ASM
 CLS.MAC
 CPU.ASM
@@ -2367,7 +2408,9 @@ TEST8080.COM
 
 
 >> imdos202.dsk
-   (imsaisim)  boots -- BASIC, 33 files
+   (imsaisim)  mount only -- BASIC, 33 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 ASM.COM
 BASIC-E.COM
 BIOS.ASM
@@ -2404,7 +2447,10 @@ XDIR.COM
 
 
 >> imdos205r0-1.dsk
-   (imsaisim)  boots -- IMDOS (IMSAI CP/M), BASIC, development tools, 44 files
+   (imsaisim)  mount only -- IMDOS (IMSAI CP/M), BASIC, development tools, 44
+               files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 ASM.COM
 BASIC-E.COM
 BASIC8K.COM
@@ -2452,7 +2498,9 @@ XREF.COM
 
 
 >> imdos205r0-2.dsk
-   (imsaisim)  boots -- graphics demos, 16 files
+   (imsaisim)  mount only -- graphics demos, 16 files
+      does not boot here:
+      loads, and then reaches no sign-on here
 BIOS.MAC
 BIOS.PRN
 BIOS.REL
@@ -2472,7 +2520,9 @@ TREKINST
 
 
 >> imsai-cpm13.dsk
-   (imsaisim)  boots -- CP/M 2.2, graphics demos, 33 files
+   (imsaisim)  mount only -- CP/M 2.2, graphics demos, 33 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 ASM.COM
 BIOS.ASM
 BIOS.HEX
@@ -3049,7 +3099,9 @@ TARGET.PRN
 
 
 >> ucsd-i5-interp.dsk
-   (altairsim)  boots -- its own operating system, no CP/M filesystem
+   (altairsim)  neither -- data in another system's format
+      does not boot here:
+      loads, and then reaches no sign-on here
 (no CP/M filesystem -- this disk boots its own system)
 
 
@@ -3059,7 +3111,9 @@ TARGET.PRN
 
 
 >> ucsd-iv-1.dsk
-   (imsaisim)  boots -- its own operating system, no CP/M filesystem
+   (imsaisim)  neither -- data in another system's format
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 (no CP/M filesystem -- this disk boots its own system)
 
 
@@ -3084,7 +3138,9 @@ TARGET.PRN
 
 
 >> um-cpm13.dsk
-   (imsaisim)  boots -- CP/M 2.2, graphics demos, 33 files
+   (imsaisim)  mount only -- CP/M 2.2, graphics demos, 33 files
+      does not boot here:
+      needs the IMSAI FIF disk controller (port FDh), not emulated here
 ASM.COM
 BIOS.ASM
 BIOS.HEX
@@ -3121,7 +3177,9 @@ XDIR.COM
 
 
 >> vbasic.dsk
-   (imsaisim)  boots -- BASIC, 10 files
+   (imsaisim)  mount only -- BASIC, 10 files
+      does not boot here:
+      loads, and then reaches no sign-on here
 VBASIC.COM
 VBJACK.ASC
 VBJACKUP.ASC

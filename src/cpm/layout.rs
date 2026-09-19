@@ -659,63 +659,6 @@ mod generate {
 
     use super::*;
 
-    /// Where the collections live on the machine that generates this.
-    ///
-    /// Paths rather than a scan, because a *name* for each collection is the
-    /// point — "z80pack cpmsim" tells a reader where to go and a directory
-    /// name would not.
-    /// Where each collection comes from, printed with it.
-    ///
-    /// The addresses matter more than the listings do: the disks are not ours
-    /// to ship, so a catalogue of software the reader cannot go and get is a
-    /// tease.  Read from the checkouts themselves rather than from memory —
-    /// `git remote` for the Altair one, the project's own README for z80pack.
-    /// The fourth field is which images to list: `&[]` means the whole folder.
-    ///
-    /// It exists for one collection. `jpmcneely/AltairDuino-Disks` holds 36
-    /// images of which 26 are byte-identical to Hansel's, so listing the folder
-    /// would repeat a quarter of this file to say nothing new. Named disks
-    /// instead — the ones that collection uniquely has, which are exactly the
-    /// ones the downloader takes from it.
-    const REPOS: &[(&str, &str, &str, &str, &[&str])] = &[
-        (
-            "hansel",
-            "Altair-Duino / Altair8800 simulator (David Hansel)",
-            "AltairRepos/Altair8800/disks",
-            "https://github.com/dhansel/Altair8800  (the disks/ folder)",
-            &[],
-        ),
-        (
-            "duino",
-            "Altair-Duino disks (Jim McNeely) -- what only it has",
-            "AltairRepos/AltairDuino-Disks/original",
-            "https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)",
-            // Not DISK17.DSK: a name this collection alone has, whose bytes are
-            // Hansel's DISK12.DSK exactly.  Listing it would catalogue one disk
-            // twice under two numbers.
-            &["HDSK04.DSK"],
-        ),
-        (
-            "duino-extra",
-            "Altair-Duino disks (Jim McNeely) -- the extra/ folder",
-            "AltairRepos/AltairDuino-Disks/extra",
-            "https://github.com/jpmcneely/AltairDuino-Disks  (the extra/ folder)",
-            &[],
-        ),
-        ("altairsim", "z80pack — altairsim library", "z80pack/altairsim/disks/library", Z80PACK, &[]),
-        ("cpmsim", "z80pack — cpmsim library", "z80pack/cpmsim/disks/library", Z80PACK, &[]),
-        ("cromemcosim", "z80pack — cromemcosim library", "z80pack/cromemcosim/disks/library", Z80PACK, &[]),
-        ("imsaisim", "z80pack — imsaisim library", "z80pack/imsaisim/disks/library", Z80PACK, &[]),
-        // Deliberately NOT z80pack's intelmdssim library. The Intel MDS is not
-        // a machine this gateway emulates, and it shows: four of its seven
-        // disks are CP/M that our format table cannot read. Listing a
-        // collection we cannot open would make this file a catalogue of
-        // disappointments rather than of what works.
-    ];
-
-    /// One address for all four of its libraries.
-    const Z80PACK: &str = "https://github.com/udo-munk/z80pack  (<sim>/disks/library)";
-
     /// What a disk *is*, worked out from the files that are on it.
     ///
     /// The catalogue used to print a name and a directory listing and nothing
@@ -892,6 +835,19 @@ mod generate {
         /// this machine merely has no *board* for still counts as bootable
         /// here, which is what makes the answer safe to ship in a file.
         boots: bool,
+        /// Why this disk will not start here, when that is known.
+        ///
+        /// From [`crate::cpm::boot::will_not_boot_here`], the same answer the
+        /// three pickers withhold on -- so a disk missing from the list and a
+        /// disk marked here are the same disk, for the same stated reason.
+        ///
+        /// **`boots` above is no longer the whole story, and this is why.**
+        /// `image_can_boot` now refuses a disk measured never to sign on, so
+        /// those fall to `mount only` -- which is TRUE, they do mount -- and a
+        /// reader comparing this catalogue with the collection's own
+        /// description would find a CP/M system disk filed as though it were a
+        /// disk of programs, with nothing saying what happened to it.
+        not_here: Option<String>,
         /// Does the disk *test* for a monitor ROM it does not carry?
         ///
         /// From the product's own [`crate::cpm::detect::image_needs_monitor_rom`],
@@ -946,6 +902,29 @@ mod generate {
         // in the ROMs folder does nothing on its own, and an operator told only
         // "needs a monitor ROM" would fetch it, see no change and be right to
         // think the catalogue had misled them.
+        // Said before the ROM note, because it is the stronger fact: a disk
+        // that will not start here at all is not helped by knowing what it
+        // would have wanted if it did.
+        if let Some(why) = &e.not_here {
+            // Wrapped to the catalogue's own 80 columns, the width its guard
+            // checks -- the ROM note below was written at 91 and caught there.
+            let mut out = format!("{mark} -- {what}\n      does not boot here:");
+            let mut line = String::new();
+            for word in why.split_whitespace() {
+                if line.len() + word.len() + 1 > 66 {
+                    out.push_str(&format!("\n      {line}"));
+                    line = String::new();
+                }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+            }
+            if !line.is_empty() {
+                out.push_str(&format!("\n      {line}"));
+            }
+            return out;
+        }
         if e.needs_rom {
             // Two lines, and both inside 80 columns -- the catalogue's own width
             // guard caught the first version of this at 91.
@@ -956,6 +935,37 @@ mod generate {
             );
         }
         format!("{mark} -- {what}")
+    }
+
+    /// `head` then `body`, wrapped to 80 columns with a hanging indent.
+    ///
+    /// Only the **first** line of `body` is wrapped: the later ones are the
+    /// summary's own notes, already written to fit and already indented.
+    fn hang(head: &str, body: &str) -> String {
+        let mut lines = body.lines();
+        let first = lines.next().unwrap_or_default();
+        let pad = " ".repeat(head.len());
+        let mut out = head.to_string();
+        let mut col = head.len();
+        for (i, word) in first.split(' ').enumerate() {
+            if i > 0 {
+                if col + 1 + word.len() > 80 {
+                    out.push('\n');
+                    out.push_str(&pad);
+                    col = pad.len();
+                } else {
+                    out.push(' ');
+                    col += 1;
+                }
+            }
+            out.push_str(word);
+            col += word.len();
+        }
+        for rest in lines {
+            out.push('\n');
+            out.push_str(rest);
+        }
+        out
     }
 
     /// Regenerate `src/cpm/repodisks.txt` from the collections above.
@@ -1024,11 +1034,12 @@ mod generate {
                 let boots = crate::cpm::boot::image_can_boot(&image);
                 // Read from the bytes, like everything else in an entry: the
                 // disk says what it needs and we write it down.
+                let not_here = crate::cpm::boot::will_not_boot_here(&image);
                 let needs_rom = std::fs::read(&image)
                     .map(|b| crate::cpm::detect::image_needs_monitor_rom(&b))
                     .unwrap_or(false);
                 entries
-                    .push(Entry { disk, tag, order, files: crate::cpm::image::files_on(&image), boots, needs_rom });
+                    .push(Entry { disk, tag, order, files: crate::cpm::image::files_on(&image), boots, needs_rom, not_here });
             }
         }
         let found = entries.len();
@@ -1061,18 +1072,26 @@ mod generate {
              catalogue.\n\n\
              Every line begins with what the disk can DO, which is the choice\n\
              you are making.  Booting and mounting are different things:\n\n\
-             \x20 boots        it carries a boot program -- set it as the boot\n\
-             \x20              disk and its own operating system takes the\n\
-             \x20              machine.  It can also be mounted.\n\
-             \x20 mount only   no boot program, but it has a CP/M filesystem --\n\
-             \x20              mount it on a drive letter.  A disk of programs\n\
-             \x20              FOR another disk is one to mount, not to boot.\n\
-             \x20 neither      no boot program and no CP/M filesystem: data in\n\
-             \x20              some other system's format, which this gateway\n\
-             \x20              can do nothing with.\n\n\
-             Those are two separate readings of the same file -- the boot marker\n\
-             is sector 0, the file list is the CP/M directory -- so neither is\n\
-             guessed from the other.\n",
+             \x20 boots        it was BOOTED here and reached its sign-on. Set\n\
+             \x20              it as the boot disk and its own operating system\n\
+             \x20              takes the machine.  It can also be mounted.\n\
+             \x20 mount only   it has a CP/M filesystem -- mount it on a drive\n\
+             \x20              letter.  A disk of programs FOR another disk is\n\
+             \x20              one to mount, not to boot.\n\
+             \x20 neither      no CP/M filesystem either: data in some other\n\
+             \x20              system's format, which this gateway can do\n\
+             \x20              nothing with.\n\n\
+             A disk that carries a boot program which does NOT start here says\n\
+             so on its own line, under the summary, with the reason.  Twelve do.\n\
+             They are still listed and still mountable -- they are simply not\n\
+             offered as boot disks, because a picker full of disks that will not\n\
+             start is worse than a short one: nothing tells you which is which\n\
+             until you have spent a session on each.\n\n\
+             Those are THREE separate readings of the same file -- the boot\n\
+             marker is sector 0, the file list is the CP/M directory, and\n\
+             whether it boots is the machine actually running it -- so none of\n\
+             them is guessed from the others.  The third is why this file and\n\
+             the three boot pickers cannot disagree: they read the same list.\n",
         );
 
         s.push_str("\n\n\nWHERE THEY COME FROM\n--------------------\n");
@@ -1095,7 +1114,22 @@ mod generate {
             // already leads with a `-- `-separated marker, so the old form put
             // three of them on one line -- and it made the summary text differ
             // between the index and here, when it is one `summary` call.
-            s.push_str(&format!("\n>> {}\n   ({})  {}\n", e.disk, e.tag, summary(e)));
+            //
+            // **Wrapped when the pair will not fit**, which started happening
+            // when the marker began being MEASURED: a `boots` that became a
+            // `mount only` is five characters wider, and `imdos205r0-1` went to
+            // 83.
+            //
+            // The *text* wraps, with a hanging indent -- not the tag onto a
+            // line of its own, which was the first attempt and which
+            // `test_the_disk_catalogue_has_the_shape_it_promises` rejected on
+            // the spot: the line under a disk's name has to be its summary, and
+            // a reader scanning down the `>>` markers relies on that. Shortening
+            // the description instead would ration the one thing they came for.
+            // The width guard protects the format; it does not set the content.
+            let sum = summary(e);
+            let head = format!("   ({})  ", e.tag);
+            s.push_str(&format!("\n>> {}\n{}\n", e.disk, hang(&head, &sum)));
             match &e.files {
                 Some(names) if !names.is_empty() => {
                     for n in names {
@@ -1175,6 +1209,7 @@ mod generate {
                 files,
                 boots,
                 needs_rom: false,
+                not_here: None,
             };
             let some = |names: &[&str]| Some(files(names));
 
@@ -1227,6 +1262,7 @@ mod generate {
                 files: Some(files(&["BASIC5.COM", "CHESS.COM"])),
                 boots: true,
                 needs_rom: false,
+                not_here: None,
             };
             let plain = super::summary(&base);
             assert!(!plain.contains("cpm_boot_rom"), "an ordinary disk gains nothing: {plain}");
@@ -1251,6 +1287,7 @@ mod generate {
                 files: Some(files(&["CPM64.SYS", "BIOS.Z80", "BOOT.Z80", "SYSGEN.SUB"])),
                 boots: false,
                 needs_rom: false,
+                not_here: None,
             };
             let s = super::summary(&e);
             assert!(s.starts_with("mount only -- "), "{s}");
@@ -1334,6 +1371,65 @@ mod generate {
         }
     }
 }
+
+/// Where the collections live on the machine that generates this.
+///
+/// Paths rather than a scan, because a *name* for each collection is the
+/// point — "z80pack cpmsim" tells a reader where to go and a directory
+/// name would not.
+/// Where each collection comes from, printed with it.
+///
+/// The addresses matter more than the listings do: the disks are not ours
+/// to ship, so a catalogue of software the reader cannot go and get is a
+/// tease.  Read from the checkouts themselves rather than from memory —
+/// `git remote` for the Altair one, the project's own README for z80pack.
+/// The fourth field is which images to list: `&[]` means the whole folder.
+///
+/// It exists for one collection. `jpmcneely/AltairDuino-Disks` holds 36
+/// images of which 26 are byte-identical to Hansel's, so listing the folder
+/// would repeat a quarter of this file to say nothing new. Named disks
+/// instead — the ones that collection uniquely has, which are exactly the
+/// ones the downloader takes from it.
+#[cfg(test)]
+pub(crate) const REPOS: &[(&str, &str, &str, &str, &[&str])] = &[
+    (
+        "hansel",
+        "Altair-Duino / Altair8800 simulator (David Hansel)",
+        "AltairRepos/Altair8800/disks",
+        "https://github.com/dhansel/Altair8800  (the disks/ folder)",
+        &[],
+    ),
+    (
+        "duino",
+        "Altair-Duino disks (Jim McNeely) -- what only it has",
+        "AltairRepos/AltairDuino-Disks/original",
+        "https://github.com/jpmcneely/AltairDuino-Disks  (the original/ folder)",
+        // Not DISK17.DSK: a name this collection alone has, whose bytes are
+        // Hansel's DISK12.DSK exactly.  Listing it would catalogue one disk
+        // twice under two numbers.
+        &["HDSK04.DSK"],
+    ),
+    (
+        "duino-extra",
+        "Altair-Duino disks (Jim McNeely) -- the extra/ folder",
+        "AltairRepos/AltairDuino-Disks/extra",
+        "https://github.com/jpmcneely/AltairDuino-Disks  (the extra/ folder)",
+        &[],
+    ),
+    ("altairsim", "z80pack — altairsim library", "z80pack/altairsim/disks/library", Z80PACK, &[]),
+    ("cpmsim", "z80pack — cpmsim library", "z80pack/cpmsim/disks/library", Z80PACK, &[]),
+    ("cromemcosim", "z80pack — cromemcosim library", "z80pack/cromemcosim/disks/library", Z80PACK, &[]),
+    ("imsaisim", "z80pack — imsaisim library", "z80pack/imsaisim/disks/library", Z80PACK, &[]),
+    // Deliberately NOT z80pack's intelmdssim library. The Intel MDS is not
+    // a machine this gateway emulates, and it shows: four of its seven
+    // disks are CP/M that our format table cannot read. Listing a
+    // collection we cannot open would make this file a catalogue of
+    // disappointments rather than of what works.
+];
+
+/// One address for all four of its libraries.
+#[cfg(test)]
+pub(crate) const Z80PACK: &str = "https://github.com/udo-munk/z80pack  (<sim>/disks/library)";
 
 #[cfg(test)]
 mod tests {

@@ -1427,7 +1427,7 @@ impl TelnetSession {
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.dim("A disk boots its OWN operating"))).await?;
             self.send_line(&format!("  {}", self.dim("system. Only disks that boot are"))).await?;
-            self.send_line(&format!("  {}", self.dim("listed here."))).await?;
+            self.send_line(&format!("  {}", self.dim("listed. T names one that is not."))).await?;
             self.send_line("").await?;
             let width = if self.terminal_type == TerminalType::Petscii { 28 } else { 58 };
             for (i, (value, label)) in shown.iter().enumerate() {
@@ -1453,6 +1453,7 @@ impl TelnetSession {
             if page + 1 < total_pages {
                 nav.push(self.action_prompt("N", "Next"));
             }
+            nav.push(self.action_prompt("T", "Type"));
             nav.push(self.action_prompt("Q", "Back"));
             self.send_line(&format!("  {}", nav.join("  "))).await?;
             self.send(&format!("{}> ", self.cyan("runs"))).await?;
@@ -1467,6 +1468,10 @@ impl TelnetSession {
                     if page + 1 < total_pages {
                         page += 1;
                     }
+                }
+                "t" => {
+                    self.cpm_name_a_boot_disk().await?;
+                    return Ok(());
                 }
                 "q" | "" => return Ok(()),
                 other => {
@@ -1487,6 +1492,75 @@ impl TelnetSession {
                 }
             }
         }
+    }
+
+    /// **Name a boot disk the picker does not list.**
+    ///
+    /// The list offers only disks measured to boot, which is right for almost
+    /// everyone and wrong for exactly one operator: the one who has built a
+    /// boot disk of their own, or who wants a disk we withhold anyway.  A
+    /// filter with no way past it turns a helpful list into a wall, and the
+    /// only way past it used to be hand-editing `egateway.conf` on a machine
+    /// that is often headless and reached from a C64.
+    ///
+    /// **It does not re-apply the bootability test**, because doing so would
+    /// refuse precisely the disk this exists to reach.  It does check the file
+    /// is *there*: a typo stored silently is indistinguishable from a disk that
+    /// will not start, and the operator would be debugging the wrong thing.
+    /// Once set, the settings row marks it with `boot_setting_mark` like any
+    /// other — `(not bootable)` if that is what it is, which is information
+    /// rather than a refusal.
+    async fn cpm_name_a_boot_disk(&mut self) -> Result<(), std::io::Error> {
+        let width = if self.terminal_type == TerminalType::Petscii { 36 } else { 70 };
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("NAME A BOOT DISK"))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        for line in [
+            "The filename of a disk in the",
+            "images folder, exactly as it is",
+            "spelled. It is taken as typed --",
+            "nothing here checks that it boots.",
+        ] {
+            self.send_line(&format!("  {}", self.dim(&truncate_to_width(line, width)))).await?;
+        }
+        self.send_line("").await?;
+        self.send(&format!("  {}", self.cyan("Filename (blank to cancel): "))).await?;
+        self.flush().await?;
+
+        let Some(typed) = self.get_line_input().await? else {
+            return Ok(());
+        };
+        let name = typed.trim().to_string();
+        if name.is_empty() {
+            return Ok(());
+        }
+        // The folder is read off the runtime: this is a directory scan, and the
+        // picker next door already takes that care.
+        let base = self.cpmmount_base();
+        let probe = name.clone();
+        let there = tokio::task::spawn_blocking(move || {
+            crate::cpm::image::images_dir(&base).join(&probe).is_file()
+        })
+        .await
+        .unwrap_or(false);
+        if !there {
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.red("No such file in the images folder."))).await?;
+            self.send_line(&format!("  {}", self.dim("Nothing was changed."))).await?;
+            self.wait_for_key().await?;
+            return Ok(());
+        }
+        let chosen = name.clone();
+        tokio::task::spawn_blocking(move || {
+            config::update_config_value("cpm_boot_image", &chosen);
+        })
+        .await
+        .ok();
+        self.other_saved_notice(&format!("CP/M now runs {name}")).await?;
+        Ok(())
     }
 
     /// Boot settings, reached from the CP/M screen → `B`.  The questions that

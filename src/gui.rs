@@ -752,6 +752,43 @@ fn spawn_folder_picker(
     rx
 }
 
+/// Launch a native file-picker for a CP/M boot disk, on the same shared picker
+/// runtime the folder dialog uses so it does not block the egui event loop.
+///
+/// **The desktop's way past the boot list.**  That list offers only disks
+/// measured to boot here, which is what keeps it from being a catalogue of
+/// disappointments -- and it leaves an operator who has built a boot disk of
+/// their own with no entry to pick.  Telnet's `T` and the web's text box are
+/// the other two doors onto the same key.
+///
+/// It opens **in the images folder**, because `cpm_boot_image` holds a bare
+/// filename from that folder and not a path: what comes back is the file's
+/// name, and a file chosen from anywhere else would name something that is not
+/// there.  Saying so is left to the row, which already marks a setting it
+/// cannot find `(missing)` -- the same marker a disk deleted out from under
+/// the config gets, and for the same reason.
+fn spawn_boot_disk_picker(
+    images_dir: std::path::PathBuf,
+) -> std::sync::mpsc::Receiver<Option<std::path::PathBuf>> {
+    let start = if images_dir.is_dir() {
+        images_dir
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    picker_runtime().spawn(async move {
+        let result = rfd::AsyncFileDialog::new()
+            .set_title("Select a CP/M boot disk")
+            .add_filter("CP/M disk image", &["dsk", "DSK"])
+            .set_directory(&start)
+            .pick_file()
+            .await
+            .map(|h| h.path().to_path_buf());
+        let _ = tx.send(result);
+    });
+    rx
+}
+
 /// Enumerate available serial ports with their hardware descriptions.
 /// `pub(crate)` so the web server's serial-port dropdown can populate
 /// from the same source the desktop GUI uses — both surfaces show
@@ -1107,6 +1144,7 @@ struct App {
     /// cancelled).  While `Some`, the button is disabled to prevent
     /// spawning duplicate pickers.
     pending_dir_pick: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    pending_boot_pick: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
     /// First-run setup wizard.  `Some` while it owns the window — on a fresh
     /// install (`setup_wizard_completed = false`) or when the operator asks for
     /// it again from the Server "More" popup.  It edits its own draft copy of
@@ -1375,6 +1413,7 @@ impl App {
                 .then(|| std::time::Instant::now() + std::time::Duration::from_millis(2500)),
             disable_ip_safety_warn_open: false,
             pending_dir_pick: None,
+            pending_boot_pick: None,
             wizard,
         }
     }
@@ -1498,6 +1537,42 @@ impl App {
             }
             Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.pending_dir_pick = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Take the boot disk a file dialog came back with.
+    ///
+    /// The **file name**, not the path: `cpm_boot_image` names a file in the
+    /// images folder, so a path would be a setting nothing could resolve.
+    fn poll_boot_pick(&mut self) {
+        let Some(rx) = &self.pending_boot_pick else { return };
+        match rx.try_recv() {
+            Ok(Some(path)) => {
+                if let Some(name) = path.file_name() {
+                    self.cfg.cpm_boot_image = name.to_string_lossy().to_string();
+                    // A file chosen from somewhere else names a disk the images
+                    // folder does not hold. The row will mark it `(missing)`,
+                    // but saying it once here is what stops that marker reading
+                    // as a bug in the picker.
+                    let images =
+                        crate::cpm::image::images_dir(&crate::cpm::layout::cpm_dir(
+                            &self.cfg.transfer_dir,
+                        ));
+                    if path.parent() != Some(images.as_path()) {
+                        logger::log(format!(
+                            "CP/M boot disk: {} is not in {} — copy it there, or the \
+                             setting will show as missing.",
+                            name.to_string_lossy(),
+                            images.display()
+                        ));
+                    }
+                }
+                self.pending_boot_pick = None;
+            }
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.pending_boot_pick = None;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
@@ -2723,6 +2798,21 @@ impl App {
                         );
                     }
                 });
+            // The way past the list.  It offers only disks measured to boot
+            // here, so an operator who has built one of their own has no entry
+            // to pick -- and a filter with no door in it is a wall.  Telnet's
+            // `T` and the web's text box are the same door on the other two
+            // surfaces.
+            let browse = ui.add_enabled(
+                self.pending_boot_pick.is_none(),
+                egui::Button::new("\u{1F4C1}").small(),
+            );
+            if browse.on_hover_text("Choose a disk image not in the list").clicked() {
+                let images = crate::cpm::image::images_dir(&crate::cpm::layout::cpm_dir(
+                    &self.cfg.transfer_dir,
+                ));
+                self.pending_boot_pick = Some(spawn_boot_disk_picker(images));
+            }
         })
         .response
         .on_hover_text(
@@ -5381,6 +5471,7 @@ impl eframe::App for App {
 
         self.poll_logs();
         self.poll_dir_pick();
+        self.poll_boot_pick();
         self.poll_bind_warning();
 
         // ── Another copy already holds this directory ─────────

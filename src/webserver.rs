@@ -1328,6 +1328,25 @@ fn collect_form_updates(
         }
     }
 
+    // **"Or type a filename", beside the CP/M boot select.**
+    //
+    // The select lists only disks measured to boot, which is what stops it
+    // being a catalogue of disappointments -- and it means an operator with a
+    // boot disk of their own, or one we withhold anyway, has no entry to pick.
+    // This is the web's way past it; telnet's is `T` on the picker and the
+    // desktop's is Browse, and all three set the same key.
+    //
+    // It **overrides** the select rather than merging with it: both controls
+    // are submitted on every save and the select always carries something, so
+    // there is no merge to do -- and a person who typed a filename meant it.
+    if let Some(typed) = fields.get("cpm_boot_image_typed") {
+        let typed = typed.trim();
+        if !typed.is_empty() {
+            updates.retain(|(k, _)| k != "cpm_boot_image");
+            updates.push(("cpm_boot_image".to_string(), typed.to_string()));
+        }
+    }
+
     // Checkbox-style booleans: an unchecked checkbox does not appear in
     // the form data, so absence is the canonical "false" signal.  Every
     // boolean key the page renders is set unconditionally (except
@@ -3848,6 +3867,13 @@ fn render_more_popups(cfg: &Config) -> String {
         cpmboot = format_args!(
             "<span class=\"label\">CP/M runs:</span>\
              <select name=\"cpm_boot_image\">{cpm_boot_options}</select>\
+             <span class=\"label\">...or a disk not listed:</span>\
+             <input type=\"text\" name=\"cpm_boot_image_typed\" value=\"\" \
+             placeholder=\"filename in the images folder\">\
+             <span class=\"hint\">The list holds only disks measured to boot \
+             here. If you built one of your own, type its filename -- it is \
+             taken as typed, and nothing checks that it starts. Leave it empty \
+             to use the list above.</span>\
              <span class=\"label\">Booted disk's machine:</span>\
              <select name=\"cpm_boot_machine\">{cpm_machine_options}</select>\
              <span class=\"hint\">Where a booted disk finds its console. \
@@ -8110,6 +8136,15 @@ mod tests {
             // holder is pinned separately, by
             // `test_the_master_password_is_held_in_memory_not_written_or_echoed`.
             "slave_master_password".to_string(),
+            // **Sets a different key on purpose.**  It is the web's way past
+            // the boot picker, which lists only disks measured to boot here, so
+            // it writes `cpm_boot_image` rather than a key of its own -- there
+            // is no `cpm_boot_image_typed` setting and there must not be one,
+            // or two keys would both claim to say what CP/M runs.  Excused from
+            // the round-trip and *not* from the page, and what it actually does
+            // is pinned next door by
+            // `test_a_typed_boot_disk_overrides_the_picker`.
+            "cpm_boot_image_typed".to_string(),
         ];
         for d in 0..16u8 {
             elsewhere.push(format!("cpm_mount_{}", (b'a' + d) as char));
@@ -8188,6 +8223,49 @@ mod tests {
             }
         }
         out
+    }
+
+    /// **The typed filename beats the select, and lands on the real key.**
+    ///
+    /// The picker lists only disks measured to boot here, which is what keeps
+    /// it from being a catalogue of disappointments -- and leaves an operator
+    /// with a disk of their own no entry to choose. This box is the web's way
+    /// past it; telnet's is `T` and the desktop's is Browse.
+    ///
+    /// "Typed wins" is the only rule that can work: both controls are
+    /// submitted on every save and the select always carries something, so
+    /// there is nothing to merge. And it must write `cpm_boot_image`, because
+    /// there is no `cpm_boot_image_typed` setting and there must not be one --
+    /// two keys claiming to say what CP/M runs is the duplication this project
+    /// keeps paying for.
+    #[test]
+    fn test_a_typed_boot_disk_overrides_the_picker() {
+        let cfg = Config::default();
+        let mut form = empty_form();
+        form.insert("cpm_boot_image".to_string(), "from-the-list.dsk".to_string());
+        form.insert("cpm_boot_image_typed".to_string(), "mine.dsk".to_string());
+        let (updates, _) = collect_form_updates(&form, &cfg);
+        let landed: Vec<&str> = updates
+            .iter()
+            .filter(|(k, _)| k == "cpm_boot_image")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(landed, vec!["mine.dsk"], "the typed name wins, and lands exactly once");
+        assert!(
+            !updates.iter().any(|(k, _)| k == "cpm_boot_image_typed"),
+            "there is no such setting, and writing one would create a second source of truth"
+        );
+
+        // **Blank means "use the list"**, never "blank the setting" -- the box
+        // is rendered empty on every page load, so an operator saving anything
+        // else on the form submits an empty one, and the other reading would
+        // wipe their boot disk every time they changed the log level.
+        form.insert("cpm_boot_image_typed".to_string(), "   ".to_string());
+        let (updates, _) = collect_form_updates(&form, &cfg);
+        assert!(
+            updates.iter().any(|(k, v)| k == "cpm_boot_image" && v == "from-the-list.dsk"),
+            "an empty box leaves the select's choice alone"
+        );
     }
 
 }

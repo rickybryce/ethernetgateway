@@ -187,6 +187,50 @@ pub fn image_drives_vdm(image: &[u8]) -> bool {
     outs.contains(&super::vdm::SCROLL_PORT)
 }
 
+/// The port the IMSAI FIF floppy controller is driven through.
+///
+/// One port, because that is the whole interface: the guest writes the address
+/// of a *disk descriptor* in its own memory here and the controller reads the
+/// unit, command, track, sector and DMA address out of RAM itself. Nothing like
+/// the 88-DCDD's port state machine, and nothing this gateway emulates answers
+/// at `FDh`.
+const IMSAI_FIF_PORT: u8 = 0xFD;
+
+/// What an operator is told about a disk whose loader wants the FIF.
+///
+/// One string, because the recorder writes it into `nonbooting.txt`, the
+/// catalogue prints it, and [`crate::cpm::boot::will_not_boot_here`] hands it
+/// to the screens -- three surfaces describing one fact, which is the shape
+/// this project keeps getting wrong when it is spelled three times.
+pub const IMSAI_FIF_REASON: &str =
+    "needs the IMSAI FIF disk controller (port FDh), not emulated here";
+
+/// Does this disk's own system software drive an IMSAI FIF disk controller?
+///
+/// **It explains; it does not gate.** Which disks fail to boot is settled by
+/// booting them — `src/cpm/nonbooting.txt` — because writing to a port nobody
+/// answers is not by itself fatal: `mits-basic40` writes to `22h`/`23h`, which
+/// no board here claims, and boots perfectly well. A guest only dies when it
+/// then *waits* for the device. So this is used to say **why** a measured
+/// failure failed, which is what turns "this disk does not boot" into something
+/// an operator can act on.
+///
+/// The IMSAI 8080 is bus-compatible with the Altair and not I/O-compatible,
+/// which is the thing that surprises people: same 8080, same S-100 bus, so
+/// Altair cards plug in — but a boot loader talks to *boards*. Measured from
+/// the boot sectors, 128 bytes each: Altair `DISK01` drives `OUT 08 / IN 08 /
+/// OUT 09`, every IMSAI loader drives `OUT FDh`, and **not one port is in
+/// common**.
+///
+/// **Measured across all 60 images in the seven collections**, and at every
+/// window from one sector to the full system tracks: `OUT FDh` fires on exactly
+/// seven, all of them IMSAI, with **zero false positives** at any width. The
+/// width therefore follows the rest of this module rather than being tuned.
+pub fn image_drives_imsai_fif(image: &[u8]) -> bool {
+    let (_, outs) = ports_touched(image, SYSTEM_SCAN_BYTES);
+    outs.contains(&IMSAI_FIF_PORT)
+}
+
 /// Does this disk require a monitor ROM it does not carry?
 ///
 /// The signal is the disk **testing for one**, which is a declaration rather
@@ -574,5 +618,28 @@ mod tests {
         // A folder none of the known disks is in proves nothing, and used to
         // *look* like a pass.  Say so instead.
         println!("  ({checked} of {} images had a recorded expectation)", names.len());
+    }
+
+    /// The IMSAI signature is an `OUT` to `FDh`, not the byte `FD` lying around.
+    ///
+    /// Mutation-checked: matching the bare byte instead of the instruction
+    /// passes the first case and fails the second, which is the whole reason
+    /// this reads the opcode.
+    #[test]
+    fn test_the_imsai_signature_is_an_instruction_not_a_byte() {
+        let mut drives = vec![0u8; 512];
+        drives[0] = 0xD3; // OUT
+        drives[1] = 0xFD; //     FDh
+        assert!(image_drives_imsai_fif(&drives), "an OUT to FDh is the declaration");
+
+        // `FD` as data, and as the operand of an `IN`, are both not it.
+        let mut data = vec![0u8; 512];
+        data[0] = 0x3E; // MVI A,
+        data[1] = 0xFD; //       FDh
+        data[8] = 0xDB; // IN
+        data[9] = 0xFD; //    FDh
+        assert!(!image_drives_imsai_fif(&data), "a data byte is not a controller");
+
+        assert!(!image_drives_imsai_fif(&[]), "nothing at all drives nothing");
     }
 }
