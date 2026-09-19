@@ -6180,7 +6180,22 @@ where
             Err(_) => return OnlineExit::Disconnected,
         }
 
-        // Duplex → serial (write in small chunks so slow baud rates stay responsive)
+        // Duplex → serial.
+        //
+        // **This does NOT write in chunks, and that is deliberate -- do not
+        // "fix" it.**  The comment here used to promise chunking, which the
+        // code has never done; the responsiveness it was promising comes from
+        // the pipe being sized in wire time instead, so there is little in
+        // flight to write (`session_output_bufsize`: 240 bytes at 2400 baud).
+        //
+        // A chunked version was written and reverted the same evening
+        // (`fb08dd0`, reverted by `6560925`, whose message records no reason).
+        // Ricky's, 2026-09-19: it did not fix the unresponsiveness it was
+        // written for, **and** it was worse for the operator -- with the write
+        // cut into timed slices, text no longer ran smoothly across the
+        // screen.  A paced write is visible.  So this is a road already taken:
+        // it lost on both counts, and the lying comment is what invited it to
+        // be taken again.
         let result = state.handle.block_on(async {
             tokio::time::timeout(Duration::from_millis(10), duplex_read.read(&mut duplex_buf))
                 .await
