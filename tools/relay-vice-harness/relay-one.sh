@@ -67,7 +67,10 @@ DISPLAY=:0 timeout 120 python3 freshdisk.py 2>&1 | grep -v "X protocol\|Xlib"
 # slave's Telnet Gateway out to it.  Without this the telnet leg would test the
 # slave against itself and pass while proving nothing about a relay.
 TG=()
-[ "$LINK" = telnet ] && TG=("tg=${MASTER_TG:-192.168.1.178:2323}")
+# The master's telnet port for the Telnet Gateway hop.  An address, not a
+# constant -- see relay-sweep.sh, which passes this in; the default is only
+# for driving one cell by hand.
+[ "$LINK" = telnet ] && TG=("tg=${MASTER_TG:-192.168.1.126:2323}")
 
 DISPLAY=:0 timeout 660 python3 run-transfer.py "$PROTO" "$DIR" "$DIALNO" "${TG[@]}" 2>&1 \
     | grep -v "X protocol\|Xlib"

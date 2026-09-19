@@ -3,11 +3,12 @@
 #
 #   LINK=serial|telnet ./relay-sweep.sh <proto>:<dir> ...
 #
-# The device is a real C64 (NovaTerm under VICE) on the SLAVE at 141; the menu
-# it drives and the files it moves belong to the MASTER at 178.  So every step
-# is on the machine that owns it: the master's transfer directory is cleaned
-# and seeded on 178, the emulator is driven on 141, and the bytes are compared
-# HERE against the payload.
+# The device is a real C64 (NovaTerm under VICE) on the SLAVE; the menu it
+# drives and the files it moves belong to the MASTER.  So every step is on the
+# machine that owns it: the master's transfer directory is cleaned and seeded
+# on the master, the emulator is driven on the slave, and the bytes are
+# compared HERE against the payload.  Both addresses come from the
+# environment -- see below.
 #
 # A screen that says "complete" is not a result.  Every run ends in a byte
 # comparison, and a run with no output file is a failure however cheerful the
@@ -16,11 +17,20 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; cd "$HERE"
 export SSH_AUTH_SOCK=/run/user/1000/keyring/ssh
 
-SLAVE=192.168.1.141
-MASTER=192.168.1.178
-MT=/home/ricky/ethernetgateway/target/release/ethernetgateway-data/transfer
-MSEED=/home/ricky/relay-payloads
-TOOLS=/home/ricky/xmodem/tools/punter-vice-harness
+# **The rig moves, so these are inputs and not constants.**  They were baked
+# in as 141/178, and by the next run those were a machine that had been
+# repurposed and one that had changed address -- a sweep that cannot be
+# pointed somewhere else is one edit away from grading the wrong box, or from
+# grading nothing and saying so cheerfully.  The master paths moved too: the
+# data directory used to sit under `target/release/` and now hangs off
+# whatever directory the gateway was launched from (0.9.4).  Override any of
+# them from the environment.
+SLAVE="${SLAVE:-192.168.1.64}"
+MASTER="${MASTER:-192.168.1.126}"
+MDATA="${MDATA:-/home/ricky/ethernetgateway-data}"
+MT="${MT:-$MDATA/transfer}"
+MSEED="${MSEED:-/home/ricky/relay-payloads}"
+TOOLS="${TOOLS:-/home/ricky/xmodem/tools/punter-vice-harness}"
 LINK="${LINK:-serial}"
 OUT="${OUT:-$HERE/results/$LINK}"
 mkdir -p "$OUT"
@@ -44,7 +54,7 @@ seed_master() {
 # trace that mattered: the first xmodem download's negotiation line was still
 # inside the window, but a busier run would have pushed it out and the evidence
 # would have been gone with nothing saying so.  A marker cannot overflow.
-MLOG=/home/ricky/ethernetgateway/target/release/ethernetgateway-data/ethernetgateway.log
+MLOG="${MLOG:-$MDATA/ethernetgateway.log}"
 mark_master() { ssh $MASTER "wc -l < $MLOG" 2>/dev/null | tr -d ' \r'; }
 
 archive() { # proto dir from-line
@@ -105,7 +115,11 @@ for spec in "$@"; do
     # before it starts anything, and the master's transfer directory and the
     # C64's disk are still sitting there from the run before.  Grading those
     # reads the PREVIOUS run's result as this one's.
-    if ! ssh $SLAVE "cd /home/ricky/relay-vice && ./relay-one.sh $proto $dir $LINK" \
+    # MASTER_TG travels with the rest of the rig: the telnet leg reaches the
+    # master through the slave's Telnet Gateway, and a default baked into
+    # relay-one.sh would send the hop to whatever machine held that address
+    # last -- a cell that then grades the SLAVE's own files as the master's.
+    if ! ssh $SLAVE "cd /home/ricky/relay-vice && MASTER_TG='${MASTER_TG:-$MASTER:2323}' ./relay-one.sh $proto $dir $LINK" \
             > "$OUT/$proto-$dir.screen" 2>&1; then
         tail -20 "$OUT/$proto-$dir.screen"
         archive "$proto" "$dir" "$mstart"
