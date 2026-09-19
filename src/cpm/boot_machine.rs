@@ -1637,7 +1637,7 @@ impl Machine for BootMachine {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cpm::dcdd::{geometry_for, Geometry};
 
@@ -2128,7 +2128,17 @@ mod tests {
         assert!(crlf.replace("\r\n", "\n").find("\n#[cfg(test)]\nmod tests").is_some());
 
         let start = src.find("impl Machine for BootMachine").expect("the impl");
-        let end = src.find("\n#[cfg(test)]\nmod tests").expect("the test module");
+        // **Both spellings, because the declaration changed.** The test module
+        // gained `pub(crate)` when `signon_of` became the one measurement that
+        // `fetch`'s download gate shares, and this bound is a literal — so it
+        // went red naming the module rather than silently scanning to
+        // end-of-file, which is the one thing a bound like this has to do. The
+        // `probe_elevation_within` scan learned the same lesson the other way
+        // round, by not going red.
+        let end = src
+            .find("\n#[cfg(test)]\npub(crate) mod tests")
+            .or_else(|| src.find("\n#[cfg(test)]\nmod tests"))
+            .expect("the test module");
         let body = &src[start..end];
         // Inside the trait impl and everything after it — the DMA service loop
         // included — nothing indexes the memory array directly.
@@ -4144,7 +4154,7 @@ mod tests {
     /// which is the catalogue-versus-picker disagreement this whole list
     /// exists to end.
     #[cfg(test)]
-    fn signon_of(
+    pub(crate) fn signon_of(
         m: &mut BootMachine,
         cpu: &mut Cpu,
         on_a_card: bool,

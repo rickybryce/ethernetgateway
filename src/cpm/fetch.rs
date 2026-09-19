@@ -1028,9 +1028,16 @@ mod tests {
     /// serves the same thing. This downloads them and boots each one, so the
     /// claim is tested end to end against the source an operator will use.
     ///
-    /// `TDISK04` is the one exception and it is in the manifest deliberately:
-    /// it boots and paints a VDM-1 screen instead of writing to a console port,
-    /// so it produces no console output by design. Its note says so.
+    /// **There is no exception any more, and there used to be one.** `TDISK04`
+    /// boots and paints a VDM-1 screen instead of writing to a console port, so
+    /// a console-only oracle calls a working disk silent -- and this gate did,
+    /// naming it in an `assert_eq!` as an expected failure while its own
+    /// message said "a disk we recommend did not boot". It asks
+    /// [`crate::cpm::boot_machine::tests::signon_of`] now, which reads the card
+    /// through the shipped publish path, so the list of silent disks is simply
+    /// empty. That also means a *second* card disk added to the manifest is
+    /// caught rather than quietly appended to a carve-out, and that this gate
+    /// and `nonbooting.txt` can no longer disagree about what booting is.
     ///
     /// Ignored: needs the network, and boots thirty machines.
     #[test]
@@ -1043,33 +1050,31 @@ mod tests {
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         let dir = crate::cpm::image::images_dir(&base);
 
+        let live = crate::cpm::screen::register("fetch boot gate");
         let mut silent = Vec::new();
         for disk in catalogue() {
             let bytes = std::fs::read(dir.join(&disk.name)).expect(&disk.name);
             let (machine, _) =
                 crate::cpm::detect::machine_for(crate::cpm::console::AUTO_MACHINE, &bytes);
+            let on_a_card = crate::cpm::detect::image_drives_vdm(&bytes);
             let mut m = BootMachine::new();
             m.set_machine(&machine);
             m.insert(0, bytes, true).unwrap_or_else(|e| panic!("{}: {e}", disk.name));
             let mut cpu = BootMachine::new_cpu();
-            m.boot(&mut cpu, 0).unwrap_or_else(|e| panic!("{}: {e}", disk.name));
-            let mut out = Vec::new();
-            for _ in 0..20_000_000u64 {
-                m.step(&mut cpu);
-                out.extend(m.take_output());
-                if out.len() > 40 {
-                    break;
+            match crate::cpm::boot_machine::tests::signon_of(&mut m, &mut cpu, on_a_card, &live) {
+                Ok((_, on_card)) => {
+                    eprintln!("  {:<14} spoke{}", disk.name, if on_card { " (on the card)" } else { "" })
+                }
+                Err(why) => {
+                    eprintln!("  {:<14} SILENT — {why}", disk.name);
+                    silent.push(disk.name.clone());
                 }
             }
-            if out.is_empty() {
-                silent.push(disk.name.clone());
-            }
-            eprintln!("  {:<14} {}", disk.name, if out.is_empty() { "(silent)" } else { "spoke" });
         }
-        assert_eq!(
-            silent,
-            vec!["TDISK04.DSK".to_string()],
-            "a disk we recommend did not boot — the manifest is promising something untrue"
+        assert!(
+            silent.is_empty(),
+            "a disk we recommend did not boot — the manifest is promising something \
+             untrue: {silent:?}"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
