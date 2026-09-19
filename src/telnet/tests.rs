@@ -13900,7 +13900,13 @@ fn test_the_welcome_page_shows_for_seven_days_and_then_stops() {
 /// exist.  A row added to `show_welcome_if_due` moves this number by itself.
 #[test]
 fn test_the_welcome_page_fits_a_petscii_screen() {
-    let src = include_str!("session.rs");
+    // **Normalised, like every other source scan here.**  A Windows checkout
+    // gets CRLF: `.gitattributes` pins the fixtures and the .COM files but not
+    // `*.rs`.  The end marker below would in fact still match inside a `\r\n`,
+    // but that is a thing a reader has to work out, and the neighbouring scans
+    // do not make them.
+    let src = include_str!("session.rs").replace('\r', "");
+    let src = src.as_str();
     let start = src
         .find("async fn show_welcome_if_due")
         .expect("show_welcome_if_due not found — this scan needs renaming");
