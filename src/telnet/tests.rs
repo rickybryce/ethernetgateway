@@ -13738,7 +13738,7 @@ async fn test_backspacing_a_digit_returns_to_the_menu_keys() {
     use tokio::io::AsyncWriteExt;
 
     /// Feed `keys` to one session's menu prompt and return what it read.
-    async fn menu_input_for(keys: &[u8]) -> Option<String> {
+    async fn menu_input_as(term: TerminalType, keys: &[u8]) -> Option<String> {
         let (mut client, reader) = tokio::io::duplex(4096);
         let (_sink, writer_inner) = tokio::io::duplex(65536);
         let writer: SharedWriter =
@@ -13752,12 +13752,18 @@ async fn test_backspacing_a_digit_returns_to_the_menu_keys() {
             None,
             lockouts,
         );
+        session.terminal_type = term;
         client.write_all(keys).await.expect("feed");
         client.flush().await.expect("flush");
         // Close the far end so a collector that never lets go hits EOF and
         // answers `None` rather than hanging the suite.
         drop(client);
         session.get_menu_input(false).await.expect("menu input")
+    }
+
+    /// The common case: an ASCII/ANSI terminal.
+    async fn menu_input_for(keys: &[u8]) -> Option<String> {
+        menu_input_as(TerminalType::Ansi, keys).await
     }
 
     // The reported sequence: a digit, a change of mind, then a nav key.
@@ -13807,5 +13813,26 @@ async fn test_backspacing_a_digit_returns_to_the_menu_keys() {
         menu_input_for(b"9\x08\rn").await,
         Some("n".to_string()),
         "Enter after the erase must be ignored, as it is at a fresh prompt"
+    );
+
+    // **And on the terminal this menu exists for.**  A C64 sends `0x14` for
+    // INST/DEL, so the erase itself is a byte none of the cases above use.
+    // Both of the keyboard's letter ranges are here, and the second is the
+    // one that makes this a PETSCII test rather than a repeat: unshifted N
+    // is `0x4E`, which an ANSI session would also read as `n`, but shifted N
+    // is `0xCE` and only the PETSCII decode turns that into a letter -- an
+    // ANSI session answers with the raw character instead.
+    for key in [0x4E_u8, 0xCE] {
+        assert_eq!(
+            menu_input_as(TerminalType::Petscii, &[b'9', 0x14, key]).await,
+            Some("n".to_string()),
+            "a Commodore's INST/DEL must free the menu keys the same way (key {key:#04x})"
+        );
+    }
+    assert_ne!(
+        menu_input_as(TerminalType::Ansi, &[b'9', 0x14, 0xCE]).await,
+        Some("n".to_string()),
+        "control: 0xCE is only an N once the PETSCII decode has run, so the \
+         case above is exercising that decode and not repeating the ASCII one"
     );
 }
