@@ -70,7 +70,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 russh = "0.63"
 ureq = "3"
 serde_json = "1"
-html2text = "0.14"
+html2text = "0.17"
 # Pinned to html2text 0.14's OWN html5ever, and it must stay that way.
 #
 # We parse the DOM ourselves rather than through `Config::parse_html` for one
