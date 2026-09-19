@@ -13724,9 +13724,13 @@ fn test_the_second_page_is_offered_and_drawn_as_one_decision() {
 /// leaving the screen.  Every one of the 37 menus that reads keys this way
 /// had it, not just that one.
 ///
-/// The three cases are one test because they are one rule: a letter typed
-/// at an empty prompt is a menu key, whether or not a digit was typed and
-/// erased first; a digit typed there still opens a collector.
+/// The cases are one test because they are one rule: a letter typed at an
+/// empty prompt is a menu key, whether or not a digit was typed and erased
+/// first; a digit typed there still opens a collector.  The last of them
+/// pins the rule's **boundary** rather than its effect -- while a number is
+/// still being typed a letter is deliberately still dropped, because `1` may
+/// yet become `10` and the mount picker numbers ten images to a page.  A
+/// later reader tempted to "finish the job" should change that on purpose.
 ///
 /// **The failure is a wrong answer, not a hang.** The feed ends in EOF, so
 /// a collector that never lets go runs out of input and returns `None` --
@@ -13834,5 +13838,18 @@ async fn test_backspacing_a_digit_returns_to_the_menu_keys() {
         Some("n".to_string()),
         "control: 0xCE is only an N once the PETSCII decode has run, so the \
          case above is exercising that decode and not repeating the ASCII one"
+    );
+
+    // **The boundary, pinned deliberately.**  A letter arriving while digits
+    // are still buffered is dropped, and stays dropped: `1` may yet become
+    // `10`, and `cpmmount_pick_image` numbers ten images to a page, so the
+    // collector cannot know the number is finished.  Only an *empty* prompt
+    // hands the key back.  This is the half of the old behaviour that is
+    // intended, and it is asserted so that widening the fix is a decision
+    // somebody makes rather than one that slips in.
+    assert_eq!(
+        menu_input_for(b"1n\r").await,
+        Some("1".to_string()),
+        "a letter typed mid-number is still dropped; only an empty prompt frees it"
     );
 }

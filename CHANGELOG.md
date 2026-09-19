@@ -130,7 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that meant pressing `9`, changing your mind, pressing backspace, and then
   finding `N` and `P` dead with no way to change page short of leaving the
   screen.  Every one of the **37** menus that reads keys this way had it, not
-  just that one, because they share a single input loop.  An erase that empties
+  just that one, because they share a single input loop; the four that take a
+  single digit without waiting for Enter &mdash; the main menu and three of the
+  modem settings screens &mdash; never could.  An erase that empties
   the prompt now hands the next key back to the menu, so a letter is a command
   again and a digit starts a fresh number.  The line-erase key (Ctrl-U, and the
   telnet EL a linemode client sends) reaches the same empty prompt and had been
