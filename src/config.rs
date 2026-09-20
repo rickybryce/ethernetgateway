@@ -7224,7 +7224,14 @@ mod tests {
         // ---- and the key/default tables, which are where this manual really
         // states its defaults.  Header-driven: see the note above.
         let mut table_checked = 0usize;
-        for table in manual.split("<table>").skip(1) {
+        // **`<table` and not `<table>`, because these tags carry attributes.**
+        // The sibling scan above already learned this and says so; this one
+        // did not, and went blind the moment the config-key tables were given
+        // a `class` for the PDF's column widths -- 216 rows dropped to 71 and
+        // the count guard below is what said so.  A literal that includes the
+        // closing bracket is a scan that breaks on the next attribute anybody
+        // adds.
+        for table in manual.split("<table").skip(1) {
             let table = table.split_once("</table>").map_or(table, |(t, _)| t);
             let headers: Vec<&str> = table
                 .split("<th>")
