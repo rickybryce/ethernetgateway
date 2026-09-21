@@ -182,7 +182,7 @@ jobs:
       #   gh api repos/dtolnay/rust-toolchain/git/matching-refs/heads/<version>
       # and confirm the commit message names that version, not "stable".
       - name: Install Rust 1.92 (the declared minimum)
-        uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.92.0
 
       # **This job passes just as well on the wrong compiler, so it says which
       # one it got.**  Installing a toolchain and running `cargo check` proves
