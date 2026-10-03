@@ -879,18 +879,23 @@ async fn purge_line(
 ) -> Result<(), String> {
     let quiet = std::time::Duration::from_secs(1);
     let give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    // CANs at the end of what was drained.  A sender giving up sends a run of
+    // them and then stops -- so *that*, CAN CAN and then silence, is the
+    // abort.  Not `is_can_abort` on every byte: what is purged is often block
+    // payload, and a binary file holding `18 18` would then end a transfer
+    // that one NAK would have recovered.
+    let mut trailing_cans = 0u32;
     while tokio::time::Instant::now() < give_up {
         match tokio::time::timeout(quiet, nvt_read_byte(reader, is_tcp, state)).await {
-            // A sender giving up says so with CAN CAN, and an error is exactly
-            // when one does: drained unread, the abort went unnoticed until
-            // the retries ran out minutes later.
-            Ok(Ok(b)) if is_can_abort(b, state) => {
-                return Err("Transfer cancelled by sender".into());
+            Ok(Ok(b)) => {
+                trailing_cans = if b == CAN { trailing_cans + 1 } else { 0 };
             }
-            Ok(Ok(_)) => continue,
             Ok(Err(e)) => return Err(e),
             Err(_) => break,
         }
+    }
+    if trailing_cans >= 2 {
+        return Err("Transfer cancelled by sender".into());
     }
     Ok(())
 }
@@ -3800,6 +3805,29 @@ mod tests {
         send_write.write_all(&[0x55, CAN, CAN]).await.unwrap(); // stray, then abort
         let err = recv_task.await.unwrap().expect_err("the abort must be heard");
         assert!(err.contains("cancelled"), "{err}");
+    }
+
+    /// The other side of the cancel: `18 18` *inside* purged payload is data,
+    /// not an abort.  A burst holding CAN CAN mid-stream is purged, NAKed once,
+    /// and the transfer recovers.
+    #[tokio::test(start_paused = true)]
+    async fn test_can_can_inside_purged_payload_is_not_an_abort() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        send_write.write_all(&[0x55, CAN, CAN, 0x41, 0x42]).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), NAK);
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        finish_plain_eot(&mut send_read, &mut send_write).await;
+        let (data, _) = recv_task.await.unwrap().unwrap();
+        assert_eq!(data.len(), 2 * XMODEM_BLOCK_SIZE);
     }
 
     /// The re-arm on its own: after a NAKed noise EOT, a stray byte says the
