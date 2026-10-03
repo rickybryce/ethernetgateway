@@ -6920,7 +6920,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [rand 0.10.2](https://github.com/rust-random/rand)
+- [rand 0.10.3](https://github.com/rust-random/rand)
 - [rand 0.9.5](https://github.com/rust-random/rand)
 - [rand_chacha 0.9.0](https://github.com/rust-random/rand)
 - [rand_core 0.9.5](https://github.com/rust-random/rand)
@@ -7119,7 +7119,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [ureq-proto 0.6.2](https://github.com/algesten/ureq-proto)
+- [ureq-proto 0.6.4](https://github.com/algesten/ureq-proto)
 
 ```
 Copyright 2022 Martin Algesten
@@ -7512,7 +7512,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [ureq 3.4.1](https://github.com/algesten/ureq)
+- [ureq 3.4.2](https://github.com/algesten/ureq)
 
 ```
 MIT License
