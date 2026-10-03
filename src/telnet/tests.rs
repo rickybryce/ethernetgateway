@@ -140,6 +140,57 @@ fn test_validate_filename_invalid() {
     assert!(TelnetSession::validate_filename("---").is_err());
 }
 
+/// A ZMODEM sender's name is converted, not refused: the upload asks no
+/// filename, so a name this gateway cannot hold would otherwise be a file
+/// nobody could upload.  Deterministic, and always a valid new name.
+#[test]
+fn test_a_sender_name_is_converted_not_refused() {
+    let f = TelnetSession::safe_upload_name;
+    assert_eq!(f("report.pdf").as_deref(), Some("report.pdf"), "a good name is untouched");
+    assert_eq!(f("My Report.pdf").as_deref(), Some("My_Report.pdf"));
+    assert_eq!(f("foo(1).txt").as_deref(), Some("foo_1_.txt"));
+    assert_eq!(f("r\u{e9}sum\u{e9}.txt").as_deref(), Some("r_sum_.txt"));
+    assert_eq!(f("../../etc/passwd").as_deref(), Some("_._etc_passwd"), "no traversal survives");
+    assert_eq!(f(".hidden").as_deref(), Some("hidden"));
+    assert_eq!(f("COM1.txt").as_deref(), Some("_COM1.txt"), "a device name is moved aside");
+    assert_eq!(f("a.txt.").as_deref(), Some("a.txt"));
+    let long = format!("{}.txt", "x".repeat(100));
+    let got = f(&long).unwrap();
+    assert!(got.len() <= TelnetSession::MAX_FILENAME_LEN && got.ends_with(".txt"), "{got}");
+    assert_eq!(f("()").as_deref(), None, "nothing usable left");
+    // A cut that lands on a dot must not leave `..` before the extension.
+    let dotted = format!("{}.{}.txt", "x".repeat(59), "y".repeat(10));
+    let got = f(&dotted).expect("converted, not refused");
+    assert!(!got.contains("..") && got.ends_with(".txt") && got.len() <= 64, "{got}");
+    let dev = format!("AUX.{}.txt", "z".repeat(70));
+    let got = f(&dev).expect("converted, not refused");
+    assert!(got.starts_with("_AUX") && got.ends_with(".txt") && got.len() <= 64, "{got}");
+    for name in ["My Report.pdf", "foo(1).txt", "COM1.txt", &long] {
+        let got = f(name).unwrap();
+        assert!(TelnetSession::validate_new_name(&got).is_ok(), "{got}");
+    }
+}
+
+/// One decision for menu upload and autostart, with a reason for each refusal.
+#[test]
+fn test_zmodem_accepts_gives_a_reason_for_every_refusal() {
+    let dir = std::env::temp_dir().join(format!("egw_zaccept_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("My_Report.pdf"), b"x").unwrap();
+    let mut taken = std::collections::HashSet::new();
+    let mut a = |name: &str, size| TelnetSession::zmodem_accepts(&dir, name, size, &mut taken);
+    assert_eq!(a("new.txt", Some(10)), Ok(()));
+    assert_eq!(a("My Report.pdf", None).unwrap_err().1, "already exists", "checked under its saved name");
+    assert_eq!(a("big.bin", Some(9 * 1024 * 1024)).unwrap_err().1, "over the 8 MB limit");
+    assert_eq!(a("()", None).unwrap_err().1, "no usable filename");
+    // Two names converting to one, in one batch: the second is declined
+    // before it is sent, not transferred only to fail on save.
+    assert_eq!(a("a b.txt", None), Ok(()));
+    assert_eq!(a("a_b.txt", None).unwrap_err().1, "same name as another file sent");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A *created* name refuses Windows device names and a trailing dot; a name
 /// that is merely *found* does not, or files already on a Linux host -- and a
 /// CP/M Kermit's `README.` -- become unreachable.
@@ -2993,7 +3044,7 @@ fn test_all_menu_items_fit_petscii() {
         "  P  PUNTER         C1 CCGMS/Novaterm",
         // Download protocol picker (reached from D).  PUNTER's
         // "C1 CCGMS/Novaterm" row is the tightest of these at 37 chars.
-        // (KERMIT is intentionally not a picker option — server mode only.)
+        // (KERMIT's rows -- "K  KERMIT ... any flavor, auto" -- are shorter.)
         "  X  XMODEM     128-byte blocks",
         "  1  XMODEM-1K  1024-byte blocks",
         "  Y  YMODEM     name+size hdr, 1K",

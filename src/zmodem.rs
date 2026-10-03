@@ -1496,6 +1496,22 @@ where
             mode.map(|m| format!("{:o}", m)),
         );
     }
+    // Consult the caller.  The decide callback is sync; if it decides
+    // to reject, we emit ZSKIP (which sz/rz treat as "move to next
+    // file in batch") and return None to signal the skip to the main
+    // loop.
+    if !decide(file_index, &filename, expected_size) {
+        if verbose {
+            glog!("ZMODEM recv: decide() rejected '{}', sending ZSKIP", filename);
+        }
+        send_zskip(writer, is_tcp, verbose).await?;
+        return Ok(None);
+    }
+
+    // The size limit after the caller, so the caller sees every offered file
+    // -- and can tell its user one was refused as too large, where before it
+    // was skipped here and never mentioned.  Both send the same ZSKIP; this
+    // stays as the backstop for a caller that does not check size.
     if let Some(sz) = expected_size {
         if sz > MAX_FILE_SIZE {
             // File too big — send ZSKIP rather than ZABORT so batch
@@ -1509,18 +1525,6 @@ where
             send_zskip(writer, is_tcp, verbose).await?;
             return Ok(None);
         }
-    }
-
-    // Consult the caller.  The decide callback is sync; if it decides
-    // to reject, we emit ZSKIP (which sz/rz treat as "move to next
-    // file in batch") and return None to signal the skip to the main
-    // loop.
-    if !decide(file_index, &filename, expected_size) {
-        if verbose {
-            glog!("ZMODEM recv: decide() rejected '{}', sending ZSKIP", filename);
-        }
-        send_zskip(writer, is_tcp, verbose).await?;
-        return Ok(None);
     }
 
     let mut file_data: Vec<u8> = Vec::new();

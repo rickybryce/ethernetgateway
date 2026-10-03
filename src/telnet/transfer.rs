@@ -475,6 +475,80 @@ impl TelnetSession {
         }
     }
 
+    /// The name a file offered under `sender`'s name is saved as -- or `None`
+    /// when nothing usable is left of it.
+    ///
+    /// **Converted, not refused.**  A ZMODEM upload asks no filename, so a
+    /// sender name this gateway cannot hold (`My Report.pdf`, `foo(1).txt`,
+    /// `résumé.txt`, one past 64 characters) would otherwise be a file nobody
+    /// can upload at all -- the typed name used to be the way round it.  Every
+    /// character outside `validate_filename`'s set becomes `_`, runs of dots
+    /// collapse, leading and trailing dots go, a long name keeps its extension,
+    /// and a Windows device name gets a leading `_`.  Deterministic, so the
+    /// existence check before the transfer and the save after it agree.
+    pub(in crate::telnet) fn safe_upload_name(sender: &str) -> Option<String> {
+        let mut out: String = sender
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+            .collect();
+        while out.contains("..") {
+            out = out.replace("..", ".");
+        }
+        let mut out = out.trim_matches('.').to_string();
+        // The device prefix before shortening, so shortening is the last
+        // word on length and cannot be undone by a character added after it.
+        if crate::cpm::is_host_device_name(out.split('.').next().unwrap_or("")) {
+            out.insert(0, '_');
+        }
+        if out.len() > Self::MAX_FILENAME_LEN {
+            // All ASCII by now, so byte offsets are character offsets.  The
+            // cut is trimmed of dots: one there would meet the extension's
+            // own and make `..`, which `validate_filename` refuses.
+            out = match out.rfind('.') {
+                Some(i) if i > 0 && out.len() - i <= 10 => {
+                    let ext = out[i..].to_string();
+                    let stem = out[..Self::MAX_FILENAME_LEN - ext.len()].trim_end_matches('.');
+                    format!("{stem}{ext}")
+                }
+                _ => out[..Self::MAX_FILENAME_LEN].trim_end_matches('.').to_string(),
+            };
+        }
+        Self::validate_new_name(&out).ok().map(|_| out)
+    }
+
+    /// Whether to accept a file a ZMODEM sender offers, and if not, the name to
+    /// show and the reason.  **One rule for the menu upload and autostart**, so
+    /// the two cannot accept different files or report them differently.
+    ///
+    /// `taken` holds the names already accepted in this batch.  Nothing is
+    /// written until the whole batch has arrived, so the existence check
+    /// alone let two senders' names that convert to one (`a b.txt` and
+    /// `a_b.txt`) both be transferred, the second only to fail on save.
+    pub(in crate::telnet) fn zmodem_accepts(
+        dir: &std::path::Path,
+        sender: &str,
+        size: Option<u64>,
+        taken: &mut std::collections::HashSet<String>,
+    ) -> Result<(), (String, &'static str)> {
+        let shown = || crate::aichat::sanitize_for_terminal(sender);
+        if size.is_some_and(|sz| sz > Self::MAX_FILE_SIZE as u64) {
+            return Err((shown(), "over the 8 MB limit"));
+        }
+        let Some(name) = Self::safe_upload_name(sender) else {
+            return Err((shown(), "no usable filename"));
+        };
+        if dir.join(&name).exists() {
+            return Err((name, "already exists"));
+        }
+        // Keyed as the filesystem compares: on Windows and macOS `Readme.txt`
+        // and `README.TXT` are one file, so the second would only fail on save.
+        let key = if cfg!(any(windows, target_os = "macos")) { name.to_ascii_lowercase() } else { name.clone() };
+        if !taken.insert(key) {
+            return Err((name, "same name as another file sent"));
+        }
+        Ok(())
+    }
+
     /// [`Self::validate_filename`] plus the rules for a name being **created**
     /// by a person: no Windows device name (an upload named `COM1`, or `MKDIR
     /// NUL`, opens a device there, whatever follows the first dot) and no
@@ -740,83 +814,105 @@ impl TelnetSession {
             return Ok(());
         }
 
-        self.clear_screen().await?;
-        let sep = self.separator();
-        self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("UPLOAD FILE")))
-            .await?;
-        self.send_line(&sep).await?;
-        self.send_line("").await?;
-
-        let p = format!("  {} ", self.cyan("Filename:"));
-        self.send(&p).await?;
-        self.flush().await?;
-
-        let filename = match self.get_line_input().await? {
-            Some(s) if !s.is_empty() => s,
-            _ => return Ok(()),
-        };
-
-        if let Err(msg) = Self::validate_new_name(&filename) {
-            self.show_error(msg).await?;
-            return Ok(());
-        }
-
-        let filepath = self.transfer_path().join(&filename);
-
-        // Detect duplicates up-front so the user doesn't sit through a
-        // whole transfer only to have the save-step fail.  Prompt to
-        // overwrite; if declined, cancel cleanly.
-        let overwrite = if tokio::fs::try_exists(&filepath).await.unwrap_or(false) {
-            self.send_line("").await?;
-            self.send_line(&format!(
-                "  {}",
-                self.yellow(&format!("File '{}' already exists.", filename))
-            ))
-            .await?;
-            self.send(&format!(
-                "  {} ",
-                self.cyan("Overwrite? (Y/N):")
-            ))
-            .await?;
-            self.flush().await?;
-            self.drain_input().await;
-            let answer = match self.read_byte_filtered().await? {
-                Some(b) => {
-                    if self.terminal_type == TerminalType::Petscii {
-                        petscii_to_ascii_byte(b)
-                    } else {
-                        b
-                    }
-                }
-                None => return Ok(()),
-            };
-            self.send_line("").await?;
-            if answer != b'y' && answer != b'Y' {
-                return Ok(());
-            }
-            true
-        } else {
-            false
-        };
-
-        // Ask the user which protocol their sender will use.  Putting
-        // this on its own screen after the filename + overwrite prompts
-        // mirrors the download flow (file → protocol → transfer) and
-        // gives the user as long as they need to browse menus on their
-        // terminal before committing to the transfer window.  ESC /
-        // PETSCII `<-` at the protocol prompt cancels cleanly.
+        // **The protocol first**, because it decides whether there is a name
+        // to ask for.  ZMODEM names every file it sends, so it is not asked
+        // one: a typed name was a second, competing answer -- the first file
+        // was saved under the *sender's* name all along, and the overwrite
+        // answer given for the typed name landed on whatever file that was.
+        // It now behaves as the ZMODEM autostart path always has: each file
+        // under its own name, and one that already exists is declined, never
+        // overwritten.  ESC / PETSCII `<-` at the protocol prompt cancels.
         let protocol = match self.prompt_upload_protocol().await? {
             Some(p) => p,
             None => return Ok(()),
         };
+        let named_by_sender = matches!(protocol, UploadProtocol::Zmodem);
 
+        let (filename, filepath, overwrite) = if named_by_sender {
+            (String::new(), self.transfer_path(), false)
+        } else {
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("UPLOAD FILE")))
+                .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            let p = format!("  {} ", self.cyan("Filename:"));
+            self.send(&p).await?;
+            self.flush().await?;
+
+            let filename = match self.get_line_input().await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+
+            if let Err(msg) = Self::validate_new_name(&filename) {
+                self.show_error(msg).await?;
+                return Ok(());
+            }
+
+            let filepath = self.transfer_path().join(&filename);
+
+            // Detect duplicates up-front so the user doesn't sit through a
+            // whole transfer only to have the save-step fail.  Prompt to
+            // overwrite; if declined, cancel cleanly.
+            let overwrite = if tokio::fs::try_exists(&filepath).await.unwrap_or(false) {
+                self.send_line("").await?;
+                self.send_line(&format!(
+                    "  {}",
+                    self.yellow(&format!("File '{}' already exists.", filename))
+                ))
+                .await?;
+                self.send(&format!(
+                    "  {} ",
+                    self.cyan("Overwrite? (Y/N):")
+                ))
+                .await?;
+                self.flush().await?;
+                self.drain_input().await;
+                let answer = match self.read_byte_filtered().await? {
+                    Some(b) => {
+                        if self.terminal_type == TerminalType::Petscii {
+                            petscii_to_ascii_byte(b)
+                        } else {
+                            b
+                        }
+                    }
+                    None => return Ok(()),
+                };
+                self.send_line("").await?;
+                if answer != b'y' && answer != b'Y' {
+                    return Ok(());
+                }
+                true
+            } else {
+                false
+            };
+            (filename, filepath, overwrite)
+        };
+
+        if named_by_sender {
+            // A screen of its own: under the protocol list it ran a PETSCII
+            // screen to its last row.
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("UPLOAD FILE"))).await?;
+            self.send_line(&sep).await?;
+        }
         self.send_line("").await?;
-        self.send_line(&format!(
-            "  Ready to receive: {}",
-            self.amber(&filename)
-        ))
-        .await?;
+        if named_by_sender {
+            self.send_line("  Ready to receive. Files keep the").await?;
+            self.send_line("  names your terminal sends.").await?;
+        } else {
+            self.send_line(&format!(
+                "  Ready to receive: {}",
+                self.amber(&filename)
+            ))
+            .await?;
+        }
         self.send_line(&format!(
             "  Max file size: {} MB",
             Self::MAX_FILE_SIZE / (1024 * 1024)
@@ -826,14 +922,12 @@ impl TelnetSession {
         self.send_line(&format!(
             "  {}",
             self.green(match protocol {
-                UploadProtocol::XmodemYmodem =>
-                    "Start XMODEM/YMODEM send from your terminal now.",
-                UploadProtocol::Zmodem =>
-                    "Start ZMODEM send from your terminal now.",
-                UploadProtocol::Kermit =>
-                    "Start KERMIT send from your terminal now.",
-                UploadProtocol::Punter =>
-                    "Start PUNTER send from your terminal now.",
+                // Each under 38 columns: the longer "... from your terminal
+                // now." wrapped on a C64.
+                UploadProtocol::XmodemYmodem => "Start the XMODEM/YMODEM send now.",
+                UploadProtocol::Zmodem => "Start the ZMODEM send now.",
+                UploadProtocol::Kermit => "Start the KERMIT send now.",
+                UploadProtocol::Punter => "Start the PUNTER send now.",
             })
         ))
         .await?;
@@ -841,7 +935,9 @@ impl TelnetSession {
         // For ExtraPutty it's File Transfer → Zmodem → Send; other
         // terminals have similar menu items.  Users who know the drill
         // can ignore this — it's here for the first-timer path.
-        if matches!(protocol, UploadProtocol::Zmodem) {
+        // Not on a C64: at ~68 columns it is two rows there, and no C64
+        // terminal is ExtraPutty.
+        if matches!(protocol, UploadProtocol::Zmodem) && self.terminal_type != TerminalType::Petscii {
             self.send_line(
                 "  (ExtraPutty: File Transfer > Zmodem > Send. Other clients vary.)",
             )
@@ -891,27 +987,26 @@ impl TelnetSession {
         // file attributes through this path so its entries are always
         // `None`.  The save-side applies modtime + mode after writing.
         type Received = Vec<(Option<String>, Vec<u8>, Option<crate::xmodem::YmodemReceiveMeta>)>;
-        // Decide callback for the ZMODEM receiver.  The first file
-        // (idx 0) is always accepted — the user typed a destination
-        // filename in the upload prompt, so they want this one saved
-        // regardless of what the sender called it.  Later files in a
-        // batch use the sender's name, which we sanitize through the
-        // same `validate_filename` rules as user input and reject with
-        // ZSKIP if they fail or collide with an existing file.  The
+        // Decide callback for the ZMODEM receiver: every file, the first
+        // included, is judged by `zmodem_accepts` -- the same rule the
+        // autostart path uses -- and declined with ZSKIP before it is sent if
+        // it is too large, has no usable name, or would collide.  The
         // path-existence check is a sync std::fs call — fast, no
         // runtime-blocking concern.
         let transfer_path = self.transfer_path();
-        let decide = |idx: usize,
-                      sender_name: &str,
-                      _size: Option<u64>|
-         -> bool {
-            if idx == 0 {
-                return true;
+        // Files declined before they are sent never come back from the
+        // receiver, so the reason is recorded here for the summary --
+        // otherwise a single declined file read as "0 saved, 0 skipped".
+        let mut declined: Vec<(String, &'static str)> = Vec::new();
+        let mut taken = std::collections::HashSet::new();
+        let decide = |_idx: usize, sender_name: &str, size: Option<u64>| -> bool {
+            match Self::zmodem_accepts(&transfer_path, sender_name, size, &mut taken) {
+                Ok(()) => true,
+                Err(why) => {
+                    declined.push(why);
+                    false
+                }
             }
-            if Self::validate_filename(sender_name).is_err() {
-                return false;
-            }
-            !transfer_path.join(sender_name).exists()
         };
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         // Captured by the Kermit branch's mapping closure when the
@@ -940,7 +1035,9 @@ impl TelnetSession {
                                 modtime: rx.modtime,
                                 mode: rx.mode,
                             });
-                        (Some(rx.filename), rx.data, meta)
+                        // The converted name `zmodem_accepts` checked.
+                        let name = Self::safe_upload_name(&rx.filename).unwrap_or(rx.filename);
+                        (Some(name), rx.data, meta)
                     })
                     .collect()
             }),
@@ -1055,19 +1152,21 @@ impl TelnetSession {
             }
         };
 
-        // Save each file.  The first file goes to the user-entered
-        // path with the user-chosen overwrite behavior.  Any additional
-        // files (ZMODEM batch mode per Forsberg §4) go to the sender's
-        // own filename after the same `validate_filename` sanitation
-        // we apply to user input — and if the name collides with an
-        // existing file we skip rather than clobber.  Batch files
-        // share the transfer-complete window with the first file; we
-        // don't prompt per-file.
+        // Save each file.  Where a name was typed, the first file goes to
+        // that path with the user-chosen overwrite behavior.  Every other
+        // file -- all of a ZMODEM upload's, and files 2..N of a YMODEM or
+        // Kermit batch -- goes to the sender's own name (converted for
+        // ZMODEM by `safe_upload_name`), and a collision is skipped rather
+        // than clobbered.  Batch files share the transfer-complete window
+        // with the first file; we don't prompt per-file.
         let mut saved: Vec<(String, usize)> = Vec::new();
-        let mut skipped: Vec<(String, &'static str)> = Vec::new();
+        let mut skipped: Vec<(String, &'static str)> = declined;
 
         for (idx, (sender_name, data, ymeta)) in uploads.iter().enumerate() {
-            if idx == 0 {
+            // A ZMODEM upload has no typed name, so every file -- the first
+            // included -- takes the batch path below: its own name, never
+            // overwriting.
+            if idx == 0 && !named_by_sender {
                 // First file: user-entered filename, honor overwrite.
                 // A codec may refine the name — Punter appends the
                 // .prg/.seq extension matching the declared CBM type when
@@ -1166,7 +1265,10 @@ impl TelnetSession {
         // was transferred (by far the common case); expand to a
         // per-file list only when we actually saw a batch.
         self.send_line("").await?;
-        if uploads.len() == 1 {
+        // The one-file summary only when one file was *saved*: a ZMODEM
+        // upload's only file can now be declined or fail, and "Upload
+        // complete!  0 bytes" said neither -- the list below says why.
+        if saved.len() == 1 && skipped.is_empty() {
             let bytes = saved.first().map(|(_, n)| *n).unwrap_or(0);
             let blocks = bytes.div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE);
             self.send_line(&format!(
@@ -1181,23 +1283,30 @@ impl TelnetSession {
                 elapsed.as_secs_f64()
             ))
             .await?;
+            // Nobody typed this name, so say what it was.
+            if named_by_sender && let Some((name, _)) = saved.first() {
+                let room = if self.terminal_type == TerminalType::Petscii { 27 } else { 66 };
+                self.send_line(&format!("  Saved as {}", self.amber(&truncate_to_width(name, room))))
+                    .await?;
+            }
             self.last_transfer_note = Some(TransferNote {
                 ok: true,
                 text: format!("Rcvd {} bytes, {:.1}s", bytes, elapsed.as_secs_f64()),
             });
         } else {
-            self.send_line(&format!(
-                "  {}",
-                self.green(&format!(
-                    "Upload complete: {} saved, {} skipped, {:.1}s",
-                    saved.len(),
-                    skipped.len(),
-                    elapsed.as_secs_f64()
-                ))
-            ))
-            .await?;
+            // Not green, and not "ok", when nothing was saved: every file
+            // declined or failed is an upload that did not happen, whatever
+            // the reasons listed under it.
+            let line = format!(
+                "Upload complete: {} saved, {} skipped, {:.1}s",
+                saved.len(),
+                skipped.len(),
+                elapsed.as_secs_f64()
+            );
+            let line = if saved.is_empty() { self.yellow(&line) } else { self.green(&line) };
+            self.send_line(&format!("  {}", line)).await?;
             self.last_transfer_note = Some(TransferNote {
-                ok: true,
+                ok: !saved.is_empty(),
                 text: format!(
                     "Rcvd {} file(s), {} skipped",
                     saved.len(),

@@ -1127,14 +1127,18 @@ impl TelnetSession {
         let verbose = config::get_config().verbose;
         let target_dir = self.transfer_path();
         let target_dir_for_decide = target_dir.clone();
-        // Auto-accept anything with a valid filename that doesn't
-        // already exist.  Same sanitation as the interactive batch
-        // upload's "subsequent files" path.
-        let decide = move |_idx: usize, sender_name: &str, _size: Option<u64>| -> bool {
-            if Self::validate_filename(sender_name).is_err() {
-                return false;
+        // The same rule, and the same record of what was declined, as the
+        // Upload menu's ZMODEM -- `zmodem_accepts`.
+        let mut declined: Vec<(String, &'static str)> = Vec::new();
+        let mut taken = std::collections::HashSet::new();
+        let decide = |_idx: usize, sender_name: &str, size: Option<u64>| -> bool {
+            match Self::zmodem_accepts(&target_dir_for_decide, sender_name, size, &mut taken) {
+                Ok(()) => true,
+                Err(why) => {
+                    declined.push(why);
+                    false
+                }
             }
-            !target_dir_for_decide.join(sender_name).exists()
         };
 
         let start = std::time::Instant::now();
@@ -1166,15 +1170,14 @@ impl TelnetSession {
         // — the sender saw a ZSKIP and moved on — so any skips here
         // are post-receive failures (write error, race on existence).
         let mut saved: Vec<(String, usize)> = Vec::new();
-        let mut skipped: Vec<(String, &'static str)> = Vec::new();
+        let mut skipped: Vec<(String, &'static str)> = declined;
         for rx in &received {
-            if Self::validate_filename(&rx.filename).is_err() {
-                // Sanitize the sender-supplied name before it can reach the
-                // terminal in the skipped summary (it may carry ANSI escapes).
-                skipped.push((crate::aichat::sanitize_for_terminal(&rx.filename), "invalid filename"));
+            // The converted name `zmodem_accepts` already checked.
+            let Some(name) = Self::safe_upload_name(&rx.filename) else {
+                skipped.push((crate::aichat::sanitize_for_terminal(&rx.filename), "no usable filename"));
                 continue;
-            }
-            let filepath = target_dir.join(&rx.filename);
+            };
+            let filepath = target_dir.join(&name);
             // Atomic create-only open — closes the TOCTOU window
             // between an `exists()` check and the write that
             // `std::fs::write` would leave open, and async lets the
@@ -1186,13 +1189,9 @@ impl TelnetSession {
                     mode: rx.mode,
                 });
             match Self::save_received_file(&filepath, &rx.data, meta.as_ref()).await {
-                Ok(()) => saved.push((rx.filename.clone(), rx.data.len())),
-                Err(SaveError::AlreadyExists) => {
-                    skipped.push((rx.filename.clone(), "already exists"));
-                }
-                Err(SaveError::WriteFailed) => {
-                    skipped.push((rx.filename.clone(), "write failed"));
-                }
+                Ok(()) => saved.push((name, rx.data.len())),
+                Err(SaveError::AlreadyExists) => skipped.push((name, "already exists")),
+                Err(SaveError::WriteFailed) => skipped.push((name, "write failed")),
             }
         }
 
@@ -1204,8 +1203,9 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line(&format!(
-            "  Received: {} file(s), saved: {}, skipped: {}.",
-            received.len(),
+            // Not "Received: N": files declined before they were sent are in
+            // `skipped` and were never received, so the three did not add up.
+            "  Saved: {}, skipped: {}.",
             saved.len(),
             skipped.len()
         ))
