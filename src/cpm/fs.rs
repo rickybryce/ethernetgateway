@@ -2160,12 +2160,18 @@ mod tests {
         assert!(fs.resolve(&fcb_named(1, "com1", "TXT")).is_none(), "in any case");
         assert!(!fs.make(&fcb_named(1, "COM1", "TXT")), "and nothing is created for one");
         // DIR agrees with OPEN: host files no FCB can open are not listed.
-        for host in ["COM1.TXT", "con", "foo."] {
-            std::fs::write(base.join("A").join(host), b"x").unwrap();
+        // Unix only, because on Windows these host files cannot exist: `foo.`
+        // is stored as `foo` (which then *is* openable, and listed), and `con`
+        // or `COM1.TXT` open the device.  Windows CI listed FOO here.
+        #[cfg(not(windows))]
+        {
+            for host in ["COM1.TXT", "con", "foo."] {
+                std::fs::write(base.join("A").join(host), b"x").unwrap();
+            }
+            std::fs::write(base.join("A").join("REAL.TXT"), b"x").unwrap();
+            let listed = fs.list_matching(&fcb_named(1, "????????", "???"));
+            assert_eq!(listed, vec!["REAL.TXT".to_string()], "only the openable file is listed");
         }
-        std::fs::write(base.join("A").join("REAL.TXT"), b"x").unwrap();
-        let listed = fs.list_matching(&fcb_named(1, "????????", "???"));
-        assert_eq!(listed, vec!["REAL.TXT".to_string()], "only the openable file is listed");
         let _ = std::fs::remove_dir_all(&base);
     }
 
