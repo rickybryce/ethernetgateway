@@ -223,7 +223,9 @@ impl TelnetSession {
         // 37 on a C64, not 38: two of indent plus a 38-column path is a full
         // 40-column row, which a C64 wraps on its own -- and the CR LF after
         // it then moves down a second row.
-        if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH - 3 } else { 78 }
+        // The same holds for an 80-column terminal that wraps at its last
+        // column, hence 77 there and not 78.
+        if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH - 3 } else { 77 }
     }
 
     /// Print an inline (red) error line and return.  Unlike `show_error`,

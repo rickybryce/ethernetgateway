@@ -6440,15 +6440,19 @@ async fn kermit_client_send_g_simple(
         is_petscii,
         verbose,
         &mut state,
+        // The negotiation window *shared* across the attempts:
+        // `send_and_await_ack` grants its allowance afresh per attempt, so
+        // the whole window each was twenty-five minutes against a dead
+        // server -- and one attempt instead let a single NAK (a bad block
+        // check on a noisy line) fail the command outright.  A share each
+        // keeps both: NAKs retransmit, and the total stays the window.
         Some(
             tokio::time::Instant::now()
-                + tokio::time::Duration::from_secs(cfg.kermit_negotiation_timeout),
+                + tokio::time::Duration::from_secs(
+                    (cfg.kermit_negotiation_timeout / u64::from(cfg.kermit_max_retries.max(1))).max(1),
+                ),
         ),
-        // One attempt: this caller's "deadline" is a long negotiation window,
-        // and `send_and_await_ack` now grants it afresh per attempt -- five
-        // of them was twenty-five minutes against a dead server.  One wait of
-        // the window is the bound this always effectively had.
-        1,
+        cfg.kermit_max_retries,
         false,
     )
     .await?;

@@ -2310,8 +2310,10 @@ impl TelnetSession {
                 _ => return Ok(()),
             };
             match input.as_str() {
-                "n" if page + 1 < total_pages => page += 1,
-                "p" if page > 0 => page -= 1,
+                // At either end the key redraws the same page rather than
+                // falling through to "Enter a number or Q." and leaving.
+                "n" => page = (page + 1).min(total_pages - 1),
+                "p" => page = page.saturating_sub(1),
                 "q" => return Ok(()),
                 _ => break input,
             }
