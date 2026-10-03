@@ -178,14 +178,22 @@ impl Tarbell {
                     self.pending = self.selected;
                     HostRequest::Read { drive: self.selected, offset, len: SECTOR_LEN }
                 }
-                None => HostRequest::None,
+                None => {
+                    // A track register written past the disk: no such sector.
+                    self.chip.record_not_found();
+                    HostRequest::None
+                }
             },
             Need::Write { track, sector } => match self.offset(track, sector) {
                 Some(offset) => {
                     self.pending = self.selected;
                     HostRequest::Write { drive: self.selected, offset, len: SECTOR_LEN }
                 }
-                None => HostRequest::None,
+                None => {
+                    // Not a silent success: the guest is told the write failed.
+                    self.chip.record_not_found();
+                    HostRequest::None
+                }
             },
         }
     }
@@ -388,6 +396,31 @@ mod tests {
         let req = t.port_out(0xF8, 0x8C);
         let want = (3 * SECTORS_PER_TRACK as u64 + 4) * SECTOR_LEN as u64;
         assert_eq!(req, HostRequest::Read { drive: 0, offset: want, len: SECTOR_LEN });
+    }
+
+    /// A track register written past the disk is a plain register write the
+    /// chip accepts, so a read issued there must *end* -- with Record Not Found
+    /// and INTRQ -- rather than leave the chip busy with no DRQ, which hung the
+    /// WAIT port for ever.  The write half must fail the same way, not succeed
+    /// silently with its bytes thrown away.
+    #[test]
+    fn test_a_track_past_the_disk_ends_with_record_not_found() {
+        for cmd in [0x8Cu8, 0xAC] {
+            let mut t = board();
+            t.port_out(0xF9, TRACKS); // the track register, written directly
+            t.port_out(0xFA, 1);
+            let mut req = t.port_out(0xF8, cmd);
+            if cmd & 0x20 != 0 {
+                for _ in 0..SECTOR_LEN {
+                    req = t.port_out(0xFB, 0xE5);
+                }
+            }
+            assert_eq!(req, HostRequest::None, "{cmd:02X}: no bytes are moved");
+            assert_eq!(t.port_in(PORT_WAIT).0 & 0x80, 0, "{cmd:02X}: the wait ends on INTRQ");
+            let status = t.port_in(0xF8).0;
+            assert_eq!(status & 0x01, 0, "{cmd:02X}: not busy");
+            assert_ne!(status & 0x10, 0, "{cmd:02X}: Record Not Found");
+        }
     }
 
     /// The whole sector reaches the guest through the data port, and the WAIT port

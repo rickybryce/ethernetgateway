@@ -786,6 +786,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Erasing or renaming a file inside an image is the same clobber as
+    /// writing it, so it takes the same claim -- and BDOS 28 protects an image
+    /// drive from erasure exactly as it protects a folder.  Both held for
+    /// folders only: the image branch of `delete` ran before the write-protect
+    /// check, and neither `delete` nor `rename` claimed anything on an image.
+    #[test]
+    fn test_an_image_file_in_use_or_write_protected_cannot_be_erased() {
+        use crate::cpm::fcb::Fcb;
+        use crate::cpm::fs::CpmFs;
+
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join("egw_image_erase_claim");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(images_dir(&base)).unwrap();
+        let fmt = format::by_token("ibm3740").unwrap();
+        std::fs::write(
+            images_dir(&base).join("ibm3740_erase.dsk"),
+            vec![0xE5u8; fmt.min_bytes() as usize],
+        )
+        .unwrap();
+        mount_image(&base, 15, "ibm3740_erase.dsk").expect("mount");
+
+        let fcb_for = |name: &[u8; 8]| {
+            let mut raw = [0u8; 36];
+            raw[0] = 16; // P:
+            raw[1..9].copy_from_slice(name);
+            raw[9..12].copy_from_slice(b"DAT");
+            Fcb::from_bytes(&raw)
+        };
+        let busy = fcb_for(b"BUSY    ");
+        let one = CpmFs::new(base.clone());
+        let mut two = CpmFs::new(base.clone());
+        assert!(one.make(&busy));
+        assert!(one.write_record(&busy, 0, &[1u8; 128]).is_ok());
+
+        assert_eq!(two.delete(&busy), 0, "must not erase a file being written");
+        assert!(!two.rename(&busy, b"MOVED   ", b"DAT"), "nor rename it away");
+        assert!(one.write_record(&busy, 1, &[1u8; 128]).is_ok(), "the writer is undisturbed");
+
+        // Once the writer lets go, the protect is the only thing in the way.
+        one.release_file(&busy);
+        assert!(two.select(15));
+        two.set_drive_ro();
+        assert_eq!(two.delete(&busy), 0, "BDOS 28 must protect an image drive");
+        assert!(two.file_size_records(&busy).is_some(), "and the file survives");
+
+        // Positive control: the same erase succeeds with nothing in the way.
+        two.clear_drive_ro(1 << 15);
+        assert_eq!(two.delete(&busy), 1);
+
+        drop(one);
+        drop(two);
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A mounted image's free space must survive the round trip into the
     /// virtual disk's units and back.
     ///

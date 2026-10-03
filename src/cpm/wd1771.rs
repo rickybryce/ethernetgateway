@@ -345,6 +345,23 @@ impl Wd1771 {
         self.idle_polls = 0;
     }
 
+    /// End the Type II command in progress with Record Not Found, because the
+    /// board found nothing on the medium at the address the chip asked for.
+    ///
+    /// The chip bounds the *sector* against the track's count, but the track
+    /// register is a plain register a guest may write anything into, and a real
+    /// chip that finds no ID field matching it gives up with this error after
+    /// its revolutions. Without that ending the command stayed busy with
+    /// neither DRQ nor INTRQ, and a loader polling for either waited for ever.
+    pub fn record_not_found(&mut self) {
+        self.error |= type2::RECORD_NOT_FOUND;
+        self.moving = Move::None;
+        self.drq = false;
+        self.busy = false;
+        self.intrq = true;
+        self.pos = 0;
+    }
+
     /// Leave the chip as a completed, error-free Read Sector would have.
     ///
     /// For a board whose bootstrap PROM loads its boot sector with a real Type II

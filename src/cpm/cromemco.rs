@@ -425,17 +425,17 @@ impl Cromemco {
             Some((offset, len)) if ahead => HostRequest::ReadAhead { drive, offset, len },
             Some((offset, len)) => HostRequest::Read { drive, offset, len },
             // Nothing on the medium answers to that address. The chip bounds the
-            // sector against the track's own count and the seek against the
-            // cylinder count, so this is not reachable from a guest today; it
-            // exists so that a future geometry whose two halves disagree fails by
-            // *not moving data* rather than by reading the wrong bytes.
-            //
-            // Deliberately not dressed up as an error: nothing here sets a status
-            // bit, so a guest that did reach it would poll a busy chip until the
-            // stuck-poll detector noticed. That is the honest description, and a
-            // worse outcome than a seek error — which is exactly why the two
-            // bounds above are the things to keep correct.
-            None => HostRequest::None,
+            // sector against the track's own count and a *seek* against the
+            // cylinder count, but the track register is a plain register: a
+            // guest that writes 77 or more into it and issues a read reaches
+            // here. A real chip finds no matching ID field and ends with Record
+            // Not Found, and so does this one -- the earlier answer, no status
+            // bit at all, left the chip busy with neither DRQ nor INTRQ and a
+            // guest polling for either waited for ever.
+            None => {
+                self.chip.record_not_found();
+                HostRequest::None
+            }
         }
     }
 
@@ -780,6 +780,22 @@ mod tests {
             0,
             "and with Record Not Found, or the loader restarts the boot"
         );
+    }
+
+    /// The track register is writable directly, so a read issued with it past
+    /// the last cylinder must end with Record Not Found and INTRQ. It used to
+    /// leave the chip busy with neither DRQ nor INTRQ, and a guest polling port
+    /// 34h for either never got out.
+    #[test]
+    fn test_a_cylinder_past_the_disk_ends_with_record_not_found() {
+        let mut c = board(SD);
+        c.port_out(0x31, CYLINDERS);
+        c.port_out(0x32, 1);
+        assert_eq!(c.port_out(0x30, 0x8C), HostRequest::None);
+        assert_ne!(c.port_in(PORT_CONTROL).0 & ST_INTRQ, 0, "the command has ended");
+        let status = c.port_in(0x30).0;
+        assert_eq!(status & 0x01, 0, "not busy");
+        assert_ne!(status & 0x10, 0, "with Record Not Found");
     }
 
     /// The cold start puts one sector at 0080h and enters there — not at 0000h,

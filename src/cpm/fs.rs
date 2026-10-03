@@ -621,10 +621,24 @@ impl CpmFs {
         if self.fcb_drive_is_ro(old) {
             return false;
         }
-        if let Some(ok) = self.with_image(old, |img, user| {
-            img.rename(user, &old.name, &old.ext, new_name, new_ext)
-                .unwrap_or(false)
-        }) {
+        if let Some(drive0) = self.mounted_for(old).and(self.drive_index_for(old.drive)) {
+            // Both names claimed for the duration, exactly as on a folder
+            // below: renaming moves a file out from under a session writing it.
+            let old_key = self.image_file_key(old, drive0);
+            let new_key = self.mounted(drive0).map(|m| m.path.join(format_8_3(new_name, new_ext)));
+            let claimed = [&old_key, &new_key]
+                .iter()
+                .all(|k| k.as_ref().is_none_or(|k| self.claim_write(k).is_ok()));
+            let ok = claimed
+                && self
+                    .with_image(old, |img, user| {
+                        img.rename(user, &old.name, &old.ext, new_name, new_ext)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+            for k in [&old_key, &new_key].into_iter().flatten() {
+                self.release_write(k);
+            }
             return ok;
         }
         let drive0 = match self.drive_index_for(old.drive) {
@@ -926,19 +940,35 @@ impl CpmFs {
     /// without this check a `chmod -w` file was erasable from the guest.
     /// A software write-protected drive (BDOS 28) refuses outright.
     pub fn delete(&self, fcb: &Fcb) -> usize {
+        // Before the image branch, not after it: the guest's BDOS 19 reaches
+        // here with no check of its own, and a write-protect that only covered
+        // folder drives let a mounted image be erased from under BDOS 28.
+        if self.fcb_drive_is_ro(fcb) {
+            return 0;
+        }
+        let image = self.mounted_for(fcb).map(|m| m.path);
         if let Some(n) = self.with_image(fcb, |img, user| {
             let mut gone = 0;
             for (n, x) in img.matching(user, fcb) {
+                // The same claim the folder path takes below, keyed the way
+                // `image_file_key` keys it, so a file another session is
+                // writing inside the image is skipped rather than erased.
+                let key = image.as_ref().map(|p| p.join(format_8_3(&n, &x)));
+                if let Some(k) = &key {
+                    if self.claim_write(k).is_err() {
+                        continue;
+                    }
+                }
                 if img.delete(user, &n, &x).unwrap_or(0) > 0 {
                     gone += 1;
+                }
+                if let Some(k) = &key {
+                    self.release_write(k);
                 }
             }
             gone
         }) {
             return n;
-        }
-        if self.fcb_drive_is_ro(fcb) {
-            return 0;
         }
         let mut count = 0;
         for path in self.matching_files(fcb) {

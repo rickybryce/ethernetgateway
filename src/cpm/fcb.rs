@@ -148,10 +148,17 @@ pub fn is_valid_8_3_char(c: u8) -> bool {
 pub fn split_8_3(filename: &str) -> Option<([u8; 8], [u8; 3])> {
     let upper = filename.to_ascii_uppercase();
     let (name_part, ext_part) = match upper.rsplit_once('.') {
+        // `FOO.` is not `FOO`: a guest can put the dot in the FCB's name field,
+        // and the host then holds a file Linux lists as FOO but will not open
+        // as FOO, and Windows silently treats as FOO under a different claim.
+        Some((_, "")) => return None,
         Some((n, e)) => (n, e),
         None => (upper.as_str(), ""),
     };
     if name_part.is_empty() || name_part.len() > 8 || ext_part.len() > 3 {
+        return None;
+    }
+    if is_host_device_name(name_part) {
         return None;
     }
     let mut name = [b' '; 8];
@@ -169,6 +176,19 @@ pub fn split_8_3(filename: &str) -> Option<([u8; 8], [u8; 3])> {
         ext[i] = c;
     }
     Some((name, ext))
+}
+
+/// Is `name` (the part before any dot, uppercased) a name Windows maps to a
+/// device rather than a file?  `CPM\A\COM1.TXT` opens the serial port, not
+/// a file in the jail -- possibly the very port the gateway's serial manager
+/// holds.  Refused on every platform, so one rule is tested everywhere and a
+/// disk of files moves between hosts unchanged.
+fn is_host_device_name(name: &str) -> bool {
+    matches!(name, "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|p| {
+            name.strip_prefix(p)
+                .is_some_and(|d| d.len() == 1 && (b'1'..=b'9').contains(&d.as_bytes()[0]))
+        })
 }
 
 /// Parse an *ambiguous* filename (a CCP-style spec that may contain the
@@ -343,6 +363,31 @@ mod tests {
         assert!(split_8_3("a b.c").is_none()); // space not allowed
         assert!(split_8_3("a*.c").is_none()); // wildcard not a concrete name
         assert!(split_8_3(".com").is_none()); // empty name
+    }
+
+    /// A dot in the FCB's name field formats as `FOO.`, which must not reach
+    /// the host as a file distinct from `FOO`.
+    #[test]
+    fn test_split_8_3_refuses_a_trailing_dot() {
+        assert!(split_8_3("FOO.").is_none());
+        assert!(split_8_3("FOO").is_some(), "positive control");
+        let mut raw = [0u8; FCB_SIZE];
+        raw[1..9].copy_from_slice(b"FOO.    ");
+        raw[9..12].copy_from_slice(b"   ");
+        let f = Fcb::from_bytes(&raw);
+        assert!(split_8_3(&format_8_3(&f.name, &f.ext)).is_none());
+    }
+
+    /// Windows opens a device for these names, whatever the extension, so a
+    /// guest writing `COM1.TXT` would write to a serial port.
+    #[test]
+    fn test_split_8_3_refuses_host_device_names() {
+        for bad in ["CON", "con.txt", "PRN", "AUX.COM", "NUL", "COM1", "com9.dat", "LPT1", "LPT9.X"] {
+            assert!(split_8_3(bad).is_none(), "{bad} must be refused");
+        }
+        for ok in ["CONFIG", "COM", "COM0", "COM10", "LPT", "AUXFILE.TXT", "NULL.BAS", "CON1"] {
+            assert!(split_8_3(ok).is_some(), "{ok} is an ordinary file name");
+        }
     }
 
     #[test]
