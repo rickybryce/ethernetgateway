@@ -2980,6 +2980,14 @@ async fn send_and_await_ack(
 ) -> Result<Vec<u8>, String> {
     let pkt = build_packet(kind, seq, payload, chkt, pad_count, pad_char, eol);
     let mut attempts = 0u32;
+    // How long the caller allowed for a reply, measured once.  Every caller
+    // but Send-Init passes `now + timeout` for this one packet, so it is a
+    // *per-attempt* allowance -- and reusing the absolute instant made every
+    // retransmit after the first timeout fail before reading a byte: the
+    // packet went out `max_retries - 1` more times back to back and one lost
+    // packet or ACK ended a stop-and-wait transfer that the peer's reply,
+    // already waiting, would have saved.
+    let attempt_span = deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
     // Outer loop = one (re)transmit of the packet.  Inner loop = read
     // responses to that transmit.  A stale/duplicate ACK for an earlier
     // seq is discarded WITHOUT retransmitting — it only advances the
@@ -3010,10 +3018,10 @@ async fn send_and_await_ack(
         // (NAK for our seq, or a read timeout); left false, a definitive
         // outcome has already returned from the function.
         let mut resend = false;
-        // A Send-Init gets a per-attempt deadline so it is actually
-        // retransmitted; every other packet keeps the caller's deadline
-        // exactly as before.  Capped by the overall deadline, so the
-        // negotiation window still bounds the whole exchange.
+        // A Send-Init gets a fixed per-attempt deadline so it is actually
+        // retransmitted, capped by the overall deadline so the negotiation
+        // window still bounds the whole exchange.  Every other packet gets
+        // the caller's allowance afresh on each transmit.
         let read_deadline = if is_send_init {
             let attempt_end = tokio::time::Instant::now()
                 + tokio::time::Duration::from_millis(KERMIT_SEND_INIT_ATTEMPT_MS);
@@ -3022,7 +3030,8 @@ async fn send_and_await_ack(
                 None => attempt_end,
             })
         } else {
-            deadline
+            // Re-armed per transmit -- see `attempt_span`.
+            attempt_span.map(|span| tokio::time::Instant::now() + span)
         };
         while !resend {
             match read_packet(reader, is_tcp, is_petscii, chkt, eol, verbose, state, read_deadline)
@@ -3144,6 +3153,23 @@ struct OutstandingPacket {
 ///
 /// Returns the seq number to use for the next packet after the window
 /// drains (the F/A/Z control packets after the data stream).
+/// May another data packet go out?  The window is a span of **sequence
+/// numbers** from the oldest unacknowledged packet, not a count of packets
+/// in flight.  Counting alone let a sender whose oldest packet was stuck run
+/// up to `2W - 2` past it once the rest were ACKed, and at `W >= 22` those
+/// sequence numbers sit within the receiver's backward window of the one it
+/// still wants -- so it re-ACKed them as duplicates, the sender dropped them,
+/// and the transfer stalled.
+fn window_has_room(outstanding: usize, oldest: Option<u8>, next_seq: u8, window: usize) -> bool {
+    if outstanding >= window {
+        return false;
+    }
+    match oldest {
+        None => true,
+        Some(o) => (next_seq.wrapping_sub(o) & 0x3F) < window as u8,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_d_packets_windowed(
     reader: &mut (impl AsyncRead + Unpin),
@@ -3169,7 +3195,7 @@ async fn send_d_packets_windowed(
 
     loop {
         // 1. Push new packets while window has room and chunks remain.
-        while outstanding.len() < window_size {
+        while window_has_room(outstanding.len(), outstanding.front().map(|p| p.seq), next_seq, window_size) {
             let Some(chunk) = chunks.next() else {
                 break;
             };
@@ -3842,6 +3868,11 @@ pub(crate) async fn kermit_receive_with_init(
     // Bound the read-error retry chain so a wedged peer can't keep
     // us NAKing forever.  Resets on any successful packet.
     let mut consecutive_failures: u32 = 0;
+    // Packets in a row that arrived *intact* but were not the one expected.
+    // A separate count because an intact packet resets the one above: a peer
+    // resending one valid stale packet -- because it never sees our ACKs, say
+    // -- was answered for ever with no timeout able to fire.
+    let mut no_progress: u32 = 0;
     let max_retries = cfg.kermit_max_retries;
     // Out-of-order buffer for sliding-window receive.  Empty when
     // window=1 (stop-and-wait); selective-repeat per spec §5.5 when
@@ -3930,6 +3961,29 @@ pub(crate) async fn kermit_receive_with_init(
         }
 
         if pkt.seq != expected_seq {
+            no_progress += 1;
+            // Room for a whole window to be resent more times than any
+            // sender's own retry limit allows -- C-Kermit's default is 10,
+            // above our `kermit_max_retries` of 5, so ours alone would give up
+            // on a noisy line the sender was still rescuing.  This only has
+            // to be finite, not tight.
+            if no_progress > max_retries.max(20).saturating_mul((window as u32).max(1)) {
+                send_error(
+                    writer,
+                    expected_seq,
+                    "No progress",
+                    session.chkt,
+                    session.npad,
+                    session.padc,
+                    session.eol,
+                    is_tcp,
+                )
+                .await?;
+                return Err(format!(
+                    "Kermit recv: aborting after {} packets in a row without seq {}",
+                    no_progress, expected_seq
+                ));
+            }
             // Modular distance: how far ahead/behind is this seq?
             // Mod-64 arithmetic, with the receive window bounded at
             // MAX_WINDOW_SIZE=31 < 32, so forward and backward windows
@@ -4046,6 +4100,8 @@ pub(crate) async fn kermit_receive_with_init(
             .await?;
             continue;
         }
+        // The packet we wanted: progress.
+        no_progress = 0;
 
         match pkt.kind {
             // F (file header) and X (text-display header, Frank da Cruz
@@ -6388,7 +6444,11 @@ async fn kermit_client_send_g_simple(
             tokio::time::Instant::now()
                 + tokio::time::Duration::from_secs(cfg.kermit_negotiation_timeout),
         ),
-        cfg.kermit_max_retries,
+        // One attempt: this caller's "deadline" is a long negotiation window,
+        // and `send_and_await_ack` now grants it afresh per attempt -- five
+        // of them was twenty-five minutes against a dead server.  One wait of
+        // the window is the bound this always effectively had.
+        1,
         false,
     )
     .await?;
@@ -7374,6 +7434,94 @@ mod tests {
             count, 1,
             "packet should be transmitted once, not resent on a stale ACK"
         );
+    }
+
+    /// **A peer that only ever resends one stale packet is stopped.**  Each
+    /// copy arrives intact, which reset the failure count, so the receiver
+    /// re-ACKed it for ever and no timeout could fire.
+    #[tokio::test]
+    async fn test_a_receiver_stops_a_peer_that_makes_no_progress() {
+        let _guard = ConfigTestGuard::acquire().await;
+        let peer_caps = Capabilities { chkt: b'1', maxl: 80, ..Capabilities::default() };
+        let init = build_packet(TYPE_SEND_INIT, 0, &build_send_init_payload(&peer_caps), b'1', 0, 0, CR);
+        let mut wire = init.clone();
+        for _ in 0..400 {
+            wire.extend_from_slice(&init); // the same packet, never seq 1
+        }
+        let (peer_to_gw, gw_in) = tokio::io::duplex(1 << 16);
+        let (gw_out, peer_from_gw) = tokio::io::duplex(1 << 16);
+        let (mut gw_r, _) = tokio::io::split(gw_in);
+        let (_, mut gw_w) = tokio::io::split(gw_out);
+        let (mut peer_r, mut peer_w) =
+            (tokio::io::split(peer_from_gw).0, tokio::io::split(peer_to_gw).1);
+        let peer_task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            peer_w.write_all(&wire).await.ok();
+            let mut tmp = vec![0u8; 4096];
+            while let Ok(n) = peer_r.read(&mut tmp).await {
+                if n == 0 {
+                    break;
+                }
+            }
+            peer_w
+        });
+        let result = kermit_receive(&mut gw_r, &mut gw_w, false, false, false).await;
+        drop(gw_w);
+        let _ = peer_task.await;
+        let err = result.expect_err("an endless stale peer must be refused");
+        assert!(err.contains("without seq"), "stopped for the right reason: {err}");
+    }
+
+    /// The window is measured in sequence numbers from the oldest unACKed
+    /// packet: with that one stuck, the sender may not run past it by a
+    /// window's width however many later packets have been ACKed.
+    #[test]
+    fn test_the_window_is_a_span_of_sequence_numbers() {
+        assert!(window_has_room(0, None, 7, 4), "empty window");
+        assert!(window_has_room(1, Some(10), 13, 4), "oldest 10, next 13: 4 wide");
+        assert!(!window_has_room(1, Some(10), 14, 4), "next 14 is past the stuck oldest");
+        assert!(!window_has_room(4, Some(10), 12, 4), "full by count");
+        // Wrapping modulo 64.
+        assert!(window_has_room(1, Some(62), 1, 4), "62,63,0,1");
+        assert!(!window_has_room(1, Some(62), 2, 4));
+        // The reported case: W = 31, oldest stuck at E, the rest ACKed.
+        assert!(!window_has_room(1, Some(0), 31, 31), "E + W is out");
+        assert!(window_has_room(1, Some(0), 30, 31));
+    }
+
+    /// **One lost reply must not end the transfer.**  The peer ignores the
+    /// first transmit and ACKs the retransmit.  The read deadline used to be
+    /// the caller's absolute instant, so once the first wait expired every
+    /// later attempt saw it already past, failed before reading a byte, and
+    /// the packet was resent back to back until the retries ran out.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_retransmit_gets_a_fresh_wait_for_its_ack() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (ours, peer) = tokio::io::duplex(4096);
+        let (mut rd, mut wr) = tokio::io::split(ours);
+        let (mut prd, mut pwr) = tokio::io::split(peer);
+        let seq = 3u8;
+        let peer_task = tokio::spawn(async move {
+            let mut seen = 0usize;
+            let mut buf = [0u8; 256];
+            // Count transmits by their CR terminators; answer only the second.
+            while seen < 2 {
+                let n = prd.read(&mut buf).await.unwrap();
+                seen += buf[..n].iter().filter(|&&b| b == CR).count();
+            }
+            pwr.write_all(&build_packet(TYPE_ACK, seq, &[], b'1', 0, 0, CR)).await.unwrap();
+            // Keep the line open until the sender is done.
+            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+        });
+        let mut state = ReadState::default();
+        let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
+        let out = send_and_await_ack(
+            &mut rd, &mut wr, TYPE_DATA, seq, b"data", b'1', 0, 0, CR,
+            false, false, false, &mut state, deadline, 5, false,
+        )
+        .await;
+        assert!(out.is_ok(), "the retransmit's ACK was never read: {out:?}");
+        peer_task.abort();
     }
 
     #[tokio::test]

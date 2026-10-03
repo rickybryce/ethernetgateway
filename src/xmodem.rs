@@ -644,6 +644,10 @@ pub(crate) async fn xmodem_receive_batch(
                             raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
                             return Err("Too many block errors".into());
                         }
+                        // Purge before the NAK (Christensen): the rest of a
+                        // block we lost sync inside is still arriving, and
+                        // read as fresh input each byte drew its own NAK.
+                        purge_line(reader, is_tcp, state).await?;
                         raw_write_byte(writer, NAK, is_tcp).await?;
                     }
                 }
@@ -655,12 +659,37 @@ pub(crate) async fn xmodem_receive_batch(
                 // immediate-ACK: its post-EOT 'C' + null-block-0 end-of-batch
                 // handshake already confirms completion, and the block-0 size
                 // field lets the receiver detect a short file regardless.
-                if !ymodem_mode && !eot_naked {
+                // A YMODEM file shorter than the size its block 0 declared is
+                // not finished: verify the EOT exactly as plain XMODEM does.
+                // The comment above relied on the size field to catch this
+                // and nothing compared the two -- a noise `04` at a block
+                // boundary was ACKed, the sender took that ACK for its next
+                // block, and the truncated file came back as a success.
+                //
+                // **Verified, never refused, and only past 254 bytes short.**
+                // A declared size is not always a byte count: NovaTerm cannot
+                // state one and declares CBM blocks x 254 (measured: 1775
+                // bytes declared as 1778), and a text-mode sender converting
+                // CR LF shrinks the file it described.  Refusing a confirmed
+                // short file broke both; a NAK costs a real EOT one resend and
+                // gives a noise `04` the chance to be followed by the block
+                // it interrupted.  254 is the most NovaTerm can overstate.
+                let declared = ymodem_meta.as_ref().and_then(|m| m.size);
+                let short = ymodem_mode
+                    && declared.is_some_and(|sz| sz.saturating_sub(file_data.len() as u64) > 254);
+                if (!ymodem_mode || short) && !eot_naked {
                     eot_naked = true;
                     awaiting_eot_confirm = true;
                     if verbose { glog!("XMODEM recv: first EOT — NAKing to verify (Forsberg EOT confirmation)"); }
                     raw_write_byte(writer, NAK, is_tcp).await?;
                     continue;
+                }
+                if short && verbose {
+                    glog!(
+                        "XMODEM recv: YMODEM file ended at {} bytes, short of the {} declared -- confirmed by the sender, accepting",
+                        file_data.len(),
+                        declared.unwrap_or(0)
+                    );
                 }
                 if verbose { glog!("XMODEM recv: EOT confirmed, ACKing"); }
                 raw_write_byte(writer, ACK, is_tcp).await?;
@@ -780,6 +809,10 @@ pub(crate) async fn xmodem_receive_batch(
                         ymodem_meta = meta;
                         expected_block = 1;
                         error_count = 0;
+                        // A new file's EOT is verified on its own terms, not
+                        // excused by a NAK the previous file drew.
+                        eot_naked = false;
+                        awaiting_eot_confirm = false;
                         if verbose { glog!("XMODEM recv: YMODEM next file in batch"); }
                         continue;
                     }
@@ -804,6 +837,27 @@ pub(crate) async fn xmodem_receive_batch(
                 if verbose { glog!("XMODEM recv: single CAN treated as line noise"); }
             }
             _ => {
+                // A byte that starts no block: the sender is out of step.
+                // **Purge, then one NAK** -- NAKing each stray byte sent a
+                // burst of NAKs that the sender, reading one per retry,
+                // spent its whole retry budget on and cancelled.  Counted
+                // like a bad block, so a babbling line is still bounded.
+                //
+                // And it **re-arms the EOT check**: anything arriving after
+                // a NAKed EOT says the sender is still mid-file, so the next
+                // EOT must be verified afresh.  Without this two `04` bytes
+                // in line noise passed as "EOT, then the confirming EOT" and
+                // a truncated file was saved as a success -- the exact case
+                // the guard exists for.  (A *duplicate block* keeps the flag;
+                // see its declaration.  Garbage is not a duplicate block.)
+                eot_naked = false;
+                awaiting_eot_confirm = false;
+                error_count += 1;
+                if error_count > max_retries {
+                    raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
+                    return Err("Too many block errors".into());
+                }
+                purge_line(reader, is_tcp, state).await?;
                 raw_write_byte(writer, NAK, is_tcp).await?;
             }
         }
@@ -812,6 +866,27 @@ pub(crate) async fn xmodem_receive_batch(
     // Every completed file was finalized (size-truncated / SUB-stripped) and
     // pushed at its EOT; nothing to do here but hand back the batch.
     Ok(files)
+}
+
+/// Read and discard until the line has been quiet for a second (Christensen's
+/// purge), so the NAK that follows answers the sender rather than the tail of
+/// whatever it was sending.  Bounded in time, so a line that never goes quiet
+/// cannot hold the receiver here; the caller's retry count then decides.
+async fn purge_line(
+    reader: &mut (impl AsyncRead + Unpin),
+    is_tcp: bool,
+    state: &mut ReadState,
+) -> Result<(), String> {
+    let quiet = std::time::Duration::from_secs(1);
+    let give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < give_up {
+        match tokio::time::timeout(quiet, nvt_read_byte(reader, is_tcp, state)).await {
+            Ok(Ok(_)) => continue,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 /// Receive and validate a single XMODEM block (after SOH or STX was
@@ -3670,6 +3745,70 @@ mod tests {
         );
     }
 
+    /// **Stray bytes are purged and answered once, and they re-arm the EOT
+    /// check.**  Garbage carrying two `04`s used to draw a NAK per byte and
+    /// pass as "EOT, then the confirming EOT", saving block 1 alone as the
+    /// whole file.
+    #[tokio::test(start_paused = true)]
+    async fn test_stray_bytes_are_purged_and_cannot_confirm_an_eot() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+
+        send_write.write_all(&[0x55, EOT, 0x66, EOT, 0x77]).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), NAK, "one NAK, after the purge");
+        // Nothing more: the other four bytes drew no answer of their own.
+        let more = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            raw_read_byte(&mut send_read, false),
+        )
+        .await;
+        assert!(more.is_err(), "a second answer to the same garbage: {more:?}");
+
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        finish_plain_eot(&mut send_read, &mut send_write).await;
+        let (data, _) = recv_task.await.unwrap().unwrap();
+        assert_eq!(data.len(), 2 * XMODEM_BLOCK_SIZE, "both blocks, not a truncated file");
+    }
+
+    /// The re-arm on its own: after a NAKed noise EOT, a stray byte says the
+    /// sender is still mid-file, so the *next* EOT is verified afresh rather
+    /// than taken as the confirmation of the first.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_stray_byte_after_a_naked_eot_rearms_the_check() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        raw_write_byte(&mut send_write, EOT, false).await.unwrap(); // noise
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), NAK);
+        raw_write_byte(&mut send_write, 0x55, false).await.unwrap(); // more noise
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), NAK);
+        raw_write_byte(&mut send_write, EOT, false).await.unwrap(); // still noise
+        assert_eq!(
+            raw_read_byte(&mut send_read, false).await.unwrap(),
+            NAK,
+            "taken as the confirming EOT, the file would end at block 1"
+        );
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        finish_plain_eot(&mut send_read, &mut send_write).await;
+        let (data, _) = recv_task.await.unwrap().unwrap();
+        assert_eq!(data.len(), 2 * XMODEM_BLOCK_SIZE);
+    }
+
     /// **A NAKed EOT answered by silence is a finished sender, not a lost
     /// block.**  Not every sender resends the EOT: NovaTerm 9.6c answers the
     /// verification NAK with nothing at all.  This end used to NAK to
@@ -6143,6 +6282,55 @@ mod tests {
         drop(outbound_writer);
         let _ = drain.await;
         result
+    }
+
+    /// **A NovaTerm-style overstated size still succeeds on one EOT.**
+    /// NovaTerm declares CBM blocks x 254, which can exceed what arrives:
+    /// 508 declared, 256 received.  A short-file *refusal* broke exactly this
+    /// -- NovaTerm answers a NAKed EOT with silence -- so the verify applies
+    /// only past 254 bytes short, and here the single EOT is ACKed at once.
+    #[tokio::test]
+    async fn test_ymodem_novaterm_overstated_size_needs_no_second_eot() {
+        let mut wire = ymodem_frame(0, &ymodem_block0_payload("prg.seq", 508));
+        wire.extend(ymodem_frame(1, &[0x41; XMODEM_BLOCK_SIZE]));
+        wire.extend(ymodem_frame(2, &[0x42; XMODEM_BLOCK_SIZE]));
+        wire.push(EOT); // one EOT only, as NovaTerm sends
+        wire.extend(ymodem_frame(0, &[0u8; XMODEM_BLOCK_SIZE]));
+        let files = replay_ymodem_batch(&wire).await.expect("an overstated size is not an error");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].data.len(), 256);
+    }
+
+    /// A file genuinely short of its declared size is verified -- the first
+    /// EOT is NAKed -- and accepted once the sender confirms it, as before.
+    #[tokio::test]
+    async fn test_ymodem_confirmed_short_file_is_verified_then_kept() {
+        let mut wire = ymodem_frame(0, &ymodem_block0_payload("short.bin", 1000));
+        wire.extend(ymodem_frame(1, &[0x41; XMODEM_BLOCK_SIZE]));
+        wire.push(EOT);
+        wire.push(EOT); // the confirmation the NAK asked for
+        wire.extend(ymodem_frame(0, &[0u8; XMODEM_BLOCK_SIZE]));
+        let files = replay_ymodem_batch(&wire).await.expect("kept, not refused");
+        assert_eq!(files[0].data.len(), XMODEM_BLOCK_SIZE);
+    }
+
+    /// The other half: a *noise* EOT before the declared size is NAKed, the
+    /// sender's next block arrives, and the file completes intact.
+    #[tokio::test]
+    async fn test_ymodem_spurious_eot_before_the_declared_size_recovers() {
+        // 384 bytes short at the noise: past the 254 a NovaTerm-style
+        // overstatement can account for, so the EOT is verified.
+        let mut wire = ymodem_frame(0, &ymodem_block0_payload("whole.bin", 512));
+        wire.extend(ymodem_frame(1, &[0x41; XMODEM_BLOCK_SIZE]));
+        wire.push(EOT); // noise
+        for seq in 2..=4u8 {
+            wire.extend(ymodem_frame(seq, &[0x42; XMODEM_BLOCK_SIZE]));
+        }
+        wire.push(EOT);
+        wire.extend(ymodem_frame(0, &[0u8; XMODEM_BLOCK_SIZE])); // end of batch
+        let files = replay_ymodem_batch(&wire).await.expect("recovers");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].data.len(), 512, "every block kept");
     }
 
     /// The regression that was deferred: a multi-file YMODEM batch must yield

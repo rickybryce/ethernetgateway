@@ -1700,7 +1700,19 @@ where
             }
             ZRQINIT => {
                 // Sender restarted mid-file — resend ZRINIT and wait
-                // for them to come back.
+                // for them to come back.  Counted against the same budget
+                // as every other data-phase setback (reset on progress):
+                // uncounted, a peer repeating ZRQINIT kept the session
+                // alive indefinitely, the chatty-peer case the between-files
+                // loop's guard exists for.
+                errors += 1;
+                if errors > max_retries {
+                    send_cancel(writer, is_tcp).await.ok();
+                    return Err(format!(
+                        "ZMODEM: too many errors during receive ({})",
+                        errors
+                    ));
+                }
                 send_zrinit(writer, is_tcp, verbose).await?;
                 continue;
             }
@@ -4363,6 +4375,44 @@ mod tests {
         let mut zfile = build_bin16_header(ZFILE, [0, 0, 0, 0]);
         zfile.extend_from_slice(&build_subpacket(&info, ZCRCW));
         m_write.write_all(&zfile).await.is_ok()
+    }
+
+    /// A sender that answers every ZRPOS and ZRINIT with ZRQINIT, mid-file,
+    /// must be bounded like any other data-phase setback.  Uncounted, the
+    /// two sides traded ZRQINIT and ZRINIT for as long as the line stayed up.
+    #[tokio::test]
+    async fn test_receiver_bounds_a_data_phase_zrqinit_loop() {
+        let (recv_half, mock_half) = tokio::io::duplex(1 << 16);
+        let (mut r_read, mut r_write) = tokio::io::split(recv_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+        let mock = tokio::spawn(async move {
+            let mut st = ReadState::default();
+            if !mock_send_zfile(&mut m_read, &mut m_write, &mut st, "chatty.bin").await {
+                return;
+            }
+            loop {
+                match read_header(&mut m_read, false, &mut st, false).await {
+                    Ok(h) if h.frame == ZRPOS || h.frame == ZRINIT => {
+                        if m_write.write_all(&build_hex_header(ZRQINIT, [0, 0, 0, 0])).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(_) => return,
+                }
+            }
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true),
+        )
+        .await;
+        mock.abort();
+        match result {
+            Ok(Err(e)) => assert!(e.contains("too many"), "bounded for the right reason: {e}"),
+            Ok(Ok(_)) => panic!("a ZRQINIT loop must not end in success"),
+            Err(_) => panic!("the receiver kept answering ZRQINIT for ever"),
+        }
     }
 
     /// Strict spec (Z-R2): a corrupt subpacket is recovered via ZRPOS, but
