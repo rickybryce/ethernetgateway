@@ -323,7 +323,7 @@ mod tests {
         for other in [Some(5), Some(2), Some(3), Some(19), None] {
             assert!(!is_sharing_violation(other), "{other:?} is not another copy");
         }
-        assert!(SHARING_RETRIES >= 2, "a scanner's brief hold must be asked about again");
+        const { assert!(SHARING_RETRIES >= 2, "a scanner's brief hold must be asked about again") };
     }
 
     /// The paths must sit inside the data directory, not beside the binary —
