@@ -328,8 +328,12 @@ pub(crate) enum TerminalType {
 /// `zmodem_receive`, which emits ZRINIT and waits for ZFILE.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum UploadProtocol {
-    /// XMODEM / YMODEM — receiver auto-detects variant.
+    /// `X` — XMODEM, and the user names the file.  The receiver still
+    /// auto-detects a YMODEM sender, whose first file then takes that name.
     XmodemYmodem,
+    /// `Y` — YMODEM, asking no name: every file keeps the name its block 0
+    /// carries, converted by `safe_upload_name`.  Same receiver as `X`.
+    Ymodem,
     /// ZMODEM — receiver initiates the session with ZRINIT.
     Zmodem,
     /// Kermit — receiver waits for the peer's Send-Init; flavor
@@ -2254,14 +2258,16 @@ impl TelnetSession {
             "  Q  Back to the main menu",
             "",
             "  Picking a protocol on upload:",
-            "    X  XMODEM or YMODEM - variant",
-            "       auto-detected from block 0.",
-            "    Z  ZMODEM - asks no filename:",
+            "    X  XMODEM - you name the file.",
+            "    Y  YMODEM, Z  ZMODEM and",
+            "    K  Kermit ask no filename:",
             "       files keep the names your",
-            "       terminal sends (unusable",
-            "       characters become _), and",
-            "       one that exists is skipped.",
-            "    K  Kermit - any flavor.",
+            "       terminal sends.  Y and Z",
+            "       turn unusable characters",
+            "       into _ and skip a name that",
+            "       exists.  Kermit refuses a",
+            "       bad name and numbers one",
+            "       that exists (A0.TXT ...).",
             "    P  Punter - Commodore C1",
             "       (CCGMS / Novaterm).",
             "",

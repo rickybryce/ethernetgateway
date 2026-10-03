@@ -3039,8 +3039,10 @@ fn test_all_menu_items_fit_petscii() {
         // Upload protocol picker (reached from the File Transfer
         // menu's U).  The key letter stands in for the color-wrapped
         // cyan() key, matching how the rest of this test models width.
-        "  X  XMODEM/YMODEM  128/1K, auto",
-        "  Z  ZMODEM         1K, autostart",
+        "  X  XMODEM         you name the file",
+        "  Y  YMODEM         sender's names",
+        "  Z  ZMODEM         sender's names",
+        "  K  KERMIT         sender's names",
         "  P  PUNTER         C1 CCGMS/Novaterm",
         // Download protocol picker (reached from D).  PUNTER's
         // "C1 CCGMS/Novaterm" row is the tightest of these at 37 chars.

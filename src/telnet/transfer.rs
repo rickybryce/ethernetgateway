@@ -743,18 +743,26 @@ impl TelnetSession {
         self.send_line("").await?;
         // Keep each line <= 39 columns so it doesn't wrap on a 40-column
         // PETSCII (C64) screen.
+        // `X` asks for a name; `Y`, `Z` and `K` send their own, so they ask
+        // none.  `Y` was a synonym for `X` until YMODEM got the ZMODEM
+        // treatment, and the two had to become different choices for it.
         self.send_line(&format!(
-            "  {}  XMODEM/YMODEM  128/1K, auto",
+            "  {}  XMODEM         you name the file",
             self.cyan("X")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  ZMODEM         1K, autostart",
+            "  {}  YMODEM         sender's names",
+            self.cyan("Y")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  {}  ZMODEM         sender's names",
             self.cyan("Z")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  KERMIT         any flavor, auto",
+            "  {}  KERMIT         sender's names",
             self.cyan("K")
         ))
         .await?;
@@ -785,11 +793,9 @@ impl TelnetSession {
             } else {
                 (b as char).to_ascii_lowercase()
             };
-            // Accept 'Y' as a synonym for 'X' so a user thinking
-            // "YMODEM" doesn't have to hunt for the right key — the
-            // XMODEM/YMODEM receive path handles both.
             let chosen = match ch {
-                'x' | 'y' => Some(UploadProtocol::XmodemYmodem),
+                'x' => Some(UploadProtocol::XmodemYmodem),
+                'y' => Some(UploadProtocol::Ymodem),
                 'z' => Some(UploadProtocol::Zmodem),
                 'k' => Some(UploadProtocol::Kermit),
                 'p' => Some(UploadProtocol::Punter),
@@ -826,7 +832,12 @@ impl TelnetSession {
             Some(p) => p,
             None => return Ok(()),
         };
-        let named_by_sender = matches!(protocol, UploadProtocol::Zmodem);
+        // Every protocol that carries names: ZMODEM, YMODEM (`Y`) and Kermit.
+        // XMODEM (`X`) and Punter carry none, so they ask.
+        let named_by_sender = matches!(
+            protocol,
+            UploadProtocol::Zmodem | UploadProtocol::Ymodem | UploadProtocol::Kermit
+        );
 
         let (filename, filepath, overwrite) = if named_by_sender {
             (String::new(), self.transfer_path(), false)
@@ -924,7 +935,8 @@ impl TelnetSession {
             self.green(match protocol {
                 // Each under 38 columns: the longer "... from your terminal
                 // now." wrapped on a C64.
-                UploadProtocol::XmodemYmodem => "Start the XMODEM/YMODEM send now.",
+                UploadProtocol::XmodemYmodem => "Start the XMODEM send now.",
+                UploadProtocol::Ymodem => "Start the YMODEM send now.",
                 UploadProtocol::Zmodem => "Start the ZMODEM send now.",
                 UploadProtocol::Kermit => "Start the KERMIT send now.",
                 UploadProtocol::Punter => "Start the PUNTER send now.",
@@ -949,7 +961,9 @@ impl TelnetSession {
                 UploadProtocol::Zmodem => cfg.zmodem_negotiation_timeout,
                 UploadProtocol::Kermit => cfg.kermit_negotiation_timeout,
                 UploadProtocol::Punter => cfg.punter_negotiation_timeout,
-                UploadProtocol::XmodemYmodem => cfg.xmodem_negotiation_timeout,
+                UploadProtocol::XmodemYmodem | UploadProtocol::Ymodem => {
+                    cfg.xmodem_negotiation_timeout
+                }
             }
         };
         self.send_line(&format!("  Start transfer within {} seconds.", neg_timeout))
@@ -1013,6 +1027,10 @@ impl TelnetSession {
         // peer's flavor is detected.  Surfaced in the post-transfer
         // summary so the user sees who they talked to.
         let mut kermit_flavor: Option<String> = None;
+        // Kermit files that resumed a partial: their data is the whole file,
+        // partial included, and they must replace that partial -- which the
+        // never-overwrite save would refuse as "already exists".
+        let mut kermit_resumed: std::collections::HashSet<String> = std::collections::HashSet::new();
         let result: Result<Received, String> = match protocol {
             UploadProtocol::Zmodem => crate::zmodem::zmodem_receive(
                 &mut self.reader,
@@ -1041,7 +1059,7 @@ impl TelnetSession {
                     })
                     .collect()
             }),
-            UploadProtocol::XmodemYmodem => crate::xmodem::xmodem_receive_batch(
+            UploadProtocol::XmodemYmodem | UploadProtocol::Ymodem => crate::xmodem::xmodem_receive_batch(
                 &mut self.reader,
                 &mut *writer_guard,
                 self.xmodem_iac,
@@ -1049,16 +1067,24 @@ impl TelnetSession {
                 verbose,
             )
             .await
-            // A YMODEM batch yields multiple files.  The first keeps the
-            // user-entered name (matching plain XMODEM / ZMODEM / Kermit); files
-            // 2..N take the sender's block-0 filename (the save path sanitizes
-            // it against path traversal, as it does for ZMODEM/Kermit names).
+            // A YMODEM batch yields multiple files.  Under `Y` every file
+            // keeps its block-0 name, converted as ZMODEM's are; under `X`
+            // the first takes the name the user typed and 2..N the sender's
+            // (the save path validates those).  A file with no name -- plain
+            // XMODEM sent under `Y`, or a non-UTF-8 block 0 -- is given a
+            // generated one by the save path.
             .map(|files| {
                 files
                     .into_iter()
                     .enumerate()
                     .map(|(i, f)| {
-                        let name = if i == 0 { None } else { f.filename };
+                        let name = if named_by_sender {
+                            f.filename.map(|n| Self::safe_upload_name(&n).unwrap_or(n))
+                        } else if i == 0 {
+                            None
+                        } else {
+                            f.filename
+                        };
                         (name, f.data, f.meta)
                     })
                     .collect()
@@ -1075,14 +1101,17 @@ impl TelnetSession {
                 // Capture flavor (per-session, identical across files
                 // in a batch).
                 kermit_flavor = rxs.first().map(|r| r.flavor.display());
-                // Map KermitReceive list to (Option<filename>, data, None).
-                // First file gets None for filename so user-entered name
-                // wins (matches XMODEM/YMODEM behavior); subsequent files
-                // in the batch use the sender's name like ZMODEM does.
+                // Map KermitReceive list to (Option<filename>, data, meta).
+                // Kermit asks no name: every file keeps the one its F packet
+                // carried (already held to Kermit's own name rules), through
+                // the same conversion ZMODEM's names get.
                 rxs.into_iter()
-                    .enumerate()
-                    .map(|(i, rx)| {
-                        let name = if i == 0 { None } else { Some(rx.filename) };
+                    .map(|rx| {
+                        let converted = Self::safe_upload_name(&rx.filename).unwrap_or(rx.filename);
+                        if rx.resumed {
+                            kermit_resumed.insert(converted.clone());
+                        }
+                        let name = Some(converted);
                         let meta = crate::xmodem::YmodemReceiveMeta {
                             size: rx.declared_size,
                             modtime: rx.modtime,
@@ -1227,16 +1256,44 @@ impl TelnetSession {
                 // symmetric.
                 let name = match sender_name {
                     Some(n) => n.clone(),
-                    // A YMODEM batch file whose block-0 name wasn't valid UTF-8
-                    // arrives nameless — save it under a generated name rather
-                    // than silently dropping it (ZMODEM/Kermit always name theirs).
-                    None => format!("ymodem_file_{}", idx + 1),
+                    // A nameless file -- a non-UTF-8 YMODEM block 0, or plain
+                    // XMODEM sent under `Y` -- gets the first free generated
+                    // name.  A fixed `ymodem_file_1` could be saved once, and
+                    // every later upload was refused as "already exists".
+                    None => (idx + 1..)
+                        .map(|n| format!("ymodem_file_{n}"))
+                        .find(|n| !self.transfer_path().join(n).exists())
+                        .expect("an unbounded range always yields a free name"),
                 };
                 if Self::validate_filename(&name).is_err() {
                     // Sanitize the sender-supplied name before it reaches the
                     // terminal (a rejected name can carry ANSI escapes).
                     let safe = crate::aichat::sanitize_for_terminal(&name);
                     skipped.push((safe, "invalid filename"));
+                    continue;
+                }
+                // Two sender names that convert to one: say so, rather than
+                // "already exists" about a file this same batch just wrote.
+                if saved.iter().any(|(n, _)| *n == name) {
+                    skipped.push((name, "same name as another file sent"));
+                    continue;
+                }
+                // Kermit saves as Kermit server mode does: a resumed file
+                // replaces its own partial, and a name that is taken is
+                // numbered (DOS/CP-M-Kermit style) rather than dropped.
+                if matches!(protocol, UploadProtocol::Kermit) {
+                    let resumed = kermit_resumed.contains(&name);
+                    match Self::save_received_file_collision_safe(
+                        &self.transfer_path(),
+                        &name,
+                        data,
+                        ymeta.as_ref(),
+                        resumed,
+                    ) {
+                        Ok(actual) => saved.push((actual, data.len())),
+                        Err(SaveError::AlreadyExists) => skipped.push((name, "already exists")),
+                        Err(SaveError::WriteFailed) => skipped.push((name, "write failed")),
+                    }
                     continue;
                 }
                 let batch_path = self.transfer_path().join(&name);
