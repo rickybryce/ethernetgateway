@@ -5887,7 +5887,9 @@ mod tests {
     /// typing at a booted guest -- open to any page the operator visited.
     #[test]
     fn test_every_post_route_is_behind_the_csrf_gate() {
-        let src = include_str!("webserver.rs");
+        // CRLF stripped: a Windows checkout has them, and `"\n}\n"` below
+        // then never matches (this test failed CI's Windows job that way).
+        let src = include_str!("webserver.rs").replace('\r', "");
         let body = &src[src.find("async fn handle_connection(").unwrap()..];
         let body = &body[..body.find("\n}\n").unwrap()];
         let gate = body
