@@ -2691,8 +2691,14 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
         // Missing means `auto`: a config written before this key existed gets
         // detection, which for every disk that booted then resolves to the
         // machine it already used -- proved in `test_detect_every_real_image`.
+        // Validated like `cpm_emu_uart` above: a hand-edited `Auto` or a typo
+        // would otherwise switch detection off with no message (it is not
+        // `auto`, and it names no machine, so the boot falls back to the
+        // Altair console), and the web select would show an option the file
+        // does not hold until a Save quietly overwrote it.
         cpm_boot_machine: map
             .get("cpm_boot_machine")
+            .filter(|v| crate::cpm::console::is_valid_machine_key(v))
             .cloned()
             .unwrap_or_else(|| crate::cpm::console::AUTO_MACHINE.to_string()),
         // Missing means `off`, which is also the default: a config written
@@ -3630,8 +3636,8 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   at emulated speed is over three months of continuous running.  Note that
 #   this bounds one transient program in the EMULATOR only: a booted disk is
 #   the session and is meant to sit at its prompt, so it has no such ceiling.
-# cpm_emu_uart: how the emulated CP/M reaches the virtual modem.  off
-#   (default) = no modem; a machine/port profile, e.g. rc2014_1b (RC2014 SIO/2
+# cpm_emu_uart: how the emulated CP/M reaches the virtual modem.  off = no
+#   modem; a machine/port profile, e.g. rc2014_1b (the default: RC2014 SIO/2
 #   0x82/0x83), altair_2sio1 (Altair 88-2SIO 0x10/0x11); aux (BDOS AUX:
 #   device); or hbios_1 / hbios_2 (RomWBW HBIOS serial unit 1 / 2, reached by
 #   RST 8 — for software built for RomWBW rather than for a bare UART, such as
@@ -3749,6 +3755,10 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #     console_04        console at 0x04/0x05, ready when the bit is CLEAR
 #     console_04_cuter  as above, but the guest prints by CALLing a Processor
 #                       Technology CUTER ROM, which we synthesise at 0xC019
+#     z80pack           z80pack cpmsim: console 0x00/0x01 and its own disk
+#                       device, not the Altair boards
+#     cromemco          Cromemco TU-ART console at 0x00/0x01 with the 16FDC
+#                       disk controller
 #   A disk that loads its operating system and then goes quiet is usually
 #   looking at a console that is not there, not misreading the disk - it will
 #   sit polling a keyboard port for ever.  `auto` reads a DECLARATION rather
@@ -8252,6 +8262,36 @@ mod tests {
             crate::cpm::console::AUTO_MACHINE,
             "a config written before this key existed must get detection"
         );
+        // A hand-edited value that names no machine is refused on LOAD too, as
+        // `cpm_emu_uart` is -- `Auto` is not `auto`, and passing it through
+        // switched detection off with no message.
+        for bad in ["Auto", "altair", "cromemcoo"] {
+            let edited: String = text
+                .lines()
+                .map(|l| if l.trim_start().starts_with("cpm_boot_machine") {
+                    format!("cpm_boot_machine = {bad}\n")
+                } else {
+                    format!("{l}\n")
+                })
+                .collect();
+            std::fs::write(path, edited).unwrap();
+            assert_eq!(
+                read_config_file(path).cpm_boot_machine,
+                crate::cpm::console::AUTO_MACHINE,
+                "{bad} must not survive a load"
+            );
+        }
+        // Positive control: a real machine written the same way does.
+        std::fs::write(path, text.replace("cpm_boot_machine = auto", "cpm_boot_machine = cromemco")).unwrap();
+        assert_eq!(read_config_file(path).cpm_boot_machine, "cromemco");
+        // And the generated file's own comment documents every machine there is.
+        for c in crate::cpm::console::MACHINE_CHOICES {
+            assert!(
+                text.contains(&format!("#     {:<18}", c.key)),
+                "the cpm_boot_machine comment must list {}",
+                c.key
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
 
         // Every machine in the shared list must be settable — iterated rather

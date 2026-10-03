@@ -364,6 +364,24 @@ async fn handle_connection(
         }
     }
 
+    // CSRF defense-in-depth for EVERY state-changing request, not only
+    // `/save`: reject a POST whose Origin/Referer doesn't match our Host.  A
+    // forged cross-site submit to `/save` would ride the operator's cached
+    // Basic-auth credentials to rewrite config (including disabling auth), and
+    // one to `/vdm/key` or `/vdm/joy` would type at a booted guest -- those
+    // two had no check at all while this sat inside the `/save` arm.  One
+    // gate above the routes, so a new POST route cannot be added without it.
+    if request.method == "POST" && !same_origin_ok(&request) {
+        logger::log(format!(
+            "Web: rejected POST {} with cross-origin Origin/Referer (possible CSRF).",
+            request.path
+        ));
+        let body = b"403 Forbidden: cross-origin request rejected\n";
+        write_response(&mut stream, 403, "Forbidden", "text/plain; charset=utf-8", body, false)
+            .await?;
+        return Ok(());
+    }
+
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") | ("GET", "/index.html") => {
             let cfg = config::get_config();
@@ -562,26 +580,6 @@ async fn handle_connection(
             .await?;
         }
         ("POST", "/save") => {
-            // CSRF defense-in-depth: reject a POST whose Origin/Referer
-            // doesn't match our Host (a forged cross-site submit that would
-            // otherwise ride the operator's cached Basic-auth credentials to
-            // rewrite config — including disabling auth).
-            if !same_origin_ok(&request) {
-                logger::log(
-                    "Web: rejected /save with cross-origin Origin/Referer (possible CSRF).".into(),
-                );
-                let body = b"403 Forbidden: cross-origin request rejected\n";
-                write_response(
-                    &mut stream,
-                    403,
-                    "Forbidden",
-                    "text/plain; charset=utf-8",
-                    body,
-                    false,
-                )
-                .await?;
-                return Ok(());
-            }
             // Apply on a blocking thread — update_config_value reads,
             // mutates, and rewrites egateway.conf, which would otherwise
             // park a tokio worker on filesystem I/O for every save.
@@ -5882,6 +5880,27 @@ mod tests {
         assert_eq!(decode_base64("YWJjZGVm"), b"abcdef");
         // Whitespace inside the input is stripped before decoding.
         assert_eq!(decode_base64("YWRt aW46 Y2hh bmdl bWU="), b"admin:changeme");
+    }
+
+    /// The CSRF gate sits above the route match and covers every POST.  It
+    /// lived inside the `/save` arm, which left `/vdm/key` and `/vdm/joy` --
+    /// typing at a booted guest -- open to any page the operator visited.
+    #[test]
+    fn test_every_post_route_is_behind_the_csrf_gate() {
+        let src = include_str!("webserver.rs");
+        let body = &src[src.find("async fn handle_connection(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let gate = body
+            .find("if request.method == \"POST\" && !same_origin_ok(&request)")
+            .expect("handle_connection must gate POSTs on same_origin_ok");
+        let routes = body.find("match (request.method.as_str(), request.path.as_str())").unwrap();
+        assert!(gate < routes, "the gate must come before the routes");
+        let posts = body.matches("(\"POST\", \"").count();
+        assert!(posts >= 3, "positive control: the POST routes were found ({posts})");
+        assert!(
+            body[..gate].matches("(\"POST\", \"").count() == 0,
+            "no POST route may be handled before the gate"
+        );
     }
 
     #[test]

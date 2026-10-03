@@ -465,7 +465,9 @@ pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     let mut result = Vec::new();
     let mut remaining = line;
     while !remaining.is_empty() {
-        if remaining.chars().count() <= width {
+        // `nth`, not `count`: counting the whole remainder on every pass made
+        // one long line quadratic, and a hostile page can be 1 MB of it.
+        if remaining.char_indices().nth(width).is_none() {
             result.push(remaining.to_string());
             break;
         }

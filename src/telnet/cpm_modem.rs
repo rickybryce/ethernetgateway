@@ -271,9 +271,13 @@ impl CpmModem {
             }
         }
         // Drain anything the peer has sent us while online, up to what the
-        // guest's RX ring can still hold (backpressure).
+        // guest's RX ring can still hold (backpressure) -- less what this call
+        // has already put in `out` (an echo, `CONNECT`), or the caller's
+        // `queue_rx` truncates the tail and peer bytes that should have stayed
+        // in the socket are lost.
         if self.mode == Mode::Online {
-            self.poll_connection(&mut out, rx_budget, guest_has_rx).await;
+            let budget = rx_budget.saturating_sub(out.len());
+            self.poll_connection(&mut out, budget, guest_has_rx).await;
         }
         out
     }
