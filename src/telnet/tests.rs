@@ -7150,6 +7150,108 @@ async fn test_a_silent_announced_client_falls_back_instead_of_being_dropped() {
     assert_eq!(session.erase_char, session::DEFAULT_ERASE_CHAR);
 }
 
+/// Everything a session says until it closes, read under the paused clock.
+async fn read_to_close(
+    prd: &mut tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    pwr: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    answers: &[(&str, &[u8])],
+    trickle: Option<std::time::Duration>,
+) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut seen = String::new();
+    let mut next = 0;
+    let mut trickled = 0;
+    loop {
+        let mut tmp = [0u8; 256];
+        // Virtual time: far past any wait in the door, so only a session that
+        // never ends can make this give up.  Once the scripted answers are
+        // spent, a trickling client sends one byte each time `trickle` passes
+        // in silence.
+        let wait = match trickle {
+            Some(t) if next == answers.len() => t,
+            _ => std::time::Duration::from_secs(3600),
+        };
+        match tokio::time::timeout(wait, prd.read(&mut tmp)).await {
+            Ok(Ok(n)) if n > 0 => seen.push_str(&String::from_utf8_lossy(&tmp[..n])),
+            Err(_) if wait < std::time::Duration::from_secs(3600) => {
+                // Bounded, so a session with no deadline fails the test rather
+                // than being kept alive by it for ever.
+                trickled += 1;
+                if trickled > 40 || pwr.write_all(b"a").await.is_err() {
+                    return seen;
+                }
+                continue;
+            }
+            _ => return seen,
+        }
+        if let Some((marker, reply)) = answers.get(next)
+            && seen.to_lowercase().contains(marker)
+        {
+            pwr.write_all(reply).await.unwrap();
+            next += 1;
+        }
+        if seen.contains("login timed out") {
+            return seen;
+        }
+    }
+}
+
+/// **A connection that never logs in is closed at the deadline, however it
+/// trickles.**  The bound is from the connection, not from the last byte: a
+/// client that answers detection and colour and then sits at `Username:` --
+/// silent, or sending one byte every half minute to keep resetting the idle
+/// allowance -- is out at `PRE_LOGIN_DEADLINE`, where the 900 s idle timer used
+/// to be the only limit and a trickle had none at all.  (With security off
+/// there is no login: detection and the colour prompt carry their own 60 s
+/// bounds, and the door is passed after them.)
+#[tokio::test(start_paused = true)]
+async fn test_a_client_that_never_logs_in_is_closed_at_the_deadline() {
+    for trickle in [false, true] {
+        let (mut session, peer) = make_test_session_with_peer(TerminalType::Ascii);
+        let (mut prd, mut pwr) = tokio::io::split(peer);
+        let start = tokio::time::Instant::now();
+        let task = tokio::spawn(async move {
+            session
+                .through_the_door(true, Some(crate::telnet::PRE_LOGIN_DEADLINE))
+                .await
+        });
+        let every = trickle.then_some(std::time::Duration::from_secs(30));
+        let reader = tokio::spawn(async move {
+            read_to_close(&mut prd, &mut pwr, &[("backspace", b"\x08"), ("color", b"n")], every).await
+        });
+        let outcome = task.await.unwrap();
+        let took = start.elapsed();
+        let seen = reader.await.unwrap();
+        assert!(matches!(outcome, Ok(false)), "trickle={trickle}: {outcome:?}");
+        assert!(seen.contains("Username"), "trickle={trickle}: reached the login, got {seen:?}");
+        assert!(seen.contains("login timed out"), "trickle={trickle}: told why, got {seen:?}");
+        assert!(
+            took >= crate::telnet::PRE_LOGIN_DEADLINE
+                && took < crate::telnet::PRE_LOGIN_DEADLINE + std::time::Duration::from_secs(5),
+            "trickle={trickle}: closed at the deadline, not {took:?}"
+        );
+    }
+}
+
+/// The positive control: a person who answers promptly is let through, with
+/// the deadline armed.
+#[tokio::test(start_paused = true)]
+async fn test_a_prompt_client_gets_through_the_door_with_the_deadline_armed() {
+    let (mut session, peer) = make_test_session_with_peer(TerminalType::Ascii);
+    let (mut prd, mut pwr) = tokio::io::split(peer);
+    let task = tokio::spawn(async move {
+        session
+            .through_the_door(false, Some(crate::telnet::PRE_LOGIN_DEADLINE))
+            .await
+    });
+    let reader = tokio::spawn(async move {
+        read_to_close(&mut prd, &mut pwr, &[("backspace", b"\x08"), ("color", b"n")], None).await
+    });
+    let outcome = task.await.unwrap();
+    assert!(matches!(outcome, Ok(true)), "{outcome:?}");
+    reader.abort();
+}
+
 /// **The master-password screen fits a C64.**
 ///
 /// 40 columns and 22 rows is the budget for every screen this gateway draws,

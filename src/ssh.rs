@@ -107,8 +107,10 @@ pub fn start_ssh_server(
             // silently, so its master-side session slot and remote-port
             // registry entry are released promptly (SshHandler::drop) instead
             // of lingering until a write happens to fail.  Benefits ordinary
-            // SSH sessions too (frees slots from half-open connections).  No
-            // `inactivity_timeout` — an idle console registration is alive.
+            // SSH sessions too (frees slots from half-open connections).
+            // `inactivity_timeout` is left at russh's default (600 s); the
+            // bound on a connection that has not logged in is
+            // `PRE_LOGIN_DEADLINE`, enforced by `PreLoginStream`.
             keepalive_interval: Some(std::time::Duration::from_secs(30)),
             keepalive_max: 3,
             ..Default::default()
@@ -143,15 +145,68 @@ pub fn start_ssh_server(
         crate::bindwatch::bound("SSH");
         glog!("SSH server listening on port {}", port);
 
-        tokio::select! {
-            result = server.run_on_socket(config, &socket) => {
-                if let Err(e) = result {
-                    glog!("SSH server error: {}", e);
+        // **Our accept loop, not russh's `run_on_socket`.**  That one owns the
+        // TCP accept, so a connection over the rate limit could only be
+        // *recorded* in `new_client` and refused when it tried to log in --
+        // a peer that never tried was never refused -- and nothing bounded how
+        // long, or how many, could sit there before logging in.  Owning the
+        // accept is what lets all three be answered before russh sees a byte.
+        // Each connection runs through `run_stream`, which is what
+        // `run_on_socket` does for it too.
+        let pending = Arc::new(AtomicUsize::new(0));
+        // Once per flood, like the rate limiter's own logging.
+        let mut full_said = false;
+        loop {
+            let (tcp, peer) = tokio::select! {
+                accepted = socket.accept() => match accepted {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        // Out of descriptors is the likely one, and it does
+                        // not clear by retrying at once: back off rather than
+                        // spin the accept loop at full speed.
+                        glog!("SSH server: accept failed: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+                },
+                _ = shutdown_notify.notified() => {
+                    glog!("SSH server: shutting down");
+                    break;
                 }
+            };
+            let mut handler = server.new_client(Some(peer));
+            if handler.rate_limited {
+                // `new_client` has logged it.  Dropped unanswered, as the
+                // telnet accept loop does: a scanner is not reading.
+                drop(tcp);
+                continue;
             }
-            _ = shutdown_notify.notified() => {
-                glog!("SSH server: shutting down");
-            }
+            let Some(pre) = PreLogin::claim(&pending, MAX_PRE_LOGIN) else {
+                if !full_said {
+                    glog!(
+                        "SSH: refusing {} -- {} connections are already waiting to log in; \
+                         further refusals are not logged until there is room again",
+                        peer, MAX_PRE_LOGIN
+                    );
+                    full_said = true;
+                }
+                drop(tcp);
+                continue;
+            };
+            full_said = false;
+            handler.pre_login = Some(pre.clone());
+            let stream = PreLoginStream::new(tcp, pre, telnet::PRE_LOGIN_DEADLINE);
+            let config = config.clone();
+            tokio::spawn(async move {
+                // An `Err` is a handshake that never completed -- including a
+                // peer that sent no version string before the deadline.  Not
+                // logged: it is what every scanner does, and a line per
+                // connection is the amplifier the rate limiter's logging
+                // avoids.  russh's own accept loop dropped these silently too.
+                if let Ok(session) = russh::server::run_stream(config, stream, handler).await {
+                    let _ = session.await;
+                }
+            });
         }
     });
 }
@@ -576,6 +631,140 @@ impl Drop for SlotGuard {
     }
 }
 
+// ─── Before the login ──────────────────────────────────────
+
+/// How many connections may be open and not yet logged in, across all
+/// addresses.  Each holds a file descriptor and a task, and nothing else
+/// bounded them: the rate limit was only *enforced* at authentication, so a
+/// peer that never authenticated was never refused, and the shipped unit's
+/// `LimitNOFILE` (8192, or 1024 on a desktop launch) was the real ceiling --
+/// reached, every listener's accept, every config save and the log file fail
+/// together.  Generous for people, since a login takes a second or two.
+pub(crate) const MAX_PRE_LOGIN: usize = 64;
+
+/// One connection's place among those not yet logged in.
+///
+/// Given back **exactly once**: when the login succeeds, or when the
+/// connection ends without one -- whichever comes first.  `released` is what
+/// makes the second of those a no-op, so a connection that logs in and later
+/// drops cannot give its place back twice and wrap the counter.
+pub(crate) struct PreLogin {
+    logged_in: AtomicBool,
+    released: AtomicBool,
+    pending: Arc<AtomicUsize>,
+}
+
+impl PreLogin {
+    /// Take a place, or `None` when `max` connections already wait.  The same
+    /// fetch_add-and-roll-back claim as the session slots, for the same reason:
+    /// two accepts cannot both see room for one.
+    pub(crate) fn claim(pending: &Arc<AtomicUsize>, max: usize) -> Option<Arc<PreLogin>> {
+        if pending.fetch_add(1, Ordering::SeqCst) >= max {
+            pending.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Arc::new(PreLogin {
+            logged_in: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+            pending: pending.clone(),
+        }))
+    }
+
+    pub(crate) fn logged_in(&self) {
+        self.logged_in.store(true, Ordering::SeqCst);
+        self.release();
+    }
+
+    fn release(&self) {
+        if !self.released.swap(true, Ordering::SeqCst) {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// The TCP stream, refusing to carry a connection that has not logged in by
+/// `PRE_LOGIN_DEADLINE`.
+///
+/// **On the stream, not the handler**, because the stall worth bounding comes
+/// before russh ever calls the handler: a peer that never sends its version
+/// string sits in `read_ssh_id` with no handler involved.  Failing the read is
+/// how the session ends -- russh's own loop treats it as the connection
+/// closing -- and the deadline is polled from `poll_read` so its timer wakes
+/// the reader, which is always waiting.  `poll_write` only *checks* it: polling
+/// the timer there too would move its waker to the writer, and a writer that
+/// is not blocked is never polled again.
+///
+/// Once logged in the timer is never looked at again: an idle session is the
+/// session idle timeout's business, not this one's.
+pub(crate) struct PreLoginStream<S> {
+    inner: S,
+    pre: Arc<PreLogin>,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+}
+
+impl<S> PreLoginStream<S> {
+    pub(crate) fn new(inner: S, pre: Arc<PreLogin>, within: std::time::Duration) -> Self {
+        PreLoginStream { inner, pre, deadline: Box::pin(tokio::time::sleep(within)) }
+    }
+
+    fn refused() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "did not log in in time")
+    }
+
+    fn waiting(&self) -> bool {
+        !self.pre.logged_in.load(Ordering::SeqCst)
+    }
+}
+
+impl<S> Drop for PreLoginStream<S> {
+    fn drop(&mut self) {
+        // The connection is over; if it never logged in, its place is free.
+        self.pre.release();
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for PreLoginStream<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if this.waiting() && this.deadline.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(Err(Self::refused()));
+        }
+        std::pin::Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for PreLoginStream<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        if this.waiting() && this.deadline.is_elapsed() {
+            return std::task::Poll::Ready(Err(Self::refused()));
+        }
+        std::pin::Pin::new(&mut this.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 // ─── Server (connection factory) ───────────────────────────
 
 struct SshServer {
@@ -671,6 +860,8 @@ impl russh::server::Server for SshServer {
             key_authed: false,
             counted: false,
             rate_limited,
+            // Filled in by the accept loop, which owns the connection.
+            pre_login: None,
         }
     }
 }
@@ -723,9 +914,10 @@ struct SshHandler {
     /// `new_client` rather than per attempt, so one connection is one unit of
     /// rate however many auth methods it tries.
     rate_limited: bool,
-    /// Whether this connection claimed a session slot (set once auth
-    /// succeeds).  Gates the Drop decrement so an unauthenticated
-    /// connection that never counted can't underflow the shared counter.
+    /// The connection's place among those not yet logged in, given back the
+    /// moment a login succeeds -- see [`PreLogin`].  `None` for a handler not
+    /// built by the accept loop (the tests).
+    pre_login: Option<Arc<PreLogin>>,
     /// The relay keys this connection may authenticate with.
     ///
     /// Read **once per connection** rather than per attempt: it keeps the file
@@ -741,7 +933,24 @@ struct SshHandler {
     /// gateways -- and did so even where the operator had blanked the SSH
     /// password specifically to shut that door.
     key_authed: bool,
+    /// Whether this connection claimed a session slot (set once auth
+    /// succeeds).  Gates the Drop decrement so an unauthenticated
+    /// connection that never counted can't underflow the shared counter.
+    /// Set only by [`SshHandler::mark_logged_in`].
     counted: bool,
+}
+
+impl SshHandler {
+    /// A login succeeded: claim the slot already reserved by the caller, and
+    /// lift the pre-login deadline.  **The one place either happens**, so the
+    /// two cannot drift apart -- a login that counted a slot but left the
+    /// deadline armed would be cut off two minutes into a working session.
+    fn mark_logged_in(&mut self) {
+        self.counted = true;
+        if let Some(p) = &self.pre_login {
+            p.logged_in();
+        }
+    }
 }
 
 impl Drop for SshHandler {
@@ -1010,7 +1219,7 @@ impl russh::server::Handler for SshHandler {
                 }
                 return Ok(russh::server::Auth::reject());
             }
-            self.counted = true;
+            self.mark_logged_in();
             Ok(russh::server::Auth::Accept)
         } else {
             if let Some(ip) = self.peer_addr {
@@ -1106,7 +1315,7 @@ impl russh::server::Handler for SshHandler {
             }
             return Ok(russh::server::Auth::reject());
         }
-        self.counted = true;
+        self.mark_logged_in();
         Ok(russh::server::Auth::Accept)
     }
 
@@ -1811,6 +2020,185 @@ mod tests {
 
     // ─── Session-slot accounting (claim on successful auth) ───
 
+    /// A place among the pre-login connections is given back exactly once,
+    /// whichever of "logged in" and "connection ended" comes first -- a second
+    /// release would wrap the counter and open the cap for good.
+    #[tokio::test]
+    async fn test_a_pre_login_place_is_given_back_exactly_once() {
+        let pending = Arc::new(AtomicUsize::new(0));
+        let a = PreLogin::claim(&pending, 2).expect("room for the first");
+        let b = PreLogin::claim(&pending, 2).expect("room for the second");
+        assert!(PreLogin::claim(&pending, 2).is_none(), "the cap holds");
+        assert_eq!(pending.load(Ordering::SeqCst), 2, "a refused claim takes nothing");
+
+        a.logged_in();
+        a.release(); // the connection later ends
+        assert_eq!(pending.load(Ordering::SeqCst), 1, "a login gives the place back once");
+
+        let (_far, near) = tokio::io::duplex(64);
+        drop(PreLoginStream::new(near, b, std::time::Duration::from_secs(60)));
+        assert_eq!(pending.load(Ordering::SeqCst), 0, "a connection that ends gives it back");
+        assert!(PreLogin::claim(&pending, 2).is_some(), "and the room is usable again");
+    }
+
+    /// The accept loop is what applies the three pre-login bounds, and it
+    /// runs only in production, so its shape is held here: every connection
+    /// that gets a handler is wrapped and carries its place, a rate-limited
+    /// one is dropped before russh sees it, and russh's own loop -- which can
+    /// do none of this -- is not quietly put back.
+    #[test]
+    fn test_the_accept_loop_applies_the_pre_login_bounds() {
+        let src = include_str!("ssh.rs").replace('\r', "");
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let start = code.find("let pending = Arc::new(AtomicUsize::new(0));").expect("accept loop");
+        let lp = &code[start..start + code[start..].find("\n    });").expect("end of the loop")];
+        for needle in [
+            "if handler.rate_limited",
+            "PreLogin::claim(&pending, MAX_PRE_LOGIN)",
+            "handler.pre_login = Some(pre.clone());",
+            "PreLoginStream::new(tcp, pre, telnet::PRE_LOGIN_DEADLINE)",
+            "russh::server::run_stream(config, stream, handler)",
+        ] {
+            assert!(lp.contains(needle), "the accept loop no longer does `{needle}`");
+        }
+        // Split with `concat!` so this test's own text is not what it finds.
+        assert!(!code.contains(concat!("run_on", "_socket(")), "russh's accept loop is back");
+        // And a login lifts the deadline wherever it is granted.
+        let set = concat!("self.counted", " = true");
+        let mark = concat!("self.mark_logged", "_in();");
+        assert_eq!(code.matches(set).count(), 1, "one place sets `counted`");
+        assert_eq!(code.matches(mark).count(), 2, "both auth paths use it");
+    }
+
+    fn loopback_handler(addr: SocketAddr, pre_login: Option<Arc<PreLogin>>) -> SshHandler {
+        SshHandler {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            restart: Arc::new(AtomicBool::new(false)),
+            session_count: Arc::new(AtomicUsize::new(0)),
+            max_sessions: 4,
+            username: "admin".into(),
+            password: "secret".into(),
+            peer_addr: Some(addr.ip()),
+            pty_term: None,
+            duplex_writer: None,
+            relay_writers: std::collections::HashMap::new(),
+            registered_ports: std::collections::HashMap::new(),
+            session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            authorized_keys: Vec::new(),
+            key_authed: false,
+            counted: false,
+            rate_limited: false,
+            pre_login,
+        }
+    }
+
+    fn loopback_config() -> Arc<russh::server::Config> {
+        let host_key = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .unwrap();
+        Arc::new(russh::server::Config { keys: vec![host_key], ..Default::default() })
+    }
+
+    /// **A peer that never logs in is cut off at the deadline** -- here the
+    /// worst one, which sends nothing at all and so never gets past russh's
+    /// wait for a version string, where no handler exists to time it out.
+    /// Real loopback TCP and the real `run_stream`, because what is being
+    /// proved is that a failed read on the wrapper ends russh's session.
+    #[tokio::test]
+    async fn test_a_peer_that_never_logs_in_is_cut_off() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let pre = PreLogin::claim(&pending, MAX_PRE_LOGIN).unwrap();
+        let handler = loopback_handler(addr, Some(pre.clone()));
+        let within = std::time::Duration::from_millis(300);
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let stream = PreLoginStream::new(tcp, pre, within);
+            if let Ok(session) = russh::server::run_stream(loopback_config(), stream, handler).await {
+                let _ = session.await;
+            }
+        });
+
+        let mut peer = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let start = std::time::Instant::now();
+        let mut buf = [0u8; 256];
+        // The server's version string arrives, then -- with nothing sent back
+        // -- the connection must close rather than wait.
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match peer.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "a silent peer was still connected after 10 s");
+        assert!(start.elapsed() >= within, "closed before the deadline");
+        tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+        assert_eq!(pending.load(Ordering::SeqCst), 0, "its place was given back");
+    }
+
+    /// The positive control, and the half that would hurt if it were wrong: a
+    /// client that logs in inside the deadline keeps a working session after
+    /// it has passed.
+    #[tokio::test]
+    async fn test_a_logged_in_session_outlives_the_deadline() {
+        struct Client;
+        impl russh::client::Handler for Client {
+            type Error = russh::Error;
+            async fn check_server_key(
+                &mut self,
+                _key: &russh::keys::PublicKeyOrCertificate,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let pre = PreLogin::claim(&pending, MAX_PRE_LOGIN).unwrap();
+        let handler = loopback_handler(addr, Some(pre.clone()));
+        let within = std::time::Duration::from_millis(1500);
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let stream = PreLoginStream::new(tcp, pre, within);
+            let running = russh::server::run_stream(loopback_config(), stream, handler)
+                .await
+                .expect("server side failed to start");
+            let _ = running.await;
+        });
+
+        let mut session = russh::client::connect(
+            Arc::new(russh::client::Config::default()),
+            addr,
+            Client,
+        )
+        .await
+        .expect("client could not connect");
+        let auth = session.authenticate_password("admin", "secret").await.unwrap();
+        assert!(auth.success(), "password auth was refused");
+        assert_eq!(pending.load(Ordering::SeqCst), 0, "a login gives its place back");
+
+        tokio::time::sleep(within * 2).await;
+        let channel = session
+            .channel_open_session()
+            .await
+            .expect("a logged-in session was cut off at the pre-login deadline");
+        channel.data(&b"\n"[..]).await.expect("and its channel still carries data");
+
+        drop(session);
+        server.abort();
+    }
+
     /// A session slot is claimed only on a successful login, released only
     /// if it was claimed, and the cap is enforced at exactly `max_sessions`
     /// — so an unauthenticated/stalled connection can't exhaust the cap.
@@ -1878,6 +2266,7 @@ mod tests {
             key_authed: false,
             counted: false,
             rate_limited: false,
+            pre_login: None,
         };
 
         let server = tokio::spawn(async move {
@@ -2183,6 +2572,7 @@ mod tests {
             key_authed: false,
             counted: false,
             rate_limited: false,
+            pre_login: None,
         }
     }
 
@@ -2208,6 +2598,7 @@ mod tests {
             key_authed: false,
             counted: false,
             rate_limited: false,
+            pre_login: None,
         };
 
         // Failed auth must NOT claim a slot, and dropping an uncounted
@@ -2292,6 +2683,7 @@ mod tests {
             key_authed: false,
             counted: false,
             rate_limited: false,
+            pre_login: None,
         };
 
         // Empty configured password: reject a matching-empty password (the
@@ -2585,6 +2977,7 @@ mod tests {
             key_authed: false,
             counted: false,
             rate_limited: false,
+            pre_login: None,
         };
         // Correct credentials, but locked out → reject, no slot claimed.
         assert!(matches!(
@@ -2621,6 +3014,7 @@ mod tests {
             key_authed: false,
             counted: false,
             rate_limited: false,
+            pre_login: None,
         };
         for _ in 0..telnet::MAX_AUTH_ATTEMPTS {
             let mut h = make();
@@ -2672,6 +3066,7 @@ mod tests {
             key_authed: false,
             counted: false,
             rate_limited: false,
+            pre_login: None,
         };
         assert!(matches!(
             h.auth_password("admin", "secret").await.unwrap(),

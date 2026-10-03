@@ -294,6 +294,25 @@ pub(crate) const MAX_AUTH_ATTEMPTS: u32 = 3;
 pub(crate) const LOCKOUT_DURATION: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
 
+/// How long a network connection may take to get through the door: terminal
+/// detection, the colour question and the login on telnet, the whole
+/// handshake and authentication on SSH.
+///
+/// **A fixed bound, not `idle_timeout_secs`.**  The idle allowance (900 s by
+/// default, `0` = none) restarts on every byte, so a peer sending one byte
+/// every few minutes held a telnet slot -- taken at accept, before any prompt
+/// -- indefinitely, and fifty of them locked everyone out.  SSH takes no slot
+/// before login, but nothing bounded how many unauthenticated connections
+/// could sit open, and each holds a file descriptor.  This bound is from the
+/// connection, not from the last byte, so trickling does not extend it.
+///
+/// Two minutes is generous for a person: detection waits at most
+/// `DETECT_WAIT` (60 s) for a key, and a person who presses it is through in a
+/// second.  It only costs a client that never logs in, and that is the client
+/// it exists for.
+pub(crate) const PRE_LOGIN_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(120);
+
 // ─── Terminal Type ──────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TerminalType {

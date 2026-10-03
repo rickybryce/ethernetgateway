@@ -960,38 +960,78 @@ impl TelnetSession {
         Ok(false)
     }
 
+    /// Terminal detection, then the login if security asks for one.
+    ///
+    /// Returns whether the session goes on to the menu: `false` for a failed
+    /// login, and for a connection that did not get through inside `deadline`
+    /// -- which is told so before it is dropped.  `deadline` is `None` for a
+    /// serial caller, which holds no network slot and whose detection already
+    /// has its own fallback.
+    pub(in crate::telnet) async fn through_the_door(
+        &mut self,
+        security_enabled: bool,
+        deadline: Option<std::time::Duration>,
+    ) -> Result<bool, std::io::Error> {
+        let Some(limit) = deadline else {
+            return self.door(security_enabled).await;
+        };
+        match tokio::time::timeout(limit, self.door(security_enabled)).await {
+            Ok(r) => r,
+            Err(_) => {
+                // Not a failed guess, and deliberately not recorded as one:
+                // counting an abandoned login against the address would let
+                // anyone lock a neighbour out by connecting and waiting.
+                glog!(
+                    "Telnet: {} did not log in within {}s; disconnected",
+                    self.peer_addr.map_or_else(|| "a client".to_string(), |a| a.to_string()),
+                    limit.as_secs()
+                );
+                let _ = self.send_line("\r\n\r\nDisconnected: login timed out.").await;
+                Ok(false)
+            }
+        }
+    }
+
+    async fn door(&mut self, security_enabled: bool) -> Result<bool, std::io::Error> {
+        self.detect_terminal_type().await?;
+
+        // Auto-set the IAC-escaping default based on
+        // whether the client actually speaks the telnet protocol
+        // (RFC 854/856).  detect_terminal_type() has already sent
+        // our opening WILL/DO batch and drained the reply window,
+        // so session_read_byte has flipped telnet_negotiated on
+        // iff the peer answered with any option-negotiation or
+        // subnegotiation bytes.  Real telnet clients (PuTTY, Tera
+        // Term, C-Kermit, SecureCRT) always negotiate and need
+        // 0xFF escaped; raw TCP clients (netcat, IMP8, CCGMS,
+        // StrikeTerm, AltairDuino firmware) stay silent and get a
+        // transparent byte stream.  Serial sessions skip the
+        // negotiation entirely (no IAC), so telnet_negotiated
+        // stays false and xmodem_iac is left off — matching the
+        // raw byte stream a serial modem caller expects.  The I
+        // key on the File Transfer menu still lets the user
+        // override per-session.
+        self.xmodem_iac = self.telnet_negotiated;
+
+        // Serial sessions don't authenticate — they arrived via
+        // ATDT on a physical port, which is its own trust boundary.
+        if !self.is_serial && security_enabled && !self.authenticate().await? {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     // ─── Main session loop ──────────────────────────────────
 
     pub(crate) async fn run(&mut self) -> Result<(), std::io::Error> {
         let cfg = config::get_config();
 
         if !self.is_ssh {
-            self.detect_terminal_type().await?;
-
-            // Auto-set the IAC-escaping default based on
-            // whether the client actually speaks the telnet protocol
-            // (RFC 854/856).  detect_terminal_type() has already sent
-            // our opening WILL/DO batch and drained the reply window,
-            // so session_read_byte has flipped telnet_negotiated on
-            // iff the peer answered with any option-negotiation or
-            // subnegotiation bytes.  Real telnet clients (PuTTY, Tera
-            // Term, C-Kermit, SecureCRT) always negotiate and need
-            // 0xFF escaped; raw TCP clients (netcat, IMP8, CCGMS,
-            // StrikeTerm, AltairDuino firmware) stay silent and get a
-            // transparent byte stream.  Serial sessions skip the
-            // negotiation entirely (no IAC), so telnet_negotiated
-            // stays false and xmodem_iac is left off — matching the
-            // raw byte stream a serial modem caller expects.  The I
-            // key on the File Transfer menu still lets the user
-            // override per-session.
-            self.xmodem_iac = self.telnet_negotiated;
-
-            // Serial sessions don't authenticate — they arrived via
-            // ATDT on a physical port, which is its own trust boundary.
-            if !self.is_serial
-                && cfg.security_enabled
-                && !self.authenticate().await?
-            {
+            // Network telnet only: a serial caller holds no network slot, and
+            // `new_relay` sessions (also `is_serial`) were authenticated by
+            // the SSH door they came through.
+            let deadline = (!self.is_serial).then_some(crate::telnet::PRE_LOGIN_DEADLINE);
+            if !self.through_the_door(cfg.security_enabled, deadline).await? {
                 return Ok(());
             }
             // **What happened at the door, written down at the door.**  The
