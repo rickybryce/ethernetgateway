@@ -1540,6 +1540,40 @@ const GOPHER_TIMEOUT_SECS: u64 = 15;
 /// Maximum Gopher response size (512 KB).
 const GOPHER_MAX_BODY: usize = 512 * 1024;
 
+/// Read a response of at most `max` bytes, giving up at `deadline`.
+///
+/// **One deadline for the whole body**, the counterpart of HTTP's
+/// `timeout_global`.  The socket's read timeout alone bounds each *read*, so a
+/// server sending one byte every fourteen seconds kept a 512 KB fetch -- and
+/// the session waiting on it, which no key can interrupt -- alive for weeks.
+fn read_gopher_body(
+    stream: &mut std::net::TcpStream,
+    max: usize,
+    deadline: std::time::Instant,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut body = Vec::new();
+    let mut buf = [0u8; 8192];
+    while body.len() < max {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err("Read error: the server took too long to send the page".into());
+        }
+        // `set_read_timeout(Some(0))` is an error, hence the floor.
+        stream
+            .set_read_timeout(Some(left.max(std::time::Duration::from_millis(1))))
+            .map_err(|e| format!("Read error: {}", e))?;
+        let want = buf.len().min(max - body.len());
+        match stream.read(&mut buf[..want]) {
+            Ok(0) => break,
+            Ok(n) => body.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("Read error: {}", e)),
+        }
+    }
+    Ok(body)
+}
+
 /// Parse a gopher:// URL into (host, port, item_type, selector).
 ///
 /// Format: `gopher://host[:port][/[type][selector]]`
@@ -1642,13 +1676,9 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
         .map_err(|e| format!("Write error: {}", e))?;
     stream.flush().map_err(|e| format!("Flush error: {}", e))?;
 
-    // Read response
-    let mut body = Vec::new();
-    stream
-        .get_mut()
-        .take(GOPHER_MAX_BODY as u64)
-        .read_to_end(&mut body)
-        .map_err(|e| format!("Read error: {}", e))?;
+    // Read response, against one deadline for the whole of it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(GOPHER_TIMEOUT_SECS);
+    let body = read_gopher_body(stream.get_mut(), GOPHER_MAX_BODY, deadline)?;
 
     let text = String::from_utf8_lossy(&body);
     let final_url = build_gopher_url(&host, port, item_type, &selector);
@@ -1841,6 +1871,50 @@ pub(crate) fn build_gopher_search_url(url: &str, query: &str) -> String {
 mod tests {
     use crate::aichat::fold_terminal_safe;
     use super::*;
+
+    /// A trickling server cannot hold a gopher fetch past its deadline.
+    #[test]
+    fn test_a_trickling_gopher_server_is_cut_off_at_the_deadline() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            // One byte every 50 ms -- each read well inside any per-read
+            // timeout, which is exactly what used to keep the fetch alive.
+            for _ in 0..200 {
+                if s.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let start = std::time::Instant::now();
+        let deadline = start + std::time::Duration::from_millis(400);
+        let got = super::read_gopher_body(&mut stream, 1 << 20, deadline);
+        assert!(got.is_err(), "the fetch outlived its deadline: {got:?}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        drop(stream);
+        let _ = server.join();
+    }
+
+    /// The positive control: a server that answers and closes is read whole.
+    #[test]
+    fn test_a_prompt_gopher_server_is_read_whole() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.write_all(b"iHello\tfake\t(NULL)\t0\r\n.\r\n").unwrap();
+        });
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let got = super::read_gopher_body(&mut stream, 1 << 20, deadline).unwrap();
+        assert!(got.starts_with(b"iHello"));
+        server.join().unwrap();
+    }
 
     /// The measured defect: an HTML table renders as box-drawing characters.
     ///

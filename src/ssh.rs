@@ -153,10 +153,29 @@ pub fn start_ssh_server(
         // accept is what lets all three be answered before russh sees a byte.
         // Each connection runs through `run_stream`, which is what
         // `run_on_socket` does for it too.
-        let pending = Arc::new(AtomicUsize::new(0));
+        let pending: SharedPreLoginPool = Default::default();
         // Once per flood, like the rate limiter's own logging.
         let mut full_said = false;
+        // **Sessions are not disconnected when this loop ends**, unlike under
+        // russh's loop, whose dropped broadcast sender disconnected every
+        // session at once -- usually *before* main's goodbye broadcast, which
+        // is sent after the shutdown notice.  Here the goodbye arrives and the
+        // connection closes when the runtime is torn down.
         loop {
+            // `notify_waiters` stores no permit, so a notice landing while
+            // this loop is between `notified()` futures -- or asleep after an
+            // accept error -- is missed; the flag is what the notifier sets
+            // first, and is the same re-check main and the telnet loop make.
+            //
+            // The notice is registered *before* the flag is read, so a notify
+            // between the two still wakes this iteration's `select!`.
+            let notified = shutdown_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if shutdown.load(Ordering::SeqCst) {
+                glog!("SSH server: shutting down");
+                break;
+            }
             let (tcp, peer) = tokio::select! {
                 accepted = socket.accept() => match accepted {
                     Ok(pair) => pair,
@@ -169,7 +188,7 @@ pub fn start_ssh_server(
                         continue;
                     }
                 },
-                _ = shutdown_notify.notified() => {
+                _ = &mut notified => {
                     glog!("SSH server: shutting down");
                     break;
                 }
@@ -181,17 +200,35 @@ pub fn start_ssh_server(
                 drop(tcp);
                 continue;
             }
-            let Some(pre) = PreLogin::claim(&pending, MAX_PRE_LOGIN) else {
-                if !full_said {
-                    glog!(
-                        "SSH: refusing {} -- {} connections are already waiting to log in; \
-                         further refusals are not logged until there is room again",
-                        peer, MAX_PRE_LOGIN
-                    );
-                    full_said = true;
+            let pre = match PreLogin::claim(
+                &pending,
+                peer.ip(),
+                MAX_PRE_LOGIN,
+                MAX_PRE_LOGIN_PER_ADDRESS,
+            ) {
+                Ok(pre) => pre,
+                Err(why) => {
+                    if !full_said {
+                        let limit = match why {
+                            PreLoginFull::Everyone => format!(
+                                "{} connections are already waiting to log in",
+                                MAX_PRE_LOGIN
+                            ),
+                            PreLoginFull::ThisAddress => format!(
+                                "this address already has {} waiting to log in",
+                                MAX_PRE_LOGIN_PER_ADDRESS
+                            ),
+                        };
+                        glog!(
+                            "SSH: refusing {} -- {}; further refusals are not logged \
+                             until one is accepted again",
+                            peer, limit
+                        );
+                        full_said = true;
+                    }
+                    drop(tcp);
+                    continue;
                 }
-                drop(tcp);
-                continue;
             };
             full_said = false;
             handler.pre_login = Some(pre.clone());
@@ -642,31 +679,83 @@ impl Drop for SlotGuard {
 /// together.  Generous for people, since a login takes a second or two.
 pub(crate) const MAX_PRE_LOGIN: usize = 64;
 
+/// How many of those places one address may hold.  Without it the global cap
+/// was itself a lockout: inside the rate limit (20 a minute) one address keeps
+/// about 40 connections alive through the deadline, so two addresses -- or one
+/// IPv6 host, which owns a whole /64 -- held all 64 places and refused every
+/// SSH login, relay slaves included.  Now filling the cap takes eight.
+pub(crate) const MAX_PRE_LOGIN_PER_ADDRESS: usize = 8;
+
+/// Who a place is charged to: the address, or for IPv6 its /64, because one
+/// host is normally handed the whole prefix and could otherwise take a fresh
+/// address per connection.
+pub(crate) fn pre_login_key(ip: std::net::IpAddr) -> std::net::IpAddr {
+    // An IPv4 client on a dual-stack socket arrives as `::ffff:a.b.c.d`; its
+    // /64 is `::`, which would put every IPv4 client in one bucket.
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(_) => ip,
+        std::net::IpAddr::V6(v6) => {
+            let mut seg = v6.segments();
+            seg[4..].fill(0);
+            std::net::IpAddr::V6(std::net::Ipv6Addr::from(seg))
+        }
+    }
+}
+
+/// The places held, in total and per [`pre_login_key`].
+#[derive(Default)]
+pub(crate) struct PreLoginPool {
+    total: usize,
+    by_key: std::collections::HashMap<std::net::IpAddr, usize>,
+}
+
+pub(crate) type SharedPreLoginPool = Arc<std::sync::Mutex<PreLoginPool>>;
+
+/// Why a place was refused, so the log can say which limit was reached.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PreLoginFull {
+    Everyone,
+    ThisAddress,
+}
+
 /// One connection's place among those not yet logged in.
 ///
 /// Given back **exactly once**: when the login succeeds, or when the
 /// connection ends without one -- whichever comes first.  `released` is what
 /// makes the second of those a no-op, so a connection that logs in and later
-/// drops cannot give its place back twice and wrap the counter.
+/// drops cannot give its place back twice.
 pub(crate) struct PreLogin {
     logged_in: AtomicBool,
     released: AtomicBool,
-    pending: Arc<AtomicUsize>,
+    pool: SharedPreLoginPool,
+    key: std::net::IpAddr,
 }
 
 impl PreLogin {
-    /// Take a place, or `None` when `max` connections already wait.  The same
-    /// fetch_add-and-roll-back claim as the session slots, for the same reason:
-    /// two accepts cannot both see room for one.
-    pub(crate) fn claim(pending: &Arc<AtomicUsize>, max: usize) -> Option<Arc<PreLogin>> {
-        if pending.fetch_add(1, Ordering::SeqCst) >= max {
-            pending.fetch_sub(1, Ordering::SeqCst);
-            return None;
+    /// Take a place for `ip`, or say which limit is full.  Checked and taken
+    /// under one lock, so two accepts cannot both see room for one.
+    pub(crate) fn claim(
+        pool: &SharedPreLoginPool,
+        ip: std::net::IpAddr,
+        max: usize,
+        per_address: usize,
+    ) -> Result<Arc<PreLogin>, PreLoginFull> {
+        let key = pre_login_key(ip);
+        let mut p = pool.lock().unwrap_or_else(|e| e.into_inner());
+        if p.total >= max {
+            return Err(PreLoginFull::Everyone);
         }
-        Some(Arc::new(PreLogin {
+        let mine = p.by_key.entry(key).or_insert(0);
+        if *mine >= per_address {
+            return Err(PreLoginFull::ThisAddress);
+        }
+        *mine += 1;
+        p.total += 1;
+        Ok(Arc::new(PreLogin {
             logged_in: AtomicBool::new(false),
             released: AtomicBool::new(false),
-            pending: pending.clone(),
+            pool: pool.clone(),
+            key,
         }))
     }
 
@@ -676,8 +765,19 @@ impl PreLogin {
     }
 
     fn release(&self) {
-        if !self.released.swap(true, Ordering::SeqCst) {
-            self.pending.fetch_sub(1, Ordering::SeqCst);
+        if self.released.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        p.total = p.total.saturating_sub(1);
+        if let Some(n) = p.by_key.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                // An address that has gone is forgotten, so the map is
+                // bounded by the places held rather than by every address
+                // ever seen.
+                p.by_key.remove(&self.key);
+            }
         }
     }
 }
@@ -792,12 +892,11 @@ impl russh::server::Server for SshServer {
         // users.  The slot is claimed in auth_password on a successful login
         // (atomic fetch_add + rollback, the same pattern the telnet accept
         // loop uses).
-        // Per-IP connection rate limit.  `run_on_socket` owns the accept
-        // loop, so unlike telnet this cannot refuse the TCP connection
-        // itself -- the verdict is recorded here (the one hook that sees
-        // every inbound connection, authenticated or not) and enforced in
-        // both auth paths below, which is the same place the lockout is
-        // enforced and costs an attacker russh's `auth_rejection_time`.
+        // Per-IP connection rate limit.  The verdict is recorded here and
+        // the accept loop in `start_ssh_server` drops a rate-limited
+        // connection before russh sees a byte.  Both auth paths still refuse
+        // while it is set -- unreachable through that loop, and kept so a
+        // handler built any other way (the tests do) cannot log in past it.
         let (rate_max, rate_window) = config::get_conn_rate();
         let (rate_limited, rate_say_so) = match peer_addr {
             Some(a) if rate_max > 0 => {
@@ -2022,23 +2121,55 @@ mod tests {
 
     /// A place among the pre-login connections is given back exactly once,
     /// whichever of "logged in" and "connection ended" comes first -- a second
-    /// release would wrap the counter and open the cap for good.
+    /// release would open the cap for good.
     #[tokio::test]
     async fn test_a_pre_login_place_is_given_back_exactly_once() {
-        let pending = Arc::new(AtomicUsize::new(0));
-        let a = PreLogin::claim(&pending, 2).expect("room for the first");
-        let b = PreLogin::claim(&pending, 2).expect("room for the second");
-        assert!(PreLogin::claim(&pending, 2).is_none(), "the cap holds");
-        assert_eq!(pending.load(Ordering::SeqCst), 2, "a refused claim takes nothing");
+        let pool: SharedPreLoginPool = Default::default();
+        let ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let a = PreLogin::claim(&pool, ip, 2, 2).expect("room for the first");
+        let b = PreLogin::claim(&pool, ip, 2, 2).expect("room for the second");
+        assert!(PreLogin::claim(&pool, ip, 2, 2).is_err(), "the cap holds");
+        assert_eq!(pool.lock().unwrap().total, 2, "a refused claim takes nothing");
 
         a.logged_in();
         a.release(); // the connection later ends
-        assert_eq!(pending.load(Ordering::SeqCst), 1, "a login gives the place back once");
+        assert_eq!(pool.lock().unwrap().total, 1, "a login gives the place back once");
 
         let (_far, near) = tokio::io::duplex(64);
         drop(PreLoginStream::new(near, b, std::time::Duration::from_secs(60)));
-        assert_eq!(pending.load(Ordering::SeqCst), 0, "a connection that ends gives it back");
-        assert!(PreLogin::claim(&pending, 2).is_some(), "and the room is usable again");
+        let p = pool.lock().unwrap();
+        assert_eq!(p.total, 0, "a connection that ends gives it back");
+        assert!(p.by_key.is_empty(), "and a departed address is forgotten");
+    }
+
+    /// One address cannot take every place: the cap that bounds descriptors
+    /// must not itself be the lockout.  IPv6 is charged per /64, since one
+    /// host normally owns the whole prefix.
+    #[test]
+    fn test_one_address_cannot_fill_the_pre_login_cap() {
+        let pool: SharedPreLoginPool = Default::default();
+        let one: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let other: std::net::IpAddr = "192.0.2.2".parse().unwrap();
+        let held: Vec<_> = (0..3).map(|_| PreLogin::claim(&pool, one, 10, 3).unwrap()).collect();
+        assert_eq!(
+            PreLogin::claim(&pool, one, 10, 3).err(),
+            Some(PreLoginFull::ThisAddress),
+            "the fourth from one address is refused"
+        );
+        assert!(PreLogin::claim(&pool, other, 10, 3).is_ok(), "while another still gets in");
+
+        let v6 = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        let _a = PreLogin::claim(&pool, v6("2001:db8:1:2::1"), 10, 1).unwrap();
+        assert_eq!(
+            PreLogin::claim(&pool, v6("2001:db8:1:2:ffff::9"), 10, 1).err(),
+            Some(PreLoginFull::ThisAddress),
+            "a fresh address in the same /64 is the same host"
+        );
+        assert!(PreLogin::claim(&pool, v6("2001:db8:1:3::1"), 10, 1).is_ok(), "the next /64 is not");
+        // IPv4 seen through a dual-stack socket is still per address.
+        let _m = PreLogin::claim(&pool, v6("::ffff:198.51.100.1"), 10, 1).unwrap();
+        assert!(PreLogin::claim(&pool, v6("::ffff:198.51.100.2"), 10, 1).is_ok(), "not one /64 for all IPv4");
+        drop(held);
     }
 
     /// The accept loop is what applies the three pre-login bounds, and it
@@ -2054,11 +2185,12 @@ mod tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        let start = code.find("let pending = Arc::new(AtomicUsize::new(0));").expect("accept loop");
+        let start = code.find("let pending: SharedPreLoginPool = Default::default();").expect("accept loop");
         let lp = &code[start..start + code[start..].find("\n    });").expect("end of the loop")];
         for needle in [
             "if handler.rate_limited",
-            "PreLogin::claim(&pending, MAX_PRE_LOGIN)",
+            "MAX_PRE_LOGIN_PER_ADDRESS",
+            "if shutdown.load(Ordering::SeqCst)",
             "handler.pre_login = Some(pre.clone());",
             "PreLoginStream::new(tcp, pre, telnet::PRE_LOGIN_DEADLINE)",
             "russh::server::run_stream(config, stream, handler)",
@@ -2115,8 +2247,8 @@ mod tests {
     async fn test_a_peer_that_never_logs_in_is_cut_off() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let pending = Arc::new(AtomicUsize::new(0));
-        let pre = PreLogin::claim(&pending, MAX_PRE_LOGIN).unwrap();
+        let pending: SharedPreLoginPool = Default::default();
+        let pre = PreLogin::claim(&pending, addr.ip(), MAX_PRE_LOGIN, MAX_PRE_LOGIN_PER_ADDRESS).unwrap();
         let handler = loopback_handler(addr, Some(pre.clone()));
         let within = std::time::Duration::from_millis(300);
         let server = tokio::spawn(async move {
@@ -2144,7 +2276,7 @@ mod tests {
         assert!(closed.is_ok(), "a silent peer was still connected after 10 s");
         assert!(start.elapsed() >= within, "closed before the deadline");
         tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
-        assert_eq!(pending.load(Ordering::SeqCst), 0, "its place was given back");
+        assert_eq!(pending.lock().unwrap().total, 0, "its place was given back");
     }
 
     /// The positive control, and the half that would hurt if it were wrong: a
@@ -2164,8 +2296,8 @@ mod tests {
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let pending = Arc::new(AtomicUsize::new(0));
-        let pre = PreLogin::claim(&pending, MAX_PRE_LOGIN).unwrap();
+        let pending: SharedPreLoginPool = Default::default();
+        let pre = PreLogin::claim(&pending, addr.ip(), MAX_PRE_LOGIN, MAX_PRE_LOGIN_PER_ADDRESS).unwrap();
         let handler = loopback_handler(addr, Some(pre.clone()));
         let within = std::time::Duration::from_millis(1500);
         let server = tokio::spawn(async move {
@@ -2186,7 +2318,7 @@ mod tests {
         .expect("client could not connect");
         let auth = session.authenticate_password("admin", "secret").await.unwrap();
         assert!(auth.success(), "password auth was refused");
-        assert_eq!(pending.load(Ordering::SeqCst), 0, "a login gives its place back");
+        assert_eq!(pending.lock().unwrap().total, 0, "a login gives its place back");
 
         tokio::time::sleep(within * 2).await;
         let channel = session

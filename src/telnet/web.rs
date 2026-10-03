@@ -484,8 +484,10 @@ impl TelnetSession {
         self.send(&format!("  {}: ", self.cyan("#/D"))).await?;
         self.flush().await?;
 
+        // Folded, as `handle_web_browser_command` folds: the line reader does
+        // not, and the prompt above shows the letters in capitals.
         let input = match self.get_line_input().await? {
-            Some(s) if !s.is_empty() => s,
+            Some(s) if !s.is_empty() => s.trim().to_ascii_lowercase(),
             _ => return Ok(()),
         };
 
@@ -677,8 +679,9 @@ impl TelnetSession {
             self.send(&format!("  {}: ", self.cyan("#/S/Q"))).await?;
             self.flush().await?;
 
+            // Folded -- see the bookmarks screen.
             let input = match self.get_line_input().await? {
-                Some(s) if !s.is_empty() => s,
+                Some(s) if !s.is_empty() => s.trim().to_ascii_lowercase(),
                 _ => return Ok(()),
             };
 

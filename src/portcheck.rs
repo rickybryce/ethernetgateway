@@ -297,6 +297,12 @@ pub fn run_check_for_cycle(cycle: u64) -> usize {
 /// fixed time, because probing a listener that has not bound yet would report
 /// it blocked and be wrong in the one direction this module is careful about.
 pub fn spawn_startup_check(settle_ms: u64) {
+    // The cycle this check belongs to, taken *now*: a Save and Restart that
+    // lands while it is still probing must not have the old cycle's answers --
+    // refused, because its listeners just closed -- stored over the new one's.
+    // `spawn_blocking` is not cancelled by the runtime shutdown, so this is
+    // the only thing that stops it.
+    let mine = cycle();
     tokio::spawn(async move {
         let step = Duration::from_millis(50);
         let deadline = std::time::Instant::now() + Duration::from_millis(settle_ms);
@@ -308,7 +314,7 @@ pub fn spawn_startup_check(settle_ms: u64) {
             tokio::time::sleep(step).await;
         }
         // Off the runtime: `run_check` blocks on connect timeouts.
-        let _ = tokio::task::spawn_blocking(run_check).await;
+        let _ = tokio::task::spawn_blocking(move || run_check_for_cycle(mine)).await;
     });
 }
 
@@ -412,6 +418,9 @@ fn run_check_inner(cycle: Option<u64>) -> usize {
     }
     if listeners.is_empty() {
         with(|s| {
+            if cycle.is_some_and(|c| c != s.cycle) {
+                return;
+            }
             s.results.clear();
             s.ran = true;
             s.ran_at = Some(std::time::Instant::now());
@@ -624,6 +633,32 @@ mod tests {
         assert!(!has_run());
         assert!(results().is_empty());
         assert!(age().is_none());
+    }
+
+    /// **A check from a previous cycle stores nothing.**  The startup check
+    /// runs on a blocking thread the runtime shutdown does not stop, so a Save
+    /// and Restart can land mid-probe; the old cycle's listeners then refuse
+    /// and, stored, would redden ports the new cycle never tested.  The guard
+    /// existed and the startup path did not use it -- so it is pinned too.
+    #[test]
+    fn test_a_stale_cycles_check_stores_nothing() {
+        let _g = tests_lock();
+        reset();
+        let old = cycle();
+        reset(); // the restart
+        store_for(vec![("telnet".into(), 2323, Reach::Blocked { refused: true })], Some(old));
+        assert!(result_of("telnet").is_none(), "a stale answer reached the new cycle");
+        assert!(!has_run(), "and the new cycle still reads as unchecked");
+        // Positive control: the current cycle's answer is stored.
+        store_for(vec![("telnet".into(), 2323, Reach::Answered)], Some(cycle()));
+        assert!(result_of("telnet").is_some());
+        reset();
+
+        let src = include_str!("portcheck.rs").replace('\r', "");
+        let body = &src[src.find("pub fn spawn_startup_check(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("let mine = cycle();"), "the startup check takes its cycle up front");
+        assert!(body.contains("run_check_for_cycle(mine)"), "and checks against it");
     }
 
     /// Serialises the tests that touch the process-wide table.

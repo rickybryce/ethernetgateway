@@ -308,7 +308,7 @@ fn main() {
     };
 
     // Now that we own the directory, stand down for a later copy that asks.
-    instance::spawn_handover_watcher(shutdown.clone());
+    instance::spawn_handover_watcher(shutdown.clone(), stop.clone());
 
     loop {
         // Load or create config (re-read from disk on each restart)

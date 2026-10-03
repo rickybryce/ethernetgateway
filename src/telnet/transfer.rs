@@ -264,10 +264,12 @@ impl TelnetSession {
         {
             Ok(mut file) => {
                 use tokio::io::AsyncWriteExt;
-                if file.write_all(data).await.is_err() {
-                    return Err(SaveError::WriteFailed);
-                }
-                if file.flush().await.is_err() {
+                if file.write_all(data).await.is_err() || file.flush().await.is_err() {
+                    // We created it, so the damaged copy is ours to remove: left
+                    // behind, it holds the name and every later upload, COPY
+                    // and MOVE refuses it as "already exists".
+                    drop(file);
+                    let _ = tokio::fs::remove_file(path).await;
                     return Err(SaveError::WriteFailed);
                 }
                 drop(file);
@@ -345,10 +347,10 @@ impl TelnetSession {
             .open(path)
         {
             Ok(mut file) => {
-                if file.write_all(data).is_err() {
-                    return Err(SaveError::WriteFailed);
-                }
-                if file.flush().is_err() {
+                if file.write_all(data).is_err() || file.flush().is_err() {
+                    // Ours to remove -- see `save_received_file`.
+                    drop(file);
+                    let _ = std::fs::remove_file(path);
                     return Err(SaveError::WriteFailed);
                 }
                 drop(file);
@@ -471,6 +473,29 @@ impl TelnetSession {
             let perms = std::fs::Permissions::from_mode(mode & 0o777);
             let _ = std::fs::set_permissions(path, perms);
         }
+    }
+
+    /// [`Self::validate_filename`] plus the rules for a name being **created**
+    /// by a person: no Windows device name (an upload named `COM1`, or `MKDIR
+    /// NUL`, opens a device there, whatever follows the first dot) and no
+    /// trailing dot (which Windows silently strips, making `A.TXT.` another
+    /// name for `A.TXT`).  Refused on every host so the rule is tested
+    /// everywhere.
+    ///
+    /// **Only where a name is created, never where one is found.**  The first
+    /// version put these in `validate_filename` itself, which also gates
+    /// names that already exist -- so `TYPE con.txt` or `CD aux` on a Linux
+    /// host stopped working, and a CP/M Kermit sending `README.` had its
+    /// whole transfer ended by an E-packet.  Protocol paths keep the old rule.
+    pub(crate) fn validate_new_name(name: &str) -> Result<(), &'static str> {
+        Self::validate_filename(name)?;
+        if crate::cpm::is_host_device_name(name.split('.').next().unwrap_or("")) {
+            return Err("Name is reserved by Windows");
+        }
+        if name.ends_with('.') {
+            return Err("Filename cannot end with a dot");
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_filename(name: &str) -> Result<(), &'static str> {
@@ -732,7 +757,7 @@ impl TelnetSession {
             _ => return Ok(()),
         };
 
-        if let Err(msg) = Self::validate_filename(&filename) {
+        if let Err(msg) = Self::validate_new_name(&filename) {
             self.show_error(msg).await?;
             return Ok(());
         }
@@ -1067,6 +1092,11 @@ impl TelnetSession {
                 match opts.open(&save_path).await {
                     Ok(mut file) => {
                         if let Err(e) = file.write_all(data).await {
+                            // A partial file under the real name is worse than
+                            // none: it looks like the upload, and it holds the
+                            // name against the retry.
+                            drop(file);
+                            let _ = tokio::fs::remove_file(&save_path).await;
                             self.post_transfer_settle().await;
                             self.show_error(&format!("Failed to save: {}", e))
                                 .await?;
@@ -1312,8 +1342,9 @@ impl TelnetSession {
                 .await?;
             self.flush().await?;
 
+            // Folded: the line reader does not, and the prompt shows capitals.
             let input = match self.get_line_input().await? {
-                Some(s) if !s.is_empty() => s,
+                Some(s) if !s.is_empty() => s.trim().to_ascii_lowercase(),
                 _ => return Ok(()),
             };
 
@@ -2089,8 +2120,9 @@ impl TelnetSession {
                 .await?;
             self.flush().await?;
 
+            // Folded: the line reader does not, and the prompt shows capitals.
             let input = match self.get_line_input().await? {
-                Some(s) if !s.is_empty() => s,
+                Some(s) if !s.is_empty() => s.trim().to_ascii_lowercase(),
                 _ => return Ok(()),
             };
 
@@ -2220,51 +2252,70 @@ impl TelnetSession {
         .await?;
         self.send_line("").await?;
 
-        let mut num = 0usize;
+        // Every choice, `..` first when there is a parent, numbered across
+        // pages so the selection below needs no page arithmetic.  Paged like
+        // the download list: unpaged, fourteen subdirectories ran a PETSCII
+        // screen past its 22 rows and scrolled the header away.
+        let mut items: Vec<String> = Vec::new();
         if !self.transfer_subdir.is_empty() {
-            num += 1;
-            self.send_line(&format!(
-                "  {:>2}. {}",
-                num,
-                self.cyan("..")
-            ))
-            .await?;
+            items.push(self.cyan(".."));
         }
-
         for name in &dirs {
-            num += 1;
             let display = if name.chars().count() > 30 {
                 let t: String = name.chars().take(27).collect();
                 format!("{}...", t)
             } else {
                 name.to_string()
             };
-            self.send_line(&format!(
-                "  {:>2}. {}/",
-                num,
-                self.cyan(&display)
-            ))
-            .await?;
+            items.push(format!("{}/", self.cyan(&display)));
         }
-
-        if num == 0 {
+        if items.is_empty() {
             self.show_error("No subdirectories.").await?;
             return Ok(());
         }
-
-        self.send_line("").await?;
-        self.send(&format!("  {} ", self.cyan("Select #:")))
-            .await?;
-        self.flush().await?;
-
-        let input = match self.get_line_input().await? {
-            Some(s) if !s.is_empty() => s,
-            _ => return Ok(()),
+        let total_pages = items.len().div_ceil(Self::TRANSFER_PAGE_SIZE);
+        let mut page = 0usize;
+        let mut first = true;
+        let input = loop {
+            // The header above is the first page's; later pages redraw it.
+            if !std::mem::replace(&mut first, false) {
+                self.clear_screen().await?;
+                self.send_line(&sep).await?;
+                self.send_line(&format!("  {}", self.yellow("CHANGE DIRECTORY"))).await?;
+                self.send_line(&sep).await?;
+                self.send_line("").await?;
+                self.send_line(&format!("  Current: {}", self.amber(&dir_str))).await?;
+                self.send_line("").await?;
+            }
+            let offset = page * Self::TRANSFER_PAGE_SIZE;
+            let end = (offset + Self::TRANSFER_PAGE_SIZE).min(items.len());
+            for (i, item) in items[offset..end].iter().enumerate() {
+                self.send_line(&format!("  {:>2}. {}", offset + i + 1, item)).await?;
+            }
+            self.send_line("").await?;
+            if total_pages > 1 {
+                let mut nav = vec![format!("Page {}/{}", page + 1, total_pages)];
+                if page > 0 {
+                    nav.push(self.action_prompt("P", "Prev"));
+                }
+                if page + 1 < total_pages {
+                    nav.push(self.action_prompt("N", "Next"));
+                }
+                self.send_line(&format!("  {}", nav.join(" | "))).await?;
+            }
+            self.send(&format!("  {} ", self.cyan("Select #:"))).await?;
+            self.flush().await?;
+            let input = match self.get_line_input().await? {
+                Some(s) if !s.is_empty() => s.trim().to_ascii_lowercase(),
+                _ => return Ok(()),
+            };
+            match input.as_str() {
+                "n" if page + 1 < total_pages => page += 1,
+                "p" if page > 0 => page -= 1,
+                "q" => return Ok(()),
+                _ => break input,
+            }
         };
-
-        if input == "q" {
-            return Ok(());
-        }
 
         if let Ok(n) = input.parse::<usize>() {
             if n == 0 {
@@ -2337,7 +2388,7 @@ impl TelnetSession {
             _ => return Ok(()), // empty / cancel
         };
 
-        if let Err(msg) = Self::validate_filename(&name) {
+        if let Err(msg) = Self::validate_new_name(&name) {
             self.show_error(msg).await?;
             return Ok(());
         }

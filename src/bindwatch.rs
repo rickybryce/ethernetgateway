@@ -267,11 +267,21 @@ fn summarize(entries: &[(&str, u16, Status)]) -> Vec<String> {
             out.extend(how_to_check());
         }
     } else {
+        // "The rest are running" only when it is true: the summary is also
+        // written when the watch's deadline passes with a listener still
+        // pending, and that one has not bound -- it may never.
+        let pending = entries.iter().filter(|(_, _, st)| *st == Status::Pending).count();
+        let rest = if pending == 0 {
+            "the rest are running".to_string()
+        } else {
+            format!("{pending} had not reported when this was written")
+        };
         out.push(format!(
-            "WARNING: {} of {} listeners could not bind ({}); the rest are running.",
+            "WARNING: {} of {} listeners could not bind ({}); {}.",
             failed.len(),
             entries.len(),
-            describe(&failed)
+            describe(&failed),
+            rest
         ));
         if any_in_use {
             out.push(
@@ -460,6 +470,19 @@ mod tests {
         assert!(text.contains("web 8080"), "{text}");
         assert!(text.contains("the rest are running"), "{text}");
         assert!(!text.contains("NONE"), "{text}");
+    }
+
+    /// Written at the watch's deadline with a listener still pending, the
+    /// summary must not claim that listener is running -- it has not bound.
+    #[test]
+    fn test_a_pending_listener_is_not_called_running() {
+        let lines = summarize(&[
+            ("telnet", 2323, Status::Pending),
+            ("web", 8080, IN_USE),
+        ]);
+        let text = lines.join("\n");
+        assert!(!text.contains("the rest are running"), "{text}");
+        assert!(text.contains("1 had not reported"), "{text}");
     }
 
     /// Serialises the tests that drive the process-wide registry.

@@ -202,12 +202,28 @@ impl TelnetSession {
 
     /// The prompt string: `A>` at the root, `A:SUB>` (uppercased) in a
     /// subdirectory so the user always sees where they are.
+    ///
+    /// The path keeps its tail when it is long (`A:...DEEP/HERE>`): a prompt
+    /// that wraps on a 40-column screen leaves no room to type, and the tail
+    /// is the part that says where you are.
     fn cpm_prompt(&self) -> String {
         if self.transfer_subdir.is_empty() {
             "A>".to_string()
         } else {
-            format!("A:{}>", self.transfer_subdir.to_uppercase())
+            let room = if self.terminal_type == TerminalType::Petscii { 16 } else { 40 };
+            format!(
+                "A:{}>",
+                crate::webbrowser::truncate_path_to_width(&self.transfer_subdir.to_uppercase(), room)
+            )
         }
+    }
+
+    /// Columns a line may use after the two-space indent every line carries.
+    fn cpm_line_room(&self) -> usize {
+        // 37 on a C64, not 38: two of indent plus a 38-column path is a full
+        // 40-column row, which a C64 wraps on its own -- and the CR LF after
+        // it then moves down a second row.
+        if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH - 3 } else { 78 }
     }
 
     /// Print an inline (red) error line and return.  Unlike `show_error`,
@@ -518,7 +534,7 @@ impl TelnetSession {
         if leaf.is_empty() {
             return Err("Bad destination.");
         }
-        Self::validate_filename(leaf)?;
+        Self::validate_new_name(leaf)?;
         let dir = self.cpm_dir_abs(dir_part)?;
         Ok((dir, leaf.to_string()))
     }
@@ -572,6 +588,7 @@ impl TelnetSession {
         } else {
             format!("A:/{}", self.transfer_subdir.to_uppercase())
         };
+        let path = crate::webbrowser::truncate_path_to_width(&path, self.cpm_line_room());
         self.send_line(&format!("  {}", self.amber(&path))).await
     }
 
@@ -678,6 +695,13 @@ impl TelnetSession {
             return self.cpm_err("No file").await;
         }
         matches.sort();
+        // One screen row each, or `cpm_page_lines` -- which counts lines, not
+        // rows -- lets a wrapped page scroll its own top away.
+        let room = self.cpm_line_room();
+        for m in &mut matches {
+            let path = m.trim_start();
+            *m = format!("  {}", crate::webbrowser::truncate_path_to_width(path, room));
+        }
         let count = matches.len();
         matches.push(String::new());
         matches.push(format!(
@@ -877,7 +901,12 @@ impl TelnetSession {
         let mut lines: Vec<String> = Vec::new();
         for raw in text.split('\n') {
             let raw = raw.strip_suffix('\r').unwrap_or(raw);
-            let expanded = raw.replace('\t', "    ");
+            // Control characters stripped, as every other surface showing
+            // text it did not write does: `looks_binary` lets a file with a
+            // few `ESC [ 2 J` through, and with security off by default any
+            // uploader could plant sequences that then ran on the terminal of
+            // whoever TYPEd the file.
+            let expanded = crate::aichat::sanitize_for_terminal(&raw.replace('\t', "    "));
             if expanded.is_empty() {
                 lines.push(String::new());
                 continue;
@@ -1041,6 +1070,11 @@ impl TelnetSession {
         // `comps` is normalized relative to the drive root, so the parent
         // chain is always addressable from the root ("/" = the root itself).
         let (last, parents) = comps.split_last().unwrap();
+        // Existing parents may carry any legal name; the one being made may not
+        // be a Windows device name -- see `validate_new_name`.
+        if let Err(e) = Self::validate_new_name(last) {
+            return self.cpm_err(e).await;
+        }
         let parent_operand = format!("/{}", parents.join("/"));
         let parent = match self.cpm_dir_abs(&parent_operand) {
             Ok(p) => p,
@@ -1156,7 +1190,7 @@ impl TelnetSession {
                 .cpm_err("REN is in-place; use MOVE across dirs.")
                 .await;
         }
-        if let Err(e) = Self::validate_filename(new) {
+        if let Err(e) = Self::validate_new_name(new) {
             return self.cpm_err(e).await;
         }
         let src = match self.cpm_existing_file(old) {
@@ -1185,6 +1219,11 @@ impl TelnetSession {
         // COPY takes the destination first (CP/M `PIP dest=source` order),
         // so operand errors echo the form to keep users from swapping them.
         let eg = "COPY dst src (dest first)";
+        // The same refusal uploads make: a copy is a write, and filling the
+        // disk takes the gateway's own config and log writes down with it.
+        if Self::is_disk_full() {
+            return self.cpm_err("Disk space is low.").await;
+        }
         let (src_dir_part, src_leaf) = Self::cpm_split_leaf(src);
 
         if Self::cpm_has_wildcard(src_leaf) {
@@ -1303,10 +1342,12 @@ impl TelnetSession {
             Err(msg) => return self.cpm_err(msg).await,
         };
         match Self::save_received_file_sync(&dst_path, &data, None, false) {
-            Ok(()) => {
-                let _ = tokio::fs::remove_file(&src_path).await;
-                self.send_line(&format!("  {}", self.green("Moved."))).await
-            }
+            Ok(()) => match tokio::fs::remove_file(&src_path).await {
+                Ok(()) => self.send_line(&format!("  {}", self.green("Moved."))).await,
+                // Not "Moved.": there are now two copies, and saying otherwise
+                // leaves the user believing the original is gone.
+                Err(_) => self.cpm_err("Copied; original not erased.").await,
+            },
             Err(SaveError::AlreadyExists) => self.cpm_err("Destination exists.").await,
             Err(SaveError::WriteFailed) => self.cpm_err("Move failed.").await,
         }

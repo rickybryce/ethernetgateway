@@ -140,6 +140,20 @@ fn test_validate_filename_invalid() {
     assert!(TelnetSession::validate_filename("---").is_err());
 }
 
+/// A *created* name refuses Windows device names and a trailing dot; a name
+/// that is merely *found* does not, or files already on a Linux host -- and a
+/// CP/M Kermit's `README.` -- become unreachable.
+#[test]
+fn test_only_a_new_name_refuses_windows_reserved_names() {
+    for bad in ["CON", "nul", "com1.txt", "LPT9.tar.gz", "a.txt."] {
+        assert!(TelnetSession::validate_new_name(bad).is_err(), "{bad}");
+        assert!(TelnetSession::validate_filename(bad).is_ok(), "{bad} must stay findable");
+    }
+    for ok in ["CONFIG.TXT", "com10.txt", "nullify", "lpt.doc", "auxiliary"] {
+        assert!(TelnetSession::validate_new_name(ok).is_ok(), "{ok}");
+    }
+}
+
 // ─── File size formatting ────────────────────────────
 
 #[test]
@@ -7231,6 +7245,30 @@ async fn test_a_client_that_never_logs_in_is_closed_at_the_deadline() {
             "trickle={trickle}: closed at the deadline, not {took:?}"
         );
     }
+}
+
+/// **A peer that has stopped reading is still let go.**  It is the one the
+/// deadline is for -- with its receive window full, the "login timed out"
+/// notice cannot be written, and an unbounded write there kept the slot the
+/// deadline was meant to free, for ever.  Here the peer never reads at all, so
+/// the 512-byte pipe fills with the detection prompt.
+#[tokio::test(start_paused = true)]
+async fn test_a_peer_that_stops_reading_is_still_let_go_at_the_deadline() {
+    let (mut session, peer) = make_test_session_with_peer(TerminalType::Ascii);
+    // Fill the pipe before the session writes anything, as a peer whose
+    // window is already shut would.
+    let filler = "x".repeat(4096);
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(1), session.send_raw(filler.as_bytes())).await;
+    let start = tokio::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(600),
+        session.through_the_door(true, Some(crate::telnet::PRE_LOGIN_DEADLINE)),
+    )
+    .await;
+    assert!(outcome.is_ok(), "the session hung on its own timeout notice");
+    assert!(matches!(outcome.unwrap(), Ok(false)));
+    assert!(start.elapsed() < crate::telnet::PRE_LOGIN_DEADLINE + std::time::Duration::from_secs(10));
+    drop(peer);
 }
 
 /// The positive control: a person who answers promptly is let through, with

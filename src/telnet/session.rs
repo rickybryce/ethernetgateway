@@ -986,7 +986,14 @@ impl TelnetSession {
                     self.peer_addr.map_or_else(|| "a client".to_string(), |a| a.to_string()),
                     limit.as_secs()
                 );
-                let _ = self.send_line("\r\n\r\nDisconnected: login timed out.").await;
+                // Bounded, because the peer this exists for may have stopped
+                // reading: with its window full the notice would block for
+                // ever and keep the slot the deadline was meant to free.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    self.send_line("\r\n\r\nDisconnected: login timed out."),
+                )
+                .await;
                 Ok(false)
             }
         }

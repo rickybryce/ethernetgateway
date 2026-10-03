@@ -138,23 +138,51 @@ pub fn acquire() -> std::io::Result<Instance> {
 pub fn acquire() -> std::io::Result<Instance> {
     use std::os::windows::fs::OpenOptionsExt;
     let path = lock_path();
-    match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .share_mode(0)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            write_pid(&mut file);
-            Ok(Instance::Acquired(InstanceLock { _file: file }))
+    let mut tries = 0;
+    loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                write_pid(&mut file);
+                return Ok(Instance::Acquired(InstanceLock { _file: file }));
+            }
+            // Only a sharing violation means somebody else has it -- and a
+            // virus scanner or backup tool holding the file for a moment
+            // causes one too, so it is asked again briefly before being
+            // believed.
+            Err(e) if is_sharing_violation(e.raw_os_error()) => {
+                tries += 1;
+                if tries >= SHARING_RETRIES {
+                    return Ok(Instance::Busy { pid: None });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            // Anything else -- permission denied, a read-only volume, a
+            // missing directory -- is *not* another copy, and reporting it as
+            // one offered to take over from a gateway that did not exist and
+            // then waited fifteen seconds for it to stand down.  Returned as an
+            // error so `main`'s ownership diagnosis can name the real cause.
+            Err(e) => return Err(e),
         }
-        // A sharing violation means somebody else has it.  Any other error
-        // would also leave us unable to serve, and reporting "already running"
-        // is the honest reading of "cannot claim the directory".
-        Err(_) => Ok(Instance::Busy { pid: None }),
     }
+}
+
+/// How many times a sharing violation is retried before it is believed.
+#[cfg(any(windows, test))]
+const SHARING_RETRIES: u32 = 5;
+
+/// `ERROR_SHARING_VIOLATION` (32) or `ERROR_LOCK_VIOLATION` (33): the file is
+/// open elsewhere.  A pure function of the raw code so it is tested on every
+/// platform, not only where the lock it decides is compiled.
+#[cfg(any(windows, test))]
+fn is_sharing_violation(raw: Option<i32>) -> bool {
+    matches!(raw, Some(32) | Some(33))
 }
 
 /// Record our PID in the lock file, for a later copy's message.
@@ -217,7 +245,12 @@ pub fn clear_stale_handover_request() {
 /// Trips `shutdown` **without** `restart`, which is exactly what the Quit
 /// button does — the process unwinds its server cycle, closes its window and
 /// exits, releasing the ports and the lock for the copy that asked.
-pub fn spawn_handover_watcher(shutdown: Arc<AtomicBool>) {
+///
+/// **And `stop`**, the flag SIGTERM sets: a stop outranks a reload.  With only
+/// `shutdown` set, a Save and Restart already in flight still had `restart`
+/// armed, and the holder ran one more full server cycle -- rebinding every
+/// port and taking sessions -- before standing down for the copy that asked.
+pub fn spawn_handover_watcher(shutdown: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         // **Must outlive a restart, and must keep asserting once asked.**
         //
@@ -246,6 +279,9 @@ pub fn spawn_handover_watcher(shutdown: Arc<AtomicBool>) {
             let assert_shutdown;
             (standing_down, assert_shutdown) = watcher_pass(asked, standing_down);
             if assert_shutdown {
+                // `stop` first: the main loop reads it after `shutdown` wakes
+                // it, and must find it already set.
+                stop.store(true, Ordering::SeqCst);
                 shutdown.store(true, Ordering::SeqCst);
             }
             std::thread::sleep(POLL);
@@ -276,6 +312,19 @@ fn watcher_pass(asked: bool, standing_down: bool) -> (bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a sharing violation is "another copy holds it"; permission
+    /// denied, a missing directory or a read-only volume must reach `main`'s
+    /// ownership diagnosis instead of an offer to take over from nobody.
+    #[test]
+    fn test_only_a_sharing_violation_reads_as_another_copy() {
+        assert!(is_sharing_violation(Some(32)), "ERROR_SHARING_VIOLATION");
+        assert!(is_sharing_violation(Some(33)), "ERROR_LOCK_VIOLATION");
+        for other in [Some(5), Some(2), Some(3), Some(19), None] {
+            assert!(!is_sharing_violation(other), "{other:?} is not another copy");
+        }
+        assert!(SHARING_RETRIES >= 2, "a scanner's brief hold must be asked about again");
+    }
 
     /// The paths must sit inside the data directory, not beside the binary —
     /// the whole point of the move.
