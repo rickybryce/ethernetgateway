@@ -719,7 +719,11 @@ pub const FORMATS: &[Format] = &[
         declared_blocks: Some(254),
         framing: Framing::Raw,
         skew: Skew::Table(CROMEMCO_DD_SKEW),
-        exm: None,
+        // Stated, because the rule disagrees with the disk: 2K blocks and
+        // DSM < 256 derive EXM 1, and the DPB above says 0 -- the Altair
+        // floppy's mismatch again.  Derived, a file past 16K was mapped with
+        // two extents to an entry and read back scrambled.
+        exm: Some(0),
         exact_size: Some(625_920),
     },
     // ---- Cromemco 8" double density, double sided, 1,256,704 bytes --------

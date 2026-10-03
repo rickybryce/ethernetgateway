@@ -264,6 +264,12 @@ pub struct BootMachine {
     /// this path and would not want one, since a paused or slow session must
     /// still see frames go by in the order the guest expects.
     instructions: u64,
+    /// Every byte of memory is a `DD`/`FD` prefix, so the CPU can never
+    /// finish another instruction -- see `cpu::endless_prefix_run`.  Found
+    /// once and remembered: nothing runs while it holds, so nothing can
+    /// change it, and rescanning 64 KB per step made a wedged machine slow
+    /// to stop instead of impossible.
+    prefix_wedged: bool,
     /// Has the guest ever written the scroll register?
     ///
     /// The one honest, evidence-based answer to "is this a VDM-1 guest?" that
@@ -396,6 +402,7 @@ impl BootMachine {
             dazzler_address: None,
             dazzler_format: 0,
             instructions: 0,
+            prefix_wedged: false,
             mmu: super::mmu::Mmu::default(),
             has_mmu: false,
             bank40: super::cromemco_bank::BankSelect::default(),
@@ -566,6 +573,15 @@ impl BootMachine {
         self.instructions = self.instructions.wrapping_add(1);
         let before = cpu.registers().pc();
         self.rx_hold = self.rx_hold.saturating_sub(1);
+        // A step iz80 could never return from is skipped, so the session
+        // pump keeps control -- see `cpu::endless_prefix_run`.  Read through
+        // `mem_read`, as the CPU's own fetches are.
+        if !self.prefix_wedged {
+            self.prefix_wedged = super::cpu::endless_prefix_run(|a| self.mem_read(a), before);
+        }
+        if self.prefix_wedged {
+            return;
+        }
         cpu.execute_instruction(self);
         if self.console_blocked {
             self.console_blocked = false;
@@ -4900,13 +4916,14 @@ pub(crate) mod tests {
         assert!(dir2.contains("NEWFILE"), "the file did not survive the reboot: {dir2:?}");
     }
 
-    /// The DMA path indexes memory raw, and this is why that is safe.
+    /// Memory is exactly the sixteen-bit address space, which is what makes
+    /// every `u16`-addressed access in bounds.
     ///
-    /// `HostRequest::Dma` walks `self.mem[addr.wrapping_add(i) as usize]` with no
-    /// bounds check, which is sound only because the address is a `u16` and the
-    /// memory is exactly 64 KB. Written down as a test because the safety of that
-    /// code is invisible at the point of use — someone shrinking `mem`, or
-    /// widening an address, would turn a wrap into a panic on a guest's disk read.
+    /// `HostRequest::Dma` now writes through `mem_write` (the MMU), not into
+    /// `self.mem` directly as this comment once said; the property still
+    /// matters there and everywhere else a wrapping `u16` indexes the array.
+    /// Someone shrinking `mem`, or widening an address, would turn a wrap into
+    /// a panic on a guest's disk read.
     #[test]
     fn test_memory_is_exactly_the_sixteen_bit_address_space() {
         let m = BootMachine::new();

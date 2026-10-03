@@ -1337,7 +1337,7 @@ impl TelnetSession {
             // Pace the guest to its processor's clock.  Cycles rather than
             // instructions, from `iz80`'s own per-CPU tables, so the rate is as
             // accurate as the instruction mix rather than an average we assumed.
-            if let Some(g) = governor.as_ref() {
+            if let Some(g) = governor.as_mut() {
                 if executed.is_multiple_of(SPEED_CHECK_INTERVAL) {
                     if let Some(nap) = g.behind(cpu.cycle_count(), crate::cpm::speed::now_ms()) {
                         tokio::time::sleep(nap).await;

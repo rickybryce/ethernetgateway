@@ -9,7 +9,7 @@
 //! container base, a guest can never escape to the host filesystem — the
 //! same jail guarantee the transfer subsystem relies on.
 
-use super::fcb::{format_8_3, split_8_3, Fcb, FCB_SIZE};
+use super::fcb::{format_8_3, is_host_device_name, is_valid_8_3_char, split_8_3, Fcb, FCB_SIZE};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -340,8 +340,12 @@ impl CpmFs {
     /// Select a drive by 0-based index (BDOS 14 convention: E = 0 → A:).
     /// Returns false (and changes nothing) for an out-of-range drive.
     pub fn select(&mut self, drive0: u8) -> bool {
-        super::image::registry::session_select(self.session, drive0);
         if drive0 < NUM_DRIVES {
+            // Only a drive that exists is recorded: registered before the
+            // range check, `E = 40h` left the guest on its old drive while
+            // the registry said it sat on drive 64, and the old drive lost
+            // its "in use" mark on the mount screens.
+            super::image::registry::session_select(self.session, drive0);
             self.drive = drive0;
             true
         } else {
@@ -402,11 +406,45 @@ impl CpmFs {
         self.resolve_name(drive0, &fcb.name, &fcb.ext)
     }
 
+    /// A host file's name as CP/M sees it -- or `None` for a file no FCB can
+    /// open.  Every listing goes through this rather than `split_8_3`, so
+    /// `DIR` and `OPEN` agree: `split_8_3` accepts `FOO.` (CCP syntax for a
+    /// blank type) and a device name (a CP/M name like any other), but a host
+    /// file named either way is one `resolve_name` will never return, and
+    /// listing it showed a file that could not be opened -- or, for `foo.`, a
+    /// second FOO beside the one a guest then created.
+    fn split_host_name(fname: &str) -> Option<([u8; 8], [u8; 3])> {
+        if fname.ends_with('.') || is_host_device_name(fname.split('.').next().unwrap_or("")) {
+            return None;
+        }
+        split_8_3(fname)
+    }
+
+    /// One FCB name or extension field as CP/M stores it: legal characters,
+    /// then nothing but padding.
+    fn fcb_field_is_concrete(field: &[u8]) -> bool {
+        let used = field.iter().take_while(|&&c| c != b' ').count();
+        field[..used].iter().all(|&c| is_valid_8_3_char(c))
+            && field[used..].iter().all(|&c| c == b' ')
+    }
+
     /// Resolve a concrete 8.3 name on a 0-based drive to a jailed host
     /// path.  Re-validates as a concrete name (rejecting wildcards and
     /// separators) so the join cannot traverse out of the drive directory.
     fn resolve_name(&self, drive0: u8, name: &[u8; 8], ext: &[u8; 3]) -> Option<PathBuf> {
+        // The FCB's own bytes, before formatting: `format_8_3` stops each
+        // field at its first space, so a `.` inside the name field (`FOO.`)
+        // or a space in the middle of it (`FO O`) formats as a name that
+        // `split_8_3` reads as a *different* file -- FOO, or FO.  On Linux
+        // `FOO.` is then a host file listed as FOO that cannot be opened as
+        // FOO; on Windows it is FOO itself under a second write claim.
+        if !Self::fcb_field_is_concrete(name) || !Self::fcb_field_is_concrete(ext) {
+            return None;
+        }
         let filename = format_8_3(name, ext);
+        if is_host_device_name(filename.split('.').next().unwrap_or("")) {
+            return None;
+        }
         // Primary defense: a concrete 8.3 name carries no separators or
         // "..", so joining it onto a fixed single-letter drive directory
         // cannot traverse out of the container.
@@ -833,7 +871,7 @@ impl CpmFs {
             for e in rd.flatten() {
                 if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
                     let fname = e.file_name().to_string_lossy().to_string();
-                    if let Some((n, x)) = split_8_3(&fname)
+                    if let Some((n, x)) = Self::split_host_name(&fname)
                         && fcb.matches(&n, &x)
                     {
                         names.push(super::fcb::format_8_3(&n, &x));
@@ -893,7 +931,7 @@ impl CpmFs {
                     continue;
                 }
                 let fname = e.file_name().to_string_lossy().to_string();
-                if split_8_3(&fname).is_none() {
+                if Self::split_host_name(&fname).is_none() {
                     continue; // not a CP/M-visible name
                 }
                 let len = e.metadata().map(|m| m.len()).unwrap_or(0);
@@ -922,7 +960,7 @@ impl CpmFs {
                     continue;
                 }
                 let fname = e.file_name().to_string_lossy().to_string();
-                if let Some((n, x)) = split_8_3(&fname) {
+                if let Some((n, x)) = Self::split_host_name(&fname) {
                     if fcb.matches(&n, &x) {
                         out.push(e.path());
                     }
@@ -1034,7 +1072,7 @@ impl CpmFs {
                     continue;
                 }
                 let fname = e.file_name().to_string_lossy().to_string();
-                if let Some((n, x)) = split_8_3(&fname) {
+                if let Some((n, x)) = Self::split_host_name(&fname) {
                     if fcb.matches(&n, &x) {
                         let md = e.metadata();
                         let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -1398,6 +1436,19 @@ mod tests {
         assert_eq!(fs.current_drive_letter(), 'P');
         assert!(!fs.select(16)); // Q: is beyond P:
         assert_eq!(fs.current_drive_letter(), 'P'); // unchanged
+        // And the registry agrees: a refused select must not move the
+        // session off the drive it is really on.
+        crate::cpm::image::registry::tests_reset();
+        let mut fs = CpmFs::new(PathBuf::from("/tmp/cpm"));
+        assert!(fs.select(2));
+        assert!(!fs.select(0x40));
+        assert_eq!(
+            crate::cpm::image::registry::usage_of(2).sitting,
+            1,
+            "C: lost its session to a drive that does not exist"
+        );
+        drop(fs);
+        crate::cpm::image::registry::tests_reset();
     }
 
     #[test]
@@ -2084,6 +2135,37 @@ mod tests {
         );
         assert_eq!(mode & 0o022, 0, "group/other must never gain write");
         assert!(!CpmFs::host_is_ro(&path));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The FCB's own bytes decide the host file, not their formatted name: a
+    /// `.` or a space inside the name field formats as a different file
+    /// (`FOO.` read as FOO), and Windows maps a device name to the device.
+    /// Each is refused where the host path is built -- and only there, so the
+    /// same names stay usable as CCP syntax and inside mounted images.
+    #[test]
+    fn test_resolve_refuses_names_that_are_not_the_file_they_name() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let base = temp_base("resolve_bytes");
+        let fs = CpmFs::new(base.clone());
+        assert!(fs.resolve(&fcb_named(1, "FOO", "")).is_some(), "positive control");
+        assert!(fs.resolve(&fcb_named(1, "FOO", "TXT")).is_some(), "positive control");
+        assert!(fs.resolve(&fcb_named(1, "FOO.", "")).is_none(), "a dot in the name field");
+        assert!(fs.resolve(&fcb_named(1, "FO O", "TXT")).is_none(), "a space inside the name");
+        assert!(fs.resolve(&fcb_named(1, "FOO", "T X")).is_none(), "a space inside the type");
+        for dev in ["CON", "NUL", "AUX", "PRN", "COM1", "LPT9"] {
+            assert!(fs.resolve(&fcb_named(1, dev, "TXT")).is_none(), "{dev}.TXT");
+            assert!(fs.resolve(&fcb_named(1, dev, "")).is_none(), "{dev}");
+        }
+        assert!(fs.resolve(&fcb_named(1, "com1", "TXT")).is_none(), "in any case");
+        assert!(!fs.make(&fcb_named(1, "COM1", "TXT")), "and nothing is created for one");
+        // DIR agrees with OPEN: host files no FCB can open are not listed.
+        for host in ["COM1.TXT", "con", "foo."] {
+            std::fs::write(base.join("A").join(host), b"x").unwrap();
+        }
+        std::fs::write(base.join("A").join("REAL.TXT"), b"x").unwrap();
+        let listed = fs.list_matching(&fcb_named(1, "????????", "???"));
+        assert_eq!(listed, vec!["REAL.TXT".to_string()], "only the openable file is listed");
         let _ = std::fs::remove_dir_all(&base);
     }
 

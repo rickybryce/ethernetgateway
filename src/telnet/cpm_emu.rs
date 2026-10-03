@@ -1363,6 +1363,11 @@ impl TelnetSession {
             self.send_line("  File R/O").await?;
         } else if fs.open_existing(&Self::cpmemu_fcb(&nn, &ne)) {
             self.send_line("  File exists").await?;
+        } else if fs.open_existing(&old) {
+            // The old file is there, so the new name was refused -- on a
+            // folder drive, a name the host cannot hold (a Windows device
+            // name).  "No file" sent the user looking for a file they had.
+            self.send_line("  Bad name").await?;
         } else {
             self.send_line("  No file").await?;
         }
@@ -2671,6 +2676,45 @@ mod repl_tests {
         );
         left.unwrap().unwrap();
         String::from_utf8_lossy(&out).to_string()
+    }
+
+    /// **`FOO.` is CP/M for FOO with a blank type, in every builtin.**
+    /// `TYPE FOO.`, `REN NEW.=OLD.` and `SAVE 1 FOO.` are legal CP/M 2.2, and a
+    /// host-path rule placed in the shared name parser once turned all three
+    /// into `FOO.?` and a usage line.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_the_builtins_accept_a_blank_type_written_with_a_dot() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let (base, mut fs) = scratch_fs("blanktype");
+        std::fs::write(base.join("A").join("FOO"), b"hello-from-foo\r\n").unwrap();
+
+        let out = run_ccp(
+            &mut fs,
+            &[b"TYPE FOO.\r", b"REN BAR.=FOO.\r", b"TYPE BAR.\r", b"SAVE 1 NEW.\r", &[0x1B, 0x1B]],
+        )
+        .await;
+        assert_eq!(out.matches("hello-from-foo").count(), 2, "TYPE before and after REN: {out:?}");
+        assert!(!out.contains("FOO.?") && !out.contains("BAR.?"), "{out:?}");
+        assert!(base.join("A").join("BAR").is_file(), "REN renamed it");
+        assert!(!base.join("A").join("FOO").exists());
+        assert!(base.join("A").join("NEW").is_file(), "SAVE wrote it: {out:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A rename refused for its *new* name says so, rather than "No file"
+    /// about a file that is plainly there.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_ren_to_a_reserved_name_says_bad_name() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let (base, mut fs) = scratch_fs("renbad");
+        std::fs::write(base.join("A").join("FOO.TXT"), b"x").unwrap();
+        let out = run_ccp(&mut fs, &[b"REN COM1.TXT=FOO.TXT\r", &[0x1B, 0x1B]]).await;
+        assert!(out.contains("Bad name"), "{out:?}");
+        assert!(!out.contains("No file"), "{out:?}");
+        assert!(base.join("A").join("FOO.TXT").is_file(), "and nothing moved");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// **One ESC at `A>` must not leave the emulator; two must.**

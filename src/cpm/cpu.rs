@@ -114,6 +114,27 @@ pub fn cpu_short(value: &str) -> &'static str {
     }
 }
 
+/// Is the CPU about to decode a prefix run that never ends?
+///
+/// iz80's Z80 decoder consumes `DD`/`FD` prefixes in a loop inside one
+/// `execute_instruction`, so with every byte of memory a prefix that call never
+/// returns -- not to the instruction budget, not to ESC-ESC, and it holds a
+/// tokio worker for good.  A guest gets there with one `LDIR` that fills memory
+/// and overwrites itself.  The caller skips the step instead (counting it), so
+/// the machine stays stoppable.
+///
+/// Cheap where it matters: the full scan starts only when two prefixes sit
+/// back to back, which real code almost never contains.  CPU-agnostic on
+/// purpose: on an 8080 the same memory is `CALL DDDD` for ever, a runaway the
+/// budget already ends, and skipping it there is equally harmless.
+pub fn endless_prefix_run(mut read: impl FnMut(u16) -> u8, pc: u16) -> bool {
+    let is_prefix = |b: u8| b == 0xDD || b == 0xFD;
+    if !is_prefix(read(pc)) || !is_prefix(read(pc.wrapping_add(1))) {
+        return false;
+    }
+    (2..=0xFFFFu16).all(|i| is_prefix(read(pc.wrapping_add(i))))
+}
+
 /// The CPU a `cpm_cpu` value names, ready to run.
 ///
 /// The single place either machine turns the setting into a processor, so the

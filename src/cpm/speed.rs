@@ -103,9 +103,29 @@ pub fn mhz_for(setting: &str, cpu: &str) -> Option<f64> {
     match setting.trim().to_ascii_lowercase().as_str() {
         "unlimited" | "off" | "none" | "0" => None,
         "auto" | "" => Some(period),
-        other => other.parse::<f64>().ok().filter(|m| *m > 0.0).or(Some(period)),
+        // Floored at `MIN_MHZ`: `1e-20` made the first nap overflow a
+        // `Duration` and panic the session, and `0.0001` slept for hours inside
+        // the pump where ESC-ESC cannot reach.  `inf` is not a clock either.
+        other => other
+            .parse::<f64>()
+            .ok()
+            .filter(|m| m.is_finite() && *m > 0.0)
+            .map(|m| m.max(MIN_MHZ))
+            .or(Some(period)),
     }
 }
+
+/// The slowest clock a setting may ask for.  Slower than any real machine of
+/// the period, and fast enough that no nap the governor asks for is long.
+pub const MIN_MHZ: f64 = 0.1;
+
+/// The longest single nap.  The pump re-checks after it, so a long debt is
+/// still paid -- in pieces short enough that the session stays responsive.
+pub const MAX_NAP: Duration = Duration::from_secs(1);
+
+/// How far behind the wall a guest may fall before the governor stops
+/// counting the difference -- see [`Governor::behind`].
+pub const MAX_ARREARS: Duration = Duration::from_millis(50);
 
 /// The label for a setting, for a screen that shows the current value.
 pub fn label_for(setting: &str) -> String {
@@ -116,8 +136,10 @@ pub fn label_for(setting: &str) -> String {
         }
     }
     // A number the list does not carry is still a valid setting.
+    // The same floor and the same refusal of `inf` as `mhz_for`, so this label
+    // and `short_label` cannot disagree about one setting.
     match want.parse::<f64>() {
-        Ok(m) if m > 0.0 => format!("{m} MHz"),
+        Ok(m) if m.is_finite() && m > 0.0 => format!("{} MHz", m.max(MIN_MHZ)),
         _ => SPEED_CHOICES[0].1.to_string(),
     }
 }
@@ -198,14 +220,25 @@ impl Governor {
     /// napped while idle, or descheduled, or reading a disk, must not then be
     /// given a burst at seventy-one times speed to "catch up": that is exactly
     /// the symptom being fixed, arriving in bursts instead of continuously.
-    pub fn behind(&self, cycles: u64, now_ms: u64) -> Option<Duration> {
+    ///
+    /// **Forgetting is done here, not by the caller.**  Only the idle nap used
+    /// to re-baseline, so any *other* stall -- a console write on a slow link,
+    /// a printer job being rendered, the host descheduling the task -- left
+    /// the guest behind its base, and it then ran unpaced until it had caught
+    /// up: the burst this doc says cannot happen.  Past [`MAX_ARREARS`] the
+    /// base moves to now, so the debt is dropped the moment it exists.
+    pub fn behind(&mut self, cycles: u64, now_ms: u64) -> Option<Duration> {
         let virtual_secs = cycles.saturating_sub(self.base_cycles) as f64 / self.cycles_per_sec;
         let real_secs = now_ms.saturating_sub(self.base_ms) as f64 / 1000.0;
         let ahead = virtual_secs - real_secs;
+        if ahead < -MAX_ARREARS.as_secs_f64() {
+            self.rebase(cycles, now_ms);
+            return None;
+        }
         if ahead <= SLACK.as_secs_f64() {
             return None;
         }
-        Some(Duration::from_secs_f64(ahead))
+        Some(Duration::try_from_secs_f64(ahead).unwrap_or(MAX_NAP).min(MAX_NAP))
     }
 
     /// Start counting again from here.
@@ -305,7 +338,7 @@ mod tests {
     /// A guest running at exactly the chosen rate is never slept.
     #[test]
     fn test_a_guest_keeping_time_is_not_paced() {
-        let g = Governor::new(2.0, 0, 0);
+        let mut g = Governor::new(2.0, 0, 0);
         // 2 MHz: 2,000 cycles is a millisecond.
         for ms in [1u64, 10, 100, 1_000] {
             assert_eq!(g.behind(2_000 * ms, ms), None, "on time at {ms} ms");
@@ -315,7 +348,7 @@ mod tests {
     /// Getting ahead is what the governor is for.
     #[test]
     fn test_a_guest_that_races_ahead_is_slept_by_the_excess() {
-        let g = Governor::new(2.0, 0, 0);
+        let mut g = Governor::new(2.0, 0, 0);
         // A full second of cycles in no time at all.
         let nap = g.behind(2_000_000, 0).expect("way ahead");
         assert!(
@@ -333,11 +366,30 @@ mod tests {
     /// to catch up, because arriving in bursts is the symptom being fixed.
     #[test]
     fn test_falling_behind_does_not_earn_a_fast_burst() {
-        let g = Governor::new(2.0, 0, 0);
+        let mut g = Governor::new(2.0, 0, 0);
         // Ten seconds of wall clock, one second of cycles: far behind.
         assert_eq!(g.behind(2_000_000, 10_000), None, "behind, but not owed anything");
-        // And the governor still paces it the moment it gets ahead again.
-        assert!(g.behind(2_000 * 20_000, 10_000).is_some());
+        // **The burst itself.**  A tenth of a second of cycles in no wall time
+        // must be paced now -- not run free until nine seconds are made up.
+        assert!(
+            g.behind(2_000_000 + 200_000, 10_000).is_some(),
+            "a guest that fell behind was handed a free run to catch up"
+        );
+    }
+
+    /// A clock no machine had is floored, so no nap can be hours long or
+    /// overflow a `Duration`; and no single nap is longer than [`MAX_NAP`].
+    #[test]
+    fn test_a_tiny_clock_cannot_hang_or_panic_the_pump() {
+        for setting in ["1e-20", "0.0001", "0.00000001"] {
+            assert_eq!(mhz_for(setting, "z80"), Some(MIN_MHZ), "{setting}");
+        }
+        assert_eq!(mhz_for("inf", "z80"), Some(MHZ_Z80), "infinity is not a clock");
+        assert_eq!(label_for("0.0001"), format!("{MIN_MHZ} MHz"), "the label shows the floor");
+        assert_eq!(label_for("inf"), SPEED_CHOICES[0].1, "and agrees about infinity");
+        let mut g = Governor::new(MIN_MHZ, 0, 0);
+        let nap = g.behind(u64::MAX, 0).expect("far ahead");
+        assert!(nap <= MAX_NAP, "{nap:?}");
     }
 
     #[test]
@@ -361,7 +413,7 @@ mod tests {
     /// gigantic sleep.
     #[test]
     fn test_a_cycle_count_behind_the_base_is_not_a_huge_nap() {
-        let g = Governor::new(2.0, 1_000_000, 1_000);
+        let mut g = Governor::new(2.0, 1_000_000, 1_000);
         assert_eq!(g.behind(0, 2_000), None, "saturating, not wrapping");
     }
 }

@@ -60,7 +60,9 @@ pub mod cromemco;
 pub mod cromemco_bank;
 pub mod z80pack;
 
-pub use fcb::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Fcb, FCB_SIZE};
+pub use fcb::{
+    is_host_device_name, parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Fcb, FCB_SIZE,
+};
 pub use fs::{CpmFs, DEFAULT_DMA, NUM_DRIVES};
 pub use machine::CpmMachine;
 pub use uart::{resolve_access, ModemAccess};
@@ -200,8 +202,11 @@ pub const TPA_BYTES: u16 = TPA_TOP - TPA_BASE;
 /// unique trap addresses [`BIOS_TRAP`]`+i`; `run` recognises a PC in that
 /// range as a BIOS call and returns [`Stop::Bios`] so the host can service
 /// it, exactly as it does for the BDOS entry.  The table sits above the
-/// TPA top (0x0001/0x0006 report `STACK_TOP`) so a guest never overwrites
-/// it.  Kept clear of the DPB/alloc scratch at 0xFE80/0xFE90.
+/// TPA top (0x0006 reports `STACK_TOP`, the BDOS entry; 0x0001 points at
+/// this table's `WBOOT`, `BIOS_BASE + 3`) so a guest never overwrites it.
+/// Kept clear of the DPB at [`DPB_ADDR`] (0xFF60) and the allocation-vector
+/// scratch at [`ALLOC_ADDR`] (0xFE00) -- not the 0xFE80/0xFE90 this once
+/// said, which were the old addresses that overran the table.
 const BIOS_BASE: u16 = 0xFF00;
 /// Per-vector trap addresses the BIOS jump table's `JP`s point at.  A guest
 /// either jumps through the table (`CALL BIOS_BASE+3*i` → `JP BIOS_TRAP+i`)
@@ -267,6 +272,12 @@ pub struct Cpm {
     /// Total instructions executed since the last load — used both for the
     /// warm-boot gate (ignore the initial `PC == 0`) and diagnostics.
     instructions: u64,
+    /// Every byte of memory is a `DD`/`FD` prefix, so the CPU can never
+    /// finish another instruction -- see `cpu::endless_prefix_run`.  Found
+    /// once and remembered: nothing runs while it holds, so nothing can
+    /// change it, and rescanning 64 KB per step made a wedged machine slow
+    /// to stop instead of impossible.
+    prefix_wedged: bool,
     /// Line characteristics the guest last set through the HBIOS `INITDEV`
     /// call, reported back verbatim by `QUERY`.  There is no real UART to
     /// program, so this is remembered rather than acted on.
@@ -299,6 +310,7 @@ impl Cpm {
             cpu: cpu::new_cpu(cpu_setting),
             mem: CpmMachine::new(),
             instructions: 0,
+            prefix_wedged: false,
             hbios_line: hbios::default_line(),
         };
         cpm.install_low_memory();
@@ -359,6 +371,8 @@ impl Cpm {
     /// the PC is set to the TPA base.  Bytes past the usable TPA are
     /// silently dropped (a `.COM` never legitimately exceeds it).
     pub fn load_com(&mut self, program: &[u8]) {
+        // New memory, so a previous program's wedge no longer holds.
+        self.prefix_wedged = false;
         self.install_low_memory();
         let max = TPA_BYTES as usize;
         for (i, b) in program.iter().take(max).enumerate() {
@@ -407,6 +421,17 @@ impl Cpm {
             // runs again and lands right back here.
             if pc == HBIOS_TRAP {
                 return Stop::Hbios(self.cpu.registers().get8(Reg8::B));
+            }
+            // See `cpu::endless_prefix_run`: a step that would never return
+            // is not taken.  The rest of the batch is charged, so the
+            // per-program ceiling still ends the run.
+            if !self.prefix_wedged {
+                let mem = &mut self.mem;
+                self.prefix_wedged = cpu::endless_prefix_run(|a| mem.peek(a), pc);
+            }
+            if self.prefix_wedged {
+                self.instructions += budget - executed;
+                return Stop::BudgetExhausted;
             }
             self.cpu.execute_instruction(&mut self.mem);
             self.instructions += 1;
@@ -974,9 +999,12 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
             // byte in step so a program that reads 0x0004 after selecting
             // sees the drive it just chose.
             let e = cpm.reg8(Reg8::E);
-            fs.select(e);
+            let ok = fs.select(e);
             cpm.set_current_disk(fs.current_drive(), fs.current_user());
-            Some(0)
+            // A drive past P: is refused and the current one kept.  `FFh`
+            // is CP/M 3's answer; CP/M 2.2 programs ignore A here, so it
+            // misleads none of them, where the old `0` claimed success.
+            Some(if ok { 0 } else { 0xFF })
         }
         // Open File.  **The extent in the FCB selects which extent to open**,
         // and honouring it is the whole of this function's difficulty.
@@ -1268,6 +1296,52 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
 
 #[cfg(test)]
 mod tests {
+    /// **A memory full of `DD` prefixes cannot wedge the emulator.**  iz80
+    /// decodes a prefix run in one step, so with nothing but prefixes left
+    /// that step never returned -- past the budget and past ESC-ESC.  The
+    /// state is set up directly: reaching it from guest code is contrived (an
+    /// `LDIR` that overwrites its own opcode stops being an `LDIR`), but the
+    /// decoder loop is real and the guard costs one comparison a step.  Run on
+    /// its own thread, so a regression fails here instead of hanging the suite.
+    #[test]
+    fn test_a_memory_full_of_prefixes_still_returns() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cpm = Cpm::new();
+            cpm.load_com(&[]);
+            cpm.write_block(0, &vec![0xDDu8; 0x1_0000]);
+            let abort = AtomicBool::new(false);
+            let _ = tx.send(cpm.run(100_000, &abort));
+        });
+        let stop = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the CPU never came back from a memory full of DD prefixes");
+        assert!(matches!(stop, Stop::BudgetExhausted), "{stop:?}");
+    }
+
+    /// The wedge belongs to the memory that caused it: the next program loaded
+    /// into the same machine runs.
+    #[test]
+    fn test_a_new_program_clears_a_prefix_wedge() {
+        let mut cpm = Cpm::new();
+        cpm.load_com(&[]);
+        cpm.write_block(0, &vec![0xDDu8; 0x1_0000]);
+        let abort = AtomicBool::new(false);
+        assert!(matches!(cpm.run(1_000, &abort), Stop::BudgetExhausted));
+        cpm.load_com(&[0xC9]); // RET -> warm boot
+        assert!(matches!(cpm.run(1_000, &abort), Stop::WarmBoot), "the next program was refused");
+    }
+
+    #[test]
+    fn test_only_an_endless_prefix_run_is_flagged() {
+        let mut mem = vec![0xDDu8; 0x1_0000];
+        assert!(cpu::endless_prefix_run(|a| mem[a as usize], 0x1234));
+        mem[0x8000] = 0x21; // one real opcode anywhere ends the run
+        assert!(!cpu::endless_prefix_run(|a| mem[a as usize], 0x1234));
+        let ix = [0xDDu8, 0x21, 0x00, 0x00]; // LD IX,0000h -- one prefix
+        assert!(!cpu::endless_prefix_run(|a| *ix.get(a as usize).unwrap_or(&0), 0));
+    }
+
     /// The RTC buffer is BCD, per the published HBIOS interface — a plain
     /// binary byte would read as a different (and often impossible) number on
     /// the guest side: 0x1F is 31 in binary but not a valid BCD date at all.

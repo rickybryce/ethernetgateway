@@ -509,8 +509,7 @@ pub fn is_erased_directory(dir: &[u8]) -> bool {
 /// * an extent must claim **at least** as many blocks as its record count needs;
 /// * **no block is claimed by two entries** — the one that random data fails
 ///   almost immediately, because collisions are overwhelmingly likely once
-///   sixteen block numbers per entry are arbitrary bytes;
-/// * an entry's record count agrees with how many blocks it claims.
+///   sixteen block numbers per entry are arbitrary bytes.
 ///
 /// An entirely erased directory passes: that is a freshly formatted disk, and
 /// refusing to write to a blank would be perverse.
@@ -610,8 +609,8 @@ pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'stat
                 return Err("two directory entries claiming one block");
             }
         }
-        // An extent's record count cannot need more blocks than it claims, nor
-        // leave a claimed block entirely unaccounted for.
+        // An extent's record count cannot need more blocks than it claims.
+        // The other direction is deliberately not checked -- see the doc above.
         let need = (e[15] as u32).div_ceil(per_block) as usize;
         if need > used.len() {
             return Err("an extent claiming fewer blocks than its records need");

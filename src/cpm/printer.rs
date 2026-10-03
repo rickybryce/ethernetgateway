@@ -331,6 +331,30 @@ pub const MAX_JOB_BYTES: usize = 4 * 1024 * 1024;
 /// job that does is closed and continued rather than truncated.
 pub const MAX_JOB_PAGES: usize = 4096;
 
+/// Most page memory one job may hold, in cells, before it is closed and the
+/// next one starts.
+///
+/// A third bound, because neither of the others bounds *memory*: the head
+/// keeps its column across a line feed, so `X` + LF in a loop puts each `X`
+/// one column further right on a new row, and every row is padded out to it.
+/// Two bytes of input buy ~66 cells, so the 4 MB byte bound allowed about two
+/// million such rows -- over a gigabyte held for one job, from any guest that
+/// can print, on a gateway that runs on a Pi Zero.  Two million cells is about
+/// 16 MB; a real document reaches it after roughly 470 pages at 64 columns, or
+/// 224 of a full 132-column listing, and is continued in the next job rather
+/// than truncated.
+pub const MAX_JOB_CELLS: usize = 2_000_000;
+
+/// Most bytes the spool folder may hold before a finished job is refused.
+///
+/// A job bound splits a runaway into documents; it does not stop it.  A booted
+/// guest has no instruction ceiling, so a print loop writes a full job every
+/// minute or so for as long as it runs -- several gigabytes an hour into the
+/// folder, which is enough to fill a Pi's SD card and take the gateway's own
+/// config and log writes down with it.  The operator empties the folder to
+/// print again; nothing is ever deleted for them.
+pub const MAX_SPOOL_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Columns before the printer wraps to the next line.
 ///
 /// Wrapping at all is the choice worth noting: a real line printer at the end
@@ -351,6 +375,9 @@ pub struct Page {
     lines: Vec<Vec<Cell>>,
     row: usize,
     col: usize,
+    /// Cells allocated, rows counted as a few cells each -- see
+    /// [`MAX_JOB_CELLS`].
+    cost: usize,
 }
 
 /// One character position on the paper, and what the head did to it.
@@ -403,12 +430,18 @@ impl Page {
         if self.col >= MAX_COLUMNS {
             self.wrap();
         }
+        // Rows are charged when the head *moves* onto them (`advance`), not
+        // here: a run of line feeds allocates nothing until the next
+        // character, and charging then let one `X` after four million LFs
+        // allocate four million rows in a single call -- after the budget it
+        // was meant to stop.
         while self.lines.len() <= self.row {
             self.lines.push(Vec::new());
         }
         let line = &mut self.lines[self.row];
         while line.len() <= self.col {
             line.push(Cell::default());
+            self.cost += 1;
         }
         let cell = &mut line[self.col];
         let existing = cell.ch;
@@ -434,7 +467,14 @@ impl Page {
     /// separately, in either order, and both orders land correctly only because
     /// the CR is the thing that zeroes the column.
     fn line_feed(&mut self) {
+        self.advance();
+    }
+
+    /// Down one row, charged now -- see [`Page::put`].  An empty row still
+    /// costs its `Vec` header, about three cells.
+    fn advance(&mut self) {
         self.row += 1;
+        self.cost += 3;
     }
 
     /// Carriage return: back to column 0 of the line the head is on.
@@ -448,7 +488,7 @@ impl Page {
     /// conflating the two put every LF at the left margin and quietly undid
     /// the model that makes overstrike work.
     fn wrap(&mut self) {
-        self.row += 1;
+        self.advance();
         self.col = 0;
     }
 
@@ -512,6 +552,9 @@ pub struct SpoolJob {
     content: bool,
     /// Where the last completed page ended, so `TAB` and wrapping are per page.
     tab_stop: usize,
+    /// The cost of every page before the current one -- see [`MAX_JOB_CELLS`].
+    /// Kept as a sum so `is_full`, asked after every byte, never walks pages.
+    closed_cost: usize,
 }
 
 impl Default for SpoolJob {
@@ -550,6 +593,7 @@ impl SpoolJob {
             after_cr: false,
             content: false,
             tab_stop: 8,
+            closed_cost: 0,
         }
     }
 
@@ -612,7 +656,14 @@ impl SpoolJob {
     /// Two bounds, because neither implies the other: a page of text is
     /// thousands of bytes, but a form feed is one byte and a whole page.
     pub fn is_full(&self) -> bool {
-        self.bytes >= MAX_JOB_BYTES || self.pages.len() >= MAX_JOB_PAGES
+        self.bytes >= MAX_JOB_BYTES
+            || self.pages.len() >= MAX_JOB_PAGES
+            || self.cost() >= MAX_JOB_CELLS
+    }
+
+    /// Page memory held, in cells.
+    fn cost(&self) -> usize {
+        self.closed_cost + self.pages.last().map_or(0, |p| p.cost)
     }
 
     /// Accept one byte from the guest.
@@ -655,6 +706,7 @@ impl SpoolJob {
             b'\n' => page.line_feed(),
             0x0C => {
                 // Form feed: this page is done.
+                self.closed_cost += page.cost;
                 self.pages.push(Page::default());
             }
             b'\t' => {
@@ -702,10 +754,26 @@ impl SpoolJob {
         let dir = Path::new(transfer_dir).join(SPOOL_DIR);
         std::fs::create_dir_all(&dir)?;
         let (stem, ext) = self.file_stem_and_ext(format);
+        // Asked twice: before rendering, so a full folder does not cost a
+        // runaway's every job a render it then discards, and after, against
+        // the size of the document actually built.
+        let held = Self::spool_dir_bytes(&dir);
+        let full = || {
+            std::io::Error::other(format!(
+                "the {SPOOL_DIR} folder holds {} MB, its limit; empty it to print again",
+                held / (1024 * 1024)
+            ))
+        };
+        if held >= MAX_SPOOL_BYTES {
+            return Err(full());
+        }
         let body = match format {
             Format::Odt => build_odt(&self.pages),
             Format::Text => self.plain_text().into_bytes(),
         };
+        if held + body.len() as u64 > MAX_SPOOL_BYTES {
+            return Err(full());
+        }
 
         // Unique per call, so concurrent jobs cannot share a staging file.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -734,7 +802,21 @@ impl SpoolJob {
         Ok(format!("{SPOOL_DIR}/{name}"))
     }
 
-    /// `("PRINT-YYYYMMDD-HHMMSS", "odt")` from the host's own clock, without the
+    /// Bytes in the spool folder's files.  A folder that cannot be read counts as
+/// empty: the write that follows will fail with the real reason.
+fn spool_dir_bytes(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// `("PRINT-YYYYMMDD-HHMMSS", "odt")` from the host's own clock, without the
     /// folder — [`SpoolJob::write`] puts that in front of what it returns, and
     /// keeps the two apart so it can disambiguate a collision in the middle.
     ///
@@ -1545,6 +1627,59 @@ mod tests {
         assert!(job.is_empty());
     }
 
+    /// **The memory bound, which neither of the others implies.**  The head
+    /// keeps its column across a line feed, so `X` + LF walks right one column
+    /// per row and pads every row out to it: two bytes buy ~66 cells, and the
+    /// byte bound alone let one job hold over a gigabyte.
+    #[test]
+    fn test_is_full_at_the_cell_bound() {
+        let mut job = SpoolJob::new();
+        while !job.is_full() {
+            job.push(b'X');
+            job.push(b'\n');
+        }
+        assert!(
+            job.len() < MAX_JOB_BYTES / 4,
+            "the staircase must bind long before the byte bound ({} bytes)",
+            job.len()
+        );
+        assert!(job.cost() < MAX_JOB_CELLS + MAX_COLUMNS + 3, "held {} cells", job.cost());
+    }
+
+    /// The positive control: a long, ordinary document -- 400 pages of 66
+    /// lines at 64 columns -- is not cut by the memory bound.
+    /// Line feeds alone must be charged as they arrive: four million of them
+    /// allocate nothing until the next character, which then built every row
+    /// at once, far past the budget.
+    #[test]
+    fn test_a_run_of_bare_line_feeds_is_charged_before_it_is_built() {
+        let mut job = SpoolJob::new();
+        job.push(b'X');
+        while !job.is_full() {
+            job.push(b'\n');
+        }
+        assert!(job.len() < MAX_JOB_BYTES, "closed by the cell budget, not the byte bound");
+        assert!(job.cost() <= MAX_JOB_CELLS + 3);
+        assert!(job.pages.last().unwrap().lines.len() < 10, "nothing was allocated for them");
+    }
+
+    #[test]
+    fn test_a_long_real_document_fits_one_job() {
+        let mut job = SpoolJob::new();
+        let line = [b'A'; 64];
+        for _ in 0..400 {
+            for _ in 0..66 {
+                for &b in &line {
+                    job.push(b);
+                }
+                job.push(b'\r');
+                job.push(b'\n');
+            }
+            job.push(0x0C);
+        }
+        assert!(!job.is_full(), "400 real pages split a job ({} cells)", job.cost());
+    }
+
     // ── writing the file out ─────────────────────────────────────────────────
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -1552,6 +1687,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
+    }
+
+    /// A runaway is split into jobs by the bounds above but not stopped by
+    /// them, so the folder itself has a limit: past it a finished job is
+    /// refused, with a reason the operator can act on, and nothing is deleted.
+    #[test]
+    fn test_write_refuses_once_the_spool_folder_is_full() {
+        let dir = temp_dir("spool_full");
+        let mut job = SpoolJob::new();
+        for &b in b"HELLO\r\n" {
+            job.push(b);
+        }
+        let spool = dir.join(SPOOL_DIR);
+        std::fs::create_dir_all(&spool).unwrap();
+        let filler = spool.join("PRINT-old.txt");
+        // Sparse, so the test costs no real disk.
+        std::fs::File::create(&filler).unwrap().set_len(MAX_SPOOL_BYTES).unwrap();
+        let err = job.write(dir.to_str().unwrap(), Format::Text).expect_err("the limit must hold");
+        assert!(err.to_string().contains("empty it"), "says what to do: {err}");
+        assert!(filler.exists(), "and deletes nothing");
+        std::fs::remove_file(&filler).unwrap();
+        assert!(job.write(dir.to_str().unwrap(), Format::Text).is_ok(), "room again, prints again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Documents land in a subfolder, not loose in the transfer directory, and

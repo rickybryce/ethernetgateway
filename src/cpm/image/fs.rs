@@ -235,10 +235,24 @@ impl ImageFs {
     fn inconsistency(&self) -> Option<String> {
         let mut owner: Vec<Option<[u8; 11]>> = vec![None; self.params.max_block as usize + 1];
         let dir_blocks = self.params.dir_records.div_ceil(self.params.records_per_block);
+        // Bytes of the 16-byte map past the slots this format's EXM uses.
+        let used_bytes = self.params.map_slots * if self.params.wide_blocks { 2 } else { 1 };
         for e in &self.dir {
             let mut who = [b' '; 11];
             who[..8].copy_from_slice(&e.name);
             who[8..].copy_from_slice(&e.ext);
+            // **A block in a slot this format never uses was put there under a
+            // different EXM** -- a `cromemcodd` image this gateway wrote before
+            // that entry stated the disk's own `EXM 0`, say.  Read with the
+            // narrower map those blocks are invisible: they would count as
+            // free, and the next file written could be given them.  Refusing
+            // to write keeps both files intact for the operator to recover.
+            if e.raw[16 + used_bytes.min(16)..32].iter().any(|&b| b != 0) {
+                return Some(format!(
+                    "{} uses allocation slots this disk format does not (written with a different EXM)",
+                    String::from_utf8_lossy(&who).trim_end()
+                ));
+            }
             for &b in &e.blocks {
                 if b == 0 {
                     continue;
@@ -2287,6 +2301,27 @@ mod tests {
         derived.exm = None;
         assert_eq!(Params::derive(&derived).exm, 1, "the standard rule gives 1 here");
         assert_eq!(Params::derive(&derived).map_slots, 16);
+        // **Every entry whose comment quotes its disk's DPB gets that DPB's EXM.**
+        // `cromemcodd` quoted `EXM 0` and derived 1 for as long as nobody
+        // compared the two; this compares them, for every format at once.
+        let src = include_str!("format.rs").replace('\r', "");
+        let mut quoted = 0;
+        for f in super::super::format::FORMATS {
+            let at = src.find(&format!("token: \"{}\"", f.token)).expect("entry in source");
+            let start = src[..at].rfind("},").map_or(0, |i| i + 2);
+            let block = &src[start..at];
+            // The first `EXM <digits>` in the comment is the quoted DPB's.
+            let stated = block.match_indices("EXM ").find_map(|(i, _)| {
+                let digits: String =
+                    block[i + 4..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse::<u32>().ok()
+            });
+            if let Some(n) = stated {
+                assert_eq!(Params::derive(f).exm, n, "{} quotes EXM {n}", f.token);
+                quoted += 1;
+            }
+        }
+        assert!(quoted >= 3, "positive control: the quoted DPBs were found ({quoted})");
         // Every other format is unaffected — the override must be a no-op where
         // the disk agrees with the rule.
         for f in super::super::format::FORMATS.iter().filter(|f| f.exm.is_none()) {
@@ -2294,5 +2329,33 @@ mod tests {
             forced.exm = Some(Params::derive(f).exm);
             assert_eq!(Params::derive(&forced).map_slots, Params::derive(f).map_slots);
         }
+    }
+
+    /// An entry written under a wider EXM carries blocks in slots the stated
+    /// EXM never reads.  Those blocks must not be taken as free: the mount
+    /// goes read-only rather than reallocating them under another file.
+    #[test]
+    fn test_blocks_past_the_stated_map_make_the_mount_read_only() {
+        let fmt = by_token("cromemcodd").unwrap();
+        assert_eq!(Params::derive(fmt).map_slots, 8, "EXM 0, 2K blocks, 8-bit numbers");
+        let image_with = |slots: usize| {
+            let mut img = blank(fmt);
+            let off = fmt.data_record_offset(0).unwrap() as usize;
+            let mut raw = [0u8; 32];
+            raw[1..9].copy_from_slice(b"BIG     ");
+            raw[9..12].copy_from_slice(b"DAT");
+            raw[12] = 1; // ex 1, as EXM 1 wrote it
+            raw[15] = 0x80;
+            for i in 0..slots {
+                raw[16 + i] = 10 + i as u8;
+            }
+            img[off..off + 32].copy_from_slice(&raw);
+            img
+        };
+        let fs = ImageFs::mount(Box::new(MemMedia::new(image_with(16))), fmt, false).unwrap();
+        assert!(fs.is_read_only(), "blocks in slots 8-15 would have counted as free");
+        // Positive control: the same entry within its eight slots mounts writable.
+        let fs = ImageFs::mount(Box::new(MemMedia::new(image_with(8))), fmt, false).unwrap();
+        assert!(!fs.is_read_only());
     }
 }
