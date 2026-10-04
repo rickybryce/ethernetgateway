@@ -29,6 +29,9 @@ const MAX_RENDERED_LINES: usize = 5000;
 /// room a `[NNN]` link number takes.  The screen shows `width + this`, so a
 /// line is never cut there -- see [`rewrap_for_screen`].
 pub(crate) const LINK_MARKER_ROOM: usize = 5;
+/// The narrowest a table column may be made: a short word and its link
+/// number, `login[123]`.  See [`render_html_body`].
+const LINK_WORD_ROOM: usize = 10;
 /// HTTP request timeout in seconds.
 const HTTP_TIMEOUT_SECS: u64 = 15;
 /// How long to wait for the TCP connection itself, as opposed to the reply.
@@ -467,7 +470,8 @@ fn render_response(
         return Err(refuse(why));
     }
 
-    let (mut page, meta_refresh) = if content_type.contains("text/plain") {
+    let plain = is_plain_text(&content_type);
+    let (mut page, meta_refresh) = if plain {
         let text = String::from_utf8_lossy(&body_bytes);
         let lines: Vec<String> = text
             .lines()
@@ -489,7 +493,7 @@ fn render_response(
     if !has_text {
         // JavaScript is the likely reason only for an HTML page that rendered
         // to nothing; an empty text file or error body is simply empty.
-        let note = if content_type.contains("text/plain") || body_bytes.is_empty() {
+        let note = if plain || body_bytes.is_empty() {
             "(This page has no text to show.)"
         } else {
             "(This page has no text to show - it may need JavaScript.)"
@@ -511,6 +515,18 @@ fn render_response(
         page.lines = head.into_iter().take(MAX_RENDERED_LINES).collect();
     }
     Ok((page, meta_refresh))
+}
+
+/// Whether a response is text to show line for line rather than markup.
+///
+/// JSON went through the HTML renderer, which folds whitespace the way a page
+/// does, so an API's pretty-printed reply arrived as one wrapped paragraph.
+/// Every text type that is not markup keeps its own lines: `text/*` except
+/// HTML and XML, and JSON under either of its names.
+fn is_plain_text(content_type: &str) -> bool {
+    let mime = content_type.split(';').next().unwrap_or("").trim();
+    let markup = mime.contains("html") || mime.contains("xml");
+    !markup && (mime.starts_with("text/") || mime == "application/json" || mime.ends_with("+json"))
 }
 
 /// Why a response cannot be shown as text, or `None` if it can.
@@ -1041,6 +1057,121 @@ fn prune_elements(root: &Handle, tags: &[&str]) {
     }
 }
 
+/// A space between two elements that touch where a real browser would have
+/// shown a gap, decided before the layout so the space is counted in it.
+///
+/// Two cases, both measured.  **Two links**, side by side with no space in the
+/// HTML, are parted by CSS in a browser and ran together here: `Hacker
+/// News[1]new[2]`, `Jump to navigationJump to search`.  (This was done on the
+/// rendered line once; a space added after html2text has laid a row out
+/// makes the row one column too wide, and HN's `login` went to a row of its
+/// own.)  **Lower case meeting a capital**: GitHub writes `<span>GitHub
+/// Copilot</span><span>Write better code</span>` and its stylesheet puts the
+/// two on separate lines; we have no stylesheet, so they read `GitHub
+/// CopilotWrite`.  Neither is a word split for styling -- `<b>Wiki</b>pedia`
+/// is lower meeting lower, and a link that ends mid-word (`<a>Wiki</a>pedia`)
+/// is not two links -- and those are left alone.  Preformatted text and code
+/// are left alone entirely: a highlighter splits tokens into spans and every
+/// byte there is meant.
+///
+/// One pass over the tree: each node's edges are worked out from its
+/// children's, never by re-reading a subtree.
+fn space_touching_elements(dom: &RcDom) {
+    use html5ever::tree_builder::{NodeOrText, TreeSink};
+    use std::collections::HashMap;
+
+    /// A node's first and last visible character (whitespace as ' '), and
+    /// the link each one is inside, if any.
+    #[derive(Clone, Copy)]
+    struct Edge {
+        first: char,
+        last: char,
+        first_link: Option<usize>,
+        last_link: Option<usize>,
+    }
+    let key = |h: &Handle| std::rc::Rc::as_ptr(h) as usize;
+    // `None`: a node with no text at all (an icon, a comment).
+    let mut edges: HashMap<usize, Option<Edge>> = HashMap::new();
+    let mut inserts: Vec<Handle> = Vec::new();
+
+    // Post-order without recursion: a node is visited again once its
+    // children have been.  The flag: inside `pre`, `code` and the like, at
+    // any depth.
+    let mut stack: Vec<(Handle, bool, bool)> = vec![(dom.document.clone(), false, false)];
+    while let Some((node, children_done, inside_verbatim)) = stack.pop() {
+        let children = node.children.borrow();
+        let is_element = matches!(node.data, Element { .. });
+        let verbatim = inside_verbatim || matches!(&node.data,
+            Element { name, .. } if matches!(name.local.as_ref(), "pre" | "code" | "textarea" | "script" | "style"));
+        // An inline SVG is a picture to html2text (see `number_links`); its
+        // insides are never drawn, so they decide no spacing.
+        if is_svg(&node) {
+            drop(children);
+            edges.insert(key(&node), None);
+            continue;
+        }
+        if !children_done && !children.is_empty() {
+            stack.push((node.clone(), true, inside_verbatim));
+            stack.extend(children.iter().map(|c| (c.clone(), false, verbatim)));
+            continue;
+        }
+        let mut own = if children.is_empty() && !is_element {
+            // A leaf that is not an element is text, or a doctype or comment,
+            // which show nothing.  Blank text reads as `None` from `text_of`.
+            let ws = |c: char| if c.is_whitespace() { ' ' } else { c };
+            match text_of(&node) {
+                Some(t) => t.chars().next().zip(t.chars().last()).map(|(f, l)| Edge {
+                    first: ws(f), last: ws(l), first_link: None, last_link: None,
+                }),
+                None if !matches!(node.data, html2text::Comment { .. } | html2text::Document) => Some(Edge {
+                    first: ' ', last: ' ', first_link: None, last_link: None,
+                }),
+                None => None,
+            }
+        } else {
+            let mut whole: Option<Edge> = None;
+            let mut prev: Option<(&Handle, Option<Edge>)> = None;
+            for child in children.iter() {
+                let e = edges.get(&key(child)).copied().flatten();
+                if let Some(c) = e {
+                    whole = Some(match whole {
+                        Some(w) => Edge { last: c.last, last_link: c.last_link, ..w },
+                        None => c,
+                    });
+                }
+                if let (Some((p, Some(l))), Some(r)) = (prev, e) {
+                    let both_elements = matches!(p.data, Element { .. }) && matches!(child.data, Element { .. });
+                    let two_links = l.last_link.is_some() && r.first_link.is_some() && l.last_link != r.first_link
+                        && l.last.is_alphanumeric() && r.first.is_alphanumeric();
+                    let case_change = l.last.is_lowercase() && r.first.is_uppercase();
+                    if !verbatim && both_elements && (two_links || case_change) {
+                        inserts.push(child.clone());
+                    }
+                }
+                // An element with no text (an icon) does not part two words.
+                if e.is_some() || !matches!(child.data, Element { .. }) {
+                    prev = Some((child, e));
+                }
+            }
+            whole
+        };
+        // Inside a link, both edges are that link's.
+        if matches!(&node.data, Element { name, .. } if name.local.as_ref() == "a")
+            && get_attr(&node, "href").is_some()
+        {
+            if let Some(e) = own.as_mut() {
+                e.first_link = Some(key(&node));
+                e.last_link = Some(key(&node));
+            }
+        }
+        drop(children);
+        edges.insert(key(&node), own);
+    }
+    for sibling in inserts {
+        dom.append_before_sibling(&sibling, NodeOrText::AppendText(" ".into()));
+    }
+}
+
 /// Parse HTML the way a browser that does not run JavaScript should.
 ///
 /// **`scripting_enabled: false`, and that is the whole point.**  html5ever
@@ -1151,6 +1282,212 @@ fn meta_refresh_from_dom(dom: &RcDom) -> Option<String> {
     walk(&dom.document)
 }
 
+/// Opens and closes a link number while html2text lays the page out (see
+/// [`number_links`]); turned into the `\x02`/`\x03` sentinels once it has.
+/// Not the sentinels themselves: html2text measures a control byte as zero
+/// columns, so every number would be two columns wider than the wrap
+/// believed, and one of its hard-wrap paths `unwrap`s that measurement.
+/// Noncharacters, because one cannot arrive in a page's own text.
+const MARK_OPEN: char = '\u{FDD0}';
+const MARK_CLOSE: char = '\u{FDD1}';
+
+/// Number every link by writing its number into the page, as text at the end
+/// of the link, before html2text lays the page out.
+///
+/// The number used to be added after html2text had wrapped the page, so a
+/// link spanning three rows got it three times -- once at the end of each
+/// row's piece, which reads as three links -- and a row the number no longer
+/// fit on spilled a fragment onto a row of its own.  As text inside the link
+/// it is one more word to html2text: counted in the wrap, kept against the
+/// last word of the link, written exactly once.  And counted when a table
+/// sizes its columns, which a number added at render time (a `TextDecorator`,
+/// tried first) is not: HN's `login` cell was given room for `login` and the
+/// number was cut through the middle.
+///
+/// In document order, one number per distinct target.  A link with nothing
+/// to show -- an icon with no alt text -- gets none, as before: html2text
+/// draws nothing for it, and a number on its own is a link to nowhere visible.
+fn number_links(dom: &RcDom) -> Vec<String> {
+    use html5ever::tree_builder::{NodeOrText, TreeSink};
+
+    let mut links: Vec<String> = Vec::new();
+    let mut marks: Vec<(Handle, usize)> = Vec::new();
+    let mut stack = vec![dom.document.clone()];
+    while let Some(node) = stack.pop() {
+        if let Element { ref name, .. } = node.data {
+            if name.local.as_ref() == "a" {
+                if let Some(href) = get_attr(&node, "href") {
+                    // An anchor on this page goes nowhere a number could take you.
+                    let shown = if href.is_empty() || href.starts_with('#') { None } else { last_shown(&node) };
+                    if let Some(leaf) = shown {
+                        let num = match links.iter().position(|l| *l == href) {
+                            Some(pos) => pos + 1,
+                            None => {
+                                links.push(href);
+                                links.len()
+                            }
+                        };
+                        marks.push((leaf, num));
+                    }
+                }
+            }
+        }
+        // html2text draws an inline SVG as one picture, never its insides: a
+        // link in there is never seen and must not take a number.
+        if !is_svg(&node) {
+            stack.extend(node.children.borrow().iter().rev().cloned());
+        }
+    }
+    // Against the last thing the link shows, not at the end of the element:
+    // pretty-printed HTML ends a link in whitespace (`<a>\n  Forums\n</a>`,
+    // VCFed's logo) and html2text may break a row there, leaving the number
+    // alone on the next.  Whitespace after the number is harmless -- and a
+    // space inside the link (`<a>Log in </a><a>Register</a>`) now lands
+    // after the number instead of between it and its word.
+    for (leaf, num) in marks {
+        let mark = format!("{MARK_OPEN}{num}{MARK_CLOSE}");
+        let Some(parent) = leaf.parent.take().and_then(|w| {
+            let up = w.upgrade();
+            leaf.parent.set(Some(w));
+            up
+        }) else {
+            continue;
+        };
+        let next = {
+            let siblings = parent.children.borrow();
+            siblings.iter().position(|c| std::rc::Rc::ptr_eq(c, &leaf))
+                .and_then(|i| siblings.get(i + 1).cloned())
+        };
+        let insert = |text: String| match &next {
+            Some(n) => dom.append_before_sibling(n, NodeOrText::AppendText(text.into())),
+            None => dom.append(&parent, NodeOrText::AppendText(text.into())),
+        };
+        match text_of(&leaf) {
+            // Text: replaced by itself with the number before its trailing
+            // whitespace.
+            Some(text) => {
+                let body = text.trim_end();
+                let tail = &text[body.len()..];
+                dom.remove_from_parent(&leaf);
+                insert(format!("{body}{mark}{tail}"));
+            }
+            // An image: the number straight after its alt text.
+            None => insert(mark),
+        }
+    }
+    links
+}
+
+/// Take [`MARK_OPEN`] and [`MARK_CLOSE`] out of everything a page can make
+/// html2text draw, before any number is written.
+///
+/// They are noncharacters, but html5ever passes them through (a parse error,
+/// not a refusal), so `Click here&#xFDD0;1&#xFDD1;` drew as a link number
+/// pointing at whatever link 1 really was.  Text, and the attributes html2text
+/// draws (`alt`); an SVG's title is text like any other.
+fn strip_mark_chars(dom: &RcDom) {
+    use html5ever::tree_builder::{NodeOrText, TreeSink};
+
+    let is_mark = |c: char| c == MARK_OPEN || c == MARK_CLOSE;
+    let mut forged: Vec<(Handle, String)> = Vec::new();
+    let mut stack = vec![dom.document.clone()];
+    while let Some(node) = stack.pop() {
+        if let Element { ref attrs, .. } = node.data {
+            for attr in attrs.borrow_mut().iter_mut() {
+                if attr.value.contains(is_mark) {
+                    attr.value = attr.value.replace(is_mark, "").into();
+                }
+            }
+        } else if let Some(text) = text_of(&node) {
+            if text.contains(is_mark) {
+                forged.push((node.clone(), text.replace(is_mark, "")));
+            }
+        }
+        stack.extend(node.children.borrow().iter().cloned());
+    }
+    for (node, clean) in forged {
+        // Before the old node and then without it, so it lands in its place.
+        dom.append_before_sibling(&node, NodeOrText::AppendText(clean.into()));
+        dom.remove_from_parent(&node);
+    }
+}
+
+/// A text node's exact contents, or `None` for anything else.
+///
+/// html2text keeps the text type private; its debug rendering is the one
+/// public reading (see `get_text_content`), and for a single leaf it is
+/// `Text:` + the contents verbatim + a newline.  Blank text is not rendered
+/// at all, so it reads as `None` -- which [`last_shown`] never asks about.
+fn text_of(node: &Handle) -> Option<String> {
+    if matches!(node.data, Element { .. }) || !node.children.borrow().is_empty() {
+        return None;
+    }
+    let s = RcDom::node_as_dom_string(node);
+    let t = s.strip_prefix("Text:")?;
+    Some(t.strip_suffix('\n').unwrap_or(t).to_string())
+}
+
+fn is_svg(node: &Handle) -> bool {
+    matches!(&node.data, Element { name, .. } if name.local.as_ref() == "svg")
+}
+
+/// The text html2text draws for an inline SVG: its `<title>`, and only when
+/// that is the first element inside it.
+fn svg_title(svg: &Handle) -> Option<String> {
+    let children = svg.children.borrow();
+    let first = children.iter().find(|c| matches!(c.data, Element { .. }))?;
+    let is_title = matches!(&first.data, Element { name, .. } if name.local.as_ref() == "title");
+    let text = get_text_content(first);
+    (is_title && !text.is_empty()).then_some(text)
+}
+
+/// The last thing html2text will draw for this subtree -- text that is not
+/// all whitespace, an image with alt text, or an SVG with a title -- or
+/// `None` if it draws nothing.
+fn last_shown(node: &Handle) -> Option<Handle> {
+    // Children pushed in order, so they come off last first: the first
+    // leaf found is the last in the document.
+    let mut stack = vec![node.clone()];
+    while let Some(n) = stack.pop() {
+        let shown = match n.data {
+            Element { ref name, .. } => match name.local.as_ref() {
+                "script" | "style" => continue,
+                // html2text draws no image without a `src`, whatever its alt.
+                "img" => get_attr(&n, "alt").is_some_and(|a| !a.trim().is_empty())
+                    && get_attr(&n, "src").is_some_and(|s| !s.is_empty()),
+                // Drawn as its title alone, and nothing inside it otherwise.
+                "svg" => {
+                    if svg_title(&n).is_some() {
+                        return Some(n);
+                    }
+                    continue;
+                }
+                _ => false,
+            },
+            _ => text_of(&n).is_some_and(|t| !t.trim().is_empty()),
+        };
+        if shown {
+            return Some(n);
+        }
+        stack.extend(n.children.borrow().iter().cloned());
+    }
+    None
+}
+
+/// A rendered line with its link numbers as the `\x02N\x03` sentinels the
+/// screen colours, and nothing else that could be read as one.
+fn place_link_markers(line: &str) -> String {
+    line.chars()
+        .filter_map(|c| match c {
+            MARK_OPEN => Some('\u{2}'),
+            MARK_CLOSE => Some('\u{3}'),
+            // The page's own sentinel bytes are not link numbers.
+            '\u{2}' | '\u{3}' => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// Parse an HTML body into a rendered WebPage with title, links, and forms.
 /// Returns the page and, if the document carries one, a `<meta refresh>`
 /// target for the caller to follow.  Reported rather than followed here
@@ -1166,7 +1503,12 @@ fn render_html_body(
     // rows than the content: a DuckDuckGo result took a whole screen, with
     // borders off about six lines (measured, 139 -> 95 lines a page; Hacker
     // News 147 -> 83).  A data table keeps its columns, aligned by spacing.
-    let cfg = config::rich().no_table_borders();
+    // `min_wrap_width`: no column narrower than this, so a short word and
+    // its link number are never cut apart by a cell too small for both --
+    // a table that cannot give every column that much is drawn one cell
+    // under another instead, which on a 40-column screen is the better
+    // layout anyway.
+    let cfg = config::rich().no_table_borders().min_wrap_width(LINK_WORD_ROOM);
     let dom = parse_html_no_scripting(body_bytes)?;
 
     // Guard against pathologically deep DOMs before our recursive title/form
@@ -1187,72 +1529,48 @@ fn render_html_body(
     // sixty country names above the first search result.  They stay
     // reachable through the form screen (F).
     prune_elements(&dom.document, &["select", "datalist"]);
+    strip_mark_chars(&dom);
+    space_touching_elements(&dom);
+    let links = number_links(&dom);
 
-    let render_tree = cfg.dom_to_render_tree(&dom)
-        .map_err(|e| format!("Render error: {}", e))?;
-    let tagged_lines: Vec<TaggedLine<Vec<RichAnnotation>>> = cfg.render_to_lines(render_tree, width)
-        .map_err(|e| format!("Render error: {}", e))?;
+    // The numbers are inside the wrap now, so the wrap gets their room.
+    let render = |cfg: &config::Config<html2text::render::RichDecorator>| {
+        cfg.dom_to_render_tree(&dom)
+            .and_then(|tree| cfg.render_to_lines(tree, width + LINK_MARKER_ROOM))
+            .map_err(|e| format!("Render error: {}", e))
+    };
+    // That minimum applies to every block, not only to table columns: each
+    // list or quote level takes its prefix from the width, and ~13 levels
+    // down a 40-column screen has less than ten left -- a whole page refused
+    // that rendered before the minimum was raised.  So it is a preference,
+    // and html2text's own minimum is the fallback.
+    let tagged_lines: Vec<TaggedLine<Vec<RichAnnotation>>> =
+        render(&cfg).or_else(|_| render(&config::rich().no_table_borders()))?;
 
-    // Extract links and build numbered text.
-    let mut links: Vec<String> = Vec::new();
     let mut rendered_lines: Vec<String> = Vec::new();
-
+    // A word wider than a whole row is cut at the row's edge by html2text,
+    // which knows nothing of link numbers, so the cut can fall inside one.
+    // The opened part is carried to the next row and put back against the
+    // rest of it -- after whatever prefix that row has (an indent, a quote's
+    // `> `), so found by the closing mark rather than by position.
+    let mut carry = String::new();
     for tagged_line in &tagged_lines {
-        let mut line_text = String::new();
-        let elements: Vec<_> = tagged_line.iter().collect();
-        for (idx, element) in elements.iter().enumerate() {
-            if let TaggedLineElement::Str(tagged_str) = *element as &TaggedLineElement<Vec<RichAnnotation>> {
-                let seg_link = tagged_str.tag.iter().find_map(|ann| {
-                    if let RichAnnotation::Link(url) = ann { Some(url.clone()) } else { None }
-                });
-
-                line_text.push_str(&tagged_str.s);
-
-                if let Some(ref href) = seg_link {
-                    let next_link = elements.get(idx + 1).and_then(|next| {
-                        if let TaggedLineElement::Str(ns) = *next as &TaggedLineElement<Vec<RichAnnotation>> {
-                            ns.tag.iter().find_map(|ann| {
-                                if let RichAnnotation::Link(u) = ann { Some(u.clone()) } else { None }
-                            })
-                        } else {
-                            None
-                        }
-                    });
-
-                    let link_ending = match &next_link {
-                        Some(next_href) => next_href != href,
-                        None => true,
-                    };
-
-                    if link_ending && !href.is_empty() && !href.starts_with('#') {
-                        let link_num = if let Some(pos) = links.iter().position(|l| l == href) {
-                            pos + 1
-                        } else {
-                            links.push(href.clone());
-                            links.len()
-                        };
-                        line_text.push_str(&format!("\x02{}\x03", link_num));
-                    }
-                    // Two links side by side with no space between them in
-                    // the HTML are separated by CSS in a real browser, and
-                    // ran together here: "Hacker News[1]new[2]", "Jump to
-                    // navigationJump to search".  A space where one link
-                    // ends and another starts with a word -- not where a
-                    // link ends mid-word (`<a>Wiki</a>pedia`).
-                    let next_starts_word = elements.get(idx + 1).is_some_and(|next| {
-                        matches!(*next as &TaggedLineElement<Vec<RichAnnotation>>,
-                            TaggedLineElement::Str(ns) if ns.s.starts_with(|c: char| c.is_alphanumeric()))
-                    });
-                    if link_ending
-                        && next_link.is_some()
-                        && next_starts_word
-                        && tagged_str.s.ends_with(|c: char| c.is_alphanumeric())
-                    {
-                        line_text.push(' ');
-                    }
-                }
-            }
+        let mut line_text: String = tagged_line.iter().filter_map(|element| match element {
+            TaggedLineElement::Str(ts) => Some(ts.s.as_str()),
+            _ => None,
+        }).collect();
+        let opened = std::mem::take(&mut carry);
+        if let Some(close) = line_text.find(MARK_CLOSE).filter(|_| !opened.is_empty()) {
+            // The rest is the digits the cut left, then the closing mark.
+            let rest = line_text[..close].trim_end_matches(|c: char| c.is_ascii_digit()).len();
+            line_text.insert_str(rest, &opened);
         }
+        if let Some(open) = line_text.rfind(MARK_OPEN)
+            && !line_text[open..].contains(MARK_CLOSE)
+        {
+            carry = line_text.split_off(open);
+        }
+        let line_text = place_link_markers(&line_text);
         rendered_lines.extend(rewrap_for_screen(&line_text, width + LINK_MARKER_ROOM));
         if rendered_lines.len() >= MAX_RENDERED_LINES {
             rendered_lines.truncate(MAX_RENDERED_LINES);
@@ -4025,6 +4343,174 @@ mod tests {
         assert_eq!(rewrap_for_screen(&"x".repeat(50), 20).len(), 3);
     }
 
+    /// A link that wraps is numbered once, at its end, and a number is never
+    /// left alone on a row; a space inside a link goes after its number.
+    /// Measured live: a CNN headline on a C64 showed `[2]` on all three of
+    /// its rows, and Hacker News left `6[13]` on a row of its own.
+    #[test]
+    fn test_a_wrapped_link_is_numbered_once() {
+        let html = br#"<html><body><ul>
+            <li><a href="/a">Trump, crime and corruption loom over Brazil's presidential vote</a></li>
+            <li>388 points by <a href="/u">snehesht</a> <a href="/i">6 hours ago</a> | <a href="/h">hide</a></li>
+            </ul><p><a href="/l">Log in </a><a href="/r">Register</a></p></body></html>"#;
+        for width in [32, 72] {
+            let (page, _) = render_html_body(html, "http://x.test/".to_string(), width).unwrap();
+            let text = page.lines.join("\n");
+            for n in 1..=6 {
+                assert_eq!(text.matches(&format!("\u{2}{n}\u{3}")).count(), 1, "{width}: [{n}] in {text:?}");
+            }
+            assert!(text.contains("vote\u{2}1\u{3}"), "{width}: {text:?}");
+            // No row is a lone fragment of a link: every row with a number
+            // has more than a word before it.
+            for line in &page.lines {
+                assert!(line.chars().count() <= width + LINK_MARKER_ROOM, "{line:?}");
+                if let Some(at) = line.find('\u{2}') {
+                    assert!(line[..at].trim().len() > 1, "{width}: orphan {line:?}");
+                }
+            }
+            assert!(text.contains("Log in\u{2}5\u{3} Register\u{2}6\u{3}"), "{width}: {text:?}");
+        }
+        // Pretty-printed links end in whitespace; the number still sits on
+        // its word.  At 32 the title and `[1]` exactly fill the row, which is
+        // where a break before the number left it alone on the next (VCFed).
+        let pretty = b"<div><a href=\"/f\">\n  <img src=l.png alt=\"Vintage Computer Federation Forums\">\n  </a></div>\
+            <div><a href=\"/t\">\n  Vintage Computer Federation Forums\n</a></div>";
+        let (page, _) = render_html_body(pretty, "http://x.test/".to_string(), 32).unwrap();
+        assert_eq!(page.lines, ["Vintage Computer Federation Forums\u{2}1\u{3}",
+                                "Vintage Computer Federation Forums\u{2}2\u{3}"]);
+        // A narrow table cell keeps its word and number together: HN's header,
+        // where the cell was sized for `login` and the number was cut in two.
+        let hn = br#"<table><tr><td><a href="/"><img src="y.svg"></a></td><td><a href="news">Hacker News</a><a href="newest">new</a> | <a href="front">past</a> | <a href="c">comments</a> | <a href="ask">ask</a> | <a href="show">show</a> | <a href="jobs">jobs</a> | <a href="submit">submit</a></td><td><a href="login">login</a></td></tr></table>"#;
+        let hn_page = [&b"<center><table width=85%><tr><td>"[..], hn, b"</td></tr></table></center>"].concat();
+        for (width, html) in [(32, &hn[..]), (72, &hn[..]), (32, &hn_page[..])] {
+            let (page, _) = render_html_body(html, "http://x.test/".to_string(), width).unwrap();
+            let text = page.lines.join("\n");
+            assert!(text.contains("login\u{2}9\u{3}"), "{width}: {text:?}");
+            // On the header's first row, as the layout put it: a space added
+            // after the layout pushed it to a row of its own.
+            assert!(page.lines[0].starts_with("Hacker News\u{2}1\u{3} new") && page.lines[0].contains("login"),
+                "{width}: {text:?}");
+            // The icon-only link has nothing to show and gets no number.
+            assert_eq!(page.links.len(), 9, "{:?}", page.links);
+            for line in &page.lines {
+                assert_eq!(line.matches('\u{2}').count(), line.matches('\u{3}').count(), "{width}: split {line:?}");
+            }
+        }
+    }
+
+    /// Two elements that touch get a space where lower case meets a capital
+    /// (GitHub's `CopilotWrite better code`), and nowhere else.
+    #[test]
+    fn test_touching_elements_are_spaced_only_at_a_case_change() {
+        let render = |body: &str| {
+            let html = format!("<html><body>{body}</body></html>");
+            let (page, _) = render_html_body(html.as_bytes(), "http://x.test/".into(), 73).unwrap();
+            page.lines.join("\n")
+        };
+        let gh = render(r#"<a href="/c"><span><svg><path d="M0"/></svg>GitHub Copilot</span><span>Write better code</span></a>"#);
+        assert!(gh.contains("GitHub Copilot Write better code"), "{gh:?}");
+        // Nested deeper on each side, and with an icon between.
+        let deep = render("<p><b><i>alpha</i></b><img src=x.png alt=''><em><span>Beta</span></em></p>");
+        assert!(deep.contains("alpha Beta"), "{deep:?}");
+        // Lower meeting lower is a word split for styling; leave it.
+        assert!(render("<p><b>Wiki</b><span>pedia</span></p>").contains("Wikipedia"));
+        // Already spaced: not doubled.
+        assert!(render("<p><span>one </span><span>Two</span></p>").contains("one Two"));
+        // Code is every byte meant, however deep the spans.
+        let code = render("<pre><span><span>let</span><span>X</span></span></pre><code><span>a</span><span>B</span></code>");
+        assert!(code.contains("letX") && code.contains("aB"), "{code:?}");
+    }
+
+    #[test]
+    fn test_json_and_plain_text_keep_their_lines() {
+        for t in ["text/plain", "application/json", "application/ld+json; charset=utf-8", "text/csv"] {
+            assert!(is_plain_text(t), "{t}");
+        }
+        for t in ["text/html", "application/xhtml+xml", "text/xml", "", "application/octet-stream"] {
+            assert!(!is_plain_text(t), "{t}");
+        }
+        // Served: httpbin's pretty-printed reply arrived as one paragraph.
+        let json = b"{\n  \"args\": {},\n  \"url\": \"https://httpbin.org/get\"\n}\n";
+        let page = fetch_and_render(&serve_raw(response("200 OK", Some("application/json"), json)), 73).unwrap();
+        assert_eq!(page.lines, ["{", "  \"args\": {},", "  \"url\": \"https://httpbin.org/get\"", "}"]);
+    }
+
+    /// A word wider than a whole row is cut by html2text at the row edge,
+    /// which knows nothing of link numbers; the number is put back whole.
+    #[test]
+    fn test_a_number_is_never_cut_by_an_overlong_word() {
+        for len in 30..=40 {
+            let word = "x".repeat(len);
+            let html = format!("<p><a href=\"/{len}\">{word}</a> after</p>");
+            let (page, _) = render_html_body(html.as_bytes(), "http://x.test/".into(), 32).unwrap();
+            for line in &page.lines {
+                assert_eq!(line.matches('\u{2}').count(), line.matches('\u{3}').count(), "{len}: {:?}", page.lines);
+            }
+            assert!(page.lines.join("").contains("x\u{2}1\u{3}"), "{len}: {:?}", page.lines);
+        }
+    }
+
+    /// Nesting deep enough that the narrowest column html2text is allowed
+    /// cannot fit renders anyway, as it did before that minimum was raised.
+    #[test]
+    fn test_deep_nesting_still_renders() {
+        for depth in [12, 14, 16] {
+            let html = format!("{}<a href=\"/d\">deep</a>{}", "<blockquote>".repeat(depth), "</blockquote>".repeat(depth));
+            let (page, _) = render_html_body(html.as_bytes(), "http://x.test/".into(), 32)
+                .unwrap_or_else(|e| panic!("{depth}: {e}"));
+            for line in &page.lines {
+                assert_eq!(line.matches('\u{2}').count(), line.matches('\u{3}').count(), "{depth}: {:?}", page.lines);
+            }
+            // Where the preferred minimum still fits, the number stays on its
+            // word; past it there may be no room for both on one row.
+            let joined = page.lines.join("");
+            assert!(joined.contains("deep") && joined.contains("\u{2}1\u{3}"), "{depth}: {:?}", page.lines);
+            if depth == 12 {
+                assert!(joined.contains("deep\u{2}1\u{3}"), "{:?}", page.lines);
+            }
+        }
+    }
+
+    /// Inside an inline SVG, html2text draws only a leading `<title>`; a
+    /// number placed anywhere else is never seen, and a link it never draws
+    /// takes a number from the ones it does.
+    #[test]
+    fn test_svg_contents_take_no_number() {
+        let html = br#"<p><a href="/x">Docs<svg><path d="M0"/><text>ext</text></svg></a>
+            <svg><a href="/hidden"><text>hidden</text></a></svg>
+            <a href="/y">Next</a> <a href="/z"><svg><title>Logo</title><path/></svg></a></p>"#;
+        let (page, _) = render_html_body(html, "http://x.test/".into(), 73).unwrap();
+        let text = page.lines.join("\n");
+        assert!(text.contains("Docs\u{2}1\u{3}") && text.contains("Next\u{2}2\u{3}"), "{text:?}");
+        assert!(text.contains("Logo\u{2}3\u{3}"), "{text:?}");
+        assert_eq!(page.links, ["/x", "/y", "/z"]);
+        // An image with no `src` is not drawn, so its link takes no number.
+        let (page, _) = render_html_body(br#"<p><a href="/n"><img alt="Logo"></a> <a href="/m">More</a></p>"#,
+            "http://x.test/".into(), 73).unwrap();
+        assert_eq!(page.links, ["/m"]);
+        assert!(!page.lines.join("").starts_with('\u{2}'), "{:?}", page.lines);
+    }
+
+    /// The characters that carry a number through the layout cannot be
+    /// typed into a page to forge one.
+    #[test]
+    fn test_a_page_cannot_forge_a_link_number() {
+        // An image's alt text is drawn when the image is a link.
+        let html = "<p>Click here&#xFDD0;1&#xFDD1; or \u{FDD0}2\u{FDD1}</p><p><a href=\"/i\"><img src=\"p.png\" alt=\"pic&#xFDD0;3&#xFDD1;\"></a> <a href=\"/real\">real</a></p>";
+        let (page, _) = render_html_body(html.as_bytes(), "http://x.test/".into(), 73).unwrap();
+        let text = page.lines.join("\n");
+        assert_eq!(text.matches('\u{2}').count(), 2, "{text:?}");
+        assert!(text.contains("pic3\u{2}1\u{3} real\u{2}2\u{3}") && text.contains("Click here1 or 2"), "{text:?}");
+    }
+
+    #[test]
+    fn test_place_link_markers() {
+        let m = |s: &str| s.replace('<', &MARK_OPEN.to_string()).replace('>', &MARK_CLOSE.to_string());
+        assert_eq!(place_link_markers(&m("Log in<22> Register<23>")), "Log in\u{2}22\u{3} Register\u{2}23\u{3}");
+        // A page's own sentinel bytes are not markers.
+        assert_eq!(place_link_markers("a\u{2}9\u{3}b"), "a9b");
+    }
+
     /// A field the page gave no label is named for what it is, not by its
     /// internal identifier.
     #[test]
@@ -4247,4 +4733,3 @@ mod tests {
         );
     }
 }
-
