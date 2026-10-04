@@ -33,6 +33,7 @@ def main():
     nt.dial(number)                       # hangs up first, and checks it worked
     nt.inst_del(3.5)                      # PETSCII detection
     nt.type('n', 3.0)                     # no colour
+    novaterm.past_welcome(nt)             # a new gateway's welcome page
     nt.type('f', 3.0)                     # File Transfer
     nt.type('d', 4.0)                     # Download
     screen = nt.text()

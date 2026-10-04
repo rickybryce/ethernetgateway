@@ -171,3 +171,30 @@ class NovaTerm:
         if got != want:
             raise RuntimeError("wanted %r (row %d), highlight is on row %d" % (name, want, got))
         self.press("Return", 1.5)
+
+
+def past_welcome(nt, timeout=15.0):
+    """Press SPACE past the gateway's welcome page, if it shows.
+
+    A gateway shows it for its first seven days (since e035aba, 2026-09-19),
+    between the colour question and the main menu, and it waits for a key.
+    Unexpected, it took the next keystroke -- the Telnet Gateway's `t`, or the
+    `f` for File Transfer -- and everything after went to the wrong screen.
+
+    Polled until either the page or the main menu shows: one look a fixed time
+    after the colour answer could come before a page that takes ~2.5 s to draw
+    at 2400 baud.  Matched on lowercase words, since NovaTerm's screen text
+    turns capitals into dots ("upload/download" is the main menu's File
+    Transfer line).  Lives here, once, because every script that reaches the
+    menu needs it, and two copies of a screen-scraper drift.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        scr = nt.text()
+        if any('or the main menu' in l or 'his page stops appearing' in l for l in scr):
+            print('  welcome page -> SPACE', flush=True)
+            nt.type(' ', 3.0)
+            return
+        if any('upload/download' in l for l in scr):
+            return
+        time.sleep(1.0)

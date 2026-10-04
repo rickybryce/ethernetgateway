@@ -124,6 +124,25 @@ def login(host, port):
     return s
 
 
+def past_welcome(s, timeout=15.0):
+    """Wait for the main menu, pressing SPACE past the welcome page on the way.
+
+    A gateway shows its welcome page (e035aba) for its first seven days,
+    between the colour question and the main menu, and it waits for a key --
+    so on a fresh scratch data dir the `F` below was eaten by it.  Waits for
+    either screen rather than looking once: at 2400 baud the page takes over
+    two seconds to draw, and a single look too early misses it.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if b"for the main menu" in s.buf:
+            s.clear(); s.send(" ")
+        elif b"File Transfer" in s.buf:
+            return
+        s.drain(0.5)
+    raise RuntimeError(f"no main menu after login:\n{s.text()[-600:]}")
+
+
 def to_menu(s):
     """Main menu -> File Transfer, with IAC escaping turned off.
 
@@ -133,6 +152,7 @@ def to_menu(s):
     is treated as a real client and the escaping comes on; `lrzsz` does not
     speak telnet and would see the doubled bytes as corruption.  Pressing `I`
     is what a user in the same position does, and it exercises the toggle."""
+    past_welcome(s)
     s.clear(); s.send("F\r"); s.drain(2.0)
     if b"Upload" not in s.buf and b"UPLOAD" not in s.buf.upper():
         raise RuntimeError(f"no file-transfer menu:\n{s.text()[-600:]}")
@@ -234,7 +254,9 @@ DOWNLOAD_RECV = {
     "ymodem":    ["rb"],
     "zmodem":    ["rz"],
 }
-UPLOAD_KEY = {"xmodem": "X", "ymodem": "X", "zmodem": "Z"}
+# `X` asks for a filename; `Y` and `Z` ask none -- each file keeps the name its
+# sender gives it, which is the staged file's own name here.
+UPLOAD_KEY = {"xmodem": "X", "ymodem": "Y", "zmodem": "Z"}
 UPLOAD_SEND = {
     "xmodem": ["sx"],
     "ymodem": ["sb"],
@@ -290,16 +312,20 @@ def upload(host, port, proto, payload, xferdir):
     try:
         to_menu(s)
         s.clear(); s.send("U\r"); s.drain(2.0)
-        if b"Filename" not in s.buf:
-            bad(f"upload/{proto}: no filename prompt:\n{s.text()[-500:]}")
-            return
-        # Filename first, then the protocol screen -- the same order as
-        # download (file, then protocol), which is deliberate in the product.
-        s.clear(); s.send(name + "\r"); s.drain(2.5)
+        # The protocol first: it decides whether there is a name to ask for.
+        # Only XMODEM asks; YMODEM and ZMODEM save under the sender's name,
+        # which is `name` -- the staged file's own.  The key is one keypress
+        # with no RETURN: a RETURN after it would land on XMODEM's filename
+        # prompt as an empty name and end the upload.
         if not (b"rotocol" in s.buf or b"ROTOCOL" in s.buf):
-            bad(f"upload/{proto}: no protocol prompt after the filename:\n{s.text()[-500:]}")
+            bad(f"upload/{proto}: no protocol prompt:\n{s.text()[-500:]}")
             return
-        s.send(UPLOAD_KEY[proto] + "\r")
+        s.clear(); s.send(UPLOAD_KEY[proto]); s.drain(2.0)
+        if UPLOAD_KEY[proto] == "X":
+            if b"Filename" not in s.buf:
+                bad(f"upload/{proto}: no filename prompt after the protocol:\n{s.text()[-500:]}")
+                return
+            s.send(name + "\r")
         settle(s)
         rc, err = handoff(s, UPLOAD_SEND[proto] + [staged],
                           os.path.dirname(payload), 120)
@@ -358,9 +384,10 @@ def punter(host, port, direction, xferdir, work):
             s.clear(); s.send(num + "\r"); s.drain(2.0)
             s.send("P\r")
         else:
+            # Protocol first, then the name: Punter carries none of its own.
             s.clear(); s.send("U\r"); s.drain(2.0)
-            s.clear(); s.send(name + "\r"); s.drain(2.5)
-            s.send("P\r")
+            s.clear(); s.send("P"); s.drain(2.0)
+            s.send(name + "\r")
         # No extra drain here.  Punter's sender opens the handshake straight
         # after the preamble, and a one-second drain ate that opening code --
         # the reference then hit its handshake timeout, and it *segfaults* on a
@@ -375,7 +402,11 @@ def punter(host, port, direction, xferdir, work):
             else:
                 bad(f"download/punter: reference rc={rc} {err[-200:]}")
         else:
-            for _ in range(40):
+            # 30 s, not 10: the gateway writes the file after Punter's own closing
+            # wait, about ten seconds after the sender's last code, so a 10 s
+            # look raced it -- and lost, with the bytes landing intact moments
+            # later.
+            for _ in range(120):
                 if os.path.exists(landed) and os.path.getsize(landed) >= len(expect):
                     break
                 time.sleep(0.25)
