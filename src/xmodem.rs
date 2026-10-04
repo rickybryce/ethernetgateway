@@ -524,6 +524,12 @@ pub(crate) async fn xmodem_receive_batch(
     // we would have synthesised end-of-file and returned the partial file as
     // a success -- the precise failure the Forsberg guard exists to prevent.
     let mut awaiting_eot_confirm = false;
+    // A purge ended on a short CAN tail.  If the NAK after it is answered by
+    // silence rather than a resent block, that tail was the sender giving up:
+    // end now, as cancelled, rather than NAKing into its terminal for every
+    // remaining retry (minutes) and then reporting a timeout.  A sender that
+    // is alive resends within one wait, which clears it.
+    let mut short_cancel_seen = false;
     loop {
         let byte = match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
@@ -554,6 +560,9 @@ pub(crate) async fn xmodem_receive_batch(
                 if awaiting_eot_confirm && !file_data.is_empty() {
                     if verbose { glog!("XMODEM recv: no answer to the EOT NAK — sender is done, accepting"); }
                     EOT
+                } else if std::mem::take(&mut short_cancel_seen) {
+                    raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
+                    return Err("Transfer cancelled by sender".into());
                 } else {
                     // Spec receiver recovery (Forsberg/Christensen): a missing
                     // or late block is recovered by NAKing to re-prompt the
@@ -574,6 +583,7 @@ pub(crate) async fn xmodem_receive_batch(
             }
         };
 
+        short_cancel_seen = false;
         if is_can_abort(byte, state) {
             return Err("Transfer cancelled by sender".into());
         }
@@ -647,7 +657,7 @@ pub(crate) async fn xmodem_receive_batch(
                         // Purge before the NAK (Christensen): the rest of a
                         // block we lost sync inside is still arriving, and
                         // read as fresh input each byte drew its own NAK.
-                        purge_line(reader, is_tcp, state).await?;
+                        short_cancel_seen = purge_line(reader, is_tcp, state).await?;
                         raw_write_byte(writer, NAK, is_tcp).await?;
                     }
                 }
@@ -857,7 +867,7 @@ pub(crate) async fn xmodem_receive_batch(
                     raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
                     return Err("Too many block errors".into());
                 }
-                purge_line(reader, is_tcp, state).await?;
+                short_cancel_seen = purge_line(reader, is_tcp, state).await?;
                 raw_write_byte(writer, NAK, is_tcp).await?;
             }
         }
@@ -881,11 +891,16 @@ const PURGE_MAX_BYTES: usize = 2 * 1029;
 /// NAK -- several retries spent on one bad block.  Two maximum-size blocks is
 /// more than a sender can have in flight, so the byte budget ends a babbling
 /// line however fast it babbles, and 60 s covers that budget at 300 baud.
+///
+/// `Ok(true)` when it ended quiet on a *short* CAN tail -- two or three, the
+/// length a minimal sender (or this gateway) cancels with, and also the length
+/// a bad block's `18 18` CRC leaves.  Not decisive alone; the caller lets the
+/// next silence decide (see `short_cancel_seen`).
 async fn purge_line(
     reader: &mut (impl AsyncRead + Unpin),
     is_tcp: bool,
     state: &mut ReadState,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let quiet = std::time::Duration::from_secs(1);
     let give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut budget = PURGE_MAX_BYTES;
@@ -933,7 +948,7 @@ async fn purge_line(
     if ended_quiet && trailing_cans >= 4 {
         return Err("Transfer cancelled by sender".into());
     }
-    Ok(())
+    Ok(ended_quiet && trailing_cans >= 2)
 }
 
 /// Receive and validate a single XMODEM block (after SOH or STX was
@@ -3894,6 +3909,31 @@ mod tests {
         finish_plain_eot(&mut send_read, &mut send_write).await;
         let (data, _) = recv_task.await.unwrap().unwrap();
         assert_eq!(data.len(), 2 * XMODEM_BLOCK_SIZE);
+    }
+
+    /// A two- or three-CAN cancel during a purge -- this gateway's own cancel
+    /// is three -- ends the transfer at the next silence, as cancelled, not
+    /// after every retry has timed out.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_short_cancel_during_the_purge_ends_at_the_next_silence() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        let start = tokio::time::Instant::now();
+        send_write.write_all(&[0x55, CAN, CAN, CAN]).await.unwrap();
+        let err = recv_task.await.unwrap().expect_err("cancelled");
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "ended after one wait, not every retry: {:?}",
+            start.elapsed()
+        );
     }
 
     /// A bad block whose CRC happens to be `18 18`, after which the sender

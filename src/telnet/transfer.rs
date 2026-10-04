@@ -406,7 +406,8 @@ impl TelnetSession {
     /// DOS/Kermit way instead of dropping the upload: if `filename`
     /// already exists, try numbered variants (`numbered_received_name`)
     /// until one is free.  A resumed transfer replaces its own partial
-    /// by exact name and is never renamed.  Returns the filename that was
+    /// by exact name and is never numbered (on Windows the name may first
+    /// be converted -- see below -- and then it is not treated as a resume).  Returns the filename that was
     /// actually written (which may differ from `filename` on collision).
     ///
     /// `MAX_TRIES` bounds the probe so a pathological peer re-uploading
@@ -2084,12 +2085,26 @@ impl TelnetSession {
         // below independent of what kermit_server returns.
         let mut saved: Vec<(String, usize)> = Vec::new();
         let mut skipped: Vec<(String, &'static str)> = Vec::new();
-        let target_dir = self.transfer_path();
+        // The transfer ROOT: the server starts in the menu's folder and
+        // stamps every file's `rx.subdir` with where it is, so joining that
+        // onto the menu's folder would name the folder twice.
+        //
+        // Only when the folder's name passes Kermit's own subdir rule: the
+        // menu lists every folder on disk (`My Disks`, `foo+bar`, non-ASCII),
+        // and the server would refuse such a start and fall back to the root
+        // -- saving there while the screen still showed the folder.  For
+        // those the server starts at the root and saves into the menu's
+        // folder, exactly as before it learned to start anywhere.
+        let (target_dir, start_subdir) = if crate::kermit::is_safe_relative_subdir(&self.transfer_subdir) {
+            (std::path::PathBuf::from(config::get_config().transfer_dir), self.transfer_subdir.clone())
+        } else {
+            (self.transfer_path(), String::new())
+        };
 
         let start = std::time::Instant::now();
         let result = {
             let mut writer_guard = self.writer.lock().await;
-            crate::kermit::kermit_server_with_outcome(
+            crate::kermit::kermit_server_with_outcome_in(
                 &mut self.reader,
                 &mut *writer_guard,
                 self.xmodem_iac,
@@ -2152,6 +2167,7 @@ impl TelnetSession {
                         }
                     }
                 },
+                &start_subdir,
             )
             .await
         };

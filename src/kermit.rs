@@ -2980,7 +2980,7 @@ async fn send_and_await_ack(
 ) -> Result<Vec<u8>, String> {
     send_and_await_ack_opts(
         reader, writer, kind, seq, payload, chkt, pad_count, pad_char, eol, is_tcp, is_petscii,
-        verbose, state, deadline, max_retries, is_send_init, true,
+        verbose, state, deadline, max_retries, is_send_init, true, false,
     )
     .await
 }
@@ -3013,6 +3013,7 @@ async fn send_and_await_ack_opts(
     max_retries: u32,
     is_send_init: bool,
     resend_on_timeout: bool,
+    stop_on_cancel: bool,
 ) -> Result<Vec<u8>, String> {
     let pkt = build_packet(kind, seq, payload, chkt, pad_count, pad_char, eol);
     let mut attempts = 0u32;
@@ -3147,6 +3148,14 @@ async fn send_and_await_ack_opts(
                     ));
                 }
                 Err(e) => {
+                    // The user's ESC or the peer's CAN x2 means stop.  Taken
+                    // as a read error it was retried -- for a G command that
+                    // re-sent DELETE / RENAME on every ESC the user pressed.
+                    // Only where the caller asks: the data paths keep their
+                    // long-standing behaviour.
+                    if stop_on_cancel && (e.contains("cancelled by user") || e.contains("peer aborted")) {
+                        return Err(e);
+                    }
                     attempts += 1;
                     if verbose {
                         glog!(
@@ -5211,7 +5220,7 @@ pub(crate) async fn kermit_server(
 ) -> Result<Vec<KermitReceive>, String> {
     // Tests read the file bytes back off the returned Vec, so retain them
     // (`retain_data = true`); the production `_with_outcome` path frees them.
-    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, true)
+    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, true, "")
         .await
         .map(|outcome| outcome.files)
 }
@@ -5257,7 +5266,24 @@ pub(crate) async fn kermit_server_with_outcome(
     verbose: bool,
     on_file: impl FnMut(&KermitReceive),
 ) -> Result<KermitServerOutcome, String> {
-    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, false).await
+    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, false, "").await
+}
+
+/// [`kermit_server_with_outcome`] starting in `start_subdir` of the transfer
+/// directory rather than its root -- the File Transfer menu's current folder.
+/// The server started at the root whatever folder the user was in, so its
+/// GET, DIR and resume lookups all disagreed with where the menu saved.
+pub(crate) async fn kermit_server_with_outcome_in(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    on_file: impl FnMut(&KermitReceive),
+    start_subdir: &str,
+) -> Result<KermitServerOutcome, String> {
+    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, false, start_subdir)
+        .await
 }
 
 /// Shared server-mode dispatch loop behind `kermit_server` and
@@ -5267,6 +5293,7 @@ pub(crate) async fn kermit_server_with_outcome(
 /// the hook has already committed the file to disk and no production
 /// caller reads them back), tests pass `true` so they can assert on the
 /// round-tripped content.
+#[allow(clippy::too_many_arguments)]
 async fn kermit_server_dispatch(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -5275,6 +5302,7 @@ async fn kermit_server_dispatch(
     verbose: bool,
     mut on_file: impl FnMut(&KermitReceive),
     retain_data: bool,
+    start_subdir: &str,
 ) -> Result<KermitServerOutcome, String> {
     let cfg = config::get_config();
     if verbose {
@@ -5289,7 +5317,13 @@ async fn kermit_server_dispatch(
     // Per-session working subdir, settled by G C (CWD).  All R-pulls,
     // S-receives (via the R/S handlers below), and G D / G $ replies
     // resolve paths relative to `cfg.transfer_dir / subdir`.
-    let mut subdir: String = String::new();
+    // Starts where the caller is (validated like any `remote cd`), so a
+    // server opened from a menu folder works in that folder.
+    let mut subdir: String = if is_safe_relative_subdir(start_subdir) {
+        start_subdir.to_string()
+    } else {
+        String::new()
+    };
     // Server idles between commands with `kermit_idle_timeout` as the
     // inactivity bound so a wedged peer can't pin us forever.  Re-armed
     // per command.  A configured value of 0 disables the deadline
@@ -6515,15 +6549,17 @@ async fn kermit_client_send_g_simple(
     raw.push(action);
     raw.extend_from_slice(arg);
     let payload = encode_data(&raw, Quoting::default());
-    // **A command that changes something is resent on a NAK, never on a
-    // timeout.**  A NAK means the server did not get it; a timeout or an
-    // unreadable reply cannot say whether it did, and a server that did would
-    // run DELETE / RENAME / a relative CWD / a directory command again on the
-    // resend.  For those the whole negotiation window is one wait.  FINISH,
-    // LOGOUT and BYE end the session however often they arrive, so they keep
-    // resending on timeout -- each attempt with a share of the window, so a
-    // dead server still costs the window and no more.
-    let repeatable = matches!(action, b'F' | b'L' | b'B');
+    // **CWD is resent on a NAK, never on a timeout.**  A NAK means the server
+    // did not get it; a timeout or an unreadable reply cannot say whether it
+    // did, and a relative CWD run twice moves twice.  For CWD the whole
+    // negotiation window is one wait.  Every other G command resends on
+    // timeout -- each attempt with a share of the window, so a dead server
+    // still costs the window and no more.
+    // Only CWD is truly harmed by running twice: a relative `remote cd ..`
+    // moves again.  A resent DELETE / RENAME / MKDIR mostly earns an error
+    // ("no such file", "exists") -- a false failure, but losing the resend
+    // instead turned one G packet eaten by noise into a 300 s failure.
+    let repeatable = action != b'C';
     let wait = if repeatable {
         (cfg.kermit_negotiation_timeout / u64::from(cfg.kermit_max_retries.max(1))).max(1)
     } else {
@@ -6547,6 +6583,7 @@ async fn kermit_client_send_g_simple(
         cfg.kermit_max_retries,
         false,
         repeatable,
+        true,
     )
     .await?;
     Ok(())
@@ -7605,7 +7642,7 @@ mod tests {
             let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
             let out = send_and_await_ack_opts(
                 &mut rd, &mut wr, TYPE_GENERIC, 0, b"Edoomed", b'1', 0, 0, CR,
-                false, false, false, &mut state, deadline, 5, false, false,
+                false, false, false, &mut state, deadline, 5, false, false, true,
             )
             .await;
             drop(wr);
@@ -7617,6 +7654,41 @@ mod tests {
         let (out, transmits) = run(false).await;
         assert!(out.is_err(), "silence ends it");
         assert_eq!(transmits, 1, "and is never resent: the server may have acted on it");
+    }
+
+    /// ESC stops a G command at once.  As a read error it was retried, so on
+    /// the resend path every ESC the user pressed sent DELETE again.
+    #[tokio::test(start_paused = true)]
+    async fn test_esc_stops_a_g_command_without_resending() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (ours, peer) = tokio::io::duplex(4096);
+        let (mut rd, mut wr) = tokio::io::split(ours);
+        let (mut prd, mut pwr) = tokio::io::split(peer);
+        let peer_task = tokio::spawn(async move {
+            let mut transmits = 0usize;
+            let mut buf = [0u8; 256];
+            while let Ok(Ok(n)) =
+                tokio::time::timeout(tokio::time::Duration::from_secs(60), prd.read(&mut buf)).await
+            {
+                if n == 0 {
+                    break;
+                }
+                transmits += buf[..n].iter().filter(|&&b| b == CR).count();
+                pwr.write_all(&[0x1B]).await.ok(); // the user presses ESC
+            }
+            transmits
+        });
+        let mut state = ReadState::default();
+        let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
+        let out = send_and_await_ack_opts(
+            &mut rd, &mut wr, TYPE_GENERIC, 0, b"Efile", b'1', 0, 0, CR,
+            false, false, false, &mut state, deadline, 5, false, true, true,
+        )
+        .await;
+        drop(wr);
+        let err = out.expect_err("ESC ends it");
+        assert!(err.contains("cancelled by user"), "{err}");
+        assert_eq!(peer_task.await.unwrap(), 1, "sent once, never again after the ESC");
     }
 
     /// The window is measured in sequence numbers from the oldest unACKed

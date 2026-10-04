@@ -190,6 +190,28 @@ fn test_the_kermit_save_converts_a_device_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Kermit server mode opened from a File Transfer folder works in that folder:
+/// the server starts there (so GET, DIR and a resume's partial agree with it),
+/// and the save joins the server's stamped subdir onto the transfer ROOT, or
+/// the folder would be named twice.
+#[test]
+fn test_menu_kermit_server_starts_in_the_menu_folder() {
+    let src = include_str!("transfer.rs").replace('\r', "");
+    let at = src.find("async fn file_transfer_kermit_server").expect("menu server");
+    let body = &src[at..at + src[at..].find("\n    }\n").unwrap()];
+    assert!(body.contains(concat!("kermit_server_with_outcome", "_in(")), "starts in a folder");
+    assert!(body.contains("&start_subdir,"), "the menu's own");
+    assert!(
+        body.contains("(std::path::PathBuf::from(config::get_config().transfer_dir), self.transfer_subdir.clone())"),
+        "saves relative to the root, since rx.subdir already names the folder"
+    );
+    assert!(
+        body.contains("is_safe_relative_subdir(&self.transfer_subdir)")
+            && body.contains("(self.transfer_path(), String::new())"),
+        "and a folder Kermit's rule refuses keeps the old behaviour: saved into, server at the root"
+    );
+}
+
 /// One decision for menu upload and autostart, with a reason for each refusal.
 #[test]
 fn test_zmodem_accepts_gives_a_reason_for_every_refusal() {

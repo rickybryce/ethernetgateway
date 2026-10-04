@@ -725,6 +725,9 @@ enum ActiveConnection {
         _session: crate::relay::RelaySession,
         read: crate::relay::RelayReadHalf,
         write: crate::relay::RelayWriteHalf,
+        /// A relayed `ATDT <host>`, so `ATO` resumes it with `AT+PETSCII`
+        /// applied -- see `online_mode_duplex`.
+        dials_a_host: bool,
     },
 }
 
@@ -4889,7 +4892,7 @@ fn handle_return_online(state: &mut ModemState) {
             }
         }
         ActiveConnection::Duplex { mut read, mut write } => {
-            let exit = online_mode_duplex(state, &mut read, &mut write);
+            let exit = online_mode_duplex(state, &mut read, &mut write, false);
             state.mode = ModemMode::Command;
             match exit {
                 OnlineExit::Escaped => {
@@ -4910,8 +4913,9 @@ fn handle_return_online(state: &mut ModemState) {
             _session,
             mut read,
             mut write,
+            dials_a_host,
         } => {
-            let exit = online_mode_duplex(state, &mut read, &mut write);
+            let exit = online_mode_duplex(state, &mut read, &mut write, dials_a_host);
             state.mode = ModemMode::Command;
             match exit {
                 OnlineExit::Escaped => {
@@ -4919,6 +4923,7 @@ fn handle_return_online(state: &mut ModemState) {
                         _session,
                         read,
                         write,
+                        dials_a_host,
                     });
                     send_result(state, "OK");
                 }
@@ -4978,6 +4983,7 @@ fn clear_active_connection(state: &mut ModemState) {
             _session,
             read,
             write,
+            ..
         }) => relay_teardown(&state.handle, _session, read, write),
         Some(conn) => {
             state.handle.block_on(async move { drop(conn) });
@@ -5538,7 +5544,7 @@ fn bridge_duplex_online(state: &mut ModemState, bridge: tokio::io::DuplexStream)
     state.mode = ModemMode::Online;
     apply_carrier(state, true);
     let (mut read, mut write) = tokio::io::split(bridge);
-    let exit = online_mode_duplex(state, &mut read, &mut write);
+    let exit = online_mode_duplex(state, &mut read, &mut write, false);
     state.mode = ModemMode::Command;
     match exit {
         OnlineExit::Escaped => {
@@ -5626,6 +5632,9 @@ fn dial_master_relay(
         return;
     }
 
+    // Only a dial to an outside host is a BBS; the master's menu and a
+    // serial peer are pipes -- see `online_mode_duplex`.
+    let dials_a_host = matches!(target, crate::relay::RelayTarget::Dial { .. });
     let host = cfg.slave_master_host.clone();
     let port = cfg.slave_master_port;
     let user = cfg.slave_master_username.clone();
@@ -5669,7 +5678,7 @@ fn dial_master_relay(
 
     let crate::relay::MasterRelay { _session, stream } = relay;
     let (mut relay_read, mut relay_write) = tokio::io::split(stream);
-    let exit = online_mode_duplex(state, &mut relay_read, &mut relay_write);
+    let exit = online_mode_duplex(state, &mut relay_read, &mut relay_write, dials_a_host);
 
     state.mode = ModemMode::Command;
     match exit {
@@ -5681,6 +5690,7 @@ fn dial_master_relay(
                 _session,
                 read: relay_read,
                 write: relay_write,
+                dials_a_host,
             });
             send_result(state, "OK");
         }
@@ -5833,7 +5843,7 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
     // roomy input side.
     let mut wire_read = wire_read;
     let mut wire_write = wire_write;
-    let exit = online_mode_duplex(state, &mut wire_read, &mut wire_write);
+    let exit = online_mode_duplex(state, &mut wire_read, &mut wire_write, false);
 
     state.mode = ModemMode::Command;
     match exit {
@@ -5916,7 +5926,7 @@ fn dial_kermit_server(state: &mut ModemState) {
 
     let (mut duplex_read, mut duplex_write) =
         tokio::io::split(serial_stream);
-    let exit = online_mode_duplex(state, &mut duplex_read, &mut duplex_write);
+    let exit = online_mode_duplex(state, &mut duplex_read, &mut duplex_write, false);
 
     state.mode = ModemMode::Command;
     match exit {
@@ -6116,10 +6126,19 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
 ///
 /// Only `AsyncRead`/`AsyncWrite` are required, so a `DuplexStream` half, a
 /// TCP socket half, or an SSH channel half all satisfy the bounds.
+///
+/// `dials_a_host` is true only for a slave's relayed `ATDT <host>`: the one
+/// call through here whose far end is a BBS, and so the one that applies
+/// `AT+PETSCII` exactly as `online_mode_tcp` does.  Every other caller -- the
+/// gateway's own menu (it handles PETSCII itself), the Kermit server, a
+/// serial-to-serial peer relay -- is a pipe and must stay raw.  Read with the
+/// live `state.petscii_translate`, so a change made between `+++` and `ATO`
+/// takes effect, as it does on the direct path.
 fn online_mode_duplex<R, W>(
     state: &mut ModemState,
     duplex_read: &mut R,
     duplex_write: &mut W,
+    dials_a_host: bool,
 ) -> OnlineExit
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -6129,6 +6148,7 @@ where
 
     let mut serial_buf = [0u8; 256];
     let mut duplex_buf = [0u8; 4096];
+    let mut link = PetsciiLink::new();
 
     state.plus_count = 0;
     state.last_data_time = Instant::now();
@@ -6169,6 +6189,9 @@ where
                 }
                 let mut forward = Vec::with_capacity(n);
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
+                if dials_a_host && state.petscii_translate {
+                    forward = link.for_host(&forward);
+                }
                 if !forward.is_empty() {
                     let result = state.handle.block_on(async {
                         tokio::time::timeout(
@@ -6212,7 +6235,14 @@ where
         match result {
             Ok(Ok(0)) => return OnlineExit::Disconnected,
             Ok(Ok(n)) => {
-                if state.port.write_all(&duplex_buf[..n]).is_err() {
+                let translated;
+                let out: &[u8] = if dials_a_host && state.petscii_translate {
+                    translated = link.for_device(&duplex_buf[..n]);
+                    &translated
+                } else {
+                    &duplex_buf[..n]
+                };
+                if !out.is_empty() && state.port.write_all(out).is_err() {
                     return OnlineExit::Disconnected;
                 }
                 let _ = state.port.flush();
@@ -6225,6 +6255,70 @@ where
         if check_plus_complete(state) {
             return OnlineExit::Escaped;
         }
+    }
+}
+
+/// The `AT+PETSCII=1` translation for one dialled call, both directions.
+///
+/// **One object for both online loops**, so a C64 dialling a BBS gets the
+/// same translation whether the gateway dials it directly (`online_mode_tcp`)
+/// or a slave relays the dial through its master (`online_mode_duplex`).  The
+/// relayed path had none at all: a C64 behind a slave lost colour, cursor
+/// control and its cursor keys where the same C64 on a standalone gateway
+/// had them.  The translation happens at the C64's own gateway, from that
+/// port's setting; the master is a raw pipe either way.
+///
+/// The state lives across reads: a CSI sequence or a UTF-8 smart quote split
+/// across packets still decodes.
+struct PetsciiLink {
+    ansi: crate::petscii::AnsiToPetscii,
+    punct: PetsciiPunctState,
+}
+
+impl PetsciiLink {
+    fn new() -> Self {
+        PetsciiLink { ansi: crate::petscii::AnsiToPetscii::new(), punct: PetsciiPunctState::default() }
+    }
+
+    /// C64 keystrokes on their way to an ASCII host.  A cursor key is one
+    /// PETSCII byte and becomes a three-byte ANSI sequence, so this cannot be
+    /// done in place.  CRSR DOWN is 0x11 -- XON -- and forwarding it raw told
+    /// a host with software flow control to resume sending.  The back-arrow
+    /// becomes ESC: a C64 user's ESC key should mean ESC at the host as much
+    /// as it does through the Telnet Gateway.  Online mode leaves with `+++`,
+    /// not with a key pair, so nothing else claims the byte -- the cost is
+    /// only that an underscore can no longer be typed.
+    fn for_host(&self, forward: &[u8]) -> Vec<u8> {
+        let mut mapped = Vec::with_capacity(forward.len());
+        for &b in forward {
+            match crate::petscii::key_to_ansi_host(b) {
+                Some(seq) => mapped.extend_from_slice(seq),
+                None => mapped.push(translate_petscii_to_ascii_byte(b)),
+            }
+        }
+        mapped
+    }
+
+    /// A host's ASCII/ANSI on its way to the C64.  Text goes through the
+    /// punctuation folder and the case swap; the escape translator's own
+    /// PETSCII control bytes must not, because `PetsciiPunctState` drops
+    /// 0x80..=0x9F -- which is where nine of the sixteen colour codes live.
+    /// Keeping the two apart is why `feed` takes the caller's text handler
+    /// rather than doing the mapping itself.
+    fn for_device(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut translated = Vec::with_capacity(bytes.len());
+        let punct = &mut self.punct;
+        let mut text = |b: u8, out: &mut Vec<u8>| {
+            let start = out.len();
+            punct.feed(b, out);
+            for v in out[start..].iter_mut() {
+                *v = translate_ascii_to_petscii_byte(*v);
+            }
+        };
+        for &b in bytes {
+            self.ansi.feed(b, &mut text, &mut translated);
+        }
+        translated
     }
 }
 
@@ -6421,15 +6515,9 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
     state.plus_count = 0;
     state.last_data_time = Instant::now();
 
-    // ANSI ESC-stripper state for the inbound (TCP→serial) direction.
     // Only consulted when AT+PETSCII=1 is active, but its state has to live
-    // across reads regardless so a CSI split across packets still
-    // collapses correctly.
-    let mut ansi = crate::petscii::AnsiToPetscii::new();
-    // Punctuation normalizer for the inbound direction, applied after
-    // the ANSI stripper and before the ASCII→PETSCII case-swap.  Lives
-    // across reads so a UTF-8 smart-quote split across packets decodes.
-    let mut punct = PetsciiPunctState::default();
+    // across reads regardless -- see `PetsciiLink`.
+    let mut link = PetsciiLink::new();
 
     let restart_flag = &SERIAL_RESTART[state.port_id.index()];
     loop {
@@ -6468,24 +6556,7 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
                 let mut forward = Vec::with_capacity(n);
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
                 if state.petscii_translate {
-                    // A cursor key is one PETSCII byte and becomes a
-                    // three-byte ANSI sequence, so this cannot be done in
-                    // place.  CRSR DOWN is 0x11 -- XON -- and forwarding it
-                    // raw told a host with software flow control to resume
-                    // sending.  The back-arrow becomes ESC here too: this mode
-                    // means "the far end speaks ASCII", and a C64 user's ESC
-                    // key should mean ESC there as much as it does through the
-                    // Telnet Gateway.  Online mode leaves with `+++`, not with
-                    // a key pair, so nothing else claims the byte -- the cost
-                    // is only that an underscore can no longer be typed.
-                    let mut mapped = Vec::with_capacity(forward.len());
-                    for &b in forward.iter() {
-                        match crate::petscii::key_to_ansi_host(b) {
-                            Some(seq) => mapped.extend_from_slice(seq),
-                            None => mapped.push(translate_petscii_to_ascii_byte(b)),
-                        }
-                    }
-                    forward = mapped;
+                    forward = link.for_host(&forward);
                 }
                 if !forward.is_empty() && tcp.write_all(&forward).is_err() {
                     return OnlineExit::Disconnected;
@@ -6502,23 +6573,7 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
                 if state.petscii_translate {
-                    let mut translated = Vec::with_capacity(n);
-                    // Text goes through the punctuation folder and the case
-                    // swap; the escape translator's own PETSCII control bytes
-                    // must not, because `PetsciiPunctState` drops 0x80..=0x9F
-                    // -- which is where nine of the sixteen colour codes live.
-                    // Keeping the two apart is why `feed` takes the caller's
-                    // text handler rather than doing the mapping itself.
-                    let mut text = |b: u8, out: &mut Vec<u8>| {
-                        let start = out.len();
-                        punct.feed(b, out);
-                        for v in out[start..].iter_mut() {
-                            *v = translate_ascii_to_petscii_byte(*v);
-                        }
-                    };
-                    for &b in &tcp_buf[..n] {
-                        ansi.feed(b, &mut text, &mut translated);
-                    }
+                    let translated = link.for_device(&tcp_buf[..n]);
                     if !translated.is_empty() {
                         if state.port.write_all(&translated).is_err() {
                             return OnlineExit::Disconnected;
@@ -6806,7 +6861,7 @@ fn process_peer_ring(state: &mut ModemState, call: PeerCall) {
     apply_carrier(state, true);
 
     let (mut read, mut write) = tokio::io::split(bridge);
-    let exit = online_mode_duplex(state, &mut read, &mut write);
+    let exit = online_mode_duplex(state, &mut read, &mut write, false);
 
     state.mode = ModemMode::Command;
     match exit {
@@ -9626,6 +9681,57 @@ mod tests {
         }
         // A graphics byte is still not a command character.
         assert!(!fold_petscii_command_byte(0xA0).is_ascii());
+    }
+
+    /// The translation a C64 gets dialling a BBS, as one object both online
+    /// loops use -- so standalone (`online_mode_tcp`) and through a slave
+    /// (`online_mode_duplex`) cannot translate differently.
+    #[test]
+    fn test_the_petscii_link_translates_both_ways() {
+        let mut link = PetsciiLink::new();
+        // Keys out: a typed lowercase letter, CRSR DOWN (0x11, XON raw).
+        assert_eq!(link.for_host(&[0x41, 0x11]), b"a\x1b[B".to_vec());
+        // Text in: case-swapped for the C64.
+        assert_eq!(link.for_device(b"Hi"), vec![b'h', b'I']);
+        // A colour sequence split across two reads still becomes one code.
+        let mut out = link.for_device(b"\x1b[3");
+        out.extend(link.for_device(b"4mX"));
+        assert_eq!(out, vec![0x1F, b'x'], "blue, then the letter");
+    }
+
+    /// **Standalone and slave must translate the same.**  A slave's relayed
+    /// `ATDT <host>` is the one `online_mode_duplex` call that applies
+    /// `AT+PETSCII`; every other caller is a pipe and passes `false`.  One
+    /// guard per link of the chain: the flag is derived from the target, it is
+    /// carried across `+++`/`ATO`, and the loop translates on it.
+    #[test]
+    fn test_only_a_relayed_host_dial_translates_petscii() {
+        let src = include_str!("serial.rs").replace('\r', "");
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Split with `concat!` so this test's own text is not what it finds.
+        let call = concat!("online_mode_", "duplex(state,");
+        let calls: Vec<&str> = code.match_indices(call).map(|(i, _)| {
+            let rest = &code[i..];
+            &rest[..rest.find(';').unwrap()]
+        }).collect();
+        assert_eq!(calls.len(), 7, "every caller is accounted for: {calls:#?}");
+        let flagged = calls.iter().filter(|c| c.contains("dials_a_host")).count();
+        let raw = calls.iter().filter(|c| c.contains("false")).count();
+        assert_eq!((flagged, raw), (2, 5), "the relay dial and its ATO; five pipes");
+        assert!(code.contains(concat!("let dials_a_host = matches!(target, ", "crate::relay::RelayTarget::Dial { .. });")));
+        assert_eq!(
+            code.matches(concat!("if dials_a_host && ", "state.petscii_translate {")).count(),
+            2,
+            "both directions translate on the flag: keys out, and text in (below)"
+        );
+        assert!(
+            code.contains(concat!("let out: &[u8] = if dials_a_host && ", "state.petscii_translate {")),
+            "text in is translated"
+        );
     }
 
     #[test]
