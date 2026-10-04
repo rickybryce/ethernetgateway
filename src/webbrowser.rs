@@ -1065,12 +1065,16 @@ fn prune_elements(root: &Handle, tags: &[&str]) {
 /// News[1]new[2]`, `Jump to navigationJump to search`.  (This was done on the
 /// rendered line once; a space added after html2text has laid a row out
 /// makes the row one column too wide, and HN's `login` went to a row of its
-/// own.)  **Lower case meeting a capital**: GitHub writes `<span>GitHub
-/// Copilot</span><span>Write better code</span>` and its stylesheet puts the
-/// two on separate lines; we have no stylesheet, so they read `GitHub
-/// CopilotWrite`.  Neither is a word split for styling -- `<b>Wiki</b>pedia`
-/// is lower meeting lower, and a link that ends mid-word (`<a>Wiki</a>pedia`)
-/// is not two links -- and those are left alone.  Preformatted text and code
+/// own.)  **Two phrases, lower case meeting a capital**: GitHub writes
+/// `<span>GitHub Copilot</span><span>Write better code</span>` and its
+/// stylesheet puts the two on separate lines; we have no stylesheet, so they
+/// read `GitHub CopilotWrite`.  Both sides must be more than one word: a
+/// capital alone also marks a name styled in parts (`i`+`Phone`, `Mac`+`Book
+/// Pro`), and a review caught the first version splitting those.  The cost is
+/// a single word meeting a phrase (GitHub's `Actions`+`Automate any workflow`)
+/// staying joined -- text left as the page wrote it, never a name broken.
+/// `<b>Wiki</b>pedia` is lower meeting lower, and a link that ends mid-word
+/// (`<a>Wiki</a>pedia`) is not two links; both are left alone.  Preformatted text and code
 /// are left alone entirely: a highlighter splits tokens into spans and every
 /// byte there is meant.
 ///
@@ -1080,14 +1084,17 @@ fn space_touching_elements(dom: &RcDom) {
     use html5ever::tree_builder::{NodeOrText, TreeSink};
     use std::collections::HashMap;
 
-    /// A node's first and last visible character (whitespace as ' '), and
-    /// the link each one is inside, if any.
+    /// A node's first and last visible character (whitespace as ' '), the
+    /// link each one is inside, if any, whether it shows anything but
+    /// whitespace, and whether that is more than one word.
     #[derive(Clone, Copy)]
     struct Edge {
         first: char,
         last: char,
         first_link: Option<usize>,
         last_link: Option<usize>,
+        content: bool,
+        phrase: bool,
     }
     let key = |h: &Handle| std::rc::Rc::as_ptr(h) as usize;
     // `None`: a node with no text at all (an icon, a comment).
@@ -1122,28 +1129,47 @@ fn space_touching_elements(dom: &RcDom) {
             match text_of(&node) {
                 Some(t) => t.chars().next().zip(t.chars().last()).map(|(f, l)| Edge {
                     first: ws(f), last: ws(l), first_link: None, last_link: None,
+                    content: !t.trim().is_empty(), phrase: t.trim().contains(char::is_whitespace),
                 }),
                 None if !matches!(node.data, html2text::Comment { .. } | html2text::Document) => Some(Edge {
-                    first: ' ', last: ' ', first_link: None, last_link: None,
+                    first: ' ', last: ' ', first_link: None, last_link: None, content: false, phrase: false,
                 }),
                 None => None,
             }
         } else {
             let mut whole: Option<Edge> = None;
             let mut prev: Option<(&Handle, Option<Edge>)> = None;
+            // A gap since the last word, for telling `GitHub Copilot` (a
+            // phrase across two children) from `Git` + `Hub`.
+            let mut gap = false;
             for child in children.iter() {
                 let e = edges.get(&key(child)).copied().flatten();
                 if let Some(c) = e {
                     whole = Some(match whole {
-                        Some(w) => Edge { last: c.last, last_link: c.last_link, ..w },
+                        Some(w) => Edge {
+                            last: c.last,
+                            last_link: c.last_link,
+                            content: w.content || c.content,
+                            phrase: w.phrase || c.phrase
+                                || (w.content && c.content && (gap || c.first == ' ')),
+                            ..w
+                        },
                         None => c,
                     });
+                    if c.content {
+                        gap = c.last == ' ';
+                    } else if whole.is_some_and(|w| w.content) {
+                        gap = true;
+                    }
                 }
                 if let (Some((p, Some(l))), Some(r)) = (prev, e) {
                     let both_elements = matches!(p.data, Element { .. }) && matches!(child.data, Element { .. });
                     let two_links = l.last_link.is_some() && r.first_link.is_some() && l.last_link != r.first_link
                         && l.last.is_alphanumeric() && r.first.is_alphanumeric();
-                    let case_change = l.last.is_lowercase() && r.first.is_uppercase();
+                    // Two phrases, not a name styled in parts: `iPhone`,
+                    // `MacBook Pro` and `WordPress` are one word each, so
+                    // the capital alone decides nothing.
+                    let case_change = l.last.is_lowercase() && r.first.is_uppercase() && l.phrase && r.phrase;
                     if !verbatim && both_elements && (two_links || case_change) {
                         inserts.push(child.clone());
                     }
@@ -1474,18 +1500,106 @@ fn last_shown(node: &Handle) -> Option<Handle> {
     None
 }
 
+/// Put back the link numbers html2text cut in two.
+///
+/// A word wider than its column is cut at the column's edge by html2text,
+/// which knows nothing of link numbers, so the cut can fall inside one: the
+/// opening half ends one row and the closing half starts the next.  A table
+/// row is several columns side by side, so one row can hold several cut
+/// numbers, and only their order says which belongs with which -- columns
+/// keep their order from row to row, so the k-th opening half on a row goes
+/// with the k-th closing half on the next.  (Carrying only the last one, and
+/// joining it to whatever closing mark came first, swapped numbers between
+/// columns and made `[21]` out of `[2]` and `[1]`.)
+///
+/// The whole number is written where its closing half was, and the opening
+/// half is blanked, so the other columns stay where they were; the row it
+/// lands on gives back padding after it where it has some.  Rows whose halves
+/// do not pair up are left alone, and `place_link_markers` draws no half
+/// number as a number -- never one that points at the wrong link.
+fn rejoin_cut_numbers(rows: &mut [Vec<char>]) {
+    // (start, end) of each opening mark and its digits not followed by a
+    // closing mark.
+    let cut_opens = |row: &[char]| -> Vec<(usize, usize)> {
+        let mut found = Vec::new();
+        for (p, &c) in row.iter().enumerate() {
+            if c == MARK_OPEN {
+                let end = p + 1 + row[p + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+                if row.get(end) != Some(&MARK_CLOSE) {
+                    found.push((p, end));
+                }
+            }
+        }
+        found
+    };
+    // (start of its digits, position) of each closing mark not preceded by
+    // an opening mark and digits.
+    let cut_closes = |row: &[char]| -> Vec<(usize, usize)> {
+        let mut found = Vec::new();
+        for (q, &c) in row.iter().enumerate() {
+            if c == MARK_CLOSE {
+                let digits = row[..q].iter().rev().take_while(|c| c.is_ascii_digit()).count();
+                let start = q - digits;
+                if start == 0 || row[start - 1] != MARK_OPEN {
+                    found.push((start, q));
+                }
+            }
+        }
+        found
+    };
+    for r in 1..rows.len() {
+        let opens = cut_opens(&rows[r - 1]);
+        let closes = cut_closes(&rows[r]);
+        if opens.is_empty() || opens.len() != closes.len() {
+            continue;
+        }
+        // Right to left, so a change cannot move a position still to come.
+        for (&(o_start, o_end), &(c_start, c_pos)) in opens.iter().zip(&closes).rev() {
+            let head: Vec<char> = rows[r - 1][o_start + 1..o_end].to_vec();
+            rows[r - 1][o_start..o_end].fill(' ');
+            let mut whole = vec![MARK_OPEN];
+            whole.extend(&head);
+            whole.extend_from_slice(&rows[r][c_start..c_pos]);
+            whole.push(MARK_CLOSE);
+            let grown = whole.len() - (c_pos + 1 - c_start);
+            let after = c_start + whole.len();
+            rows[r].splice(c_start..=c_pos, whole);
+            let pad = rows[r][after..].iter().take(grown).take_while(|c| **c == ' ').count();
+            rows[r].drain(after..after + pad);
+        }
+    }
+}
+
 /// A rendered line with its link numbers as the `\x02N\x03` sentinels the
 /// screen colours, and nothing else that could be read as one.
 fn place_link_markers(line: &str) -> String {
-    line.chars()
-        .filter_map(|c| match c {
-            MARK_OPEN => Some('\u{2}'),
-            MARK_CLOSE => Some('\u{3}'),
-            // The page's own sentinel bytes are not link numbers.
-            '\u{2}' | '\u{3}' => None,
-            c => Some(c),
-        })
-        .collect()
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            MARK_OPEN => {
+                let end = i + 1 + chars[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+                // Only a whole number is shown as one.  Half of one that
+                // could not be put back loses its marks and keeps its digits
+                // as plain text: a link with no number, never a number
+                // pointing at the wrong link.
+                if end > i + 1 && chars.get(end) == Some(&MARK_CLOSE) {
+                    out.push('\u{2}');
+                    out.extend(&chars[i + 1..end]);
+                    out.push('\u{3}');
+                    i = end + 1;
+                    continue;
+                }
+            }
+            // A stray closing mark, and the page's own sentinel bytes, which
+            // are not link numbers.
+            MARK_CLOSE | '\u{2}' | '\u{3}' => {}
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Parse an HTML body into a rendered WebPage with title, links, and forms.
@@ -1547,29 +1661,16 @@ fn render_html_body(
     let tagged_lines: Vec<TaggedLine<Vec<RichAnnotation>>> =
         render(&cfg).or_else(|_| render(&config::rich().no_table_borders()))?;
 
-    let mut rendered_lines: Vec<String> = Vec::new();
-    // A word wider than a whole row is cut at the row's edge by html2text,
-    // which knows nothing of link numbers, so the cut can fall inside one.
-    // The opened part is carried to the next row and put back against the
-    // rest of it -- after whatever prefix that row has (an indent, a quote's
-    // `> `), so found by the closing mark rather than by position.
-    let mut carry = String::new();
-    for tagged_line in &tagged_lines {
-        let mut line_text: String = tagged_line.iter().filter_map(|element| match element {
+    let mut rows: Vec<Vec<char>> = tagged_lines.iter().map(|tagged_line| {
+        tagged_line.iter().filter_map(|element| match element {
             TaggedLineElement::Str(ts) => Some(ts.s.as_str()),
             _ => None,
-        }).collect();
-        let opened = std::mem::take(&mut carry);
-        if let Some(close) = line_text.find(MARK_CLOSE).filter(|_| !opened.is_empty()) {
-            // The rest is the digits the cut left, then the closing mark.
-            let rest = line_text[..close].trim_end_matches(|c: char| c.is_ascii_digit()).len();
-            line_text.insert_str(rest, &opened);
-        }
-        if let Some(open) = line_text.rfind(MARK_OPEN)
-            && !line_text[open..].contains(MARK_CLOSE)
-        {
-            carry = line_text.split_off(open);
-        }
+        }).collect::<String>().chars().collect()
+    }).collect();
+    rejoin_cut_numbers(&mut rows);
+    let mut rendered_lines: Vec<String> = Vec::new();
+    for row in &rows {
+        let line_text: String = row.iter().collect();
         let line_text = place_link_markers(&line_text);
         rendered_lines.extend(rewrap_for_screen(&line_text, width + LINK_MARKER_ROOM));
         if rendered_lines.len() >= MAX_RENDERED_LINES {
@@ -4410,8 +4511,20 @@ mod tests {
         let gh = render(r#"<a href="/c"><span><svg><path d="M0"/></svg>GitHub Copilot</span><span>Write better code</span></a>"#);
         assert!(gh.contains("GitHub Copilot Write better code"), "{gh:?}");
         // Nested deeper on each side, and with an icon between.
-        let deep = render("<p><b><i>alpha</i></b><img src=x.png alt=''><em><span>Beta</span></em></p>");
-        assert!(deep.contains("alpha Beta"), "{deep:?}");
+        let deep = render("<p><b><i>first alpha</i></b><img src=x.png alt=''><em><span>Beta</span> <span>two</span></em></p>");
+        assert!(deep.contains("first alpha Beta two"), "{deep:?}");
+        // The price of not splitting names: one word meeting a phrase stays
+        // as the page wrote it.
+        assert!(render("<p><span>Actions</span><span>Automate any workflow</span></p>").contains("ActionsAutomate"));
+        // A name styled in two parts is one word, whatever its case:
+        // the space is for two phrases meeting, not for a capital.
+        for (html, word) in [("<p><span>i</span><span>Phone</span> sale</p>", "iPhone"),
+                             ("<p><b>Mac</b><b>Book</b> Pro</p>", "MacBook"),
+                             ("<p><span>Git</span><span>Hub</span></p>", "GitHub"),
+                             ("<p><b>Mac</b><b>Book Pro</b></p>", "MacBook Pro"),
+                             ("<p><a href=/w><span>Word</span><span>Press</span></a> hosting</p>", "WordPress")] {
+            assert!(render(html).contains(word), "{html}: {:?}", render(html));
+        }
         // Lower meeting lower is a word split for styling; leave it.
         assert!(render("<p><b>Wiki</b><span>pedia</span></p>").contains("Wikipedia"));
         // Already spaced: not doubled.
@@ -4448,6 +4561,41 @@ mod tests {
             }
             assert!(page.lines.join("").contains("x\u{2}1\u{3}"), "{len}: {:?}", page.lines);
         }
+    }
+
+    /// Side-by-side table columns can each have a number cut by a word wider
+    /// than the column; every number comes back whole, in its own column,
+    /// and none is invented from the digits of two.
+    #[test]
+    fn test_numbers_cut_in_several_columns_are_each_put_back() {
+        let mut layouts = 0;
+        for len in 8..=29 {
+            for width in [20, 27, 32, 40] {
+                let w = "a".repeat(len);
+                for html in [
+                    format!("<table><tr><td><a href=/a>{w}</a></td><td><a href=/b>{w}</a></td></tr></table>"),
+                    format!("<table><tr><td>plain text <a href=/a>{w}</a></td><td>first <a href=/b>{w}</a></td></tr></table>"),
+                ] {
+                    let (page, _) = render_html_body(html.as_bytes(), "http://x.test/".into(), width).unwrap();
+                    let text = page.lines.join("\n");
+                    for line in &page.lines {
+                        assert_eq!(line.matches('\u{2}').count(), line.matches('\u{3}').count(), "{len}/{width}: {text:?}");
+                    }
+                    let numbers: Vec<&str> = text.split('\u{2}').skip(1).map(|s| s.split('\u{3}').next().unwrap()).collect();
+                    assert!(numbers.iter().all(|n| *n == "1" || *n == "2"), "{len}/{width}: {numbers:?} in {text:?}");
+                    assert!(numbers.contains(&"1") && numbers.contains(&"2"), "{len}/{width}: {text:?}");
+                    layouts += 1;
+                }
+            }
+        }
+        assert_eq!(layouts, 22 * 4 * 2);
+        // The joined number takes back the padding it grew into, so the next
+        // column stays in line: `eee` under `bbb`.
+        let html = format!("<table><tr><td><a href=/a>{}</a></td><td>bbb ccc ddd eee fff ggg</td></tr></table>", "a".repeat(9));
+        let (page, _) = render_html_body(html.as_bytes(), "http://x.test/".into(), 20).unwrap();
+        let col = |line: &str, word: &str| line[..line.find(word).unwrap()].chars().count();
+        assert!(page.lines[1].starts_with("\u{2}1\u{3}"), "{:?}", page.lines);
+        assert_eq!(col(&page.lines[0], "bbb"), col(&page.lines[1], "eee"), "{:?}", page.lines);
     }
 
     /// Nesting deep enough that the narrowest column html2text is allowed
@@ -4509,6 +4657,10 @@ mod tests {
         assert_eq!(place_link_markers(&m("Log in<22> Register<23>")), "Log in\u{2}22\u{3} Register\u{2}23\u{3}");
         // A page's own sentinel bytes are not markers.
         assert_eq!(place_link_markers("a\u{2}9\u{3}b"), "a9b");
+        // Half a number, or a mark with no digits, is never drawn as one.
+        assert_eq!(place_link_markers(&m("cut<1 more")), "cut1 more");
+        assert_eq!(place_link_markers(&m("2> rest")), "2 rest");
+        assert_eq!(place_link_markers(&m("<> x")), " x");
     }
 
     /// A field the page gave no label is named for what it is, not by its
