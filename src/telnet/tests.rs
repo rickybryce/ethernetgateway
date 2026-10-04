@@ -171,6 +171,25 @@ fn test_a_sender_name_is_converted_not_refused() {
     }
 }
 
+/// Every Kermit upload path -- serial port, ATDT KERMIT, relay, TCP server and
+/// the menu -- saves through the collision-safe helper, so the conversion
+/// lives there: on Windows a device name is saved moved aside, never opened
+/// as a device; elsewhere it is an ordinary name and is kept.
+#[test]
+fn test_the_kermit_save_converts_a_device_name() {
+    let dir = std::env::temp_dir().join(format!("egw_kdev_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let saved = TelnetSession::save_received_file_collision_safe(&dir, "NUL.TXT", b"data", None, false)
+        .expect("saved");
+    // Converted on Windows, where the name opens a device; kept elsewhere,
+    // where it is an ordinary file a peer may later GET by that name.
+    let want = if cfg!(windows) { "_NUL.TXT" } else { "NUL.TXT" };
+    assert_eq!(saved, want);
+    assert_eq!(std::fs::read(dir.join(want)).unwrap(), b"data");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One decision for menu upload and autostart, with a reason for each refusal.
 #[test]
 fn test_zmodem_accepts_gives_a_reason_for_every_refusal() {

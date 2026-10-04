@@ -2978,6 +2978,42 @@ async fn send_and_await_ack(
     max_retries: u32,
     is_send_init: bool,
 ) -> Result<Vec<u8>, String> {
+    send_and_await_ack_opts(
+        reader, writer, kind, seq, payload, chkt, pad_count, pad_char, eol, is_tcp, is_petscii,
+        verbose, state, deadline, max_retries, is_send_init, true,
+    )
+    .await
+}
+
+/// [`send_and_await_ack`], choosing whether a *timeout* retransmits.
+///
+/// A NAK says the peer did not get the packet, so resending is always safe.
+/// A timeout cannot say which side was lost: the packet, or the ACK for a
+/// packet the peer acted on.  For data that is harmless -- a duplicate is
+/// recognised by its sequence number -- but a Kermit server sitting idle
+/// takes a resent G packet as a new command, so a lost ACK ran REMOTE DELETE,
+/// RENAME or a relative CWD twice.  `resend_on_timeout = false` reports the
+/// timeout instead, for exactly those packets.
+#[allow(clippy::too_many_arguments)]
+async fn send_and_await_ack_opts(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    kind: u8,
+    seq: u8,
+    payload: &[u8],
+    chkt: u8,
+    pad_count: u8,
+    pad_char: u8,
+    eol: u8,
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    state: &mut ReadState,
+    deadline: Option<tokio::time::Instant>,
+    max_retries: u32,
+    is_send_init: bool,
+    resend_on_timeout: bool,
+) -> Result<Vec<u8>, String> {
     let pkt = build_packet(kind, seq, payload, chkt, pad_count, pad_char, eol);
     let mut attempts = 0u32;
     // How long the caller allowed for a reply, measured once.  Every caller
@@ -3124,6 +3160,19 @@ async fn send_and_await_ack(
                     }
                     if attempts >= max_retries {
                         return Err(format!("Kermit: too many timeouts: {}", e));
+                    }
+                    if !resend_on_timeout {
+                        // Say which it was: silence, or a reply that could
+                        // not be read.  Either way the command may have run,
+                        // which is why it is not resent.
+                        let what = if e.contains("timeout") {
+                            "no answer from the server"
+                        } else {
+                            "the server's reply could not be read"
+                        };
+                        return Err(format!(
+                            "Kermit: {what} -- not resent, as the command may already have run: {e}"
+                        ));
                     }
                     resend = true;
                 }
@@ -3731,6 +3780,10 @@ async fn handle_streaming_response(
 /// stream.  Returns the full list of received files; on abort
 /// (E-packet, CAN×2, or ESC) returns an Err with a human-readable
 /// reason.
+///
+/// Test-only now: every product path says where it will save, through
+/// [`kermit_receive_in`] or [`kermit_receive_with_init_in`].
+#[cfg(test)]
 pub(crate) async fn kermit_receive(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -3755,7 +3808,39 @@ pub(crate) async fn kermit_receive_with_init(
     verbose: bool,
     init_pkt: Option<Packet>,
 ) -> Result<Vec<KermitReceive>, String> {
+    let root = std::path::PathBuf::from(config::get_config().transfer_dir);
+    kermit_receive_with_init_in(reader, writer, is_tcp, is_petscii, verbose, init_pkt, &root).await
+}
+
+/// [`kermit_receive`] for a caller that saves somewhere other than the
+/// transfer root -- the Upload menu in a subdirectory.
+pub(crate) async fn kermit_receive_in(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    save_dir: &std::path::Path,
+) -> Result<Vec<KermitReceive>, String> {
+    kermit_receive_with_init_in(reader, writer, is_tcp, is_petscii, verbose, None, save_dir).await
+}
+
+/// [`kermit_receive_with_init`] with the directory the caller will save
+/// into.  **Resume reads its partial from there**: it read from the
+/// transfer root whatever the caller's directory, so a resumed upload into
+/// `work/` spliced the root's file onto the sender's tail and then replaced
+/// `work/`'s file with the result.
+pub(crate) async fn kermit_receive_with_init_in(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    init_pkt: Option<Packet>,
+    save_dir: &std::path::Path,
+) -> Result<Vec<KermitReceive>, String> {
     let cfg = config::get_config();
+    let save_dir_str = save_dir.to_string_lossy().into_owned();
     if verbose {
         glog!(
             "Kermit recv: starting, is_tcp={}, is_petscii={}, pre_read={}",
@@ -4204,7 +4289,7 @@ pub(crate) async fn kermit_receive_with_init(
                 if cfg.kermit_resume_partial && session.attribute_packets && session.resend {
                     let off = compute_resume_offset(
                         &fname,
-                        &cfg.transfer_dir,
+                        &save_dir_str,
                         cfg.kermit_resume_max_age_hours,
                     );
                     if let Some(n) = off
@@ -4372,7 +4457,7 @@ pub(crate) async fn kermit_receive_with_init(
                 if let Some(offset) = pending_resume_offset.take()
                     && let Some(last) = received.last_mut()
                 {
-                    let path = std::path::Path::new(&cfg.transfer_dir).join(&last.filename);
+                    let path = save_dir.join(&last.filename);
                     match tokio::fs::read(&path).await {
                         Ok(mut bytes) => {
                             // If the file grew between F-packet stat and
@@ -5911,13 +5996,17 @@ async fn kermit_server_dispatch(
                 // accumulate whatever it returns; then loop back for
                 // the next command.  A read failure inside the receive
                 // (timeout, malformed packet, etc.) propagates up.
-                let mut received = kermit_receive_with_init(
+                // Into the session's `remote cd` directory, which is where
+                // the caller saves -- and so where a resume's partial is.
+                let into = effective_transfer_path(&cfg, &subdir);
+                let mut received = kermit_receive_with_init_in(
                     reader,
                     writer,
                     is_tcp,
                     is_petscii,
                     verbose,
                     Some(pkt),
+                    &into,
                 )
                 .await?;
                 if verbose {
@@ -6426,7 +6515,21 @@ async fn kermit_client_send_g_simple(
     raw.push(action);
     raw.extend_from_slice(arg);
     let payload = encode_data(&raw, Quoting::default());
-    let _ack_payload = send_and_await_ack(
+    // **A command that changes something is resent on a NAK, never on a
+    // timeout.**  A NAK means the server did not get it; a timeout or an
+    // unreadable reply cannot say whether it did, and a server that did would
+    // run DELETE / RENAME / a relative CWD / a directory command again on the
+    // resend.  For those the whole negotiation window is one wait.  FINISH,
+    // LOGOUT and BYE end the session however often they arrive, so they keep
+    // resending on timeout -- each attempt with a share of the window, so a
+    // dead server still costs the window and no more.
+    let repeatable = matches!(action, b'F' | b'L' | b'B');
+    let wait = if repeatable {
+        (cfg.kermit_negotiation_timeout / u64::from(cfg.kermit_max_retries.max(1))).max(1)
+    } else {
+        cfg.kermit_negotiation_timeout
+    };
+    let _ack_payload = send_and_await_ack_opts(
         reader,
         writer,
         TYPE_GENERIC,
@@ -6440,20 +6543,10 @@ async fn kermit_client_send_g_simple(
         is_petscii,
         verbose,
         &mut state,
-        // The negotiation window *shared* across the attempts:
-        // `send_and_await_ack` grants its allowance afresh per attempt, so
-        // the whole window each was twenty-five minutes against a dead
-        // server -- and one attempt instead let a single NAK (a bad block
-        // check on a noisy line) fail the command outright.  A share each
-        // keeps both: NAKs retransmit, and the total stays the window.
-        Some(
-            tokio::time::Instant::now()
-                + tokio::time::Duration::from_secs(
-                    (cfg.kermit_negotiation_timeout / u64::from(cfg.kermit_max_retries.max(1))).max(1),
-                ),
-        ),
+        Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(wait)),
         cfg.kermit_max_retries,
         false,
+        repeatable,
     )
     .await?;
     Ok(())
@@ -7476,6 +7569,56 @@ mod tests {
         assert!(err.contains("without seq"), "stopped for the right reason: {err}");
     }
 
+    /// A packet sent with `resend_on_timeout = false` is resent on a NAK --
+    /// the peer did not get it -- but a timeout ends the exchange instead:
+    /// the peer may have acted on it, and a G command must not run twice.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_g_command_is_resent_on_nak_but_not_on_timeout() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let run = |answer_with_nak: bool| async move {
+            let (ours, peer) = tokio::io::duplex(4096);
+            let (mut rd, mut wr) = tokio::io::split(ours);
+            let (mut prd, mut pwr) = tokio::io::split(peer);
+            let peer_task = tokio::spawn(async move {
+                let mut transmits = 0usize;
+                let mut buf = [0u8; 256];
+                loop {
+                    let n = match tokio::time::timeout(
+                        tokio::time::Duration::from_secs(120),
+                        prd.read(&mut buf),
+                    )
+                    .await
+                    {
+                        Ok(Ok(n)) if n > 0 => n,
+                        _ => return transmits,
+                    };
+                    let crs = buf[..n].iter().filter(|&&b| b == CR).count();
+                    transmits += crs;
+                    if answer_with_nak && transmits == 1 {
+                        pwr.write_all(&build_packet(TYPE_NAK, 0, &[], b'1', 0, 0, CR)).await.ok();
+                    } else if answer_with_nak && transmits >= 2 {
+                        pwr.write_all(&build_packet(TYPE_ACK, 0, &[], b'1', 0, 0, CR)).await.ok();
+                    }
+                }
+            });
+            let mut state = ReadState::default();
+            let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
+            let out = send_and_await_ack_opts(
+                &mut rd, &mut wr, TYPE_GENERIC, 0, b"Edoomed", b'1', 0, 0, CR,
+                false, false, false, &mut state, deadline, 5, false, false,
+            )
+            .await;
+            drop(wr);
+            (out, peer_task.await.unwrap())
+        };
+        let (out, transmits) = run(true).await;
+        assert!(out.is_ok(), "a NAK is resent and the ACK accepted: {out:?}");
+        assert_eq!(transmits, 2, "sent once, resent once after the NAK");
+        let (out, transmits) = run(false).await;
+        assert!(out.is_err(), "silence ends it");
+        assert_eq!(transmits, 1, "and is never resent: the server may have acted on it");
+    }
+
     /// The window is measured in sequence numbers from the oldest unACKed
     /// packet: with that one stuck, the sender may not run past it by a
     /// window's width however many later packets have been ACKed.
@@ -7968,6 +8111,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Resume reads its partial from the directory the caller will save
+    /// into.  It read `cfg.transfer_dir` -- the root -- whatever that was, so
+    /// a resumed upload into `work/` spliced the root's file onto the
+    /// sender's tail.  Nothing in the receiver may name the root again.
+    #[test]
+    fn test_resume_reads_the_partial_from_the_save_directory() {
+        let src = include_str!("kermit.rs").replace('\r', "");
+        let start = src.find("pub(crate) async fn kermit_receive_with_init_in(").expect("receiver");
+        let body = &src[start..];
+        let body = &body[..body.find("\n}\n").expect("end of receiver")];
+        let root = concat!("cfg.transfer", "_dir");
+        assert!(!body.contains(root), "the receiver reads the transfer root again");
+        assert!(body.contains("&save_dir_str"), "the resume offset is computed in save_dir");
+        assert!(body.contains("save_dir.join(&last.filename)"), "and the partial read from it");
+        // And the server passes its `remote cd` directory.
+        assert!(src.contains("let into = effective_transfer_path(&cfg, &subdir);"));
     }
 
     #[test]

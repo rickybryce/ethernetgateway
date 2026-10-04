@@ -3392,8 +3392,17 @@ pub(crate) fn commit_kermit_upload(
             label, saved_name, rx.data.len()
         ),
         Ok(saved_name) => glog!(
-            "Serial Kermit server (Port {}): saved {} as {} ({} bytes, name collision)",
-            label, rx.filename, saved_name, rx.data.len()
+            "Serial Kermit server (Port {}): saved {} as {} ({} bytes, {})",
+            label,
+            rx.filename,
+            saved_name,
+            rx.data.len(),
+            // Converted (Windows device name or trailing dot), or numbered.
+            if TelnetSession::safe_upload_name(&rx.filename).as_deref() == Some(saved_name.as_str()) {
+                "name converted"
+            } else {
+                "name collision"
+            }
         ),
         Err(e) => glog!(
             "Serial Kermit server (Port {}): could not save {}: {:?}",

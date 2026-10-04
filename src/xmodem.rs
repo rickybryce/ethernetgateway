@@ -868,33 +868,69 @@ pub(crate) async fn xmodem_receive_batch(
     Ok(files)
 }
 
+/// Most a purge drains: two of the largest blocks (STX + 2 + 1024 + 2 CRC).
+const PURGE_MAX_BYTES: usize = 2 * 1029;
+
 /// Read and discard until the line has been quiet for a second (Christensen's
 /// purge), so the NAK that follows answers the sender rather than the tail of
-/// whatever it was sending.  Bounded in time, so a line that never goes quiet
-/// cannot hold the receiver here; the caller's retry count then decides.
+/// whatever it was sending.
+///
+/// **Bounded by bytes as well as time.**  A 10 s cap alone was shorter than
+/// one 1K block at 300 baud (1029 bytes, ~34 s), so the purge ended mid-block,
+/// the NAK went out, and the rest of the block drew another error and another
+/// NAK -- several retries spent on one bad block.  Two maximum-size blocks is
+/// more than a sender can have in flight, so the byte budget ends a babbling
+/// line however fast it babbles, and 60 s covers that budget at 300 baud.
 async fn purge_line(
     reader: &mut (impl AsyncRead + Unpin),
     is_tcp: bool,
     state: &mut ReadState,
 ) -> Result<(), String> {
     let quiet = std::time::Duration::from_secs(1);
-    let give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut budget = PURGE_MAX_BYTES;
     // CANs at the end of what was drained.  A sender giving up sends a run of
     // them and then stops -- so *that*, CAN CAN and then silence, is the
     // abort.  Not `is_can_abort` on every byte: what is purged is often block
     // payload, and a binary file holding `18 18` would then end a transfer
     // that one NAK would have recovered.
+    // The CANs the drained bytes end in, allowing backspaces after them:
+    // lrzsz cancels with ten CANs then ten backspaces (read out of
+    // /usr/bin/sz), so it never ends on a CAN.  **Not "a long run
+    // anywhere"** -- that was ZMODEM's rule, safe there only because ZMODEM
+    // escapes every CAN in data; XMODEM does not, and a font's `|` is eight
+    // of them.  A run in payload is followed by more payload, not silence.
     let mut trailing_cans = 0u32;
+    // A cancel ends in silence; a purge cut short by its budget or time cap
+    // ended on whatever byte came last, which proves nothing.
+    let mut ended_quiet = false;
     while tokio::time::Instant::now() < give_up {
         match tokio::time::timeout(quiet, nvt_read_byte(reader, is_tcp, state)).await {
             Ok(Ok(b)) => {
-                trailing_cans = if b == CAN { trailing_cans + 1 } else { 0 };
+                trailing_cans = match b {
+                    CAN => trailing_cans + 1,
+                    // Backspaces after a CAN run keep it as the tail.
+                    0x08 if trailing_cans >= 2 => trailing_cans,
+                    _ => 0,
+                };
+                budget -= 1;
+                if budget == 0 {
+                    break;
+                }
             }
             Ok(Err(e)) => return Err(e),
-            Err(_) => break,
+            Err(_) => {
+                ended_quiet = true;
+                break;
+            }
         }
     }
-    if trailing_cans >= 2 {
+    // **Four**, not two: the purge drains a bad block's own tail, and a CRC
+    // of `18 18` -- 1 in 65536 at random, far likelier in a file dense in
+    // 0x18 such as a font -- then reads as CAN CAN followed by the sender
+    // going quiet to wait.  Real cancels are longer (lrzsz sends ten); a
+    // two-CAN cancel during a purge is still caught, later, by the timeouts.
+    if ended_quiet && trailing_cans >= 4 {
         return Err("Transfer cancelled by sender".into());
     }
     Ok(())
@@ -3802,9 +3838,84 @@ mod tests {
         assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
         send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
         assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
-        send_write.write_all(&[0x55, CAN, CAN]).await.unwrap(); // stray, then abort
+        // A stray byte, then a cancel as senders send one: a run of CANs (eight
+        // is Forsberg's recommendation; lrzsz sends ten).  A two-CAN cancel
+        // during a purge is left to the timeouts, because a bad block's own
+        // CRC can be `18 18` -- see `test_a_bad_block_ending_in_18_18_...`.
+        let mut abort = vec![0x55];
+        abort.extend([CAN; 8]);
+        send_write.write_all(&abort).await.unwrap();
         let err = recv_task.await.unwrap().expect_err("the abort must be heard");
         assert!(err.contains("cancelled"), "{err}");
+    }
+
+    /// lrzsz cancels with ten CANs and then ten backspaces -- measured in the
+    /// `sz` binary -- so the line does not go quiet on a CAN.  Heard anyway.
+    #[tokio::test(start_paused = true)]
+    async fn test_lrzsz_cancel_during_the_purge_is_heard() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        let mut canit = vec![0x55];
+        canit.extend([CAN; 10]);
+        canit.extend([0x08; 10]);
+        send_write.write_all(&canit).await.unwrap();
+        let err = recv_task.await.unwrap().expect_err("lrzsz's cancel must be heard");
+        assert!(err.contains("cancelled"), "{err}");
+    }
+
+    /// A long run of `18` inside purged payload -- a font's `|` glyph is eight
+    /// of them -- is still data.  XMODEM does not escape CAN, so only a run
+    /// the line goes quiet after can be a cancel.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_long_can_run_inside_payload_is_not_an_abort() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        let mut burst = vec![0x55];
+        burst.extend([CAN; 8]);
+        burst.extend([0x42, 0x24, 0x7E]);
+        send_write.write_all(&burst).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), NAK);
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        finish_plain_eot(&mut send_read, &mut send_write).await;
+        let (data, _) = recv_task.await.unwrap().unwrap();
+        assert_eq!(data.len(), 2 * XMODEM_BLOCK_SIZE);
+    }
+
+    /// A bad block whose CRC happens to be `18 18`, after which the sender
+    /// goes quiet to wait, is not a cancel: the transfer recovers with a NAK.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_bad_block_ending_in_18_18_is_not_a_cancel() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        send_write.write_all(&[0x55, 0x41, CAN, CAN]).await.unwrap(); // tail of a bad block
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), NAK, "a NAK, not an abort");
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        finish_plain_eot(&mut send_read, &mut send_write).await;
+        let (data, _) = recv_task.await.unwrap().unwrap();
+        assert_eq!(data.len(), 2 * XMODEM_BLOCK_SIZE);
     }
 
     /// The other side of the cancel: `18 18` *inside* purged payload is data,
@@ -3828,6 +3939,42 @@ mod tests {
         finish_plain_eot(&mut send_read, &mut send_write).await;
         let (data, _) = recv_task.await.unwrap().unwrap();
         assert_eq!(data.len(), 2 * XMODEM_BLOCK_SIZE);
+    }
+
+    /// A 1K block at 300 baud arrives over ~34 s; the purge must outlast it, or
+    /// it ends mid-block and the remainder draws further errors and NAKs.
+    /// Simulated with one byte every 33 ms after a stray byte: one NAK, at the
+    /// end, not several along the way.
+    #[tokio::test(start_paused = true)]
+    async fn test_the_purge_outlasts_a_slow_1k_block() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let _recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        let start = tokio::time::Instant::now();
+        // The trickle runs on its own, so the first NAK is timed as it is
+        // sent -- read only after the loop, an early NAK would sit in the pipe
+        // and pass (it did, against the old 10 s cap).
+        let _trickle = tokio::spawn(async move {
+            for _ in 0..1029 {
+                if send_write.write_all(&[0x55]).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(33)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), NAK);
+        assert!(
+            start.elapsed() >= std::time::Duration::from_secs(33),
+            "the NAK came {:?} in, before the slow block had finished",
+            start.elapsed()
+        );
     }
 
     /// The re-arm on its own: after a NAKed noise EOT, a stray byte says the

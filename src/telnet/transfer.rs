@@ -421,6 +421,28 @@ impl TelnetSession {
         resumed: bool,
     ) -> Result<String, SaveError> {
         const MAX_TRIES: u32 = 100_000;
+        // Four Kermit server paths (serial port, ATDT KERMIT, relay, TCP
+        // server) save through here with the sender's name as sent, so on
+        // **Windows** `NUL` or `COM1.TXT` opened the device and `FOO.` was
+        // another name for `FOO`.  Converted there, and only there: on other
+        // hosts those are ordinary names -- Kermit-80's `CON.ASM` renamed
+        // `_CON.ASM` broke the peer's own later `get CON.ASM`, and a resume
+        // looking for its partial under the name as sent.  Kermit's own rule
+        // already refused anything worse.  (The Upload menu converts before
+        // it gets here, on every host, by `validate_new_name`'s rule for a
+        // name being created; nothing fetches a menu upload back by name.)
+        let converted = if cfg!(windows) {
+            match Self::safe_upload_name(filename) {
+                Some(c) => c,
+                None => return Err(SaveError::WriteFailed),
+            }
+        } else {
+            filename.to_string()
+        };
+        // A resume's partial was found under the name as sent; if converting
+        // it changed the name, that partial is not the file being replaced.
+        let resumed = resumed && converted == filename;
+        let filename = converted.as_str();
         if resumed {
             // Resume replaces the partial it pre-loaded — exact name only.
             return Self::save_received_file_sync(&dir.join(filename), data, meta, true)
@@ -439,6 +461,13 @@ impl TelnetSession {
             let Some(candidate) = Self::numbered_received_name(filename, n) else {
                 break;
             };
+            // Numbering can make a device name out of one that was not:
+            // `COM.TXT` taken becomes `COM1.TXT`, the serial port on Windows.
+            if cfg!(windows)
+                && crate::cpm::is_host_device_name(candidate.split('.').next().unwrap_or(""))
+            {
+                continue;
+            }
             match Self::save_received_file_sync(&dir.join(&candidate), data, meta, false) {
                 Ok(()) => return Ok(candidate),
                 Err(SaveError::AlreadyExists) => continue,
@@ -486,7 +515,7 @@ impl TelnetSession {
     /// collapse, leading and trailing dots go, a long name keeps its extension,
     /// and a Windows device name gets a leading `_`.  Deterministic, so the
     /// existence check before the transfer and the save after it agree.
-    pub(in crate::telnet) fn safe_upload_name(sender: &str) -> Option<String> {
+    pub(crate) fn safe_upload_name(sender: &str) -> Option<String> {
         let mut out: String = sender
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
@@ -1069,8 +1098,8 @@ impl TelnetSession {
             .await
             // A YMODEM batch yields multiple files.  Under `Y` every file
             // keeps its block-0 name, converted as ZMODEM's are; under `X`
-            // the first takes the name the user typed and 2..N the sender's
-            // (the save path validates those).  A file with no name -- plain
+            // the first takes the name the user typed and 2..N the sender's,
+            // converted the same way.  A file with no name -- plain
             // XMODEM sent under `Y`, or a non-UTF-8 block 0 -- is given a
             // generated one by the save path.
             .map(|files| {
@@ -1078,23 +1107,27 @@ impl TelnetSession {
                     .into_iter()
                     .enumerate()
                     .map(|(i, f)| {
-                        let name = if named_by_sender {
-                            f.filename.map(|n| Self::safe_upload_name(&n).unwrap_or(n))
-                        } else if i == 0 {
+                        // Every name a sender supplies gets the same
+                        // conversion, whichever key was pressed: under `X`
+                        // a YMODEM batch's files 2..N were held to the raw
+                        // rule, so `My File.txt` was skipped there and saved
+                        // as `My_File.txt` under `Y`.
+                        let name = if !named_by_sender && i == 0 {
                             None
                         } else {
-                            f.filename
+                            f.filename.map(|n| Self::safe_upload_name(&n).unwrap_or(n))
                         };
                         (name, f.data, f.meta)
                     })
                     .collect()
             }),
-            UploadProtocol::Kermit => crate::kermit::kermit_receive(
+            UploadProtocol::Kermit => crate::kermit::kermit_receive_in(
                 &mut self.reader,
                 &mut *writer_guard,
                 self.xmodem_iac,
                 is_petscii,
                 verbose,
+                &transfer_path,
             )
             .await
             .map(|rxs| {
@@ -1107,8 +1140,12 @@ impl TelnetSession {
                 // the same conversion ZMODEM's names get.
                 rxs.into_iter()
                     .map(|rx| {
-                        let converted = Self::safe_upload_name(&rx.filename).unwrap_or(rx.filename);
-                        if rx.resumed {
+                        let as_sent = rx.filename;
+                        let converted = Self::safe_upload_name(&as_sent).unwrap_or(as_sent.clone());
+                        // The partial a resume read was found under the
+                        // name as sent; if conversion changed it, that
+                        // partial is not the file this would replace.
+                        if rx.resumed && converted == as_sent {
                             kermit_resumed.insert(converted.clone());
                         }
                         let name = Some(converted);
