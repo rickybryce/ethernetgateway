@@ -35,6 +35,21 @@ PROTOCOLS = {
     'kermit':    (8, 'k', 'k'),
 }
 
+def dismiss_welcome(nt):
+    """Press SPACE past the gateway's welcome page, if it is showing.
+
+    A gateway shows it for its first seven days (since e035aba, 2026-09-19),
+    between the colour question and the main menu, and it waits for a key.
+    Unexpected, it took the next keystroke -- the Telnet Gateway's `t` -- and
+    the host and port then landed on the main menu, where the port's `2`
+    opened the Second Menu.  Matched on lowercase words, since NovaTerm's
+    screen text turns capitals into dots.
+    """
+    if any('or the main menu' in l or 'his page stops appearing' in l for l in nt.text()):
+        print('  welcome page -> SPACE', flush=True)
+        nt.type(' ', 3.0)
+
+
 def started(nt):
     """Is NovaTerm already receiving?
 
@@ -124,6 +139,7 @@ def main():
     nt.dial(dial)
     nt.inst_del(3.5)
     nt.type('n', 3.0)
+    dismiss_welcome(nt)
     nt.type('f', 3.0)
 
     if direction == 'download':
