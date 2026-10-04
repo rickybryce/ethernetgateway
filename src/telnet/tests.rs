@@ -6285,6 +6285,11 @@ async fn test_the_browser_page_fills_the_screen_and_no_more() {
         sess.web_url = Some(format!("https://example.test/{}", "long/".repeat(30)));
         sess.web_title = Some("A page title that is longer than any screen is wide, by some way".into());
         sess.web_scroll = 4983;
+        // One line exactly as wide as the page is laid out for, ending in a
+        // link number: drawn whole, so the screen's width and the layout's
+        // agree (see `rewrap_for_screen`).
+        let laid_out = sess.web_content_width() + crate::webbrowser::LINK_MARKER_ROOM;
+        sess.web_lines[4983] = format!("line {}\u{2}123\u{3}", "z".repeat(laid_out - 10));
         let collector = tokio::spawn(async move {
             let mut out = Vec::new();
             let _ = peer.read_to_end(&mut out).await;
@@ -6314,6 +6319,10 @@ async fn test_the_browser_page_fills_the_screen_and_no_more() {
                 .count();
             assert!(shown <= width, "{term:?}: {:?} is {shown} wide", String::from_utf8_lossy(r));
         }
+        assert!(
+            out.windows(6).any(|w| w.eq_ignore_ascii_case(b"z[123]")),
+            "{term:?}: a line at the layout width is drawn whole"
+        );
         match term {
             TerminalType::Ansi => assert!(out.windows(2).any(|w| w == "í".as_bytes()), "ANSI keeps UTF-8"),
             _ => {

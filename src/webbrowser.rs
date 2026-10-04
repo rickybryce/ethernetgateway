@@ -24,6 +24,11 @@ const MAX_BOOKMARKS: usize = 100;
 const MAX_BODY_SIZE: usize = 1024 * 1024;
 /// Maximum rendered lines to keep (prevents memory bloat on huge pages).
 const MAX_RENDERED_LINES: usize = 5000;
+
+/// Columns a page line may have beyond the width html2text wraps it to: the
+/// room a `[NNN]` link number takes.  The screen shows `width + this`, so a
+/// line is never cut there -- see [`rewrap_for_screen`].
+pub(crate) const LINK_MARKER_ROOM: usize = 5;
 /// HTTP request timeout in seconds.
 const HTTP_TIMEOUT_SECS: u64 = 15;
 /// How long to wait for the TCP connection itself, as opposed to the reply.
@@ -932,6 +937,96 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
     }
 }
 
+/// One rendered line as rows that fit `max` columns, with every link number
+/// kept whole.
+///
+/// html2text wraps to `width` and leaves room for ONE `[NNN]`; a line with
+/// several links ran past the screen and was cut there, taking the numbers of
+/// its later links with it -- a link you can see and cannot follow.  So a line
+/// too wide moves its overflow to the next row: at a space, never inside a
+/// link number, a continuation indented like the line (and past its bullet).
+/// Width is counted as the narrowest terminal will draw it -- a `ß` is two
+/// columns once a C64 has it as `ss` -- and a line that fits is left exactly
+/// as it was, spacing and all.
+fn rewrap_for_screen(line: &str, max: usize) -> Vec<String> {
+    // The widest any terminal draws it: an ASCII-only one draws the fold
+    // (`ss`), an ANSI one draws CJK and emoji two columns wide.
+    let cols = |c: char| -> usize {
+        match c {
+            '\u{2}' | '\u{3}' => 1, // drawn as '[' and ']'
+            c if c.is_ascii() => 1,
+            c => {
+                let folded = crate::aichat::fold_to_ascii(c.encode_utf8(&mut [0; 4])).chars().count();
+                let wide = matches!(c,
+                    '\u{1100}'..='\u{115F}' | '\u{2E80}'..='\u{A4CF}' | '\u{AC00}'..='\u{D7A3}'
+                    | '\u{F900}'..='\u{FAFF}' | '\u{FE30}'..='\u{FE4F}' | '\u{FF00}'..='\u{FF60}'
+                    | '\u{FFE0}'..='\u{FFE6}' | '\u{1F300}'..='\u{1FAFF}' | '\u{20000}'..='\u{3FFFD}');
+                folded.max(if wide { 2 } else { 1 })
+            }
+        }
+    };
+    if line.chars().map(cols).sum::<usize>() <= max {
+        return vec![line.to_string()];
+    }
+    let body = line.trim_start_matches(' ');
+    let indent = line.len() - body.len();
+    // A bullet, or a list number like `12. `, which the text hangs under.
+    let digits = body.chars().take_while(char::is_ascii_digit).count();
+    let bullet = if body.starts_with("* ") || body.starts_with("- ") {
+        2
+    } else if digits > 0 && body[digits..].starts_with(". ") {
+        digits + 2
+    } else {
+        0
+    };
+    let cont = " ".repeat((indent + bullet).min(max / 2));
+
+    let mut rows = Vec::new();
+    let mut rest = line;
+    let mut prefix = "";
+    loop {
+        let budget = max.saturating_sub(prefix.len()).max(1);
+        // On the first row, a break inside the indent or the bullet would
+        // leave a blank row or a bullet on its own.
+        let lead = if prefix.is_empty() { indent + bullet } else { 0 };
+        let (mut used, mut last_space, mut marker_start, mut cut) = (0, None, None, None);
+        for (i, c) in rest.char_indices() {
+            if c == '\u{2}' {
+                marker_start = Some(i);
+            }
+            let w = cols(c);
+            if used + w > budget {
+                cut = Some(i);
+                break;
+            }
+            used += w;
+            if c == '\u{3}' {
+                marker_start = None;
+            }
+            if c == ' ' && marker_start.is_none() && i > lead {
+                last_space = Some(i);
+            }
+        }
+        let Some(hard) = cut else {
+            rows.push(format!("{prefix}{rest}"));
+            break;
+        };
+        // A space if there is one; else just before a link number the cut
+        // would split; else wherever the row is full.
+        let at = last_space
+            .or(marker_start.filter(|&m| m > 0))
+            .unwrap_or(hard)
+            .max(rest.chars().next().map_or(1, char::len_utf8));
+        rows.push(format!("{prefix}{}", rest[..at].trim_end()));
+        rest = rest[at..].trim_start();
+        prefix = &cont;
+        if rest.is_empty() {
+            break;
+        }
+    }
+    rows
+}
+
 /// Remove every element named in `tags` (and what is inside it) from the tree.
 ///
 /// Iterative, like the tree's own `Drop`: the depth is bounded before this
@@ -1158,8 +1253,9 @@ fn render_html_body(
                 }
             }
         }
-        rendered_lines.push(line_text);
+        rendered_lines.extend(rewrap_for_screen(&line_text, width + LINK_MARKER_ROOM));
         if rendered_lines.len() >= MAX_RENDERED_LINES {
+            rendered_lines.truncate(MAX_RENDERED_LINES);
             break;
         }
     }
@@ -3881,6 +3977,52 @@ mod tests {
         // A link that ends mid-word is not split from the rest of it.
         let (page, _) = render_html_body(br#"<p><a href="/w">Wiki</a>pedia</p>"#, "http://x.test/".into(), 73).unwrap();
         assert!(page.lines.join("").contains("Wiki\u{2}1\u{3}pedia"), "{:?}", page.lines);
+    }
+
+    /// A line with more links than fit keeps every link number: the overflow
+    /// moves to the next row, a number is never split, a list item's
+    /// continuation is indented past its bullet, and a line that fits is
+    /// untouched.
+    #[test]
+    fn test_no_link_number_is_lost_to_the_screen_edge() {
+        let links: String = (1..=15).map(|i| format!("<a href=\"/p{i}\">w{i}</a> ")).collect();
+        for width in [32, 72] {
+            let html = format!("<html><body><p>{links}</p><ul><li>{links}</li></ul></body></html>");
+            let (page, _) = render_html_body(html.as_bytes(), "http://x.test/".to_string(), width).unwrap();
+            let max = width + LINK_MARKER_ROOM;
+            for line in &page.lines {
+                assert!(line.chars().count() <= max, "{width}: {line:?} is wider than {max}");
+                assert_eq!(line.matches('\u{2}').count(), line.matches('\u{3}').count(), "split: {line:?}");
+            }
+            let text = page.lines.join("\n");
+            for i in 1..=15 {
+                assert!(text.contains(&format!("w{i}\u{2}{i}\u{3}")), "{width}: link {i} lost: {text:?}");
+            }
+        }
+        // The list continuation sits under the text, not under the bullet.
+        let rows = rewrap_for_screen("  * one two three four five six", 16);
+        assert!(rows.len() > 1 && rows[1..].iter().all(|r| r.starts_with("    ") && !r.starts_with("     ")), "{rows:?}");
+        // Folded width counts: twelve `ß` are 24 columns on a C64.
+        assert!(rewrap_for_screen("ßßßßßß ßßßßßß", 20).len() == 2);
+        // A long first word on an indented line or after a bullet breaks
+        // inside the word, not at the indent: no blank row, no lone bullet.
+        for line in [format!("    {}", "u".repeat(30)), format!("  * {}", "u".repeat(30))] {
+            let rows = rewrap_for_screen(&line, 20);
+            assert!(rows.iter().all(|r| r.trim().len() > 1), "{rows:?}");
+        }
+        // A numbered item hangs under its text, like a bullet.
+        let rows = rewrap_for_screen("  12. one two three four five six", 16);
+        assert!(rows[1..].iter().all(|r| r.starts_with("      ") && !r.starts_with("       ")), "{rows:?}");
+        // A CJK character is two columns on an ANSI terminal.
+        assert_eq!(rewrap_for_screen(&"\u{4E2D}".repeat(12), 20).len(), 2);
+        // A line that fits is left exactly as it was.
+        assert_eq!(rewrap_for_screen("a   b\u{2}1\u{3}", 37), ["a   b\u{2}1\u{3}"]);
+        // No space to break at and the row ends inside a link number: the
+        // break goes before the number, not through it.
+        let long = format!("{}\u{2}12\u{3}", "x".repeat(18));
+        assert_eq!(rewrap_for_screen(&long, 20), ["x".repeat(18), "\u{2}12\u{3}".to_string()]);
+        // A word longer than a row is cut, and the loop ends.
+        assert_eq!(rewrap_for_screen(&"x".repeat(50), 20).len(), 3);
     }
 
     /// A field the page gave no label is named for what it is, not by its

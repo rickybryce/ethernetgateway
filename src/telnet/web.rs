@@ -115,13 +115,10 @@ impl TelnetSession {
             let start = self.web_scroll.min(total.saturating_sub(1));
             let end = (start + page_h).min(total);
 
-            // Never the last column: a row that fills it wraps on a C64 (see
-            // `separator`) and the screen grows past 22 rows.
-            let content_max = if self.terminal_type == TerminalType::Petscii {
-                PETSCII_WIDTH - 3
-            } else {
-                77
-            };
+            // The width the page was laid out for (see `rewrap_for_screen`);
+            // one short of the screen, since a row that fills it wraps on a
+            // C64 (see `separator`).
+            let content_max = self.web_content_width() + crate::webbrowser::LINK_MARKER_ROOM;
             let page_lines: Vec<String> = self.web_lines[start..end].to_vec();
             for line in &page_lines {
                 let safe = crate::webbrowser::truncate_to_width(&self.web_text(line), content_max);
