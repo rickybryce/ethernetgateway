@@ -323,6 +323,12 @@ pub struct Cromemco {
     /// The auxiliary latch, as last written. Powers up with side 0 selected,
     /// which is what the loaders write before they do anything.
     aux: u8,
+    /// The drive and auxiliary latch a read or write command was issued
+    /// against, held until it finishes.  The bytes in flight were framed for
+    /// that drive and side and that format: a reselect between Write Sector
+    /// and its last byte sent the sector to the new drive, at the new
+    /// format's length -- 512 bytes written, 128 committed, on the wrong disk.
+    in_flight: Option<(u8, u8)>,
     /// Status reads that found nothing to report.
     idle_polls: u32,
 }
@@ -339,6 +345,7 @@ impl Cromemco {
             chip: Wd1771::new(),
             drives: [Drive { present: false, read_only: true, format: None }; DRIVES],
             selected: 0,
+            in_flight: None,
             control: 0,
             aux: AUX_SIDE_0,
             idle_polls: 0,
@@ -395,10 +402,24 @@ impl Cromemco {
     /// judged as a 26-sector single-density one accepts sectors that are not
     /// there.
     fn refresh(&mut self) {
+        self.refresh_for(false);
+    }
+
+    /// [`Cromemco::refresh`], told whether a command is about to be written.
+    /// A command ends any transfer still in flight (see `Wd1771::command`), so
+    /// the format it is judged by is the one selected now, busy or not.
+    fn refresh_for(&mut self, command: bool) {
         let d = self.drives[self.selected as usize % DRIVES];
         self.chip.set_drive(d.present, d.read_only, CYLINDERS);
         self.chip.set_side(self.side());
-        if let Some(f) = d.format {
+        // Not under a transfer in flight: a drive or side change between a
+        // Write Sector and its last byte re-derived the format from the new
+        // selection, so a 512-byte double-density sector being collected could
+        // be cut to the 128 of a single-density one -- the guest wrote 512 and
+        // 128 were committed.  The format is the one the command was judged by.
+        if let Some(f) = d.format
+            && (command || !self.chip.busy())
+        {
             let index = self.track_index(self.chip.track()).unwrap_or(0);
             let (len, count) = f.track_format(index);
             self.chip.set_format(len, count);
@@ -414,13 +435,30 @@ impl Cromemco {
     /// just finished, and the machine must not replace it. See
     /// [`HostRequest::ReadAhead`].
     fn serve(&mut self, need: Need, ahead: bool) -> HostRequest {
+        let req = self.serve_selected(need, ahead);
+        if !self.chip.busy() {
+            self.in_flight = None;
+        }
+        req
+    }
+
+    /// [`Cromemco::serve`] against the drive and side the command was issued
+    /// for -- see `in_flight` -- not whatever is selected now.
+    fn serve_selected(&mut self, need: Need, ahead: bool) -> HostRequest {
         let (track, sector, writing) = match need {
             Need::None => return HostRequest::None,
             Need::Read { track, sector } => (track, sector, false),
             Need::Write { track, sector } => (track, sector, true),
         };
+        let now = (self.selected, self.aux);
+        if let Some((drive, aux)) = self.in_flight {
+            self.selected = drive;
+            self.aux = aux;
+        }
         let drive = self.selected;
-        match self.offset(track, sector) {
+        let found = self.offset(track, sector);
+        (self.selected, self.aux) = now;
+        match found {
             Some((offset, len)) if writing => HostRequest::Write { drive, offset, len },
             Some((offset, len)) if ahead => HostRequest::ReadAhead { drive, offset, len },
             Some((offset, len)) => HostRequest::Read { drive, offset, len },
@@ -515,7 +553,7 @@ impl Controller for Cromemco {
                 if port & 0x03 == super::wd1771::reg::COMMAND {
                     // A command is judged against the drive and the track that
                     // are actually selected.
-                    self.refresh();
+                    self.refresh_for(true);
                     if std::env::var_os("CPM_CROMEMCO_TRACE").is_some() {
                         eprintln!(
                             "cromemco cmd {value:02x} drive {} cyl {} side {} sector {} \
@@ -534,6 +572,13 @@ impl Controller for Cromemco {
                     }
                 }
                 let need = self.chip.write(port & 0x03, value);
+                // A command holds the drive and side it was issued on -- every
+                // command, including one that ended a transfer still in flight
+                // and started its own: that one belongs to the drive selected
+                // now, not to the transfer it replaced.
+                if port & 0x03 == super::wd1771::reg::COMMAND {
+                    self.in_flight = self.chip.busy().then_some((self.selected, self.aux));
+                }
                 self.serve(need, false)
             }
         }
@@ -796,6 +841,63 @@ mod tests {
         let status = c.port_in(0x30).0;
         assert_eq!(status & 0x01, 0, "not busy");
         assert_ne!(status & 0x10, 0, "with Record Not Found");
+    }
+
+    /// A reselect in the middle of a Write Sector does not move the sector:
+    /// it lands on the drive, side and format the command was issued for.
+    #[test]
+    fn test_a_reselect_mid_write_does_not_move_the_sector() {
+        let mut c = board(DD);
+        c.insert(1, SD, false).unwrap();
+        // Drive 0, double density: seek to a 512-byte track.
+        c.port_out(PORT_CONTROL, 0x31 | CTL_DOUBLE_DENSITY);
+        c.port_out(0x33, 2);
+        c.port_out(0x30, 0x18);
+        c.port_out(0x32, 1);
+        assert_eq!(c.port_out(0x30, 0xA8), HostRequest::None, "write sector, collecting");
+        // The guest selects drive 1 (single density) before its last byte.
+        c.port_out(PORT_CONTROL, 0x32);
+        let done: Vec<HostRequest> = (0..512)
+            .map(|_| c.port_out(0x33, 0xE5))
+            .filter(|r| *r != HostRequest::None)
+            .collect();
+        assert_eq!(done.len(), 1, "{done:?}");
+        match done[0] {
+            HostRequest::Write { drive, len, .. } => {
+                assert_eq!(drive, 0, "the drive the write was issued for");
+                assert_eq!(len, 512, "and the whole sector the guest wrote");
+            }
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    /// A command that ends an abandoned transfer and starts its own belongs to
+    /// the drive selected for it, at that drive's format -- not to the transfer
+    /// it replaced.
+    #[test]
+    fn test_a_command_after_an_abandoned_write_uses_its_own_drive() {
+        let mut c = board(DD);
+        c.insert(1, SD, false).unwrap();
+        c.port_out(PORT_CONTROL, 0x31 | CTL_DOUBLE_DENSITY);
+        c.port_out(0x33, 2);
+        c.port_out(0x30, 0x18);
+        c.port_out(0x32, 1);
+        assert_eq!(c.port_out(0x30, 0xA8), HostRequest::None, "write sector on drive 0");
+        c.port_out(0x33, 0xE5); // ...abandoned after one byte
+        c.port_out(PORT_CONTROL, 0x32); // drive 1, single density
+        c.port_out(0x32, 1);
+        assert_eq!(c.port_out(0x30, 0xA8), HostRequest::None, "a new write on drive 1");
+        let done: Vec<HostRequest> = (0..512)
+            .map(|_| c.port_out(0x33, 0xE5))
+            .filter(|r| *r != HostRequest::None)
+            .collect();
+        match done.first() {
+            Some(HostRequest::Write { drive, len, .. }) => {
+                assert_eq!(*drive, 1, "the drive the new write was issued for");
+                assert_eq!(*len, 128, "at that drive's single-density length");
+            }
+            other => panic!("{other:?} / {done:?}"),
+        }
     }
 
     /// The cold start puts one sector at 0080h and enters there — not at 0000h,

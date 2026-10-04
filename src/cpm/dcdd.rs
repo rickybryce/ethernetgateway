@@ -502,15 +502,19 @@ impl Dcdd {
             d.head_loaded = false;
             d.byte = None;
         }
-        if value & control::WRITE_ENABLE != 0 {
-            let read_only = d.disk.as_ref().is_some_and(|k| k.read_only);
-            if !read_only {
-                d.writing = true;
-                d.byte = Some(0);
-                // The guest has already positioned itself; this is the sector
-                // it means to write, whatever the head does next.
-                d.write_at = Some((d.track, d.sector));
-            }
+        // A read-only disk takes the write sequence like any other and keeps
+        // none of it -- see `finish_write`.  Refusing WRITE_ENABLE instead
+        // left ENWD never asserted, and MITS CP/M's BIOS polls for it without
+        // a timeout: measured, a `SAVE` on a read-only floppy hung the guest
+        // for good.  The 88-DCDD has no write-protect status to report, so a
+        // write that appears to work and is gone at the next boot is the
+        // documented read-only behaviour (`cpm_boot_writable`).
+        if value & control::WRITE_ENABLE != 0 && d.disk.is_some() {
+            d.writing = true;
+            d.byte = Some(0);
+            // The guest has already positioned itself; this is the sector
+            // it means to write, whatever the head does next.
+            d.write_at = Some((d.track, d.sector));
         }
         request
     }
@@ -527,7 +531,8 @@ impl Dcdd {
         let Some(d) = self.drives.get_mut(sel as usize) else {
             return Request::None;
         };
-        let pending = d.writing && d.dirty;
+        let read_only = d.disk.as_ref().is_some_and(|k| k.read_only);
+        let pending = d.writing && d.dirty && !read_only;
         let at = d.write_at;
         d.writing = false;
         d.dirty = false;
@@ -1028,21 +1033,28 @@ mod tests {
         assert_eq!(c.sector_buffer(0).unwrap()[5], 5);
     }
 
-    /// A read-only disk must refuse the write sequence outright, so a guest
-    /// cannot get as far as filling a buffer that will never be committed.
+    /// A read-only disk runs the write sequence -- the guest is asked for its
+    /// bytes, so a BIOS polling ENWD is not left waiting for ever -- and
+    /// commits none of it, however the write ends.
     #[test]
-    fn test_a_read_only_disk_refuses_writes() {
+    fn test_a_read_only_disk_takes_a_write_and_keeps_nothing() {
         let mut c = Dcdd::new();
         c.insert(0, Disk { geometry: Geometry::EIGHT_INCH, read_only: true });
         c.port_out(0x08, 0);
         c.port_out(0x09, control::HEAD_LOAD);
         c.port_out(0x09, control::WRITE_ENABLE);
-        c.port_out(0x0A, 0x55);
-        for _ in 0..4 {
-            if let (_, Request::Write { .. }) = c.port_in(0x09) {
-                panic!("a read-only disk must never ask for a write");
-            }
+        // Status is active low: a clear bit is an asserted one.
+        assert_eq!(c.port_in(0x08).0 & status::ENWD, 0, "the guest is asked for a byte");
+        for _ in 0..SECTOR_LEN {
+            c.port_out(0x0A, 0x55);
         }
+        let mut reqs: Vec<Request> = (0..4).map(|_| c.port_in(0x09).1).collect();
+        reqs.push(c.port_out(0x09, control::STEP_IN));
+        reqs.push(c.port_out(0x08, 0x80));
+        assert!(
+            reqs.iter().all(|r| !matches!(r, Request::Write { .. })),
+            "a read-only disk must never ask for a write: {reqs:?}"
+        );
     }
 
     // ---- geometry ----------------------------------------------------------

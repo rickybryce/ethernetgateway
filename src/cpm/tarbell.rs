@@ -105,6 +105,9 @@ const FN_LATCH: u8 = 0b010;
 /// rest of the latch is remembered without being interpreted.
 const LATCH_DRIVE: u8 = 0x10;
 
+/// Drives the software select can reach -- see [`LATCH_DRIVE`].
+const SELECTABLE: u8 = 2;
+
 /// One drive.
 #[derive(Debug, Clone, Copy)]
 struct Drive {
@@ -121,6 +124,10 @@ pub struct Tarbell {
     latch: u8,
     /// Which drive a pending host request is for, since the chip does not know.
     pending: u8,
+    /// The drive a read or write command was issued against, held until it
+    /// finishes: a latch strobe between Write Sector and its last byte must
+    /// not send the sector to the newly selected drive.
+    in_flight: Option<u8>,
     /// WAIT-port reads that found nothing to report.
     idle_waits: u32,
 }
@@ -139,6 +146,7 @@ impl Tarbell {
             selected: 0,
             latch: 0,
             pending: 0,
+            in_flight: None,
             idle_waits: 0,
         }
     }
@@ -167,16 +175,20 @@ impl Tarbell {
 
     /// Turn what the chip wants into what the machine can do.
     fn serve(&mut self, need: Need, ahead: bool) -> HostRequest {
+        let drive = self.in_flight.unwrap_or(self.selected);
+        if !self.chip.busy() {
+            self.in_flight = None;
+        }
         match need {
             Need::None => HostRequest::None,
             Need::Read { track, sector } => match self.offset(track, sector) {
                 Some(offset) if ahead => {
-                    self.pending = self.selected;
-                    HostRequest::ReadAhead { drive: self.selected, offset, len: SECTOR_LEN }
+                    self.pending = drive;
+                    HostRequest::ReadAhead { drive, offset, len: SECTOR_LEN }
                 }
                 Some(offset) => {
-                    self.pending = self.selected;
-                    HostRequest::Read { drive: self.selected, offset, len: SECTOR_LEN }
+                    self.pending = drive;
+                    HostRequest::Read { drive, offset, len: SECTOR_LEN }
                 }
                 None => {
                     // A track register written past the disk: no such sector.
@@ -186,8 +198,8 @@ impl Tarbell {
             },
             Need::Write { track, sector } => match self.offset(track, sector) {
                 Some(offset) => {
-                    self.pending = self.selected;
-                    HostRequest::Write { drive: self.selected, offset, len: SECTOR_LEN }
+                    self.pending = drive;
+                    HostRequest::Write { drive, offset, len: SECTOR_LEN }
                 }
                 None => {
                     // Not a silent success: the guest is told the write failed.
@@ -269,6 +281,12 @@ impl Controller for Tarbell {
             }
         }
         let need = self.chip.write(port & 0x03, value);
+        // A command holds the drive it was issued on -- every command,
+        // including one that ended a transfer still in flight and started its
+        // own: that one belongs to the drive selected now.
+        if port & 0x03 == 0 {
+            self.in_flight = self.chip.busy().then_some(self.selected);
+        }
         self.serve(need, false)
     }
 
@@ -284,6 +302,14 @@ impl Controller for Tarbell {
     fn insert(&mut self, drive: u8, image_len: u64, read_only: bool) -> Result<(), String> {
         if self.accepts(image_len).is_none() {
             return Err(format!("{image_len} bytes is not a Tarbell image"));
+        }
+        // Only drives 0 and 1: the documented software select reaches no
+        // others (see `LATCH_DRIVE`), so an image placed on 2 or 3 was taken,
+        // never selectable, and invisible to the guest with nothing said.
+        if drive >= SELECTABLE {
+            return Err(format!(
+                "the Tarbell board selects drives 0 and 1 only; drive {drive} can never be reached"
+            ));
         }
         let d = self
             .drives
@@ -423,6 +449,19 @@ mod tests {
         }
     }
 
+    /// An image on a drive the select can never reach is refused with a
+    /// reason, not accepted and left invisible.
+    #[test]
+    fn test_a_drive_the_select_cannot_reach_is_refused() {
+        let mut t = Tarbell::new();
+        assert!(t.insert(0, IMAGE_LEN, false).is_ok());
+        assert!(t.insert(1, IMAGE_LEN, false).is_ok());
+        for d in [2u8, 3] {
+            let err = t.insert(d, IMAGE_LEN, false).expect_err("unreachable drive");
+            assert!(err.contains("0 and 1"), "{err}");
+        }
+    }
+
     /// The whole sector reaches the guest through the data port, and the WAIT port
     /// says "data" until the last byte and then "finished".
     #[test]
@@ -468,6 +507,44 @@ mod tests {
         let want = (2 * SECTORS_PER_TRACK as u64 + 8) * SECTOR_LEN as u64;
         assert_eq!(req, HostRequest::Write { drive: 0, offset: want, len: SECTOR_LEN });
         assert_eq!(t.buffer(0).unwrap()[7], 7);
+    }
+
+    /// A latch strobe in the middle of a Write Sector does not move the
+    /// sector: it lands on the drive the command was issued for.
+    #[test]
+    fn test_a_reselect_mid_write_does_not_move_the_sector() {
+        let mut t = Tarbell::new();
+        t.insert(0, IMAGE_LEN, false).unwrap();
+        t.insert(1, IMAGE_LEN, false).unwrap();
+        t.port_out(PORT_WAIT, FN_LATCH | LATCH_DRIVE); // drive 0
+        t.port_out(0xFA, 1);
+        assert_eq!(t.port_out(0xF8, 0xAC), HostRequest::None, "write sector, collecting");
+        t.port_out(PORT_WAIT, FN_LATCH); // drive 1, mid-sector
+        let done: Vec<HostRequest> = (0..SECTOR_LEN)
+            .map(|i| t.port_out(0xFB, i as u8))
+            .filter(|r| *r != HostRequest::None)
+            .collect();
+        assert_eq!(done, vec![HostRequest::Write { drive: 0, offset: 0, len: SECTOR_LEN }]);
+    }
+
+    /// A write that ends an abandoned one and starts its own belongs to the
+    /// drive selected for it, not to the transfer it replaced.
+    #[test]
+    fn test_a_command_after_an_abandoned_write_uses_its_own_drive() {
+        let mut t = Tarbell::new();
+        t.insert(0, IMAGE_LEN, false).unwrap();
+        t.insert(1, IMAGE_LEN, false).unwrap();
+        t.port_out(PORT_WAIT, FN_LATCH | LATCH_DRIVE); // drive 0
+        t.port_out(0xFA, 1);
+        t.port_out(0xF8, 0xAC);
+        t.port_out(0xFB, 0); // ...abandoned after one byte
+        t.port_out(PORT_WAIT, FN_LATCH); // drive 1
+        t.port_out(0xF8, 0xAC);
+        let done: Vec<HostRequest> = (0..SECTOR_LEN)
+            .map(|i| t.port_out(0xFB, i as u8))
+            .filter(|r| *r != HostRequest::None)
+            .collect();
+        assert_eq!(done, vec![HostRequest::Write { drive: 1, offset: 0, len: SECTOR_LEN }]);
     }
 
     /// The latch selects the drive, and a command is judged against *that* drive —

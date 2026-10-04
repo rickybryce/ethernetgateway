@@ -364,6 +364,36 @@ async fn handle_connection(
         }
     }
 
+    // **Only names this gateway answers to** -- see `host_header_allowed`.
+    // Every request, GET included: the page itself shows the API key.  The
+    // documented escape hatch for the address allowlist opens this too.
+    if !live_disable_safety
+        && let Some(host) = request.headers.get("host")
+        && let (machine, domains) = host_names()
+        && !host_header_allowed(host, machine, domains)
+    {
+        // Once per host in a row: a page left open polls, and every refusal
+        // would otherwise be a line in the on-disk log.
+        static LAST_REFUSED: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        let first = {
+            let mut last = LAST_REFUSED.lock().unwrap_or_else(|p| p.into_inner());
+            *last != *host && {
+                *last = host.clone();
+                true
+            }
+        };
+        if first {
+            logger::log(format!(
+                "Web: refused a request for host {:?} (not an address or a name of this machine)",
+                crate::aichat::sanitize_for_terminal(host)
+            ));
+        }
+        let body = b"403 Forbidden\nReach this gateway by its IP address, localhost, a .local name, or the machine's own name.\n";
+        write_response(&mut stream, 403, "Forbidden", "text/plain; charset=utf-8", body, false)
+            .await?;
+        return Ok(());
+    }
+
     // CSRF defense-in-depth for EVERY state-changing request, not only
     // `/save`: reject a POST whose Origin/Referer doesn't match our Host.  A
     // forged cross-site submit to `/save` would ride the operator's cached
@@ -752,6 +782,112 @@ fn url_authority(url: &str) -> &str {
         .split(['/', '?', '#'])
         .next()
         .unwrap_or(after_scheme)
+}
+
+/// Is `host` (a request's `Host` header) a name this gateway answers to?
+///
+/// **The DNS-rebinding guard.**  A hostile page can re-point its own domain
+/// at this gateway's LAN address; the browser then sends that domain as
+/// `Host` (and as `Origin`, so the same-origin check agrees with itself) from
+/// the operator's own address, which the private-IP allowlist admits.  With
+/// security off -- the default -- that read the page that shows the Groq key
+/// and could post `/save`.  An attacker's domain is never one of these:
+///
+/// * an IP address, v4 or v6 -- how most people reach it;
+/// * `localhost` (and `*.localhost`);
+/// * any `*.local` name -- mDNS, `raspberrypi.local`;
+/// * this machine's own name, bare or with a router's single-label suffix
+///   (`.lan`, `.home`, `.localdomain`, `.internal`, `.home.arpa`), or with
+///   one of `domains` -- the resolver's own search domains, which is how a
+///   LAN whose DNS registers DHCP clients under a real domain names it
+///   (`pi.example.com`).  Any other suffix stays refused: `raspberrypi.` is
+///   a guessable prefix an attacker can put on a domain of their own.
+///
+/// Compared case-insensitively, a trailing dot, the port and an IPv6 zone id
+/// (`[fe80::1%25eth0]`) ignored.
+pub(crate) fn host_header_allowed(host: &str, machine: &str, domains: &[String]) -> bool {
+    let host = host.trim();
+    // A whole address first: a bare IPv6 `::1` ends in what looks like a port.
+    if host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    // Strip the port: `[v6]:port`, `[v6]`, `name:port`, `v4:port`.
+    let bare = if let Some(rest) = host.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inside, _)) => inside,
+            None => return false,
+        }
+    } else {
+        match host.rsplit_once(':') {
+            Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => host,
+        }
+    };
+    let name = bare.trim_end_matches('.').to_ascii_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    // A zone id (`%eth0`, or `%25eth0` as a URL spells it) is no part of the
+    // address as far as `IpAddr` is concerned -- and only ever on a bracketed
+    // IPv6 literal, so a name cannot borrow it to pass as an address.
+    let addr = match name.split_once('%') {
+        Some((a, _)) if host.starts_with('[') => a,
+        _ => name.as_str(),
+    };
+    if addr.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    if name == "localhost" || name.ends_with(".localhost") || name.ends_with(".local") {
+        return true;
+    }
+    let machine = machine.trim_end_matches('.').to_ascii_lowercase();
+    if machine.is_empty() {
+        return false;
+    }
+    if name == machine {
+        return true;
+    }
+    let short = machine.split('.').next().unwrap_or("");
+    match name.split_once('.') {
+        None => name == short,
+        Some((first, suffix)) => {
+            first == short
+                && (matches!(suffix, "lan" | "home" | "localdomain" | "internal" | "home.arpa")
+                    || domains.iter().any(|d| d.trim_end_matches('.').eq_ignore_ascii_case(suffix)))
+        }
+    }
+}
+
+/// This machine's name and the DNS domains its resolver searches, read once.
+///
+/// The name is the whole one ([`crate::relay::raw_hostname`]), not the label
+/// cut to 32 characters for display.  The domains come from
+/// `/etc/resolv.conf`'s `search` and `domain` lines and, on Windows,
+/// `USERDNSDOMAIN`; a machine with neither simply has none.
+fn host_names() -> &'static (String, Vec<String>) {
+    static NAMES: std::sync::OnceLock<(String, Vec<String>)> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut domains = std::fs::read_to_string("/etc/resolv.conf")
+            .map(|t| resolver_domains(&t))
+            .unwrap_or_default();
+        if let Ok(d) = std::env::var("USERDNSDOMAIN") {
+            domains.push(d.to_ascii_lowercase());
+        }
+        (crate::relay::raw_hostname(), domains)
+    })
+}
+
+/// The `search` and `domain` entries of a `resolv.conf`.
+fn resolver_domains(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            matches!(w.next(), Some("search" | "domain")).then_some(w)
+        })
+        .flatten()
+        .map(|d| d.trim_end_matches('.').to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect()
 }
 
 /// Same-origin guard for state-changing POSTs (CSRF defense-in-depth).
@@ -5880,6 +6016,67 @@ mod tests {
         assert_eq!(decode_base64("YWJjZGVm"), b"abcdef");
         // Whitespace inside the input is stripped before decoding.
         assert_eq!(decode_base64("YWRt aW46 Y2hh bmdl bWU="), b"admin:changeme");
+    }
+
+    /// The DNS-rebinding guard admits every way a person reaches the gateway
+    /// on a LAN and nothing an attacker's domain can be.
+    #[test]
+    fn test_host_header_allowed() {
+        let m = "raspberrypi5";
+        for ok in [
+            "192.168.1.126", "192.168.1.126:8080", "[::1]:8080", "[fe80::1]", "::1",
+            "localhost", "localhost:8080", "LOCALHOST", "pi.localhost",
+            "raspberrypi5.local", "RaspberryPi5.Local:8080", "anything.local.",
+            "raspberrypi5", "raspberrypi5:8080", "raspberrypi5.lan", "raspberrypi5.home",
+            "raspberrypi5.localdomain", "raspberrypi5.home.arpa",
+        ] {
+            assert!(host_header_allowed(ok, m, &[]), "{ok} must be allowed");
+        }
+        for bad in [
+            "evil.example", "evil.example:8080", "raspberrypi5.evil.com",
+            "raspberrypi5.com", "otherhost", "otherhost.lan", "local", "",
+            "[::1", "rebind.attacker.net",
+        ] {
+            assert!(!host_header_allowed(bad, m, &[]), "{bad} must be refused");
+        }
+        // A machine name given with its domain still matches bare and full.
+        assert!(host_header_allowed("gw", "gw.example.org", &[]));
+        assert!(host_header_allowed("gw.example.org", "gw.example.org", &[]));
+        // No machine name known: names other than addresses/localhost/.local fail.
+        assert!(!host_header_allowed("gw", "", &[]));
+        // An IPv6 zone id, as curl or a URL spells it.
+        assert!(host_header_allowed("[fe80::1%25eth0]:8080", m, &[]));
+        assert!(host_header_allowed("[fe80::1%eth0]", m, &[]));
+        assert!(!host_header_allowed("1.2.3.4%evil.com", m, &[]));
+        // The resolver's own search domain names this machine; no other does.
+        let lan = vec!["example.com".to_string()];
+        assert!(host_header_allowed("raspberrypi5.example.com", m, &lan));
+        assert!(host_header_allowed("RaspberryPi5.Example.Com.:8080", m, &lan));
+        assert!(!host_header_allowed("raspberrypi5.example.com", m, &[]));
+        assert!(!host_header_allowed("raspberrypi5.evil.com", m, &lan));
+        assert!(!host_header_allowed("other.example.com", m, &lan));
+        // A long name matches itself whole (the display label is cut at 32).
+        let long = "a-very-long-hostname-for-a-lab-machine-01";
+        assert!(host_header_allowed(long, long, &[]));
+    }
+
+    #[test]
+    fn test_resolver_domains() {
+        let conf = "# comment\nnameserver 192.168.1.1\nsearch Example.COM lab.example.com.\n\
+                    domain home.example\noptions ndots:1\n";
+        assert_eq!(resolver_domains(conf), ["example.com", "lab.example.com", "home.example"]);
+        assert!(resolver_domains("nameserver 1.1.1.1\n").is_empty());
+    }
+
+    /// The Host gate runs before any route, so every page is behind it.
+    #[test]
+    fn test_the_host_gate_comes_before_the_routes() {
+        let src = include_str!("webserver.rs").replace('\r', "");
+        let body = &src[src.find("async fn handle_connection(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let gate = body.find(concat!("!host_header", "_allowed(host,")).expect("the Host gate");
+        let routes = body.find("match (request.method.as_str(), request.path.as_str())").unwrap();
+        assert!(gate < routes);
     }
 
     /// The CSRF gate sits above the route match and covers every POST.  It

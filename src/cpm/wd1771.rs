@@ -296,6 +296,12 @@ impl Wd1771 {
         self.side = side;
     }
 
+    /// Is a command in progress?  For a board that must not change what the
+    /// chip believes about the medium under a transfer it is part-way through.
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
     /// The track register, for a board's diagnostics.
     pub fn track(&self) -> u8 {
         self.track
@@ -518,6 +524,24 @@ impl Wd1771 {
             // data sheet has it terminate without one.
             self.intrq = cmd & 0x08 != 0;
             return Need::None;
+        }
+        // A command that finds a transfer still collecting or delivering its
+        // bytes.  The chip ignores commands while busy -- but on the chip busy
+        // always ends by itself, the sector passing under the head and the
+        // transfer stopping with Lost Data, and a driver only issues another
+        // command once it has given up on the last.  Nothing here takes time,
+        // so that moment is now: the old transfer ends -- its error bits are
+        // not kept, the status from here on being the new command's -- its
+        // buffer is dropped (written nowhere -- accepted as it was, a seek in
+        // the middle of a write moved the write onto the *new* track), and
+        // the new command runs on an idle chip.  Ignoring it instead left a
+        // Restore unperformed under a status a driver reads as "on track 0".
+        if self.busy {
+            self.busy = false;
+            self.drq = false;
+            self.moving = Move::None;
+            self.multi = false;
+            self.pos = 0;
         }
 
         self.cmd = cmd;
@@ -895,6 +919,31 @@ mod tests {
         let s = c.read(reg::COMMAND).0;
         assert_ne!(s & type2::LOST_DATA, 0, "and the same bit is Lost Data here");
         assert_eq!(s & type1::HEAD_LOADED, 0, "with no head-engaged bit in this family");
+    }
+
+    /// A seek written while a Write Sector is collecting its bytes ends the
+    /// abandoned write -- written nowhere, never onto the track the seek goes
+    /// to -- and then runs, so a driver's retry is not lost with it.
+    #[test]
+    fn test_a_command_while_busy_ends_the_transfer_and_runs() {
+        let mut c = chip();
+        c.write(reg::TRACK, 3);
+        c.write(reg::SECTOR, 1);
+        assert_eq!(c.write(reg::COMMAND, 0xA8), Need::None, "write sector, now collecting");
+        c.write(reg::DATA, 9);
+        c.write(reg::COMMAND, 0x18);
+        assert_eq!(c.track(), 9, "the seek ran");
+        assert!(!c.busy(), "and the abandoned write is over");
+        let stray: Vec<Need> = (0..128)
+            .map(|_| c.write(reg::DATA, 0xE5))
+            .filter(|n| *n != Need::None)
+            .collect();
+        assert!(stray.is_empty(), "the write lands nowhere: {stray:?}");
+        // The status is the seek's own: a Restore that ran says Track 00
+        // because the head is there, not because a Lost Data bit says so.
+        c.write(reg::COMMAND, 0xA8);
+        c.write(reg::COMMAND, 0x08);
+        assert_eq!(c.track(), 0, "a Restore under a transfer is performed");
     }
 
     /// A sector number that is not on the track is Record Not Found, rather than

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Upgrade note: `AT+PETSCII=1` now applies to a slave's relayed dial.**  A
+  slave port saved with `AT+PETSCII=1` used to reach a BBS through the master
+  as a raw pipe, so a Commodore behind a slave saw no translation, while the
+  same setting on a standalone gateway translated.  It now translates on both,
+  from the slave port's own setting; the master stays a raw pipe.  If a slave
+  port dials a board that already speaks PETSCII to a Commodore and it worked
+  only because the relay passed bytes untouched, set that port to
+  `AT+PETSCII=0` &mdash; otherwise the text is case-swapped twice.
+
 ## [1.0.2] - 2026-09-19
 
 ### Added

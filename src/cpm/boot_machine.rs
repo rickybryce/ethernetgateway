@@ -4071,6 +4071,44 @@ pub(crate) mod tests {
         );
     }
 
+    /// A read-only 88-DCDD disk must not hang the guest that writes to it.
+    ///
+    /// The board once refused `WRITE_ENABLE` on a read-only disk, and MITS
+    /// CP/M's BIOS polls for the controller to ask for a byte with no timeout:
+    /// measured, `SAVE` hung the guest for good.  The board now takes the
+    /// write and keeps none of it (`dcdd`'s own test holds "keeps none"; the
+    /// machine drops read-only writes too), so this holds the half only a
+    /// booted guest can show -- the operator gets a prompt back.
+    ///
+    /// Ignored: set `CPM_FLOPPY_BOOT` to an Altair CP/M floppy.  Set but
+    /// pointing nowhere is a failure, not a skip.
+    #[test]
+    #[ignore]
+    fn test_a_save_on_a_read_only_floppy_gives_the_prompt_back() {
+        let Ok(path) = std::env::var("CPM_FLOPPY_BOOT") else {
+            eprintln!("SKIPPED: set CPM_FLOPPY_BOOT to an Altair CP/M floppy");
+            return;
+        };
+        let original = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let mut m = BootMachine::new();
+        m.insert(0, original, true).expect("an 88-DCDD image");
+        let mut cpu = BootMachine::new_cpu();
+        m.boot(&mut cpu, 0).expect("boots");
+        let banner = printable(&run_until_quiet(&mut m, &mut cpu, 60_000_000));
+        assert!(banner.contains("A>"), "no prompt: {banner:?}");
+
+        let saved = type_at(&mut m, &mut cpu, b"SAVE 1 ZZRO.COM\r", 400_000_000);
+        println!("--- SAVE on a read-only disk ---\n{saved}");
+        // Whatever the BIOS said, a keypress must reach a prompt again.  MITS
+        // CP/M's BDOS error waits for one.
+        let after = type_at(&mut m, &mut cpu, b"\r", 400_000_000);
+        println!("--- after a key ---\n{after}");
+        let dir = type_at(&mut m, &mut cpu, b"DIR\r", 400_000_000);
+        println!("--- DIR ---\n{dir}");
+        assert!(dir.contains("COM"), "the guest never came back: {saved:?} / {after:?} / {dir:?}");
+        assert!(m.take_dirty().is_empty(), "a read-only disk was written");
+    }
+
     /// Boot every image in a folder and print what each one says.
     ///
     /// The survey behind the single-disk test: one run tells you which

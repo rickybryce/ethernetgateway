@@ -309,7 +309,29 @@ fn is_internal_ip(ip: std::net::IpAddr) -> bool {
                 || v6
                     .to_ipv4()
                     .is_some_and(|m| is_internal_ip(IpAddr::V4(m)))
+                // Two more prefixes that carry an IPv4 address a router will
+                // deliver to: NAT64's well-known 64:ff9b::/96 (the v4 is the
+                // last 32 bits) and 6to4's 2002::/16 (bits 16..48). On a
+                // network with either gateway, `[64:ff9b::7f00:1]` is
+                // 127.0.0.1 -- so judge them by the address inside.
+                || embedded_v4(v6).is_some_and(|m| is_internal_ip(IpAddr::V4(m)))
         }
+    }
+}
+
+/// The IPv4 address a NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) address
+/// is routed to, if it is one.
+fn embedded_v4(v6: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let s = v6.segments();
+    let v4 = |hi: u16, lo: u16| {
+        std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
+    };
+    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        Some(v4(s[6], s[7]))
+    } else if s[0] == 0x2002 {
+        Some(v4(s[1], s[2]))
+    } else {
+        None
     }
 }
 
@@ -2528,6 +2550,9 @@ mod tests {
             "127.0.0.1", "10.1.2.3", "172.16.5.5", "192.168.1.1",
             "169.254.169.254", "0.0.0.0", "100.64.0.1", "::1", "fc00::1",
             "fe80::1",
+            // NAT64 and 6to4 carrying a loopback / private / metadata v4.
+            "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "2002:c0a8:101::1",
+            "2002:7f00:1::",
         ] {
             assert!(
                 is_internal_ip(s.parse::<IpAddr>().unwrap()),
@@ -2536,7 +2561,11 @@ mod tests {
             );
         }
         // Public addresses — must be allowed.
-        for s in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"] {
+        for s in [
+            "8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111",
+            // The same prefixes carrying a public v4 stay reachable.
+            "64:ff9b::808:808", "2002:808:808::1",
+        ] {
             assert!(
                 !is_internal_ip(s.parse::<IpAddr>().unwrap()),
                 "{} should be classified public",

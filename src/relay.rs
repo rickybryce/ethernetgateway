@@ -929,6 +929,18 @@ pub(crate) static HOSTNAME_READS: std::sync::atomic::AtomicUsize =
 fn read_hostname_label() -> String {
     #[cfg(test)]
     HOSTNAME_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    raw_hostname()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+        .take(32)
+        .collect()
+}
+
+/// The machine's name as the system gives it, untrimmed of nothing but
+/// whitespace -- [`hostname_label`] is this cut down for display, and the web
+/// server's Host check needs the whole name (a 40-character hostname must
+/// still match itself). Not cached: callers that want it twice cache it.
+pub(crate) fn raw_hostname() -> String {
     let raw = std::fs::read_to_string("/etc/hostname")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -950,11 +962,7 @@ fn read_hostname_label() -> String {
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         })
         .unwrap_or_default();
-    raw.trim()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
-        .take(32)
-        .collect()
+    raw.trim().to_string()
 }
 
 /// Relay wire-protocol version.  Bump on any incompatible change to the

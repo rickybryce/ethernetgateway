@@ -2293,6 +2293,10 @@ fn modem_slave_announce_tick(
             "Serial modem (Port {}): REGISTERED with master; awaiting a call",
             label
         );
+        // The console and CP/M registrations each print the whole picture; this
+        // one did not, so a slave whose modem port registered last left a
+        // summary in the log still calling it "connecting to the master".
+        crate::relay::log_slave_link_summary(&host, mport);
 
         let registered_as = slave_link_fingerprint(&config::get_config(), id);
         let crate::relay::MasterRelay { _session, mut stream } = relay;

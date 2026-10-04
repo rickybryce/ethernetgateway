@@ -2513,9 +2513,7 @@ impl TelnetSession {
     async fn cpmemu_emit(&mut self, term: &mut Adm3a, bytes: &[u8]) -> Result<(), std::io::Error> {
         let mut out = Vec::with_capacity(bytes.len());
         for &b in bytes {
-            for op in term.feed(b) {
-                cpm_term::render_op(op, self.terminal_type, &mut out);
-            }
+            term.emit(b, self.terminal_type, &mut out);
         }
         if !out.is_empty() {
             self.send_raw(&out).await?;
@@ -3452,11 +3450,12 @@ mod repl_tests {
 
         // The operator's side: D I R echoed (case-swapped back for the C64),
         // then CRSR LEFT / space / CRSR LEFT, then the CR LF that RETURN
-        // itself echoes.  A 0x14 anywhere in here would be the old behaviour --
-        // the screen erasing a character the guest still holds.
+        // itself echoes -- one `0x0D` on a C64, which is both motions at once
+        // (see `Adm3a::emit`).  A 0x14 anywhere in here would be the old
+        // behaviour -- the screen erasing a character the guest still holds.
         assert_eq!(
             screen,
-            vec![b'D', b'I', b'R', 0x9D, b' ', 0x9D, b'\r', b'\n'],
+            vec![b'D', b'I', b'R', 0x9D, b' ', 0x9D, b'\r'],
             "the echo must rub the R out with cursor moves, never with 0x14",
         );
         assert!(
