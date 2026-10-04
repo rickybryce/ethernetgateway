@@ -1057,26 +1057,27 @@ fn prune_elements(root: &Handle, tags: &[&str]) {
     }
 }
 
-/// A space between two elements that touch where a real browser would have
-/// shown a gap, decided before the layout so the space is counted in it.
+/// A space between two links that touch, decided before the layout so the
+/// space is counted in it.
 ///
-/// Two cases, both measured.  **Two links**, side by side with no space in the
-/// HTML, are parted by CSS in a browser and ran together here: `Hacker
-/// News[1]new[2]`, `Jump to navigationJump to search`.  (This was done on the
-/// rendered line once; a space added after html2text has laid a row out
-/// makes the row one column too wide, and HN's `login` went to a row of its
-/// own.)  **Two phrases, lower case meeting a capital**: GitHub writes
-/// `<span>GitHub Copilot</span><span>Write better code</span>` and its
-/// stylesheet puts the two on separate lines; we have no stylesheet, so they
-/// read `GitHub CopilotWrite`.  Both sides must be more than one word: a
-/// capital alone also marks a name styled in parts (`i`+`Phone`, `Mac`+`Book
-/// Pro`), and a review caught the first version splitting those.  The cost is
-/// a single word meeting a phrase (GitHub's `Actions`+`Automate any workflow`)
-/// staying joined -- text left as the page wrote it, never a name broken.
-/// `<b>Wiki</b>pedia` is lower meeting lower, and a link that ends mid-word
-/// (`<a>Wiki</a>pedia`) is not two links; both are left alone.  Preformatted text and code
-/// are left alone entirely: a highlighter splits tokens into spans and every
-/// byte there is meant.
+/// Side by side with no space in the HTML, two links are parted by CSS in a
+/// browser and ran together here: `Hacker News[1]new[2]`, `Jump to
+/// navigationJump to search`.  Two different links are never one word, so
+/// this cannot break one -- unlike a link that ends mid-word
+/// (`<a>Wiki</a>pedia`), which is one link and plain text and is left alone.
+/// (Done on the rendered line once; a space added after html2text has laid a
+/// row out makes the row one column too wide, and HN's `login` went to a row
+/// of its own.)  Preformatted text and code are left alone entirely: a
+/// highlighter splits tokens into spans and every byte there is meant.
+///
+/// **Only links.**  A space where lower case met a capital across two
+/// elements was tried for GitHub's `<span>GitHub Copilot</span><span>Write
+/// better code</span>` (`CopilotWrite`, two lines under its stylesheet) and
+/// withdrawn after three reviews: `<span>The new i</span><span>Phone 15</span>`
+/// and `Hosted on <span>Word</span><span>Press</span>` are the same shape to
+/// any rule that reads only the text, and the difference is in a stylesheet
+/// we do not load.  Words run together are the page's text as written; a
+/// name split in two is our invention.
 ///
 /// One pass over the tree: each node's edges are worked out from its
 /// children's, never by re-reading a subtree.
@@ -1084,17 +1085,14 @@ fn space_touching_elements(dom: &RcDom) {
     use html5ever::tree_builder::{NodeOrText, TreeSink};
     use std::collections::HashMap;
 
-    /// A node's first and last visible character (whitespace as ' '), the
-    /// link each one is inside, if any, whether it shows anything but
-    /// whitespace, and whether that is more than one word.
+    /// A node's first and last visible character (whitespace as ' '), and
+    /// the link each one is inside, if any.
     #[derive(Clone, Copy)]
     struct Edge {
         first: char,
         last: char,
         first_link: Option<usize>,
         last_link: Option<usize>,
-        content: bool,
-        phrase: bool,
     }
     let key = |h: &Handle| std::rc::Rc::as_ptr(h) as usize;
     // `None`: a node with no text at all (an icon, a comment).
@@ -1129,48 +1127,28 @@ fn space_touching_elements(dom: &RcDom) {
             match text_of(&node) {
                 Some(t) => t.chars().next().zip(t.chars().last()).map(|(f, l)| Edge {
                     first: ws(f), last: ws(l), first_link: None, last_link: None,
-                    content: !t.trim().is_empty(), phrase: t.trim().contains(char::is_whitespace),
                 }),
                 None if !matches!(node.data, html2text::Comment { .. } | html2text::Document) => Some(Edge {
-                    first: ' ', last: ' ', first_link: None, last_link: None, content: false, phrase: false,
+                    first: ' ', last: ' ', first_link: None, last_link: None,
                 }),
                 None => None,
             }
         } else {
             let mut whole: Option<Edge> = None;
             let mut prev: Option<(&Handle, Option<Edge>)> = None;
-            // A gap since the last word, for telling `GitHub Copilot` (a
-            // phrase across two children) from `Git` + `Hub`.
-            let mut gap = false;
             for child in children.iter() {
                 let e = edges.get(&key(child)).copied().flatten();
                 if let Some(c) = e {
                     whole = Some(match whole {
-                        Some(w) => Edge {
-                            last: c.last,
-                            last_link: c.last_link,
-                            content: w.content || c.content,
-                            phrase: w.phrase || c.phrase
-                                || (w.content && c.content && (gap || c.first == ' ')),
-                            ..w
-                        },
+                        Some(w) => Edge { last: c.last, last_link: c.last_link, ..w },
                         None => c,
                     });
-                    if c.content {
-                        gap = c.last == ' ';
-                    } else if whole.is_some_and(|w| w.content) {
-                        gap = true;
-                    }
                 }
                 if let (Some((p, Some(l))), Some(r)) = (prev, e) {
                     let both_elements = matches!(p.data, Element { .. }) && matches!(child.data, Element { .. });
                     let two_links = l.last_link.is_some() && r.first_link.is_some() && l.last_link != r.first_link
                         && l.last.is_alphanumeric() && r.first.is_alphanumeric();
-                    // Two phrases, not a name styled in parts: `iPhone`,
-                    // `MacBook Pro` and `WordPress` are one word each, so
-                    // the capital alone decides nothing.
-                    let case_change = l.last.is_lowercase() && r.first.is_uppercase() && l.phrase && r.phrase;
-                    if !verbatim && both_elements && (two_links || case_change) {
+                    if !verbatim && both_elements && two_links {
                         inserts.push(child.clone());
                     }
                 }
@@ -4499,39 +4477,40 @@ mod tests {
         }
     }
 
-    /// Two elements that touch get a space where lower case meets a capital
-    /// (GitHub's `CopilotWrite better code`), and nowhere else.
+    /// Two links that touch get a space; nothing else does, whatever its
+    /// case -- a name styled in parts is the page's word, not two.
     #[test]
-    fn test_touching_elements_are_spaced_only_at_a_case_change() {
+    fn test_only_touching_links_are_spaced() {
         let render = |body: &str| {
             let html = format!("<html><body>{body}</body></html>");
             let (page, _) = render_html_body(html.as_bytes(), "http://x.test/".into(), 73).unwrap();
             page.lines.join("\n")
         };
-        let gh = render(r#"<a href="/c"><span><svg><path d="M0"/></svg>GitHub Copilot</span><span>Write better code</span></a>"#);
-        assert!(gh.contains("GitHub Copilot Write better code"), "{gh:?}");
         // Nested deeper on each side, and with an icon between.
-        let deep = render("<p><b><i>first alpha</i></b><img src=x.png alt=''><em><span>Beta</span> <span>two</span></em></p>");
-        assert!(deep.contains("first alpha Beta two"), "{deep:?}");
-        // The price of not splitting names: one word meeting a phrase stays
-        // as the page wrote it.
-        assert!(render("<p><span>Actions</span><span>Automate any workflow</span></p>").contains("ActionsAutomate"));
-        // A name styled in two parts is one word, whatever its case:
-        // the space is for two phrases meeting, not for a capital.
-        for (html, word) in [("<p><span>i</span><span>Phone</span> sale</p>", "iPhone"),
-                             ("<p><b>Mac</b><b>Book</b> Pro</p>", "MacBook"),
-                             ("<p><span>Git</span><span>Hub</span></p>", "GitHub"),
-                             ("<p><b>Mac</b><b>Book Pro</b></p>", "MacBook Pro"),
-                             ("<p><a href=/w><span>Word</span><span>Press</span></a> hosting</p>", "WordPress")] {
-            assert!(render(html).contains(word), "{html}: {:?}", render(html));
+        let deep = render("<p><b><i><a href=/a>alpha</a></i></b><img src=x.png alt=''><em><a href=/b>Beta</a></em></p>");
+        assert!(deep.contains("alpha\u{2}1\u{3} Beta\u{2}2\u{3}"), "{deep:?}");
+        // Already spaced inside the link: not doubled.
+        assert!(render("<p><a href=/a>one </a><a href=/b>Two</a></p>").contains("one\u{2}1\u{3} Two"));
+        // Code is every byte meant, links or not.
+        let code = render("<pre><span><a href=/a>let</a><a href=/b>X</a></span></pre>");
+        assert!(code.contains("let\u{2}1\u{3}X"), "{code:?}");
+        // Names styled in parts stay whole, including across phrases (the
+        // shape a case rule cannot tell from two separate lines) -- and so
+        // GitHub's two menu lines stay run together, as the page wrote them.
+        for (html, text) in [
+            ("<p><span>i</span><span>Phone</span> sale</p>", "iPhone sale"),
+            ("<p><b>Mac</b><b>Book Pro</b></p>", "MacBook Pro"),
+            ("<p><span>Git</span><span>Hub</span></p>", "GitHub"),
+            ("<p><span>The new i</span><span>Phone 15</span></p>", "The new iPhone 15"),
+            ("<p><span>Shop Mac</span><span>Book Pro</span></p>", "Shop MacBook Pro"),
+            ("<p><span>Hosted on Word</span><span>Press today</span></p>", "Hosted on WordPress today"),
+            ("<p><b>Wiki</b><span>pedia</span></p>", "Wikipedia"),
+            ("<p><span>GitHub Copilot</span><span>Write better code</span></p>", "GitHub CopilotWrite better code"),
+        ] {
+            assert!(render(html).contains(text), "{html}: {:?}", render(html));
         }
-        // Lower meeting lower is a word split for styling; leave it.
-        assert!(render("<p><b>Wiki</b><span>pedia</span></p>").contains("Wikipedia"));
-        // Already spaced: not doubled.
-        assert!(render("<p><span>one </span><span>Two</span></p>").contains("one Two"));
-        // Code is every byte meant, however deep the spans.
-        let code = render("<pre><span><span>let</span><span>X</span></span></pre><code><span>a</span><span>B</span></code>");
-        assert!(code.contains("letX") && code.contains("aB"), "{code:?}");
+        // A link that ends mid-word is one word with the text after it.
+        assert!(render("<p><a href=/w>Wiki</a>pedia</p>").contains("Wiki\u{2}1\u{3}pedia"));
     }
 
     #[test]
