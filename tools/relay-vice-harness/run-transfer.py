@@ -193,9 +193,16 @@ def main():
             else:
                 break
     else:
+        # **The protocol first, then a name only if the gateway asks.**  Since
+        # 9255921 / 9517c78 the Upload menu asks which protocol before it asks
+        # anything else, and YMODEM, ZMODEM and Kermit ask no filename at all
+        # -- each file keeps the name the sender gives it.  Typing the name
+        # first, as this did, put its first letter at the protocol prompt
+        # (`puntestup.seq` chose Punter).
         nt.type('u', 4.0)
-        nt.type('%sup.seq\n' % name[:6], 3.5)
         nt.type(key, 4.0)
+        if key in ('x', 'p'):
+            nt.type('%sup.seq\n' % name[:6], 3.5)
         time.sleep(1.0)
         nt.keys.focus(); nt.keys.combo('Tab', 'u')
         time.sleep(5.0)

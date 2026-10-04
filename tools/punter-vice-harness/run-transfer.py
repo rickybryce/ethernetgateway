@@ -169,9 +169,13 @@ def main():
             else:
                 break
     else:
+        # The protocol first, then a name only if the gateway asks: the
+        # Upload menu now asks which protocol before anything else, and
+        # YMODEM, ZMODEM and Kermit ask no filename.  See relay-vice-harness.
         nt.type('u', 4.0)
-        nt.type('%sup.seq\n' % name[:6], 3.5)
         nt.type(key, 4.0)
+        if key in ('x', 'p'):
+            nt.type('%sup.seq\n' % name[:6], 3.5)
         time.sleep(1.0)
         nt.keys.focus(); nt.keys.combo('Tab', 'u')
         time.sleep(5.0)
