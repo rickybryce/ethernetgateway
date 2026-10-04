@@ -184,8 +184,10 @@ def past_welcome(nt, timeout=15.0):
     Polled until either the page or the main menu shows: one look a fixed time
     after the colour answer could come before a page that takes ~2.5 s to draw
     at 2400 baud.  Matched on lowercase words, since NovaTerm's screen text
-    turns capitals into dots ("upload/download" is the main menu's File
-    Transfer line).  Lives here, once, because every script that reaches the
+    turns capitals into dots: the main menu is recognised by its
+    "Troubleshooting" row, which the welcome page never mentions ("upload/
+    download" was tried first and is only on the help screen, so every run
+    past a gateway's first week waited out the full timeout).  Lives here, once, because every script that reaches the
     menu needs it, and two copies of a screen-scraper drift.
     """
     end = time.time() + timeout
@@ -195,6 +197,6 @@ def past_welcome(nt, timeout=15.0):
             print('  welcome page -> SPACE', flush=True)
             nt.type(' ', 3.0)
             return
-        if any('upload/download' in l for l in scr):
+        if any('roubleshooting' in l for l in scr):
             return
         time.sleep(1.0)
