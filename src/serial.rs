@@ -392,6 +392,34 @@ pub fn cpm_announce_release() {
     CPM_ANNOUNCE_OWNER.store(false, Ordering::SeqCst);
 }
 
+/// Ends an announcer's tenure however its task ends: clears the "announced"
+/// flag, then gives up the claim.
+///
+/// The task had three ways out and released on one.  A stop or restart
+/// returned from the top of the loop or the `Aborted` arm, and a session's
+/// `abort()` cancels it at whatever await it is parked in -- so after a Save
+/// and Restart the next cycle could not claim the role, the slave stopped
+/// offering its CP/M endpoint until the process restarted, and the flag
+/// stayed `true`.  Once `slave_relay_status` counted that flag, the web and
+/// desktop said "Connected" for a dead master and took the credential boxes
+/// away.  A drop guard runs on every one of those exits, including
+/// cancellation.
+///
+/// **The task releases its own claim; nobody releases it for the task.**
+/// `CpmPeerReg::drop` used to, right after `abort()` -- but cancellation lands
+/// at the task's next poll, so a new session could claim in between and then
+/// have the old task's exit clear the flag and the claim out from under it.
+/// Flag first, then claim: once the claim is free a new announcer may set the
+/// flag, and that must not be undone.
+struct AnnouncerExit;
+
+impl Drop for AnnouncerExit {
+    fn drop(&mut self) {
+        crate::relay::set_cpm_announced(false);
+        cpm_announce_release();
+    }
+}
+
 /// Claim a pending incoming CP/M call, if one is waiting (called by the
 /// emulator's modem pump).
 pub fn take_cpm_call_request() -> Option<CpmIncomingCall> {
@@ -2564,6 +2592,9 @@ async fn cpm_announce_backoff(stop: &Arc<AtomicBool>, dur: Duration) {
 /// per-session endpoint rather than a fixed port — spawned by the CP/M driver
 /// (already on the tokio runtime) and stopped via `stop` when the shell exits.
 pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
+    // Owns the announcer claim and the "announced" flag from here to however
+    // this task ends -- see `AnnouncerExit`.
+    let _exit = AnnouncerExit;
     let mut attempt: u32 = 0; // announce attempts since the last success
     let mut backoff = RECONNECT_BACKOFF_MIN; // grows while the master is away
     let mut last_err: Option<String> = None; // so one reason logs once
@@ -2585,9 +2616,7 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                 crate::cpm::uart::ModemAccess::Off
             )
         {
-            crate::relay::set_cpm_announced(false);
-            cpm_announce_release();
-            return; // config no longer makes this applicable
+            return; // config no longer makes this applicable (`_exit` releases)
         }
         let registered_as = slave_master_fingerprint(&cfg);
         let host = cfg.slave_master_host.clone();
@@ -5632,9 +5661,11 @@ fn dial_master_relay(
 ) {
     if cfg.slave_master_host.is_empty() {
         glog!("Relay (slave): no master host configured; refusing dial");
+        explain_master_failure(state, master_failure_reason(None, false));
         send_result(state, "NO CARRIER");
         return;
     }
+    let to_menu = matches!(target, crate::relay::RelayTarget::Menu);
 
     // Only a dial to an outside host is a BBS; the master's menu and a
     // serial peer are pipes -- see `online_mode_duplex`.
@@ -5671,6 +5702,7 @@ fn dial_master_relay(
         Ok(r) => r,
         Err(e) => {
             glog!("Relay (slave) Port {}: {}", port_label, e);
+            explain_master_failure(state, master_failure_reason(Some(&e), to_menu));
             send_result(state, "NO CARRIER");
             return;
         }
@@ -6909,6 +6941,57 @@ fn format_s_regs(regs: &[u8; NUM_S_REGS]) -> String {
 }
 
 // ─── Helpers ───────────────────────────────────────────────
+
+/// What a slave tells its caller when a call to the master fails, or `None`
+/// when the plain `NO CARRIER` is the honest answer.
+///
+/// A slave's serial port never shows the slave's own menu: `ATDT
+/// ethernetgateway` there is relayed to the master's.  So with the master
+/// down, the one person stuck -- the user at the retro terminal -- got
+/// `NO CARRIER` and nothing else, and the reason went to a log on a box they
+/// may not even know exists.
+///
+/// **Only what is certainly about the master.**  `err` is `None` when no
+/// master is configured at all.  `Network` and `Auth` happen before any
+/// call is placed.  `Refused` is the master's own answer only when the call
+/// was for its menu (`to_menu`): for an onward dial or a peer it also covers
+/// the far end not answering, which the master relays as a refusal, and
+/// blaming the master for a BBS that is down would send the user after the
+/// wrong machine.  Those stay a plain `NO CARRIER`, as before.
+///
+/// Upper case and short, as a modem speaks: it fits a 40-column screen.
+fn master_failure_reason(
+    err: Option<&crate::relay::RelayConnectError>,
+    to_menu: bool,
+) -> Option<&'static str> {
+    use crate::relay::RelayConnectError as E;
+    match err {
+        None => Some("MASTER NOT CONFIGURED"),
+        Some(E::Network(_)) => Some("NOT CONNECTED TO MASTER"),
+        Some(E::Auth(_)) => Some("MASTER REFUSED LOGIN"),
+        Some(E::Refused(_)) if to_menu => Some("MASTER REFUSED CALL"),
+        Some(E::Refused(_)) => None,
+    }
+}
+
+/// Whether a modem in this mode may say a [`master_failure_reason`] line.
+///
+/// Verbose mode only.  `ATQ1` asks for silence and `ATV0` for result codes a
+/// program can parse, so neither gets text it did not ask for; `ATV1` is a
+/// person reading the screen, and they are who this is for.
+fn says_failure_reasons(quiet: bool, verbose: bool) -> bool {
+    !quiet && verbose
+}
+
+/// Say [`master_failure_reason`]'s line before the `NO CARRIER`, framed like
+/// `ATI`'s output by the S3/S4 registers.
+fn explain_master_failure(state: &mut ModemState, reason: Option<&str>) {
+    if let Some(line) = reason
+        && says_failure_reasons(state.quiet, state.verbose)
+    {
+        send_response(state, line);
+    }
+}
 
 /// Write an informational message framed by the configured CR (S3) and LF
 /// (S4).  Internal `\r\n` or `\n` line breaks within `msg` are rewritten to
@@ -9397,8 +9480,10 @@ mod tests {
 
     #[test]
     fn test_cpm_pool_listener_count_and_announce_owner() {
+        // The claim is also exercised by the announcer-exit test.
+        let _lock = crate::relay::key_auth_test_lock();
         // Pool: enter twice, exit twice, count returns to 0.  (Global statics,
-        // but no other test touches these.)
+        // but no other test touches the pool.)
         assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 0);
         cpm_peer_listen_enter();
         cpm_peer_listen_enter();
@@ -10422,5 +10507,81 @@ mod tests {
             drained.iter().any(|m| &**m == b"admin notice"),
             "subscriber should see the globally-broadcast message"
         );
+    }
+
+    /// A slave's caller is told when the master is why the call failed, and
+    /// only then: a far end that does not answer is not the master's fault.
+    #[test]
+    fn test_a_failed_call_to_the_master_says_why() {
+        use crate::relay::RelayConnectError as E;
+        let net = E::Network("connect failed: refused".into());
+        let auth = E::Auth("bad key".into());
+        let refused = E::Refused("no relay hello".into());
+        for to_menu in [true, false] {
+            assert_eq!(master_failure_reason(None, to_menu), Some("MASTER NOT CONFIGURED"));
+            assert_eq!(master_failure_reason(Some(&net), to_menu), Some("NOT CONNECTED TO MASTER"));
+            assert_eq!(master_failure_reason(Some(&auth), to_menu), Some("MASTER REFUSED LOGIN"));
+        }
+        // Refused is the master's own answer only for its menu; for an onward
+        // dial or a peer it also means the far end did not pick up.
+        assert_eq!(master_failure_reason(Some(&refused), true), Some("MASTER REFUSED CALL"));
+        assert_eq!(master_failure_reason(Some(&refused), false), None);
+        // Words a C64 can show on one line.
+        for e in [None, Some(&net), Some(&auth), Some(&refused)] {
+            if let Some(line) = master_failure_reason(e, true) {
+                assert!(line.len() < 40 && line == line.to_uppercase(), "{line:?}");
+            }
+        }
+        // Text only for a person reading: never in quiet or numeric mode.
+        assert!(says_failure_reasons(false, true));
+        assert!(!says_failure_reasons(true, true));
+        assert!(!says_failure_reasons(false, false));
+        assert!(!says_failure_reasons(true, false));
+    }
+
+    /// However the CP/M announcer ends, it gives up the claim and the
+    /// "announced" flag: stopped by a restart, and cancelled by `abort()`.
+    #[test]
+    fn test_the_cpm_announcer_releases_however_it_ends() {
+        // Synchronous, on its own runtime: the lock is a std mutex and must
+        // not be held across an await.
+        let _lock = crate::relay::key_auth_test_lock();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let held = || !cpm_announce_claim(); // true while someone holds it
+        let reset = || {
+            cpm_announce_release();
+            crate::relay::set_cpm_announced(false);
+            crate::relay::set_slave_link(0, crate::relay::SlaveLinkState::Down);
+            crate::relay::set_slave_link(1, crate::relay::SlaveLinkState::Down);
+            crate::relay::clear_master_credential_needed();
+        };
+
+        // Stopped (the restart path): the task returns at once.
+        reset();
+        assert!(cpm_announce_claim());
+        crate::relay::set_cpm_announced(true);
+        rt.block_on(cpm_slave_announce(Arc::new(AtomicBool::new(true))));
+        assert!(!held(), "a restart left the announcer claimed");
+        cpm_announce_release();
+        assert_eq!(crate::relay::slave_relay_status(), crate::relay::SlaveRelayStatus::Idle,
+            "a restart left the CP/M endpoint reading as connected");
+
+        // Cancelled where it is parked (a session's `abort()`).
+        reset();
+        assert!(cpm_announce_claim());
+        crate::relay::set_cpm_announced(true);
+        rt.block_on(async {
+            let jh = tokio::spawn(async {
+                let _exit = AnnouncerExit;
+                std::future::pending::<()>().await;
+            });
+            tokio::task::yield_now().await;
+            jh.abort();
+            let _ = jh.await;
+        });
+        assert!(!held(), "a cancelled announcer left its claim held");
+        cpm_announce_release();
+        assert_eq!(crate::relay::slave_relay_status(), crate::relay::SlaveRelayStatus::Idle);
+        reset();
     }
 }

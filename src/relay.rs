@@ -2103,10 +2103,14 @@ impl SlaveRelayStatus {
     }
 }
 
-/// The current link status, over both ports.
+/// The current link status, over both ports and the CP/M emulator.
 ///
 /// `Connected` outranks everything: one working port means this gateway can
-/// reach its master, whatever the other is doing. `CredentialNeeded` outranks
+/// reach its master, whatever the other is doing.  The emulator counts as a
+/// port here: announced, it is authenticated to the master and dialable from
+/// it, and a slave whose only link it is (no serial port enabled) read "Not
+/// connected" while the master could reach it -- which the main menu would
+/// have shown in red. `CredentialNeeded` outranks
 /// `Connecting` because a retry loop with no usable credential is going to
 /// keep failing, and saying "connecting" about it would be an encouraging
 /// untruth of exactly the kind this file keeps having to remove.
@@ -2115,6 +2119,7 @@ pub fn slave_relay_status() -> SlaveRelayStatus {
     if states
         .iter()
         .any(|s| matches!(s, SlaveLinkState::Registered | SlaveLinkState::Bridging))
+        || CPM_ANNOUNCED.load(Ordering::SeqCst)
     {
         return SlaveRelayStatus::Connected;
     }

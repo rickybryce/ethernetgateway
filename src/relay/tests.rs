@@ -1197,6 +1197,8 @@ fn test_an_unknown_answer_byte_is_not_a_connection() {
 #[test]
 fn test_cpm_announced_flag_roundtrips() {
     use super::{set_cpm_announced, log_slave_link_summary};
+    // `slave_relay_status` reads this flag too; hold its test's lock.
+    let _lock = super::key_auth_test_lock();
     // The flag drives what the summary claims about the CP/M endpoint, so a
     // stale `true` would have the log advertising something the master cannot
     // reach.  Round-trip it, and prove the summary runs in both states without
@@ -1210,6 +1212,8 @@ fn test_cpm_announced_flag_roundtrips() {
 #[test]
 fn test_slave_link_summary_names_every_port_and_its_mode() {
     use super::{log_slave_link_summary, set_slave_link, SlaveLinkState};
+    // The link states are global and `slave_relay_status`'s test reads them.
+    let _lock = super::key_auth_test_lock();
     use crate::logger;
     // The point of the summary is that one glance answers "what can the master
     // reach?", so every port must appear with its mode and state — including a
@@ -1232,6 +1236,8 @@ fn test_slave_link_summary_names_every_port_and_its_mode() {
 
 #[test]
 fn test_slave_link_state_roundtrip() {
+    // The link states are global and `slave_relay_status`'s test reads them.
+    let _lock = super::key_auth_test_lock();
     use super::{set_slave_link, slave_link_state, SlaveLinkState};
     for st in [
         SlaveLinkState::Down,
@@ -2304,6 +2310,7 @@ fn test_the_relay_status_the_credential_boxes_report() {
     let reset = || {
         super::set_slave_link(0, L::Down);
         super::set_slave_link(1, L::Down);
+        super::set_cpm_announced(false);
         super::clear_master_credential_needed();
     };
 
@@ -2321,6 +2328,15 @@ fn test_the_relay_status_the_credential_boxes_report() {
     reset();
     super::set_slave_link(0, L::Connecting);
     assert_eq!(super::slave_relay_status(), S::Connecting);
+
+    // The CP/M emulator announced is a link to the master like a port: a
+    // slave with no serial port enabled is connected by it alone.
+    reset();
+    super::set_cpm_announced(true);
+    assert_eq!(super::slave_relay_status(), S::Connected);
+    super::note_master_credential_needed("10.0.0.9", 2222);
+    assert_eq!(super::slave_relay_status(), S::Connected, "an announced emulator outranks a missing credential");
+    reset();
 
     // A missing credential outranks a retry loop that cannot succeed...
     reset();

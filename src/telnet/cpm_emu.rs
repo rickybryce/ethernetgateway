@@ -522,8 +522,11 @@ impl Drop for CpmPeerReg {
         crate::serial::cpm_peer_listen_exit();
         if let Some((stop, jh)) = self.announce.take() {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            // The task gives the claim up itself as it ends (its
+            // `AnnouncerExit` guard), which cancellation still runs.
+            // Releasing here as well could free a claim a new session has
+            // taken before this task got around to ending.
             jh.abort();
-            crate::serial::cpm_announce_release();
         }
     }
 }
