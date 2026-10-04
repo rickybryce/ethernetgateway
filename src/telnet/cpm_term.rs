@@ -54,9 +54,12 @@ pub(in crate::telnet) enum TermOp {
 #[derive(Default)]
 pub(in crate::telnet) struct Adm3a {
     stage: Stage,
-    /// A CR went to a Commodore and nothing has followed it yet: how many
-    /// rows to climb if what follows is not an LF -- see [`Adm3a::emit`].
-    petscii_cr: Option<u8>,
+    /// A CR went to a Commodore and nothing has followed it yet: how to get
+    /// back if what follows is not an LF -- see [`Adm3a::emit`].
+    petscii_cr: Option<CrFix>,
+    /// The C64 screen row where `petscii_col`'s column 0 is, once a cursor
+    /// jump, HOME or clear screen has told us -- `None` before any has.
+    petscii_origin: Option<u16>,
     /// Cells printed since the C64's cursor was last at column 0 of a row
     /// we know -- past 39 the line has wrapped onto the next row.
     petscii_col: u16,
@@ -64,6 +67,20 @@ pub(in crate::telnet) struct Adm3a {
     /// column 0 but the C64 keeps the rows it wrapped onto linked, so its
     /// next `0x0D` still leaves from the end of them.
     petscii_wide: u16,
+}
+
+/// What a bare CR still owes the C64 once the byte after it shows it was not
+/// half of a CR LF.
+#[derive(Clone, Copy)]
+struct CrFix {
+    /// Rows to climb back over from where the C64's `0x0D` landed.
+    ups: u8,
+    /// The row to go to with HOME and cursor-downs instead, when it is known
+    /// -- which no row link can mislead.
+    row: Option<u16>,
+    /// Where `petscii_origin` is if this was a bare CR.  After a CR LF it is
+    /// not known: the `0x0D` landed past whatever rows the C64 still links.
+    after_bare: Option<u16>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -138,70 +155,160 @@ impl Adm3a {
     /// leaves from the row the cursor is on -- so a 60-character status line
     /// rewritten with a bare CR climbs two rows, not one.
     ///
-    /// The known limit: the C64 keeps rows linked until the screen is cleared,
-    /// and this tracks only the line being printed.  A bare CR after cursor
-    /// addressing onto a row an *earlier* long line left linked lands a row
-    /// low.  Modelling the whole screen's link table would fix it; full-screen
-    /// software addresses the cursor rather than rewriting with CR, so it is
-    /// left until something is seen to need it.
+    /// Climbing assumes the C64's `0x0D` left from the end of the line being
+    /// printed, and the C64 keeps rows linked until the screen is cleared: a
+    /// cursor jump onto a row an *earlier* long line left linked would put a
+    /// climb one row low.  So once the row is known -- after any cursor jump,
+    /// HOME or clear screen, which is when full-screen software starts -- a
+    /// bare CR goes back by HOME and cursor-downs to the row it means, which
+    /// no link can mislead.  It climbs instead where the `0x0D` may have
+    /// scrolled the screen (near the bottom, by an amount a link would
+    /// change), and once a CR LF has gone out, because where that landed is
+    /// the C64's own business -- until the next jump says again.
     pub(in crate::telnet) fn emit(&mut self, b: u8, term: TerminalType, out: &mut Vec<u8>) {
         for op in self.feed(b) {
             if term != TerminalType::Petscii {
                 render_op(op, term, out);
                 continue;
             }
-            let pending = self.petscii_cr.take();
-            match op {
-                TermOp::Print(b'\r') => {
-                    if let Some(ups) = pending {
-                        out.extend(std::iter::repeat_n(PET_UP, ups.into()));
-                    }
-                    out.push(b'\r');
-                    let wide = self.petscii_wide.max(self.petscii_col);
-                    // The C64 joins at most two rows into one logical line,
-                    // and its `0x0D` leaves from the end of the one the cursor
-                    // is in: the row pair holding it, plus the pair's second
-                    // row only if the line ever reached into it.  The climb
-                    // goes back to the pair's first row -- which is where the
-                    // ADM-3A's CR goes too, since it wraps at 80 columns and a
-                    // pair is exactly one of its lines.
-                    let row = u32::from(self.petscii_col) / 40;
-                    let pair = row - row % 2;
-                    let end = if u32::from(wide) >= (pair + 1) * 40 { pair + 1 } else { pair };
-                    self.petscii_cr = Some((end - pair + 1) as u8);
-                    self.petscii_col = (pair * 40) as u16;
-                    self.petscii_wide = wide;
-                    continue;
-                }
-                TermOp::Print(b'\n') => {
-                    if pending.is_none() {
-                        out.push(PET_DOWN);
-                        self.petscii_col %= 40;
-                    }
-                    // A new row either way: CR LF begins a fresh line.
-                    self.petscii_wide = self.petscii_col;
-                    continue;
-                }
-                _ => {}
-            }
-            if let Some(ups) = pending {
-                out.extend(std::iter::repeat_n(PET_UP, ups.into()));
-            }
-            // Saturating: a guest may print for ever without a line end.
-            self.petscii_col = match op {
-                TermOp::CursorTo(_, c) => u16::from(c.min(39)),
-                TermOp::ClearHome | TermOp::Home => 0,
-                TermOp::Left => self.petscii_col.saturating_sub(1),
-                TermOp::Right => self.petscii_col.saturating_add(1),
-                TermOp::Print(c) if c >= 0x20 && c != 0x7F => self.petscii_col.saturating_add(1),
-                _ => self.petscii_col,
-            };
-            self.petscii_wide = match op {
-                TermOp::CursorTo(..) | TermOp::ClearHome | TermOp::Home => self.petscii_col,
-                _ => self.petscii_wide.max(self.petscii_col),
-            };
-            render_op(op, term, out);
+            self.emit_petscii(op, out);
         }
+    }
+
+    /// Go where a bare CR meant, now that what followed it says it was one.
+    fn settle_cr(&mut self, fix: CrFix, out: &mut Vec<u8>) {
+        match fix.row {
+            Some(row) => {
+                out.push(PET_HOME);
+                out.extend(std::iter::repeat_n(PET_DOWN, row.into()));
+            }
+            None => out.extend(std::iter::repeat_n(PET_UP, fix.ups.into())),
+        }
+        self.petscii_origin = fix.after_bare;
+    }
+
+    /// One operation for a Commodore -- see [`Adm3a::emit`].
+    fn emit_petscii(&mut self, op: TermOp, out: &mut Vec<u8>) {
+        let term = TerminalType::Petscii;
+        let pending = self.petscii_cr.take();
+        match op {
+            TermOp::Print(b'\r') => {
+                if let Some(fix) = pending {
+                    self.settle_cr(fix, out);
+                }
+                out.push(b'\r');
+                let wide = self.petscii_wide.max(self.petscii_col);
+                // The C64 joins at most two rows into one logical line,
+                // and its `0x0D` leaves from the end of the one the cursor
+                // is in: the row pair holding it, plus the pair's second
+                // row only if the line ever reached into it.  The climb
+                // goes back to the pair's first row -- which is where the
+                // ADM-3A's CR goes too, since it wraps at 80 columns and a
+                // pair is exactly one of its lines.
+                let row = u32::from(self.petscii_col) / 40;
+                let pair = row - row % 2;
+                let end = if u32::from(wide) >= (pair + 1) * 40 { pair + 1 } else { pair };
+                let ups = (end - pair + 1) as u8;
+                let fix = match self.petscii_origin {
+                    Some(o) => {
+                        let (o, pair, end) = (u32::from(o), pair, end);
+                        // Where the 0x0D lands if nothing below is linked --
+                        // and a stale link can put it one row further.  If
+                        // that could scroll the screen, by an amount nobody
+                        // here knows, climb instead and forget the row.
+                        let landed = o + end + 1;
+                        let trusted = landed < 24;
+                        CrFix {
+                            ups,
+                            row: trusted.then_some((o + pair) as u16),
+                            after_bare: trusted.then_some(o as u16),
+                        }
+                    }
+                    None => CrFix { ups, row: None, after_bare: None },
+                };
+                self.petscii_cr = Some(fix);
+                self.petscii_col = (pair * 40) as u16;
+                self.petscii_wide = wide;
+                return;
+            }
+            TermOp::Print(b'\n') => {
+                match pending {
+                    // CR LF: a fresh line, just past the one the CR left --
+                    // on a row only the C64 knows (see `CrFix::after_bare`).
+                    Some(_) => {
+                        self.petscii_origin = None;
+                        self.petscii_col = 0;
+                    }
+                    None => {
+                        out.push(PET_DOWN);
+                        // Off the bottom row it scrolls, and the C64 scrolls
+                        // a whole logical line -- two rows if the top one is
+                        // linked -- so then the row is no longer known.
+                        let row = self.cursor_row().map(|r| r + 1).filter(|&r| r <= 24);
+                        self.petscii_col %= 40;
+                        self.petscii_origin = row;
+                    }
+                }
+                self.petscii_wide = self.petscii_col;
+                return;
+            }
+            _ => {}
+        }
+        // Nothing to correct when the next thing is a jump of its own.
+        if let Some(fix) = pending
+            && !matches!(op, TermOp::CursorTo(..) | TermOp::Home | TermOp::ClearHome)
+        {
+            self.settle_cr(fix, out);
+        }
+        let was_col = self.petscii_col;
+        // Saturating: a guest may print for ever without a line end.
+        self.petscii_col = match op {
+            TermOp::CursorTo(_, c) => u16::from(c.min(39)),
+            TermOp::ClearHome | TermOp::Home => 0,
+            TermOp::Left => self.petscii_col.saturating_sub(1),
+            TermOp::Right => self.petscii_col.saturating_add(1),
+            TermOp::Print(c) if c >= 0x20 && c != 0x7F => self.petscii_col.saturating_add(1),
+            _ => self.petscii_col,
+        };
+        self.petscii_wide = match op {
+            TermOp::CursorTo(..) | TermOp::ClearHome | TermOp::Home => self.petscii_col,
+            _ => self.petscii_wide.max(self.petscii_col),
+        };
+        self.petscii_origin = match op {
+            TermOp::CursorTo(r, _) => Some(u16::from(r.min(24))),
+            TermOp::ClearHome | TermOp::Home => Some(0),
+            // Up one row: within a wrapped line that is 40 cells back
+            // along it, from its first row it moves the line's origin.
+            TermOp::Up => match self.petscii_origin {
+                Some(o) if self.petscii_col >= 40 => {
+                    self.petscii_col -= 40;
+                    Some(o)
+                }
+                // Onto another line: what the line below reached is not its.
+                Some(o) => {
+                    self.petscii_wide = self.petscii_col;
+                    Some(o.saturating_sub(1))
+                }
+                None => None,
+            },
+            // CRSR LEFT at column 0 goes to the end of the row above.
+            TermOp::Left if was_col == 0 => match self.petscii_origin {
+                Some(o) if o > 0 => {
+                    self.petscii_col = 39;
+                    Some(o - 1)
+                }
+                other => other,
+            },
+            // Printing off the bottom row scrolls -- by a logical line, which
+            // may be two rows (see the bare LF above): no longer known.
+            _ => self.petscii_origin.filter(|&o| o + self.petscii_col / 40 <= 24),
+        };
+        render_op(op, term, out);
+    }
+
+    /// The C64 row the cursor is on, if the origin is known.
+    fn cursor_row(&self) -> Option<u16> {
+        self.petscii_origin.map(|o| o + self.petscii_col / 40)
     }
 }
 
@@ -407,6 +514,112 @@ mod tests {
         // Nothing changes for a terminal that has both motions.
         assert_eq!(emit_all(b"a\rb\nc\r\n", TerminalType::Ansi), b"a\rb\nc\r\n");
         assert_eq!(emit_all(b"a\rb\nc\r\n", TerminalType::Ascii), b"a\rb\nc\r\n");
+    }
+
+    /// Once a cursor jump says where the cursor is, a bare CR goes back by
+    /// HOME and cursor-downs -- so a row an earlier long line left linked on
+    /// the C64 cannot put it a row low.
+    #[test]
+    fn test_a_bare_cr_after_a_cursor_jump_goes_to_its_own_row() {
+        let p = TerminalType::Petscii;
+        let jump = |r: u8, c: u8| vec![0x1B, b'=', r + 0x20, c + 0x20];
+        // Rows 5 and 6 linked by a 60-character line, then a jump back to 5.
+        let mut g = vec![0x1A]; // clear screen
+        g.extend(jump(5, 0));
+        g.extend([b'x'; 60]);
+        g.extend(jump(5, 0));
+        g.extend_from_slice(b"hi\rz");
+        let out = emit_all(&g, p);
+        let tail: Vec<u8> = [&[0x0D, PET_HOME][..], &[PET_DOWN; 5][..], &b"Z"[..]].concat();
+        assert!(out.ends_with(&tail), "{out:02x?}");
+        // ...and on the second row of that line, back to its first.
+        let mut g2 = vec![0x1A];
+        g2.extend(jump(5, 0));
+        g2.extend([b'x'; 60]);
+        g2.extend_from_slice(b"\rz");
+        let tail: Vec<u8> = [&[0x0D, PET_HOME][..], &[PET_DOWN; 5][..], &b"Z"[..]].concat();
+        assert!(emit_all(&g2, p).ends_with(&tail));
+        // CR LF still costs its one byte, and from a row an earlier line
+        // left linked it lands past the link -- where only the C64 knows.  So
+        // the row is forgotten and the next bare CR climbs from where the
+        // 0x0D really went, as the previous release did.
+        let mut g3 = vec![0x1A];
+        g3.extend(jump(5, 0));
+        g3.extend([b'x'; 60]);
+        g3.extend(jump(5, 0));
+        g3.extend_from_slice(b"a\r\nstatus\rz");
+        let want: Vec<u8> = [&[b'A', 0x0D][..], &b"STATUS"[..], &[0x0D, PET_UP, b'Z'][..]].concat();
+        assert!(emit_all(&g3, p).ends_with(&want), "{:02x?}", emit_all(&g3, p));
+        // CRSR UP inside a wrapped line steps back along it, not off it: 45
+        // cells from row 5 put the cursor on row 6, and up is row 5 again.
+        let mut g6 = vec![0x1A];
+        g6.extend(jump(5, 0));
+        g6.extend([b'x'; 45]);
+        g6.extend_from_slice(b"\x0b\rz");
+        let tail: Vec<u8> = [&[PET_UP, 0x0D, PET_HOME][..], &[PET_DOWN; 5][..], &b"Z"[..]].concat();
+        assert!(emit_all(&g6, p).ends_with(&tail), "{:02x?}", emit_all(&g6, p));
+        // A CR followed by a jump owes nothing: the jump goes there itself.
+        let mut g7 = vec![0x1A];
+        g7.extend(jump(5, 0));
+        g7.extend_from_slice(b"a\r");
+        g7.extend(jump(9, 0));
+        let mut want = vec![b'A', 0x0D, PET_HOME];
+        want.extend([PET_DOWN; 9]);
+        assert!(emit_all(&g7, p).ends_with(&want), "{:02x?}", emit_all(&g7, p));
+        // A bare LF moves the known row too.
+        let mut g4 = vec![0x1A];
+        g4.extend(jump(2, 0));
+        g4.extend_from_slice(b"a\nb\rz");
+        let want: Vec<u8> = [&[b'A', PET_DOWN, b'B', 0x0D, PET_HOME][..], &[PET_DOWN; 3][..], &b"Z"[..]].concat();
+        assert!(emit_all(&g4, p).ends_with(&want), "{:02x?}", emit_all(&g4, p));
+        // Where the 0x0D may scroll the screen -- the bottom row, or the one
+        // above it with a link below -- it climbs instead.
+        for row in [23, 24] {
+            let mut g5 = vec![0x1A];
+            g5.extend(jump(row, 0));
+            g5.extend_from_slice(b"a\rz");
+            assert!(emit_all(&g5, p).ends_with(&[b'A', 0x0D, PET_UP, b'Z']), "row {row}");
+        }
+        // A CR that was not trusted forgets the row: climbing up from row 23
+        // afterwards still climbs rather than trusting a stale origin.
+        let mut g9 = vec![0x1A];
+        g9.extend(jump(23, 0));
+        g9.extend_from_slice(b"a\r\x0b\x0bb\rz");
+        assert!(emit_all(&g9, p).ends_with(&[b'B', 0x0D, PET_UP, b'Z']), "{:02x?}", emit_all(&g9, p));
+        // Up from a line's first row moves the row: from 5 to 4.
+        let mut g10 = vec![0x1A];
+        g10.extend(jump(5, 0));
+        g10.extend_from_slice(b"\x0ba\rz");
+        let tail: Vec<u8> = [&[0x0D, PET_HOME][..], &[PET_DOWN; 4][..], &b"Z"[..]].concat();
+        assert!(emit_all(&g10, p).ends_with(&tail), "{:02x?}", emit_all(&g10, p));
+        // Left from column 0 is the end of the row above: row 4 again.
+        let mut g11 = vec![0x1A];
+        g11.extend(jump(5, 0));
+        g11.extend_from_slice(b"\x08a\rz");
+        let tail: Vec<u8> = [&[0x0D, PET_HOME][..], &[PET_DOWN; 4][..], &b"Z"[..]].concat();
+        assert!(emit_all(&g11, p).ends_with(&tail), "{:02x?}", emit_all(&g11, p));
+        // Printing off the bottom scrolls by a logical line the C64 alone
+        // knows the height of: the row is forgotten, and a CR climbs.
+        let mut g12 = vec![0x1A];
+        g12.extend(jump(24, 0));
+        g12.extend([b'x'; 41]);
+        g12.extend_from_slice(b"\x0b\x0b\x0b\x0b\rz");
+        let out = emit_all(&g12, p);
+        let after_cr = &out[out.iter().rposition(|&b| b == 0x0D).unwrap()..];
+        assert!(after_cr.starts_with(&[0x0D, PET_UP]) && !after_cr.contains(&PET_HOME), "{out:02x?}");
+        // HOME and clear-screen after a CR owe nothing either.
+        for (op, b) in [(PET_HOME, 0x1Eu8), (PET_CLEAR, 0x1A)] {
+            let mut g = vec![0x1A];
+            g.extend(jump(5, 0));
+            g.extend_from_slice(&[b'a', b'\r', b]);
+            assert!(emit_all(&g, p).ends_with(&[b'A', 0x0D, op]), "{:02x?}", emit_all(&g, p));
+        }
+        // One higher, nothing a link could do scrolls: HOME is trusted.
+        let mut g8 = vec![0x1A];
+        g8.extend(jump(22, 0));
+        g8.extend_from_slice(b"a\rz");
+        let tail: Vec<u8> = [&[0x0D, PET_HOME][..], &[PET_DOWN; 22][..], &b"Z"[..]].concat();
+        assert!(emit_all(&g8, p).ends_with(&tail));
     }
 
     fn render_all(ops: &[TermOp], term: TerminalType) -> Vec<u8> {

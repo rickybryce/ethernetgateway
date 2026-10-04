@@ -403,9 +403,214 @@ fn guard_public_url(url_str: &str) -> Result<(), String> {
 /// Fetch a URL and render it as wrapped plain text with numbered links.
 ///
 /// This is a blocking call (uses ureq) and should be run via `spawn_blocking`.
-/// `width` is the target column count for word-wrapping (33 for PETSCII, 73 for ANSI).
+/// `width` is the target column count for word-wrapping (32 for PETSCII, 72 for ANSI).
 pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, String> {
     fetch_and_render_from(url, width, 0, None)
+}
+
+/// Turn a response into a page -- one function for a page load and a form
+/// submission, which each had their own copy of this.
+///
+/// Three things a reader was not told before, all decided here:
+///
+/// * **A file that is not text is refused by name** rather than drawn.  A
+///   PDF link filled screen after screen with its compressed bytes, and on a
+///   Commodore the bytes above 0x7F are graphics characters.  Decided from
+///   the declared type before the body is read, and from the first bytes
+///   when a server declares none.
+/// * **An HTTP error says so** at the top of what it sent.  The body of a 404
+///   is still shown -- it may hold directions -- but a 404 with an empty body
+///   left the reader on the browser's home screen with no word of why.
+/// * **A page with no text says so**, rather than being an empty screen --
+///   which on this browser looks exactly like "nothing was loaded".
+fn render_response(
+    response: ureq::http::Response<ureq::Body>,
+    final_url: String,
+    width: usize,
+) -> Result<(WebPage, Option<String>), String> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    // An error is the news, whatever its body is: a 404 served as a picture
+    // is still a 404.
+    let refuse = |why: String| -> String {
+        if status.as_u16() >= 400 {
+            match status.canonical_reason() {
+                Some(reason) => format!("HTTP error {} - {}.", status.as_u16(), reason),
+                None => format!("HTTP error {}.", status.as_u16()),
+            }
+        } else {
+            why
+        }
+    };
+    if let Some(why) = unshowable(&content_type, None) {
+        return Err(refuse(why));
+    }
+
+    let mut body_bytes = Vec::new();
+    response
+        .into_body()
+        .as_reader()
+        .take(MAX_BODY_SIZE as u64)
+        .read_to_end(&mut body_bytes)
+        .map_err(|e| format!("Read error: {}", e))?;
+    if let Some(why) = unshowable(&content_type, Some(&body_bytes)) {
+        return Err(refuse(why));
+    }
+
+    let (mut page, meta_refresh) = if content_type.contains("text/plain") {
+        let text = String::from_utf8_lossy(&body_bytes);
+        let lines: Vec<String> = text
+            .lines()
+            .flat_map(|line| wrap_line(line, width))
+            .take(MAX_RENDERED_LINES)
+            .collect();
+        (
+            WebPage { title: None, lines, links: Vec::new(), url: final_url, forms: Vec::new() },
+            None,
+        )
+    } else {
+        render_html_body(&body_bytes, final_url, width)?
+    };
+
+    let has_text = page
+        .lines
+        .iter()
+        .any(|l| l.chars().any(|c| !c.is_whitespace() && c != '\u{02}' && c != '\u{03}'));
+    if !has_text {
+        // JavaScript is the likely reason only for an HTML page that rendered
+        // to nothing; an empty text file or error body is simply empty.
+        let note = if content_type.contains("text/plain") || body_bytes.is_empty() {
+            "(This page has no text to show.)"
+        } else {
+            "(This page has no text to show - it may need JavaScript.)"
+        };
+        page.lines = wrap_line(note, width);
+    }
+    let mut meta_refresh = meta_refresh;
+    if status.as_u16() >= 400 {
+        // An error page that refreshes elsewhere would take its own error
+        // line with it; the reader is told, and can follow a link on.
+        meta_refresh = None;
+        let what = match status.canonical_reason() {
+            Some(reason) => format!("[!] HTTP error {} - {}.", status.as_u16(), reason),
+            None => format!("[!] HTTP error {}.", status.as_u16()),
+        };
+        let mut head = wrap_line(&what, width);
+        head.push(String::new());
+        head.append(&mut page.lines);
+        page.lines = head.into_iter().take(MAX_RENDERED_LINES).collect();
+    }
+    Ok((page, meta_refresh))
+}
+
+/// Why a response cannot be shown as text, or `None` if it can.
+///
+/// `body` is `None` for the check made from the declared type alone, before
+/// anything is downloaded; with no declared type the first bytes decide.
+fn unshowable(content_type: &str, body: Option<&[u8]>) -> Option<String> {
+    let mime = content_type.split(';').next().unwrap_or("").trim();
+    // A real type decides by itself.  `octet-stream` is what a server says
+    // when it does not know (a `.txt` it has no mapping for), and a value with
+    // no `/` is not a type at all: for those the bytes decide, as for none.
+    if mime.contains('/') && mime != "application/octet-stream" {
+        // "xml" only as the whole subtype or a `+xml` suffix: Word, Excel and
+        // PowerPoint declare `...openxmlformats-officedocument...`, which
+        // contains it and is a ZIP.
+        let sub = mime.split('/').nth(1).unwrap_or("");
+        // A picture first: `image/svg+xml` is XML and is still a picture.
+        let textual = !mime.starts_with("image/")
+            && (mime.starts_with("text/")
+            || sub == "xml"
+            || sub.ends_with("+xml")
+            || ["html", "json", "javascript"].iter().any(|t| sub.contains(t)));
+        if textual {
+            return None;
+        }
+        let kind = if mime == "application/pdf" {
+            "a PDF file".to_string()
+        } else if mime.starts_with("image/") {
+            "a picture".to_string()
+        } else if mime.starts_with("audio/") {
+            "a sound file".to_string()
+        } else if mime.starts_with("video/") {
+            "a video".to_string()
+        } else if ["zip", "gzip", "x-tar", "x-7z", "rar", "x-bzip"].iter().any(|t| mime.contains(t)) {
+            "a compressed archive".to_string()
+        } else {
+            format!("a file of type {}", sanitize_for_terminal_ascii(mime))
+        };
+        return Some(format!("That link is {kind}, which can't be shown as text."));
+    }
+    let body = body?;
+    let head = &body[..body.len().min(1024)];
+    if head.starts_with(b"%PDF") {
+        Some("That link is a PDF file, which can't be shown as text.".to_string())
+    } else if head.contains(&0) {
+        Some("That link is a binary file, which can't be shown as text.".to_string())
+    } else {
+        None
+    }
+}
+
+/// A server-supplied string cut down to printable ASCII, for a message.
+fn sanitize_for_terminal_ascii(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_graphic()).take(60).collect()
+}
+
+/// What went wrong, in words a reader can act on.
+///
+/// The raw error was shown before, cut to fit: `io: invalid peer
+/// certificate: certificate expir...` -- the right facts in the wrong words,
+/// with the important one truncated.  The certificate case is matched on the
+/// message because rustls reaches us wrapped in an I/O error.
+fn friendly_fetch_error(e: &ureq::Error) -> String {
+    let msg = e.to_string();
+    let lower = msg.to_ascii_lowercase();
+    if matches!(e, ureq::Error::HostNotFound) {
+        return "Could not find that site. Check the address.".to_string();
+    }
+    if matches!(e, ureq::Error::Timeout(_)) {
+        return "The site did not answer in time.".to_string();
+    }
+    if lower.contains("certificate") {
+        let why = if lower.contains("expired") {
+            "has expired"
+        } else if lower.contains("notvalidforname") || lower.contains("not valid for") {
+            "is for a different site"
+        } else if lower.contains("unknownissuer") || lower.contains("unknown issuer") {
+            "is not from a trusted authority"
+        } else {
+            "is not valid"
+        };
+        return format!("This site's security certificate {why}, so the page was not loaded.");
+    }
+    if let ureq::Error::Io(io) = e
+        && io.kind() == std::io::ErrorKind::ConnectionRefused
+    {
+        return "The site refused the connection.".to_string();
+    }
+    if matches!(e, ureq::Error::ConnectionFailed) {
+        return "Could not connect to the site.".to_string();
+    }
+    format!("Could not load the page ({msg}).")
+}
+
+/// Whether a downgrade reason from an earlier hop still describes `url`.
+///
+/// **A reason must not outlive the cleartext run it belongs to.** It says how
+/// the page in front of the reader was fetched, so carrying it across every
+/// `<meta refresh>` unconditionally mislabels a later page: `https://a` fails
+/// TLS, is refetched as `http://a`, refreshes to a working `https://b`, which
+/// refreshes to an ordinary `http://c` -- and `c`, never tried over TLS at
+/// all, would be announced as a TLS failure.  Reaching an HTTPS URL ends the
+/// run and drops the reason; a fresh downgrade on a later hop sets its own.
+fn carry_downgrade(url: &str, carried: Option<DowngradeReason>) -> Option<DowngradeReason> {
+    if url.starts_with("https://") { None } else { carried }
 }
 
 /// `start_hops` carries the redirect budget across a `<meta refresh>` hop.
@@ -422,19 +627,6 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
 /// refreshed to another page handed the reader cleartext with no warning at
 /// all -- and `no_https_service` / `https_timed_out` sites are exactly the
 /// ones the downgrade exists for.
-/// Whether a downgrade reason from an earlier hop still describes `url`.
-///
-/// **A reason must not outlive the cleartext run it belongs to.** It says how
-/// the page in front of the reader was fetched, so carrying it across every
-/// `<meta refresh>` unconditionally mislabels a later page: `https://a` fails
-/// TLS, is refetched as `http://a`, refreshes to a working `https://b`, which
-/// refreshes to an ordinary `http://c` -- and `c`, never tried over TLS at
-/// all, would be announced as a TLS failure.  Reaching an HTTPS URL ends the
-/// run and drops the reason; a fresh downgrade on a later hop sets its own.
-fn carry_downgrade(url: &str, carried: Option<DowngradeReason>) -> Option<DowngradeReason> {
-    if url.starts_with("https://") { None } else { carried }
-}
-
 fn fetch_and_render_from(
     url: &str,
     width: usize,
@@ -499,7 +691,7 @@ fn fetch_and_render_from(
                 current = format!("http://{}", &current["https://".len()..]);
                 continue;
             }
-            Err(e) => return Err(format!("{}", e)),
+            Err(e) => return Err(friendly_fetch_error(&e)),
         };
         // Redirect: resolve + guard the next hop before following it.
         if matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
@@ -519,44 +711,7 @@ fn fetch_and_render_from(
         break (resp, current.clone());
     };
 
-    // Check content type
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
-
-    // Read body with size limit
-    let mut body_bytes = Vec::new();
-    response
-        .into_body()
-        .as_reader()
-        .take(MAX_BODY_SIZE as u64)
-        .read_to_end(&mut body_bytes)
-        .map_err(|e| format!("Read error: {}", e))?;
-
-    let (mut page, meta_refresh) = if content_type.contains("text/plain") {
-        // Plain text: just split into lines and wrap
-        let text = String::from_utf8_lossy(&body_bytes);
-        let lines: Vec<String> = text
-            .lines()
-            .flat_map(|line| wrap_line(line, width))
-            .take(MAX_RENDERED_LINES)
-            .collect();
-        (
-            WebPage {
-                title: None,
-                lines,
-                links: Vec::new(),
-                url: final_url,
-                forms: Vec::new(),
-            },
-            None,
-        )
-    } else {
-        render_html_body(&body_bytes, final_url, width)?
-    };
+    let (mut page, meta_refresh) = render_response(response, final_url, width)?;
 
     // A `<meta refresh>` redirect.  Followed through the same entry point, so
     // the new URL is SSRF-guarded exactly like an HTTP hop, and against the
@@ -726,7 +881,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
                         .to_string(),
                 );
             }
-            Err(e) => return Err(format!("{}", e)),
+            Err(e) => return Err(friendly_fetch_error(&e)),
         };
 
         // POST-redirect: follow it through fetch_and_render, which SSRF-guards
@@ -749,40 +904,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
 
         let final_url = post_url.clone();
         guard_public_url(&final_url)?;
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_lowercase();
-        let mut body_bytes = Vec::new();
-        response
-            .into_body()
-            .as_reader()
-            .take(MAX_BODY_SIZE as u64)
-            .read_to_end(&mut body_bytes)
-            .map_err(|e| format!("Read error: {}", e))?;
-
-        let (mut page, meta_refresh) = if content_type.contains("text/plain") {
-            let text = String::from_utf8_lossy(&body_bytes);
-            let lines: Vec<String> = text
-                .lines()
-                .flat_map(|line| wrap_line(line, width))
-                .take(MAX_RENDERED_LINES)
-                .collect();
-            (
-                WebPage {
-                    title: None,
-                    lines,
-                    links: Vec::new(),
-                    url: final_url,
-                    forms: Vec::new(),
-                },
-                None,
-            )
-        } else {
-            render_html_body(&body_bytes, final_url, width)?
-        };
+        let (mut page, meta_refresh) = render_response(response, final_url, width)?;
 
         // Same treatment a POST already gives an HTTP redirect: follow it
         // through the guarded fetch path rather than rendering the notice.
@@ -807,6 +929,20 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             }
         }
         fetch_and_render(url.as_str(), width)
+    }
+}
+
+/// Remove every element named in `tags` (and what is inside it) from the tree.
+///
+/// Iterative, like the tree's own `Drop`: the depth is bounded before this
+/// runs, but a stack here costs nothing and cannot overflow.
+fn prune_elements(root: &Handle, tags: &[&str]) {
+    let mut stack = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        node.children.borrow_mut().retain(|child| {
+            !matches!(child.data, Element { ref name, .. } if tags.contains(&name.local.as_ref()))
+        });
+        stack.extend(node.children.borrow().iter().cloned());
     }
 }
 
@@ -930,7 +1066,12 @@ fn render_html_body(
     final_url: String,
     width: usize,
 ) -> Result<(WebPage, Option<String>), String> {
-    let cfg = config::rich();
+    // No table borders.  Most tables on the web are LAYOUT, not data -- a
+    // search result or a news item boxed in rules -- and the boxes cost more
+    // rows than the content: a DuckDuckGo result took a whole screen, with
+    // borders off about six lines (measured, 139 -> 95 lines a page; Hacker
+    // News 147 -> 83).  A data table keeps its columns, aligned by spacing.
+    let cfg = config::rich().no_table_borders();
     let dom = parse_html_no_scripting(body_bytes)?;
 
     // Guard against pathologically deep DOMs before our recursive title/form
@@ -946,6 +1087,11 @@ fn render_html_body(
     let title = extract_title_from_dom(&dom);
     let forms = extract_forms_from_dom(&dom);
     let meta_refresh = meta_refresh_from_dom(&dom);
+    // After the forms have their options: a drop-down's choices are not page
+    // text, and rendered as text they were -- DuckDuckGo's region picker put
+    // sixty country names above the first search result.  They stay
+    // reachable through the form screen (F).
+    prune_elements(&dom.document, &["select", "datalist"]);
 
     let render_tree = cfg.dom_to_render_tree(&dom)
         .map_err(|e| format!("Render error: {}", e))?;
@@ -991,6 +1137,23 @@ fn render_html_body(
                             links.len()
                         };
                         line_text.push_str(&format!("\x02{}\x03", link_num));
+                    }
+                    // Two links side by side with no space between them in
+                    // the HTML are separated by CSS in a real browser, and
+                    // ran together here: "Hacker News[1]new[2]", "Jump to
+                    // navigationJump to search".  A space where one link
+                    // ends and another starts with a word -- not where a
+                    // link ends mid-word (`<a>Wiki</a>pedia`).
+                    let next_starts_word = elements.get(idx + 1).is_some_and(|next| {
+                        matches!(*next as &TaggedLineElement<Vec<RichAnnotation>>,
+                            TaggedLineElement::Str(ns) if ns.s.starts_with(|c: char| c.is_alphanumeric()))
+                    });
+                    if link_ending
+                        && next_link.is_some()
+                        && next_starts_word
+                        && tagged_str.s.ends_with(|c: char| c.is_alphanumeric())
+                    {
+                        line_text.push(' ');
                     }
                 }
             }
@@ -1240,7 +1403,7 @@ fn find_forms(node: &Handle, forms: &mut Vec<WebForm>) {
             // submit button?"  Scoped here rather than inline so the recursion
             // below plainly shares one flag across the whole form.
             let mut submit_taken = false;
-            extract_form_fields(node, &mut fields, &mut submit_label, &mut submit_taken, &labels);
+            extract_form_fields(node, &mut fields, &mut submit_label, &mut submit_taken, &labels, None);
 
             let label = submit_label.unwrap_or_else(|| {
                 format!("Form {}", forms.len() + 1)
@@ -1263,16 +1426,107 @@ fn find_forms(node: &Handle, forms: &mut Vec<WebForm>) {
 /// tens of thousands of bare `<input id=…>` (still under `MAX_BODY_SIZE`) cost
 /// quadratic CPU on a shared render thread with no time budget — a soft-DoS
 /// (round-6 F1).  The one-pass map makes the whole form O(subtree).
+///
+/// Then a `<label>` wrapping the field (`enclosing`), and only then a name
+/// made readable by [`fallback_label`] -- the raw name is the page's internal
+/// identifier, and DuckDuckGo's search box, region and date fields showed as
+/// `q`, `kl` and `df`.
 fn get_field_label(
     node: &Handle,
     field_name: &str,
     labels: &std::collections::HashMap<String, String>,
+    enclosing: Option<&str>,
+    kind: &str,
 ) -> String {
-    get_attr(node, "placeholder")
-        .or_else(|| get_attr(node, "aria-label"))
-        .or_else(|| get_attr(node, "title"))
-        .or_else(|| get_attr(node, "id").and_then(|id| labels.get(&id).cloned()))
-        .unwrap_or_else(|| field_name.to_string())
+    // Each source must have something in it: `placeholder=""` is present
+    // and says nothing, and must not stop the search for the next one.
+    let some = |v: Option<String>| v.filter(|l| !l.trim().is_empty());
+    some(get_attr(node, "placeholder"))
+        .or_else(|| some(get_attr(node, "aria-label")))
+        .or_else(|| some(get_attr(node, "title")))
+        .or_else(|| some(get_attr(node, "id").and_then(|id| labels.get(&id).cloned())))
+        .or_else(|| some(enclosing.map(str::to_string)))
+        .unwrap_or_else(|| fallback_label(field_name, kind))
+}
+
+/// A label for a field whose page gave it none: from what kind of field it
+/// is, from a name everybody uses (`q` is a search box), or from the name
+/// tidied up.  A one- or two-letter name says nothing, so it gets a word.
+fn fallback_label(field_name: &str, kind: &str) -> String {
+    let by_kind = match kind {
+        "search" => Some("Search"),
+        "email" => Some("Email"),
+        "password" => Some("Password"),
+        "url" => Some("Web address"),
+        "tel" => Some("Phone"),
+        "number" => Some("Number"),
+        "date" => Some("Date"),
+        _ => None,
+    };
+    let name = field_name.to_ascii_lowercase();
+    let by_name = match name.as_str() {
+        "q" | "query" | "search" | "s" | "keyword" | "keywords" | "term" | "terms" | "search_query" => {
+            Some("Search")
+        }
+        "user" | "username" | "login" | "userid" | "user_id" => Some("Username"),
+        "pass" | "passwd" | "password" | "pwd" => Some("Password"),
+        "email" | "mail" => Some("Email"),
+        _ => None,
+    };
+    if let Some(l) = by_kind.or(by_name) {
+        return l.to_string();
+    }
+    let words: String = field_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if words.chars().count() <= 2 {
+        return if kind == "select" { "Choose" } else { "Text" }.to_string();
+    }
+    let mut c = words.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or(words)
+}
+
+/// A `<label>`'s own words, without the text of a field inside it -- a label
+/// wrapping a drop-down would otherwise read as every option it offers.
+///
+/// **Bounded, because it runs once per label.**  html5ever does not close a
+/// `<label>` when another opens, so labels nest; walking each one's whole
+/// subtree made a page of nested labels over a megabyte of text cost the
+/// square of both on the shared render thread -- the soft-DoS round-6 F1
+/// closed for `<label for>`.  So: no descent into a nested label or form,
+/// and no more than `LABEL_MAX` characters gathered.
+fn label_own_text(node: &Handle) -> String {
+    const LABEL_MAX: usize = 100;
+    let mut out = String::new();
+    let mut stack: Vec<Handle> = node.children.borrow().iter().rev().cloned().collect();
+    while let Some(child) = stack.pop() {
+        if out.chars().count() >= LABEL_MAX {
+            break;
+        }
+        match child.data {
+            Element { ref name, .. }
+                if matches!(
+                    name.local.as_ref(),
+                    "select" | "textarea" | "option" | "datalist" | "label" | "form"
+                ) => {}
+            Element { .. } => stack.extend(child.children.borrow().iter().rev().cloned()),
+            _ => {
+                let text = get_text_content(&child);
+                let text = text.trim();
+                if !text.is_empty() {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.extend(text.chars().take(LABEL_MAX));
+                }
+            }
+        }
+    }
+    out.chars().take(LABEL_MAX).collect()
 }
 
 /// Walk a form subtree ONCE, mapping each `<label for="id">`'s id to its text.
@@ -1299,7 +1553,17 @@ fn extract_form_fields(
     submit_label: &mut Option<String>,
     submit_taken: &mut bool,
     labels: &std::collections::HashMap<String, String>,
+    enclosing: Option<&str>,
 ) {
+    // Inside a `<label>`, its words name the field it wraps.
+    let own;
+    let mut enclosing = enclosing;
+    if let Element { ref name, .. } = node.data
+        && name.local.as_ref() == "label"
+    {
+        own = label_own_text(node);
+        enclosing = Some(own.as_str());
+    }
     if let Element { ref name, .. } = node.data {
         let tag = name.local.as_ref();
         match tag {
@@ -1360,7 +1624,7 @@ fn extract_form_fields(
                     }
                     "checkbox" => {
                         if !field_name.is_empty() {
-                            let label = get_field_label(node, &field_name, labels);
+                            let label = get_field_label(node, &field_name, labels, enclosing, "checkbox");
                             let val = if value.is_empty() { "on".to_string() } else { value };
                             let checked = get_attr(node, "checked").is_some();
                             fields.push(FormField::Checkbox { name: field_name, value: val, checked, label });
@@ -1369,6 +1633,8 @@ fn extract_form_fields(
                     "radio" => {
                         if !field_name.is_empty() {
                             let label = get_attr(node, "aria-label")
+                                .filter(|l| !l.trim().is_empty())
+                                .or_else(|| enclosing.filter(|l| !l.trim().is_empty()).map(str::to_string))
                                 .unwrap_or_else(|| value.clone());
                             let checked = get_attr(node, "checked").is_some();
                             fields.push(FormField::Radio { name: field_name, value, checked, label });
@@ -1377,7 +1643,7 @@ fn extract_form_fields(
                     "image" | "button" | "reset" | "file" => {} // skip
                     _ => {
                         if !field_name.is_empty() {
-                            let label = get_field_label(node, &field_name, labels);
+                            let label = get_field_label(node, &field_name, labels, enclosing, &input_type);
                             fields.push(FormField::Text {
                                 name: field_name, value, label, input_type,
                             });
@@ -1389,7 +1655,7 @@ fn extract_form_fields(
                 let field_name = get_attr(node, "name").unwrap_or_default();
                 if !field_name.is_empty() {
                     let value = get_text_content(node);
-                    let label = get_field_label(node, &field_name, labels);
+                    let label = get_field_label(node, &field_name, labels, enclosing, "textarea");
                     fields.push(FormField::TextArea { name: field_name, value, label });
                 }
             }
@@ -1399,7 +1665,7 @@ fn extract_form_fields(
                     let mut options = Vec::new();
                     let mut selected = 0;
                     extract_select_options(node, &mut options, &mut selected);
-                    let label = get_field_label(node, &field_name, labels);
+                    let label = get_field_label(node, &field_name, labels, enclosing, "select");
                     fields.push(FormField::Select { name: field_name, options, selected, label });
                 }
             }
@@ -1439,7 +1705,7 @@ fn extract_form_fields(
             && name.local.as_ref() == "form" {
                 continue;
             }
-        extract_form_fields(child, fields, submit_label, submit_taken, labels);
+        extract_form_fields(child, fields, submit_label, submit_taken, labels, enclosing);
     }
 }
 
@@ -2703,7 +2969,8 @@ mod tests {
     }
 
     /// F1: a field with no matching `<label for>` (and no placeholder/aria/
-    /// title) falls back to the field name — unchanged by the refactor.
+    /// title) falls back to a label made from its name -- `query`, a name
+    /// every search box uses, reads as "Search" (see `fallback_label`).
     #[test]
     fn test_form_field_label_falls_back_to_name() {
         let cfg = config::rich();
@@ -2717,7 +2984,7 @@ mod tests {
             FormField::Text { name, label, .. } if name == "query" => Some(label.clone()),
             _ => None,
         });
-        assert_eq!(label.as_deref(), Some("query"));
+        assert_eq!(label.as_deref(), Some("Search"));
     }
 
     #[test]
@@ -3477,6 +3744,185 @@ mod tests {
             body.len(),
             body
         )
+    }
+
+    /// Serve one raw HTTP response and return its URL.
+    fn serve_raw(raw: Vec<u8>) -> String {
+        let port = spawn_oneshot_server(move |mut stream| {
+            use std::io::Write;
+            let _ = read_request_blob(&stream);
+            stream.write_all(&raw).unwrap();
+        });
+        format!("http://127.0.0.1:{}/", port)
+    }
+
+    fn response(status: &str, content_type: Option<&str>, body: &[u8]) -> Vec<u8> {
+        let mut raw = format!("HTTP/1.1 {status}\r\n").into_bytes();
+        if let Some(ct) = content_type {
+            raw.extend(format!("Content-Type: {ct}\r\n").bytes());
+        }
+        raw.extend(format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).bytes());
+        raw.extend_from_slice(body);
+        raw
+    }
+
+    /// A file that is not text is refused by name rather than drawn as its
+    /// bytes -- by its declared type, and by its first bytes when it has none.
+    #[test]
+    fn test_a_file_that_is_not_text_is_refused_by_name() {
+        let pdf = b"%PDF-1.4\n\xe4\xfc\xf6\xdf 2 0 obj <<>> stream\x00\x01";
+        let err = fetch_and_render(&serve_raw(response("200 OK", Some("application/pdf"), pdf)), 73)
+            .err()
+            .expect("a PDF is refused");
+        assert!(err.contains("PDF file") && err.contains("can't be shown"), "{err}");
+        let err = fetch_and_render(&serve_raw(response("200 OK", None, pdf)), 73)
+            .err()
+            .expect("an undeclared PDF is refused too");
+        assert!(err.contains("PDF file"), "{err}");
+
+        for (ct, want) in [
+            ("image/png", "a picture"),
+            ("image/svg+xml", "a picture"),
+            ("audio/mpeg", "a sound file"),
+            ("video/mp4", "a video"),
+            ("application/zip", "a compressed archive"),
+            ("application/x-foo; charset=x", "a file of type application/x-foo"),
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "a file of type application/vnd.openxmlformats",
+            ),
+        ] {
+            assert!(unshowable(ct, None).is_some_and(|m| m.contains(want)), "{ct}");
+        }
+        for ct in [
+            "text/html; charset=utf-8", "text/plain", "application/xhtml+xml", "application/json",
+            "application/xml", "application/rss+xml", "application/ld+json", "",
+        ] {
+            assert_eq!(unshowable(ct, None), None, "{ct:?} is text");
+        }
+        assert!(unshowable("", Some(b"abc\x00def")).is_some(), "NUL bytes with no type");
+        // A server that does not know what it has: the bytes decide.
+        assert_eq!(unshowable("application/octet-stream", None), None);
+        assert_eq!(unshowable("application/octet-stream", Some(b"just a text file\n")), None);
+        assert!(unshowable("application/octet-stream", Some(b"%PDF-1.7")).is_some());
+        assert_eq!(unshowable("none", Some(b"<p>hi</p>")), None, "not a type at all");
+        assert_eq!(unshowable("", Some(b"<html>plain</html>")), None);
+    }
+
+    /// An HTTP error says so, above whatever the server sent; an empty one
+    /// says the page has no text rather than leaving a blank screen.
+    #[test]
+    fn test_an_http_error_and_an_empty_page_say_so() {
+        let page = fetch_and_render(&serve_raw(response("404 Not Found", Some("text/html"), b"")), 73).unwrap();
+        assert!(page.lines[0].contains("HTTP error 404") && page.lines[0].contains("Not Found"), "{:?}", page.lines);
+        assert!(page.lines.iter().any(|l| l.contains("no text to show")), "{:?}", page.lines);
+        assert!(!page.lines.iter().any(|l| l.contains("JavaScript")), "an empty body is just empty");
+
+        // An error served as a file that is not text is reported as the error.
+        let err = fetch_and_render(&serve_raw(response("404 Not Found", Some("image/png"), b"\x89PNG")), 73)
+            .err()
+            .expect("refused");
+        assert!(err.contains("HTTP error 404"), "{err}");
+        // An error page that refreshes away keeps its error in front of the reader.
+        let refresh = b"<html><head><meta http-equiv=refresh content=\"0;url=/elsewhere\"></head><body>Moved</body></html>";
+        let page = fetch_and_render(&serve_raw(response("404 Not Found", Some("text/html"), refresh)), 73).unwrap();
+        assert!(page.lines[0].contains("HTTP error 404"), "{:?}", page.lines);
+
+        let body = b"<html><body><p>Try the archive instead.</p></body></html>";
+        let page = fetch_and_render(&serve_raw(response("410 Gone", Some("text/html"), body)), 73).unwrap();
+        assert!(page.lines[0].contains("HTTP error 410"), "{:?}", page.lines);
+        assert!(page.lines.iter().any(|l| l.contains("Try the archive")), "the body is still shown");
+
+        let js = b"<html><body><script>render()</script></body></html>";
+        let page = fetch_and_render(&serve_raw(response("200 OK", Some("text/html"), js)), 73).unwrap();
+        assert!(page.lines.iter().any(|l| l.contains("may need JavaScript")), "{:?}", page.lines);
+        assert!(!page.lines.iter().any(|l| l.contains("HTTP error")), "a 200 is not an error");
+    }
+
+    /// Errors in words a reader can act on, never cut off mid-word.
+    #[test]
+    fn test_fetch_errors_are_explained() {
+        let cert = |m: &str| friendly_fetch_error(&ureq::Error::Io(std::io::Error::other(m.to_string())));
+        assert!(cert("invalid peer certificate: certificate expired: verification time").contains("has expired"));
+        assert!(cert("invalid peer certificate: NotValidForName").contains("different site"));
+        assert!(cert("invalid peer certificate: UnknownIssuer").contains("trusted authority"));
+        assert!(friendly_fetch_error(&ureq::Error::HostNotFound).contains("Could not find that site"));
+        let refused = ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+        assert!(friendly_fetch_error(&refused).contains("refused the connection"));
+        assert!(friendly_fetch_error(&ureq::Error::TooManyRedirects).starts_with("Could not load the page ("));
+    }
+
+    /// Layout tables are drawn without boxes; a drop-down's choices are left
+    /// out of the page and kept in its form; two touching links are spaced.
+    #[test]
+    fn test_tables_drop_downs_and_touching_links() {
+        let html = br##"<html><body>
+            <form action="/s"><select name="kl"><option value="ar">Argentina</option>
+            <option value="br" selected>Brazil</option></select><input name="q" value="c64"></form>
+            <table><tr><td>1.</td><td>First result</td></tr><tr><td>2.</td><td>Second result</td></tr></table>
+            <p><a href="/home">Hacker News</a><a href="/new">new</a> | <a href="/past">past</a></p>
+            <p><a href="#n">Jump to navigation</a><a href="#s">Jump to search</a></p>
+            </body></html>"##;
+        let (page, _) = render_html_body(html, "http://x.test/".to_string(), 73).unwrap();
+        let text = page.lines.join("\n");
+        // Box characters, as html2text draws them before any folding.
+        assert!(!text.contains(['\u{2500}', '\u{2502}', '\u{253C}']), "no table rules: {text}");
+        assert!(text.contains("First result") && text.contains("Second result"), "{text}");
+        assert!(!text.contains("Argentina") && !text.contains("Brazil"), "drop-down text: {text}");
+        match &page.forms[0].fields[0] {
+            FormField::Select { options, selected, .. } => {
+                assert_eq!(options.len(), 2);
+                assert_eq!(*selected, 1, "the form keeps the choices");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(text.contains("Hacker News\u{2}1\u{3} new\u{2}2\u{3}"), "{text:?}");
+        assert!(text.contains("Jump to navigation Jump to search"), "{text:?}");
+        // A link that ends mid-word is not split from the rest of it.
+        let (page, _) = render_html_body(br#"<p><a href="/w">Wiki</a>pedia</p>"#, "http://x.test/".into(), 73).unwrap();
+        assert!(page.lines.join("").contains("Wiki\u{2}1\u{3}pedia"), "{:?}", page.lines);
+    }
+
+    /// A field the page gave no label is named for what it is, not by its
+    /// internal identifier.
+    #[test]
+    fn test_unlabelled_form_fields_get_readable_names() {
+        let html = br#"<html><body><form action="/f">
+            <input name="q"><select name="kl"><option>All</option></select>
+            <label>Region <select name="rg"><option>Europe</option><option>Asia</option></select></label>
+            <input type="email" name="e1"><input name="first_name"><input name="zz">
+            <input name="x" placeholder="Your town">
+            <input name="y" placeholder="" aria-label="Search the site">
+            </form></body></html>"#;
+        let (page, _) = render_html_body(html, "http://x.test/".to_string(), 73).unwrap();
+        let labels: Vec<String> = page.forms[0]
+            .fields
+            .iter()
+            .filter_map(|f| match f {
+                FormField::Text { label, .. } | FormField::Select { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ["Search", "Choose", "Region", "Email", "First name", "Text", "Your town", "Search the site"]
+        );
+        // A radio button inside a label is named by it, not by its value.
+        let radio = br#"<form><label><input type="radio" name="r" value="1"> Yes</label></form>"#;
+        let (page, _) = render_html_body(radio, "http://x.test/".into(), 73).unwrap();
+        assert!(matches!(&page.forms[0].fields[0], FormField::Radio { label, .. } if label == "Yes"));
+        // Nested labels: each takes its own words, not everything below it.
+        let nested = br#"<form><label>Outer <label>Inner <input name="n1"></label> <input name="n2"></label></form>"#;
+        let (page, _) = render_html_body(nested, "http://x.test/".into(), 73).unwrap();
+        let got: Vec<&str> = page.forms[0]
+            .fields
+            .iter()
+            .filter_map(|f| match f {
+                FormField::Text { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, ["Inner", "Outer"], "the outer label's own words, not the inner's too");
     }
 
     #[test]

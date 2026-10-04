@@ -12,20 +12,45 @@ impl TelnetSession {
 
     pub(in crate::telnet) const WEB_MAX_HISTORY: usize = 50;
 
-    /// Number of content lines per page.
-    /// Total screen budget is 22 rows: header (sep + title + sep = 3) +
-    /// content + blank (1) + footer (position + url + nav1 + nav2 = 4) + prompt (1) = 9 overhead.
-    /// 22 - 9 = 13 content lines.
-    pub(in crate::telnet) const WEB_PAGE_HEIGHT: usize = 13;
+    /// Content lines per page, out of the 22-row screen: the header (3), the
+    /// status row (1), the command rows (1 on 80 columns, 2 on 40) and the
+    /// prompt (1).  It was 13 everywhere, with a blank row and the URL on a
+    /// row of its own -- Wikipedia's C64 article was 169 screens long.
+    /// `test_the_browser_page_fills_the_screen_and_no_more` counts the rows
+    /// actually drawn.
+    pub(in crate::telnet) const WEB_PAGE_HEIGHT_WIDE: usize = 16;
+    pub(in crate::telnet) const WEB_PAGE_HEIGHT_PETSCII: usize = 15;
+    /// How many bookmarks the bookmarks screen lists.
+    pub(in crate::telnet) const WEB_BOOKMARKS_SHOWN: usize = 13;
+
+    pub(in crate::telnet) fn web_page_height(&self) -> usize {
+        if self.terminal_type == TerminalType::Petscii {
+            Self::WEB_PAGE_HEIGHT_PETSCII
+        } else {
+            Self::WEB_PAGE_HEIGHT_WIDE
+        }
+    }
+
+    /// Fetched text as this terminal can show it.  A Commodore draws a byte
+    /// above 0x7F as a graphics character and a 7-bit terminal cannot draw
+    /// UTF-8 at all, so for those two an accented letter becomes its plain
+    /// letter and an emoji goes; an ANSI client -- a modern terminal, as a
+    /// rule -- keeps the text as it was.
+    pub(in crate::telnet) fn web_text(&self, s: &str) -> String {
+        match self.terminal_type {
+            TerminalType::Ansi => s.to_string(),
+            _ => crate::aichat::fold_to_ascii(s),
+        }
+    }
 
     /// Content width for HTML rendering.
     /// Slightly narrower than the display to leave room for link number suffixes
     /// like `[12]` that are appended after html2text wraps.
     pub(in crate::telnet) fn web_content_width(&self) -> usize {
         if self.terminal_type == TerminalType::Petscii {
-            33 // 40 - 2 indent - 5 for "[NNN]"
+            32 // 40 - 1 (the last column wraps) - 2 indent - 5 for "[NNN]"
         } else {
-            73 // 80 - 2 indent - 5 for "[NNN]"
+            72 // 80 - 1 - 2 indent - 5 for "[NNN]"
         }
     }
 
@@ -75,14 +100,14 @@ impl TelnetSession {
             let title_display = match &self.web_title {
                 Some(t) => {
                     let max_w = if self.terminal_type == TerminalType::Petscii { 34 } else { 52 };
-                    crate::webbrowser::truncate_to_width(t, max_w)
+                    crate::webbrowser::truncate_to_width(&self.web_text(t), max_w)
                 }
                 None => "Web Browser".to_string(),
             };
             self.send_line(&format!("  {}", self.yellow(&title_display))).await?;
             self.send_line(&sep).await?;
 
-            let page_h = Self::WEB_PAGE_HEIGHT;
+            let page_h = self.web_page_height();
             let total = self.web_lines.len();
             // Defensive clamp: never let a scroll position index past the
             // current page — guarantees the page_lines slice below can't
@@ -90,43 +115,36 @@ impl TelnetSession {
             let start = self.web_scroll.min(total.saturating_sub(1));
             let end = (start + page_h).min(total);
 
+            // Never the last column: a row that fills it wraps on a C64 (see
+            // `separator`) and the screen grows past 22 rows.
             let content_max = if self.terminal_type == TerminalType::Petscii {
-                PETSCII_WIDTH - 2
+                PETSCII_WIDTH - 3
             } else {
-                78
+                77
             };
             let page_lines: Vec<String> = self.web_lines[start..end].to_vec();
             for line in &page_lines {
-                let safe = crate::webbrowser::truncate_to_width(line, content_max);
+                let safe = crate::webbrowser::truncate_to_width(&self.web_text(line), content_max);
                 let colored = self.colorize_link_markers(&safe);
                 self.send_line(&format!("  {}", colored)).await?;
             }
-            self.send_line("").await?;
 
-            // Status line
+            // Status: where we are, then the forms or the address, one row.
             let has_prev = start > 0;
             let has_next = end < total;
-            let url_display = match &self.web_url {
-                Some(u) => {
-                    let max_w = if self.terminal_type == TerminalType::Petscii { 36 } else { 54 };
-                    crate::webbrowser::truncate_to_width(u, max_w)
-                }
-                None => String::new(),
-            };
-            self.send_line(&format!("  {}", self.dim(&format!("({}-{} of {})", start + 1, end, total)))).await?;
-            if !self.web_forms.is_empty() {
-                let form_count = self.web_forms.len();
-                let form_hint = if form_count == 1 {
-                    "1 form on this page (F to edit)".to_string()
-                } else {
-                    format!("{} forms on this page (F to edit)", form_count)
-                };
-                self.send_line(&format!("  {}", self.amber(&form_hint))).await?;
+            let position = format!("({}-{} of {})", start + 1, end, total);
+            let room = content_max.saturating_sub(position.chars().count() + 2);
+            let tail = if !self.web_forms.is_empty() {
+                let n = self.web_forms.len();
+                let hint = if n == 1 { "1 form - F".to_string() } else { format!("{n} forms - F") };
+                self.amber(&crate::webbrowser::truncate_to_width(&hint, room))
             } else {
-                self.send_line(&format!("  {}", self.dim(&url_display))).await?;
-            }
+                let url = self.web_text(self.web_url.as_deref().unwrap_or(""));
+                self.dim(&crate::webbrowser::truncate_to_width(&url, room))
+            };
+            self.send_line(&format!("  {}  {}", self.dim(&position), tail)).await?;
 
-            // Navigation footer — two rows to fit all commands
+            // Commands: one row on an 80-column screen, two on a 40-column one.
             let is_petscii = self.terminal_type == TerminalType::Petscii;
             let has_forms = !self.web_forms.is_empty();
             // Row 1: navigation
@@ -139,7 +157,6 @@ impl TelnetSession {
             if !is_petscii {
                 nav.push(self.action_prompt("G", "Go"));
             }
-            self.send_line(&format!("  {}", nav.join(" "))).await?;
             // Row 2: actions
             let mut act = Vec::new();
             if is_petscii {
@@ -157,7 +174,13 @@ impl TelnetSession {
                 act.push(self.action_prompt("B", "Bk"));
             }
             act.push(self.action_prompt("Q", "X"));
-            self.send_line(&format!("  {}", act.join(" "))).await?;
+            if is_petscii {
+                self.send_line(&format!("  {}", nav.join(" "))).await?;
+                self.send_line(&format!("  {}", act.join(" "))).await?;
+            } else {
+                nav.extend(act);
+                self.send_line(&format!("  {}", nav.join(" "))).await?;
+            }
         }
         Ok(())
     }
@@ -218,7 +241,7 @@ impl TelnetSession {
                     }
                 }
                 "n" => {
-                    let page_h = Self::WEB_PAGE_HEIGHT;
+                    let page_h = self.web_page_height();
                     let total = self.web_lines.len();
                     if self.web_scroll + page_h < total {
                         self.web_scroll += page_h;
@@ -228,7 +251,7 @@ impl TelnetSession {
                 }
                 "p" => {
                     if self.web_scroll > 0 {
-                        let page_h = Self::WEB_PAGE_HEIGHT;
+                        let page_h = self.web_page_height();
                         self.web_scroll = self.web_scroll.saturating_sub(page_h);
                     } else {
                         self.show_error("Top of page.").await?;
@@ -238,7 +261,7 @@ impl TelnetSession {
                     self.web_scroll = 0;
                 }
                 "e" => {
-                    let page_h = Self::WEB_PAGE_HEIGHT;
+                    let page_h = self.web_page_height();
                     let total = self.web_lines.len();
                     if total > page_h {
                         self.web_scroll = total - page_h;
@@ -287,7 +310,10 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn web_prompt_url(&mut self) -> Result<(), std::io::Error> {
-        self.send_line("").await?;
+        // No blank row first, here or at any prompt below the page: the page
+        // fills the screen, and a C64 has three rows under it before its
+        // header scrolls away -- the typed command's own row, the prompt, and
+        // "Loading...".
         self.send(&format!("  {}: ", self.cyan("URL/Search"))).await?;
         self.flush().await?;
 
@@ -307,7 +333,6 @@ impl TelnetSession {
             return Ok(());
         }
 
-        self.send_line("").await?;
         self.send(&format!("  {} (1-{}): ", self.cyan("Link #"), self.web_links.len())).await?;
         self.flush().await?;
 
@@ -344,7 +369,6 @@ impl TelnetSession {
     pub(in crate::telnet) async fn web_fetch_page(&mut self, url: &str, push_history: bool) -> Result<bool, std::io::Error> {
         // Gopher search URLs need a query term before fetching
         let url = if crate::webbrowser::is_gopher_search(url) {
-            self.send_line("").await?;
             self.send(&format!("  {}: ", self.cyan("Search"))).await?;
             self.flush().await?;
             let query = match self.get_line_input().await? {
@@ -356,7 +380,6 @@ impl TelnetSession {
             url.to_string()
         };
 
-        self.send_line("").await?;
         self.send_line(&format!("  {}...", self.dim("Loading"))).await?;
         self.flush().await?;
 
@@ -466,9 +489,9 @@ impl TelnetSession {
         self.send_line("").await?;
 
         let max_title = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
-        let display_max = bookmarks.len().min(Self::WEB_PAGE_HEIGHT);
+        let display_max = bookmarks.len().min(Self::WEB_BOOKMARKS_SHOWN);
         for (i, bm) in bookmarks.iter().take(display_max).enumerate() {
-            let title = crate::webbrowser::truncate_to_width(&bm.title, max_title);
+            let title = crate::webbrowser::truncate_to_width(&self.web_text(&bm.title), max_title);
             self.send_line(&format!("  {:>2}. {}", i + 1, title)).await?;
         }
         if bookmarks.len() > display_max {
@@ -526,7 +549,6 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn web_search_in_page(&mut self) -> Result<(), std::io::Error> {
-        self.send_line("").await?;
         self.send(&format!("  {}: ", self.cyan("Find"))).await?;
         self.flush().await?;
 
@@ -540,7 +562,8 @@ impl TelnetSession {
         let start_line = self.web_scroll + 1;
         for offset in 0..total {
             let idx = (start_line + offset) % total;
-            if self.web_lines[idx].to_ascii_lowercase().contains(&query) {
+            // The text as shown: a C64 user who sees "Bahia" searches for it.
+            if self.web_text(&self.web_lines[idx]).to_ascii_lowercase().contains(&query) {
                 // Scroll to put the match at the top of the page
                 self.web_scroll = idx;
                 return Ok(());
@@ -564,7 +587,7 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send_line(&format!("  {}", self.yellow("FORMS"))).await?;
         let forms_snapshot: Vec<String> = self.web_forms.iter().enumerate().map(|(i, form)| {
-            let label = crate::webbrowser::truncate_to_width(&form.label, 30);
+            let label = crate::webbrowser::truncate_to_width(&self.web_text(&form.label), 30);
             format!("  {}. {}", i + 1, label)
         }).collect();
         for line in &forms_snapshot {
@@ -605,7 +628,7 @@ impl TelnetSession {
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
-            let title = crate::webbrowser::truncate_to_width(&form.label, 34);
+            let title = crate::webbrowser::truncate_to_width(&self.web_text(&form.label), 34);
             self.send_line(&format!("  {}", self.yellow(&title))).await?;
             self.send_line(&sep).await?;
 
@@ -631,8 +654,8 @@ impl TelnetSession {
                         };
                         Some(format!("  {}.{}: {}",
                             field_num,
-                            crate::webbrowser::truncate_to_width(label, max_label),
-                            crate::webbrowser::truncate_to_width(&display_val, max_val),
+                            crate::webbrowser::truncate_to_width(&self.web_text(label), max_label),
+                            crate::webbrowser::truncate_to_width(&self.web_text(&display_val), max_val),
                         ))
                     }
                     crate::webbrowser::FormField::Select { label, options, selected, .. } => {
@@ -640,8 +663,8 @@ impl TelnetSession {
                         let chosen = options.get(*selected).map(|(_, t)| t.as_str()).unwrap_or("?");
                         Some(format!("  {}.{}: {}",
                             field_num,
-                            crate::webbrowser::truncate_to_width(label, max_label),
-                            crate::webbrowser::truncate_to_width(chosen, max_val),
+                            crate::webbrowser::truncate_to_width(&self.web_text(label), max_label),
+                            crate::webbrowser::truncate_to_width(&self.web_text(chosen), max_val),
                         ))
                     }
                     crate::webbrowser::FormField::Checkbox { label, checked, .. } => {
@@ -649,7 +672,7 @@ impl TelnetSession {
                         let mark = if *checked { "[X]" } else { "[ ]" };
                         Some(format!("  {}.{}: {}",
                             field_num,
-                            crate::webbrowser::truncate_to_width(label, max_label),
+                            crate::webbrowser::truncate_to_width(&self.web_text(label), max_label),
                             mark,
                         ))
                     }
@@ -658,7 +681,7 @@ impl TelnetSession {
                         let mark = if *checked { "(X)" } else { "( )" };
                         Some(format!("  {}.{}: {}",
                             field_num,
-                            crate::webbrowser::truncate_to_width(label, max_label),
+                            crate::webbrowser::truncate_to_width(&self.web_text(label), max_label),
                             mark,
                         ))
                     }
@@ -739,7 +762,7 @@ impl TelnetSession {
 
         if is_text {
             self.send_line("").await?;
-            self.send(&format!("  {}: ", self.cyan(&label_str))).await?;
+            self.send(&format!("  {}: ", self.cyan(&self.web_text(&label_str)))).await?;
             self.flush().await?;
             let input = if is_password {
                 self.get_password_input().await?
@@ -767,7 +790,7 @@ impl TelnetSession {
                 let marker = if *is_sel { ">" } else { " " };
                 self.send_line(&format!("  {}{}.{}",
                     marker, i + 1,
-                    crate::webbrowser::truncate_to_width(display, 30),
+                    crate::webbrowser::truncate_to_width(&self.web_text(display), 30),
                 )).await?;
             }
             self.send(&format!("  {} (1-{}): ", self.cyan("Pick"), opt_count)).await?;
@@ -844,9 +867,18 @@ impl TelnetSession {
                 // error carrying a remote host string), which would otherwise
                 // reach the terminal raw — the same escape-injection risk M-8
                 // closes on the page-render path.
-                let max_w = if self.terminal_type == TerminalType::Petscii { 30 } else { 50 };
-                let safe = crate::aichat::sanitize_for_terminal(&e);
-                self.show_error(&crate::webbrowser::truncate_to_width(&safe, max_w)).await?;
+                //
+                // Wrapped, not cut: the end of a message is where it says
+                // why (`...certificate expir...` lost the word that mattered).
+                let width = if self.terminal_type == TerminalType::Petscii { 36 } else { 76 };
+                let safe = self.web_text(&crate::aichat::sanitize_for_terminal(&e));
+                for line in crate::aichat::wrap_line(&safe, width) {
+                    self.send_line(&format!("  {}", self.red(&line))).await?;
+                }
+                self.send_line("").await?;
+                self.send("  Press any key to continue.").await?;
+                self.flush().await?;
+                self.wait_for_key().await?;
                 Ok(false)
             }
         }

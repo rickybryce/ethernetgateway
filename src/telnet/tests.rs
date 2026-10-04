@@ -6210,18 +6210,6 @@ fn test_browser_menu_path() {
 }
 
 #[test]
-fn test_web_page_height_fits_screen() {
-    let overhead = 3 + 1 + 4 + 1; // header(3) + blank + footer(pos+url+nav1+nav2) + prompt
-    assert!(
-        TelnetSession::WEB_PAGE_HEIGHT + overhead <= 22,
-        "WEB_PAGE_HEIGHT {} + overhead {} = {} exceeds 22",
-        TelnetSession::WEB_PAGE_HEIGHT,
-        overhead,
-        TelnetSession::WEB_PAGE_HEIGHT + overhead,
-    );
-}
-
-#[test]
 fn test_web_max_history_is_reasonable() {
     const _: () = assert!(TelnetSession::WEB_MAX_HISTORY >= 10, "too few history entries");
     const _: () = assert!(TelnetSession::WEB_MAX_HISTORY <= 200, "excessive history cap");
@@ -6262,36 +6250,85 @@ fn test_web_browser_footer_fits_petscii() {
     );
 }
 
-#[test]
-fn test_web_browser_status_line_fits_petscii() {
-    let status = format!("  ({}-{} of {})", 4983, 5000, 5000);
-    assert!(
-        status.len() <= PETSCII_WIDTH,
-        "status '{}' is {} chars, exceeds {}",
-        status,
-        status.len(),
-        PETSCII_WIDTH,
-    );
-    // Form indicator line
-    let form_hint = "  1 form on this page (F to edit)";
-    assert!(
-        form_hint.len() <= PETSCII_WIDTH,
-        "form hint '{}' is {} chars, exceeds {}",
-        form_hint, form_hint.len(), PETSCII_WIDTH,
-    );
-    let form_hint_multi = "  99 forms on this page (F to edit)";
-    assert!(
-        form_hint_multi.len() <= PETSCII_WIDTH,
-        "form hint '{}' is {} chars, exceeds {}",
-        form_hint_multi, form_hint_multi.len(), PETSCII_WIDTH,
-    );
+/// The page view draws exactly the 22 rows a screen has, as many of them
+/// page text as the terminal's command rows allow, none wider than the
+/// screen -- measured from what `render_web_browser` actually sends, with
+/// every optional element on (forms, links, history, both directions).  And
+/// what it sends a Commodore or a 7-bit terminal is ASCII: an accented
+/// letter arrives as its plain letter.
+#[tokio::test]
+async fn test_the_browser_page_fills_the_screen_and_no_more() {
+    use tokio::io::AsyncReadExt;
+    // With forms the status row names them; without, it is the address --
+    // a long one, cut to fit, beside the widest position a page can have.
+    for (term, forms) in [TerminalType::Ansi, TerminalType::Petscii, TerminalType::Ascii]
+        .into_iter()
+        .flat_map(|t| [(t, true), (t, false)])
+    {
+        let (mut sess, mut peer) = make_test_session_with_peer(term);
+        sess.color_enabled = false;
+        // Long enough to need cutting, with a fold that lengthens (ß -> ss)
+        // and a three-digit link marker.
+        sess.web_lines = (0..5000)
+            .map(|i| format!("line {i} Bahía Straße {} \u{2}123\u{3}", "word ".repeat(20)))
+            .collect();
+        sess.web_links = vec!["http://a.test/".to_string(); 3];
+        if forms {
+            sess.web_forms = vec![crate::webbrowser::WebForm {
+                action: "/s".into(),
+                method: "get".into(),
+                label: "Search".into(),
+                fields: Vec::new(),
+            }; 2];
+        }
+        sess.web_history = vec![("http://prev.test/".to_string(), 0)];
+        sess.web_url = Some(format!("https://example.test/{}", "long/".repeat(30)));
+        sess.web_title = Some("A page title that is longer than any screen is wide, by some way".into());
+        sess.web_scroll = 4983;
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            let _ = peer.read_to_end(&mut out).await;
+            out
+        });
+        sess.render_web_browser().await.unwrap();
+        let page_h = sess.web_page_height();
+        drop(sess);
+        let out = collector.await.unwrap();
+
+        // An ASCII terminal's clear screen is three blank lines that scroll
+        // the old one away -- not rows of this one.  Count from the header.
+        let from = out.windows(4).position(|w| w == b"====").unwrap();
+        let out = out[from..].to_vec();
+        let rows: Vec<&[u8]> = out.split(|&b| b == b'\n').collect();
+        // Every row ends in CR LF but the last, which is where the prompt goes.
+        assert_eq!(rows.len(), 22, "{term:?}: {} rows drawn plus the prompt", rows.len() - 1);
+        let content = rows.iter().filter(|r| r.windows(5).any(|w| w.eq_ignore_ascii_case(b"line "))).count();
+        assert_eq!(content, page_h, "{term:?}: page rows");
+        // One short of the screen: a row that fills it wraps (`separator`).
+        let width = if term == TerminalType::Petscii { 39 } else { 79 };
+        for r in &rows {
+            // Characters, not bytes: an ANSI row keeps its UTF-8.
+            let shown = String::from_utf8_lossy(r)
+                .chars()
+                .filter(|&c| c >= ' ' && c != '\u{7F}' && c != '\u{93}')
+                .count();
+            assert!(shown <= width, "{term:?}: {:?} is {shown} wide", String::from_utf8_lossy(r));
+        }
+        match term {
+            TerminalType::Ansi => assert!(out.windows(2).any(|w| w == "í".as_bytes()), "ANSI keeps UTF-8"),
+            _ => {
+                assert!(!out.iter().any(|&b| b >= 0x80 && b != 0x93), "{term:?} gets ASCII");
+                assert!(out.windows(5).any(|w| w.eq_ignore_ascii_case(b"bahia")), "{term:?}: the plain letter");
+            }
+        }
+    }
 }
 
 // ─── Web browser pagination ──────────────────────────
 
 #[test]
 fn test_web_pagination_single_line() {
-    let page_h = TelnetSession::WEB_PAGE_HEIGHT;
+    let page_h = TelnetSession::WEB_PAGE_HEIGHT_PETSCII;
     let total = 1;
     let scroll = 0;
     let end = (scroll + page_h).min(total);
@@ -6302,7 +6339,7 @@ fn test_web_pagination_single_line() {
 
 #[test]
 fn test_web_pagination_exact_page() {
-    let page_h = TelnetSession::WEB_PAGE_HEIGHT;
+    let page_h = TelnetSession::WEB_PAGE_HEIGHT_PETSCII;
     let total = page_h;
     let scroll = 0;
     let end = (scroll + page_h).min(total);
@@ -6312,7 +6349,7 @@ fn test_web_pagination_exact_page() {
 
 #[test]
 fn test_web_pagination_two_pages() {
-    let page_h = TelnetSession::WEB_PAGE_HEIGHT;
+    let page_h = TelnetSession::WEB_PAGE_HEIGHT_PETSCII;
     let total = page_h + 5;
     // Page 1
     let scroll = 0;
@@ -6331,7 +6368,7 @@ fn test_web_pagination_two_pages() {
 
 #[test]
 fn test_web_end_scroll_calculation() {
-    let page_h = TelnetSession::WEB_PAGE_HEIGHT;
+    let page_h = TelnetSession::WEB_PAGE_HEIGHT_PETSCII;
     let total = 100;
     // E command: scroll = total - page_h
     let scroll = total - page_h;
@@ -6342,7 +6379,7 @@ fn test_web_end_scroll_calculation() {
 
 #[test]
 fn test_web_end_scroll_short_page() {
-    let page_h = TelnetSession::WEB_PAGE_HEIGHT;
+    let page_h = TelnetSession::WEB_PAGE_HEIGHT_PETSCII;
     let total: usize = 5;
     // E command when total <= page_h: scroll stays 0
     let scroll = total.saturating_sub(page_h);

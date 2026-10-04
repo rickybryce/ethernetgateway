@@ -397,10 +397,11 @@ pub(crate) fn display_for_terminal(s: &str) -> String {
 /// three unrenderable characters, which is exactly the "garbage from page two
 /// onward" an operator sees. It looks like a terminal fault and is not one.
 ///
-/// `html2text` offers `no_table_borders()`, which would also remove the bytes
-/// — by removing the table's structure. `+---+` says the same thing in
-/// characters every terminal since the teletype can draw, so the borders are
-/// translated rather than dropped.
+/// The browser has since turned borders off (`no_table_borders()`): most web
+/// tables are layout, and their boxes cost more rows than their content.  The
+/// fold stays for box drawing from every other source -- a page's own text, an
+/// AI answer, a gopher menu -- translated to `+---+`, which every terminal
+/// since the teletype can draw.
 ///
 /// **Every surface that shows fetched text needs this, and for two releases
 /// only one of them had it.** It lived in `webbrowser` and was called nowhere
@@ -454,6 +455,109 @@ pub(crate) fn fold_terminal_safe(s: &str) -> String {
         .replace('\u{2026}', "...")
 }
 
+/// Text for a terminal that can show nothing but ASCII: a Commodore, which
+/// draws a byte above 0x7F as a graphics character, or a 7-bit terminal,
+/// which cannot draw UTF-8 at all.
+///
+/// [`fold_terminal_safe`] stays narrow on purpose -- a modern terminal over
+/// SSH renders an accented letter, so it is left alone there.  This is the
+/// other half, for the terminals that cannot: a Latin letter becomes its
+/// plain letter (`Bahia`, not `Bah` and a graphic), a few common symbols
+/// become their ASCII spelling, an emoji or an invisible joiner goes, and
+/// anything else outside ASCII is a `?` -- one mark per character rather
+/// than three pieces of rubbish per byte.  ASCII passes through untouched,
+/// control bytes included, so a caller's own markers survive it.
+pub(crate) fn fold_to_ascii(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in fold_terminal_safe(s).chars() {
+        if c.is_ascii() {
+            out.push(c);
+            continue;
+        }
+        let folded: &str = match c {
+            'À'..='Å' | 'Ā' | 'Ă' | 'Ą' => "A",
+            'à'..='å' | 'ā' | 'ă' | 'ą' | 'ª' => "a",
+            'Æ' => "AE",
+            'æ' => "ae",
+            'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => "C",
+            'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' | '¢' => "c",
+            'Ð' | 'Ď' | 'Đ' => "D",
+            'ð' | 'ď' | 'đ' => "d",
+            'È'..='Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => "E",
+            'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+            'Ĝ' | 'Ğ' | 'Ġ' | 'Ģ' => "G",
+            'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+            'Ĥ' | 'Ħ' => "H",
+            'ĥ' | 'ħ' => "h",
+            'Ì'..='Ï' | 'Ĩ' | 'Ī' | 'Ĭ' | 'Į' | 'İ' => "I",
+            'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+            'Ĳ' => "IJ",
+            'ĳ' => "ij",
+            'Ĵ' => "J",
+            'ĵ' => "j",
+            'Ķ' => "K",
+            'ķ' | 'ĸ' => "k",
+            'Ĺ' | 'Ļ' | 'Ľ' | 'Ŀ' | 'Ł' => "L",
+            'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+            'Ñ' | 'Ń' | 'Ņ' | 'Ň' | 'Ŋ' => "N",
+            'ñ' | 'ń' | 'ņ' | 'ň' | 'ŉ' | 'ŋ' => "n",
+            'Ò'..='Ö' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' => "O",
+            'ò'..='ö' | 'ø' | 'ō' | 'ŏ' | 'ő' | 'º' => "o",
+            'Œ' => "OE",
+            'œ' => "oe",
+            'Ŕ' | 'Ŗ' | 'Ř' => "R",
+            'ŕ' | 'ŗ' | 'ř' => "r",
+            'Ś' | 'Ŝ' | 'Ş' | 'Š' => "S",
+            'ś' | 'ŝ' | 'ş' | 'š' | 'ſ' => "s",
+            'ß' => "ss",
+            'Ţ' | 'Ť' | 'Ŧ' => "T",
+            'ţ' | 'ť' | 'ŧ' => "t",
+            'Þ' => "Th",
+            'þ' => "th",
+            'Ù'..='Ü' | 'Ũ' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' => "U",
+            'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' | 'µ' => "u",
+            'Ŵ' => "W",
+            'ŵ' => "w",
+            'Ý' | 'Ÿ' | 'Ŷ' => "Y",
+            'ý' | 'ÿ' | 'ŷ' => "y",
+            'Ź' | 'Ż' | 'Ž' => "Z",
+            'ź' | 'ż' | 'ž' => "z",
+            '©' => "(c)",
+            '®' => "(R)",
+            '™' => "(TM)",
+            '°' => "deg",
+            '×' => "x",
+            '÷' => "/",
+            '±' => "+/-",
+            '¹' => "1",
+            '²' => "2",
+            '³' => "3",
+            '¼' => "1/4",
+            '½' => "1/2",
+            '¾' => "3/4",
+            '«' | '»' => "\"",
+            '¡' => "!",
+            '¿' => "?",
+            '£' => "GBP",
+            '€' => "EUR",
+            '¥' => "JPY",
+            // Marks that carry meaning in a table or a rating.
+            '\u{2713}' | '\u{2714}' | '\u{2611}' => "v",
+            '\u{2717}' | '\u{2718}' | '\u{2612}' => "x",
+            '\u{2605}' | '\u{2606}' => "*",
+            // Emoji and pictographs, their skin-tone and style modifiers, the
+            // invisible joiners between them, and an accent written as a
+            // separate combining mark (the letter before it already went out
+            // plain): nothing to draw.
+            '\u{1F000}'..='\u{1FAFF}' | '\u{FE00}'..='\u{FE0F}' | '\u{0300}'..='\u{036F}'
+            | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' => "",
+            _ => "?",
+        };
+        out.push_str(folded);
+    }
+    out
+}
+
 /// Word-wrap a single line to fit within `width` columns, breaking at spaces.
 pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if line.is_empty() {
@@ -493,6 +597,21 @@ pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The ASCII-only fold: plain letters for Latin ones, words for a few
+    /// symbols, nothing for emoji, one `?` for anything else -- and ASCII,
+    /// control bytes included, untouched.
+    #[test]
+    fn test_fold_to_ascii() {
+        assert_eq!(fold_to_ascii("Bahía Blanca, Glashütte"), "Bahia Blanca, Glashutte");
+        assert_eq!(fold_to_ascii("Straße Æsir Œuvre"), "Strasse AEsir OEuvre");
+        assert_eq!(fold_to_ascii("© 2026 – 20°C ½"), "(c) 2026 - 20degC 1/2");
+        assert_eq!(fold_to_ascii("\u{1F3A7}Prefer \u{1F44D}\u{1F3FD}\u{200D}ok"), "Prefer ok");
+        assert_eq!(fold_to_ascii("Привет"), "??????");
+        assert_eq!(fold_to_ascii("Cafe\u{301} \u{2713} \u{2717} \u{2605}\u{2605}\u{2606} \u{2602}"), "Cafe v x *** ?");
+        assert_eq!(fold_to_ascii("a\u{2}12\u{3}b\r\n"), "a\u{2}12\u{3}b\r\n");
+        assert!(fold_to_ascii("“quoted” ’s").is_ascii());
+    }
+
     use super::*;
 
     #[test]
