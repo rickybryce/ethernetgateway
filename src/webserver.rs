@@ -6040,8 +6040,6 @@ mod tests {
         assert_eq!(decode_base64("YWRt aW46 Y2hh bmdl bWU="), b"admin:changeme");
     }
 
-    /// The DNS-rebinding guard admits every way a person reaches the gateway
-    /// on a LAN and nothing an attacker's domain can be.
     /// A long Windows name answers to both its full name and the 15-character
     /// NetBIOS name -- preferring the full one must not refuse the short one
     /// a LAN or an old bookmark still uses.  And the second name widens
@@ -6059,6 +6057,8 @@ mod tests {
         assert_eq!(machine_names("gw".into(), None), vec!["gw".to_string()]);
     }
 
+    /// The DNS-rebinding guard admits every way a person reaches the gateway
+    /// on a LAN and nothing an attacker's domain can be.
     #[test]
     fn test_host_header_allowed() {
         let m = "raspberrypi5";
