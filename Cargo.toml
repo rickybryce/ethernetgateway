@@ -98,6 +98,14 @@ arboard = { version = "3", default-features = false }
 rfd = { version = "0.16", default-features = false, features = ["xdg-portal", "tokio"] }
 iz80 = "0.5.1"
 
+# The machine's DNS host name on Windows (`GetComputerNameExW`, UTF-16, no
+# subprocess) -- see `relay::raw_hostname`.  `COMPUTERNAME` is the NetBIOS name
+# cut to 15 characters, and running `hostname.exe` instead decodes its output in
+# the console code page and searches the program's own folder first.  Already in
+# the tree via x11rb, so this adds **no new crate**.
+[target.'cfg(windows)'.dependencies]
+gethostname = "1.1"
+
 [dev-dependencies]
 proptest = "1"
 tokio = { version = "1", features = ["test-util"] }

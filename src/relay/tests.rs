@@ -2404,6 +2404,29 @@ fn test_the_machines_name_is_read_once_for_the_process() {
     assert_eq!(first, second, "the cache must not change the answer");
 }
 
+/// On Windows the `hostname` command must win over `COMPUTERNAME`, which is
+/// the NetBIOS name cut to 15 characters -- reading it first made the web Host
+/// check refuse a long machine name as itself.  The sources are injected, so
+/// this holds the order on every platform rather than only on Windows.
+#[test]
+fn test_the_full_hostname_beats_the_netbios_one() {
+    use super::pick_hostname;
+    let full = || Some("ricky-workstation-01\r\n".to_string());
+    let netbios = || Some("RICKY-WORKSTATI".to_string());
+    let none = || None::<String>;
+
+    assert_eq!(pick_hostname(None, full, netbios), "ricky-workstation-01");
+    // The file still comes first, and the command is never asked for it.
+    assert_eq!(
+        pick_hostname(Some("pi126\n".into()), || panic!("asked the command"), netbios),
+        "pi126",
+    );
+    // A blank answer anywhere is no answer: fall through to the next source.
+    assert_eq!(pick_hostname(Some("  \n".into()), || Some(" ".into()), netbios), "RICKY-WORKSTATI");
+    assert_eq!(pick_hostname(None, none, netbios), "RICKY-WORKSTATI");
+    assert_eq!(pick_hostname(None, none, none), "");
+}
+
 /// The whole relay budget running out means the master is unreachable only
 /// until it has taken the call; after that, the call was not answered.  The
 /// slave's modem tells its caller which, so getting this wrong blamed the

@@ -941,28 +941,62 @@ fn read_hostname_label() -> String {
 /// server's Host check needs the whole name (a 40-character hostname must
 /// still match itself). Not cached: callers that want it twice cache it.
 pub(crate) fn raw_hostname() -> String {
-    let raw = std::fs::read_to_string("/etc/hostname")
+    pick_hostname(
+        std::fs::read_to_string("/etc/hostname").ok(),
+        system_hostname,
+        || std::env::var("COMPUTERNAME").ok(),
+    )
+}
+
+/// The machine's DNS host name asked of the OS itself, when there is no
+/// `/etc/hostname` to read.
+///
+/// **Windows asks the API, never a program.**  `COMPUTERNAME` is the NetBIOS
+/// name, cut to 15 characters, so a box called `ricky-workstation-01` carried
+/// `RICKY-WORKSTATI` and the web Host check refused the machine's own full
+/// name.  `hostname.exe` has the right name but is the wrong road: its output
+/// is in the console code page (a `büro-pc` arrives as `b\x81ro-pc`), it is a
+/// process spawned on a tokio worker, and Windows looks for it in the
+/// program's own folder before System32.  `GetComputerNameExW` has none of
+/// those.  It asserts on an API failure, so a panic falls through to
+/// `COMPUTERNAME` rather than taking a web request down with it.
+#[cfg(windows)]
+fn system_hostname() -> Option<String> {
+    std::panic::catch_unwind(gethostname::gethostname)
         .ok()
-        .filter(|s| !s.trim().is_empty())
-        // Windows.
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
-        // **macOS has neither**, and nor do a good many containers: there is
-        // no `/etc/hostname` on a Mac and `COMPUTERNAME` is a Windows
-        // variable, so this returned the empty string on the one Unix where
-        // double-clicking is the normal launch.  The telnet MORE page names
-        // the computer it is about to shut down and simply omitted the row,
-        // which is the one sentence that page exists to say.  `hostname` is on
-        // every Unix; it is asked only when the file was not there, so the
-        // common path still costs one read.
-        .or_else(|| {
-            std::process::Command::new("hostname")
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        })
-        .unwrap_or_default();
-    raw.trim().to_string()
+        .and_then(|name| name.into_string().ok())
+}
+
+/// **macOS has no `/etc/hostname`**, nor do a good many containers, and
+/// `hostname` is on every Unix.  Without it the telnet second page omitted the
+/// name of the computer it was about to shut down.  Asked only when the file
+/// was not there, so the Linux path is one read.
+#[cfg(not(windows))]
+fn system_hostname() -> Option<String> {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// The order [`raw_hostname`] asks its three sources in, apart from the
+/// asking, so the order is what a test holds: the file, then the system
+/// ([`system_hostname`]), and `COMPUTERNAME` only as the last resort -- it
+/// is the 15-character NetBIOS name, and reading it before the system was
+/// what refused a long Windows name.  A blank answer is no answer.
+fn pick_hostname(
+    file: Option<String>,
+    system: impl FnOnce() -> Option<String>,
+    computername: impl FnOnce() -> Option<String>,
+) -> String {
+    let nonblank = |s: &String| !s.trim().is_empty();
+    file.filter(nonblank)
+        .or_else(|| system().filter(nonblank))
+        .or_else(|| computername().filter(nonblank))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 /// Relay wire-protocol version.  Bump on any incompatible change to the

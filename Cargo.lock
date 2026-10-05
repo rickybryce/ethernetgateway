@@ -1246,6 +1246,7 @@ dependencies = [
  "chrono",
  "eframe",
  "egui_extras",
+ "gethostname",
  "html2text",
  "html5ever",
  "if-addrs",
