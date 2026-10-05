@@ -369,8 +369,8 @@ async fn handle_connection(
     // documented escape hatch for the address allowlist opens this too.
     if !live_disable_safety
         && let Some(host) = request.headers.get("host")
-        && let (machine, domains) = host_names()
-        && !host_header_allowed(host, machine, domains)
+        && let (machines, domains) = host_names()
+        && !machines.iter().any(|m| host_header_allowed(host, m, domains))
     {
         // Once per host in a row: a page left open polls, and every refusal
         // would otherwise be a line in the on-disk log.
@@ -858,14 +858,14 @@ pub(crate) fn host_header_allowed(host: &str, machine: &str, domains: &[String])
     }
 }
 
-/// This machine's name and the DNS domains its resolver searches, read once.
+/// This machine's names and the DNS domains its resolver searches, read once.
 ///
-/// The name is the whole one ([`crate::relay::raw_hostname`]), not the label
-/// cut to 32 characters for display.  The domains come from
+/// The first name is the whole one ([`crate::relay::raw_hostname`]), not the
+/// label cut to 32 characters for display.  The domains come from
 /// `/etc/resolv.conf`'s `search` and `domain` lines and, on Windows,
 /// `USERDNSDOMAIN`; a machine with neither simply has none.
-fn host_names() -> &'static (String, Vec<String>) {
-    static NAMES: std::sync::OnceLock<(String, Vec<String>)> = std::sync::OnceLock::new();
+fn host_names() -> &'static (Vec<String>, Vec<String>) {
+    static NAMES: std::sync::OnceLock<(Vec<String>, Vec<String>)> = std::sync::OnceLock::new();
     NAMES.get_or_init(|| {
         let mut domains = std::fs::read_to_string("/etc/resolv.conf")
             .map(|t| resolver_domains(&t))
@@ -873,8 +873,30 @@ fn host_names() -> &'static (String, Vec<String>) {
         if let Ok(d) = std::env::var("USERDNSDOMAIN") {
             domains.push(d.to_ascii_lowercase());
         }
-        (crate::relay::raw_hostname(), domains)
+        #[cfg(windows)]
+        let netbios = std::env::var("COMPUTERNAME").ok();
+        #[cfg(not(windows))]
+        let netbios = None;
+        (machine_names(crate::relay::raw_hostname(), netbios), domains)
     })
+}
+
+/// The names this machine answers to: its full name, and on Windows also its
+/// **NetBIOS** name (`COMPUTERNAME`) when that differs.  The NetBIOS name is
+/// the full one cut to 15 characters, and a browser can reach the box by it
+/// (NBNS on a LAN, or a bookmark from when the Host check compared against
+/// that name alone) -- so preferring the full name must not refuse the short
+/// one.  Only Windows supplies it: elsewhere `COMPUTERNAME` is just an
+/// environment variable and names nothing.
+fn machine_names(full: String, netbios: Option<String>) -> Vec<String> {
+    let mut names = vec![full];
+    if let Some(n) = netbios.map(|n| n.trim().to_string())
+        && !n.is_empty()
+        && !names.iter().any(|m| m.eq_ignore_ascii_case(&n))
+    {
+        names.push(n);
+    }
+    names
 }
 
 /// The `search` and `domain` entries of a `resolv.conf`.
@@ -6020,6 +6042,23 @@ mod tests {
 
     /// The DNS-rebinding guard admits every way a person reaches the gateway
     /// on a LAN and nothing an attacker's domain can be.
+    /// A long Windows name answers to both its full name and the 15-character
+    /// NetBIOS name -- preferring the full one must not refuse the short one
+    /// a LAN or an old bookmark still uses.  And the second name widens
+    /// nothing else: a different name is still refused.
+    #[test]
+    fn test_a_long_windows_name_answers_to_its_netbios_name_too() {
+        let names = machine_names("ricky-workstation-01".into(), Some("RICKY-WORKSTATI".into()));
+        let ok = |h: &str| names.iter().any(|m| host_header_allowed(h, m, &[]));
+        assert!(ok("ricky-workstation-01:8080"));
+        assert!(ok("ricky-workstati:8080"), "the NetBIOS name was refused");
+        assert!(!ok("evil.example:8080"));
+        // A NetBIOS name equal to the full one, or blank, adds nothing.
+        assert_eq!(machine_names("gw".into(), Some("GW".into())), vec!["gw".to_string()]);
+        assert_eq!(machine_names("gw".into(), Some("  ".into())), vec!["gw".to_string()]);
+        assert_eq!(machine_names("gw".into(), None), vec!["gw".to_string()]);
+    }
+
     #[test]
     fn test_host_header_allowed() {
         let m = "raspberrypi5";
@@ -6074,7 +6113,7 @@ mod tests {
         let src = include_str!("webserver.rs").replace('\r', "");
         let body = &src[src.find("async fn handle_connection(").unwrap()..];
         let body = &body[..body.find("\n}\n").unwrap()];
-        let gate = body.find(concat!("!host_header", "_allowed(host,")).expect("the Host gate");
+        let gate = body.find(concat!("machines.iter().any(|m| host_header", "_allowed(host, m,")).expect("the Host gate");
         let routes = body.find("match (request.method.as_str(), request.path.as_str())").unwrap();
         assert!(gate < routes);
     }

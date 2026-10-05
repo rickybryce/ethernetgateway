@@ -220,7 +220,10 @@ fn test_menu_kermit_server_starts_in_the_menu_folder() {
     let body = &src[at..at + src[at..].find("\n    }\n").unwrap()];
     assert!(body.contains(concat!("kermit_server_with_outcome", "_in(")), "starts in a folder");
     assert!(body.contains("&start_subdir,"), "the menu's own");
-    assert!(body.contains("resume,"), "and with the menu's resume choice");
+    // The call's own arguments, not the bare word: `resume,` also occurs in
+    // this body's comments, so a scan for it alone passed with the argument
+    // hard-coded to `Resume::FromSaveDir`.
+    assert!(body.contains("&start_subdir,\n                resume,\n"), "and with the menu's resume choice");
     // Which folder is started in, and whether it may resume, is
     // `menu_kermit_server_start` and its own test; this holds the save
     // directory the body picks from that choice.
