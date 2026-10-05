@@ -2425,7 +2425,11 @@ fn test_an_expired_relay_budget_blames_the_right_end() {
 /// body, so a copy elsewhere cannot satisfy it.
 #[test]
 fn test_the_answer_marker_is_raised_between_the_call_and_the_answer() {
-    let src = include_str!("../relay.rs");
+    // LF, whatever the checkout: on Windows `include_str!` sees CRLF and the
+    // `"\n}\n"` end-of-function search below found nothing -- this test went
+    // red there and only there.
+    let src = include_str!("../relay.rs").replace("\r\n", "\n");
+    let src = src.as_str();
     let start = src.find("async fn connect_master_relay_inner(").expect("the function");
     let body = &src[start..];
     let body = &body[..body.find("\n}\n").expect("its end")];
