@@ -2435,4 +2435,16 @@ fn test_the_answer_marker_is_raised_between_the_call_and_the_answer() {
     assert!(exec < mark && mark < hello, "marker out of place: exec {exec}, mark {mark}, hello {hello}");
     assert_eq!(body.matches("awaiting_answer.store(true").count(), 1, "raised in more than one place");
     assert!(!body[mark..hello].contains(".await"), "something is awaited between the marker and the answer");
+    // And only a dial or peer, the targets with a far end, may turn the
+    // marker into a refusal: a registration answers at accept.
+    let outer = &src[src.find("async fn connect_relay_exec(").expect("the caller")..];
+    let outer = &outer[..outer.find("\n}\n").expect("its end")];
+    assert!(
+        outer.contains("awaiting_answer.load(Ordering::SeqCst) && hello_wait > RELAY_HELLO_TIMEOUT"),
+        "the far-end condition is gone from connect_relay_exec"
+    );
+    // The registration and the menu wait the default; a dial waits longer.
+    assert_eq!(super::hello_wait(&super::RelayTarget::Menu), super::RELAY_HELLO_TIMEOUT);
+    assert!(super::hello_wait(&super::RelayTarget::Dial { host: "bbs.example".into(), port: 23 })
+        > super::RELAY_HELLO_TIMEOUT);
 }

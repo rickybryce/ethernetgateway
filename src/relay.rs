@@ -1269,7 +1269,7 @@ async fn connect_relay_exec(
     {
         Ok(result) => result,
         Err(_) => Err(relay_budget_expired(
-            awaiting_answer.load(Ordering::SeqCst),
+            awaiting_answer.load(Ordering::SeqCst) && hello_wait > RELAY_HELLO_TIMEOUT,
             budget,
             host,
             port,
@@ -1278,8 +1278,16 @@ async fn connect_relay_exec(
 }
 
 /// What it means that [`connect_relay_exec`]'s whole budget ran out, given
-/// whether the master had already taken the call and only its answer was
-/// outstanding.
+/// whether the master had already taken the call and only a FAR END's answer
+/// was outstanding.
+///
+/// **A far end exists only for a dial or a peer**, which are the targets that
+/// get the longer answer wait (`hello_wait > RELAY_HELLO_TIMEOUT`); the caller
+/// passes `waiting_on_far_end` as that and the marker together.  For a
+/// registration, the menu or Kermit, the master answers at accept, so a
+/// budget gone after a slow connect is still the link -- `Network` and a brisk
+/// retry -- and calling it a refusal would back a slave off hard and log a
+/// dial that never happened.  A review caught the first version doing that.
 ///
 /// Before that point it is a transport problem -- the master is unreachable
 /// or stalled -- and `Network`, so a slave retries briskly.  After it, the
@@ -1290,12 +1298,12 @@ async fn connect_relay_exec(
 /// connect is what makes the two differ: it leaves the answer wait less than
 /// its full `hello_wait` before the budget runs out.
 fn relay_budget_expired(
-    awaiting_answer: bool,
+    waiting_on_far_end: bool,
     budget: std::time::Duration,
     host: &str,
     port: u16,
 ) -> RelayConnectError {
-    if awaiting_answer {
+    if waiting_on_far_end {
         return RelayConnectError::Refused(format!(
             "no answer within {}s -- master {}:{} took the call but it was not \
              answered (dial refused or unreachable), or relays are disabled",
