@@ -1682,11 +1682,13 @@ pub(crate) struct KermitReceive {
     /// of refusing the write with `AlreadyExists`.
     pub resumed: bool,
     /// Per-session working sub-directory at the moment of receipt,
-    /// relative to `transfer_dir`.  Empty string = root.  In server
-    /// mode, the peer changes this with `remote cwd <subdir>` (G C);
-    /// the saver must join it onto `transfer_dir` so uploads land in
-    /// the directory the peer asked for instead of the base.  Plain
-    /// (non-server) `kermit_receive_with_init` callers leave it empty.
+    /// relative to the server's **base** folder.  Empty string = the
+    /// base.  In server mode, the peer changes this with `remote cwd
+    /// <subdir>` (G C); the saver must join it onto the same base it
+    /// handed the server -- the transfer root for most callers, the
+    /// menu's folder for File Transfer `K` -- so uploads land in the
+    /// directory the peer asked for.  Plain (non-server)
+    /// `kermit_receive_with_init` callers leave it empty.
     pub subdir: String,
 }
 
@@ -5578,9 +5580,11 @@ async fn kermit_server_dispatch(
                         // subsequent upload into a directory that
                         // doesn't exist (the user's confused-bug
                         // report from 2026-05-01 was caused by exactly
-                        // this footgun).  Empty subdir = root, which
-                        // we trust to exist (ensure_transfer_dir runs
-                        // before kermit_server in the telnet layer).
+                        // this footgun).  Empty subdir = the base, which
+                        // the caller creates before starting the server
+                        // (ensure_transfer_dir).  If it is removed while
+                        // the session runs, nothing panics: DIR comes
+                        // back empty and saves fail as write errors.
                         if !new_subdir.is_empty() {
                             let resolved = session_dir(base, &new_subdir);
                             if !resolved.is_dir() {
@@ -5718,7 +5722,7 @@ async fn kermit_server_dispatch(
                         // Field-encoded filename argument.  We refuse
                         // wildcards, traversal, and missing args — the
                         // file lookup is rooted under the per-session
-                        // subdir (so deletes outside `transfer_dir/<subdir>`
+                        // subdir (so deletes outside `<base>/<subdir>`
                         // are impossible by construction).
                         let fname = parse_g_field_argument(&raw[1..])
                             .map(|b| String::from_utf8_lossy(b).into_owned())
