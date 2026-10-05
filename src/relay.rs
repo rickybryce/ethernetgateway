@@ -1044,11 +1044,40 @@ const RELAY_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 const RELAY_HELLO_TIMEOUT_DIALING: std::time::Duration =
     RELAY_ANSWER_WAIT.saturating_add(std::time::Duration::from_secs(5));
 
-/// The hello wait for a given target — see [`RELAY_HELLO`] for why they differ.
-fn hello_wait(target: &RelayTarget) -> std::time::Duration {
-    match target {
-        RelayTarget::Dial { .. } | RelayTarget::Peer { .. } => RELAY_HELLO_TIMEOUT_DIALING,
-        RelayTarget::Menu | RelayTarget::Kermit => RELAY_HELLO_TIMEOUT,
+/// Who sends the hello on a relay call: the master itself at accept, or a far
+/// end the master has to reach first.
+///
+/// **One fact, two consequences**, which is why it is a type rather than read
+/// back out of one of them: it sets how long the slave waits for the hello
+/// ([`Answerer::hello_wait`]), and it decides whether a budget that runs out
+/// after the master took the call is a refusal or still the link
+/// ([`relay_budget_expired`]).  The second used to be inferred from the first
+/// (`hello_wait > RELAY_HELLO_TIMEOUT`), so retuning a wait would have silently
+/// changed which failures back a slave off hard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answerer {
+    /// The menu, Kermit and a `serial-register`: the master answers at accept.
+    Master,
+    /// A Dial or a Peer: the master withholds the hello until the far end
+    /// picks up.
+    FarEnd,
+}
+
+impl Answerer {
+    /// Exhaustive on purpose: a new target has to say who answers it.
+    fn of(target: &RelayTarget) -> Self {
+        match target {
+            RelayTarget::Dial { .. } | RelayTarget::Peer { .. } => Answerer::FarEnd,
+            RelayTarget::Menu | RelayTarget::Kermit => Answerer::Master,
+        }
+    }
+
+    /// The hello wait -- see [`RELAY_HELLO`] for why they differ.
+    fn hello_wait(self) -> std::time::Duration {
+        match self {
+            Answerer::FarEnd => RELAY_HELLO_TIMEOUT_DIALING,
+            Answerer::Master => RELAY_HELLO_TIMEOUT,
+        }
     }
 }
 
@@ -1154,7 +1183,7 @@ pub async fn connect_master_relay(
         username,
         password,
         &target.exec_command(port_label),
-        hello_wait(target),
+        Answerer::of(target),
     )
     .await
 }
@@ -1195,7 +1224,7 @@ pub async fn connect_master_register(
         // whitespace and takes what it knows), so a new slave against an old
         // master degrades to exactly today's behaviour rather than breaking.
         &format!("serial-register {} {} {}", port_label, mode, erase),
-        RELAY_HELLO_TIMEOUT,
+        Answerer::Master,
     )
     .await
 }
@@ -1244,8 +1273,9 @@ async fn connect_relay_exec(
     username: &str,
     password: &str,
     exec_command: &str,
-    hello_wait: std::time::Duration,
+    answerer: Answerer,
 ) -> Result<MasterRelay, RelayConnectError> {
+    let hello_wait = answerer.hello_wait();
     // The outer budget has to cover the hello wait, or a dialing target would
     // be cut off by this timeout before its own wait expired -- and reported as
     // a *network* failure (brisk retry) rather than the refusal it is.  Written
@@ -1269,7 +1299,7 @@ async fn connect_relay_exec(
     {
         Ok(result) => result,
         Err(_) => Err(relay_budget_expired(
-            awaiting_answer.load(Ordering::SeqCst) && hello_wait > RELAY_HELLO_TIMEOUT,
+            awaiting_answer.load(Ordering::SeqCst) && answerer == Answerer::FarEnd,
             budget,
             host,
             port,
@@ -1281,9 +1311,8 @@ async fn connect_relay_exec(
 /// whether the master had already taken the call and only a FAR END's answer
 /// was outstanding.
 ///
-/// **A far end exists only for a dial or a peer**, which are the targets that
-/// get the longer answer wait (`hello_wait > RELAY_HELLO_TIMEOUT`); the caller
-/// passes `waiting_on_far_end` as that and the marker together.  For a
+/// **A far end exists only for a dial or a peer** ([`Answerer::FarEnd`]); the
+/// caller passes `waiting_on_far_end` as that and the marker together.  For a
 /// registration, the menu or Kermit, the master answers at accept, so a
 /// budget gone after a slow connect is still the link -- `Network` and a brisk
 /// retry -- and calling it a refusal would back a slave off hard and log a

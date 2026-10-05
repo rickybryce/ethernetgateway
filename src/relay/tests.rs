@@ -2444,11 +2444,34 @@ fn test_the_answer_marker_is_raised_between_the_call_and_the_answer() {
     let outer = &src[src.find("async fn connect_relay_exec(").expect("the caller")..];
     let outer = &outer[..outer.find("\n}\n").expect("its end")];
     assert!(
-        outer.contains("awaiting_answer.load(Ordering::SeqCst) && hello_wait > RELAY_HELLO_TIMEOUT"),
+        outer.contains("awaiting_answer.load(Ordering::SeqCst) && answerer == Answerer::FarEnd"),
         "the far-end condition is gone from connect_relay_exec"
     );
-    // The registration and the menu wait the default; a dial waits longer.
-    assert_eq!(super::hello_wait(&super::RelayTarget::Menu), super::RELAY_HELLO_TIMEOUT);
-    assert!(super::hello_wait(&super::RelayTarget::Dial { host: "bbs.example".into(), port: 23 })
-        > super::RELAY_HELLO_TIMEOUT);
+}
+
+/// Who answers each target, and the wait that follows from it.  Every target
+/// is named, so a regrouping in `Answerer::of` cannot pass by omission, and the
+/// waits are compared to each other rather than to a constant, because the
+/// refusal rule no longer reads them -- what matters is that a far end gets the
+/// longer one.
+#[test]
+fn test_only_a_dial_or_a_peer_waits_on_a_far_end() {
+    use super::{Answerer, RelayTarget};
+    let far = [
+        RelayTarget::Dial { host: "bbs.example".into(), port: 23 },
+        RelayTarget::Peer { addr: "A@192.0.2.7".into() },
+    ];
+    for t in &far {
+        assert_eq!(Answerer::of(t), Answerer::FarEnd, "{t:?}");
+    }
+    for t in &[RelayTarget::Menu, RelayTarget::Kermit] {
+        assert_eq!(Answerer::of(t), Answerer::Master, "{t:?}");
+    }
+    assert_eq!(Answerer::Master.hello_wait(), super::RELAY_HELLO_TIMEOUT);
+    assert!(Answerer::FarEnd.hello_wait() > Answerer::Master.hello_wait());
+    // A registration is answered at accept: the master, never a far end.
+    let src = include_str!("../relay.rs").replace("\r\n", "\n");
+    let reg = &src[src.find("pub async fn connect_master_register(").expect("the registrar")..];
+    let reg = &reg[..reg.find("\n}\n").expect("its end")];
+    assert!(reg.contains("Answerer::Master,"), "a registration must not wait on a far end");
 }
