@@ -119,25 +119,6 @@ fn test_truncate_to_width() {
 
 // ─── Filename validation ─────────────────────────────
 
-/// The menu's Kermit server resumes only in a folder it can start in.  A
-/// folder failing Kermit's subdir rule is served from the root while files are
-/// saved into the folder, so a resume there would splice a root file's bytes
-/// onto the upload -- it must be `Never`, and the server must start at the root.
-#[test]
-fn test_the_menu_kermit_server_resumes_only_where_it_saves() {
-    use crate::kermit::Resume;
-    assert_eq!(TelnetSession::menu_kermit_server_start(""), (String::new(), Resume::FromSaveDir));
-    assert_eq!(TelnetSession::menu_kermit_server_start("work"), ("work".to_string(), Resume::FromSaveDir));
-    assert_eq!(TelnetSession::menu_kermit_server_start("a/b"), ("a/b".to_string(), Resume::FromSaveDir));
-    for unsafe_name in ["My Disks", "foo+bar", "b\u{fc}ro", ".hidden", "../up"] {
-        assert_eq!(
-            TelnetSession::menu_kermit_server_start(unsafe_name),
-            (String::new(), Resume::Never),
-            "{unsafe_name:?} is served from the root, so it must not resume",
-        );
-    }
-}
-
 #[test]
 fn test_validate_filename_valid() {
     assert!(TelnetSession::validate_filename("test.txt").is_ok());
@@ -209,34 +190,24 @@ fn test_the_kermit_save_converts_a_device_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Kermit server mode opened from a File Transfer folder works in that folder:
-/// the server starts there (so GET, DIR and a resume's partial agree with it),
-/// and the save joins the server's stamped subdir onto the transfer ROOT, or
-/// the folder would be named twice.
+/// Kermit server mode opened from a File Transfer folder runs IN that folder:
+/// the folder is the server's base, and files are saved relative to the same
+/// folder, so GET, DIR, saving and a resume's partial cannot disagree about
+/// where they are -- whatever the folder is called.  The server's own half
+/// (resuming from its base, `remote cd ..` stopping there) is driven in
+/// `kermit::tests`; this holds that the menu hands it the folder it saves into.
 #[test]
 fn test_menu_kermit_server_starts_in_the_menu_folder() {
     let src = include_str!("transfer.rs").replace('\r', "");
     let at = src.find("async fn file_transfer_kermit_server").expect("menu server");
     let body = &src[at..at + src[at..].find("\n    }\n").unwrap()];
-    assert!(body.contains(concat!("kermit_server_with_outcome", "_in(")), "starts in a folder");
-    assert!(body.contains("&start_subdir,"), "the menu's own");
-    // The call's own arguments, not the bare word: `resume,` also occurs in
-    // this body's comments, so a scan for it alone passed with the argument
-    // hard-coded to `Resume::FromSaveDir`.
-    assert!(body.contains("&start_subdir,\n                resume,\n"), "and with the menu's resume choice");
-    // Which folder is started in, and whether it may resume, is
-    // `menu_kermit_server_start` and its own test; this holds the save
-    // directory the body picks from that choice.
-    assert!(body.contains("menu_kermit_server_start(&self.transfer_subdir)"), "one rule for the choice");
+    assert!(body.contains("let target_dir = self.transfer_path();"), "the base is the menu's folder");
+    // The call's own last argument, not a bare word that a comment could hold.
     assert!(
-        body.contains("Resume::FromSaveDir => std::path::PathBuf::from(config::get_config().transfer_dir)"),
-        "saves relative to the root, since rx.subdir already names the folder"
+        body.contains(concat!("kermit_server_with_outcome", "_in(")) && body.contains("&target_dir,\n            )"),
+        "the server is based in that folder"
     );
-    let never = &body[body.find("Resume::Never =>").expect("the fallback arm")..];
-    assert!(
-        never[..never.find("\n        };").expect("arm end")].contains("self.transfer_path()"),
-        "and a folder Kermit's rule refuses keeps the old behaviour: saved into, server at the root"
-    );
+    assert!(body.contains("target_dir.join(&rx.subdir)"), "and files are saved relative to the same folder");
 }
 
 /// One decision for menu upload and autostart, with a reason for each refusal.

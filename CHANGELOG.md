@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Kermit server mode from the File Transfer menu works in the menu's folder,
+  whatever it is called.**  The folder is the server's whole world: it starts
+  there, `remote cd` with no argument returns there, and `remote cdup` stops
+  there.  Saving, `get`, `remote dir` and a resumed upload now all use that one
+  folder.  Before, the server could only start in a folder whose name passed
+  Kermit's rule for names sent over the wire, so for a folder like `My Disks`
+  it fell back to the top of the transfer folder while files were saved into
+  `My Disks`; 1.0.3 avoided the resulting corruption by turning resume off
+  there, and resume now works in every folder.  **Upgrade note:** a server
+  started from a subfolder can no longer `remote cd` above it.  Start it from
+  the top of the transfer folder to reach every file.  Every other way in
+  &mdash; the Kermit TCP port, `ATDT KERMIT`, a serial port in Kermit mode, and
+  a slave's relayed Kermit call &mdash; always starts at the top of the
+  transfer folder and is unchanged.
+
 ## [1.0.3] - 2026-10-05
 
 ### Security
