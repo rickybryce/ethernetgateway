@@ -2403,3 +2403,36 @@ fn test_the_machines_name_is_read_once_for_the_process() {
     );
     assert_eq!(first, second, "the cache must not change the answer");
 }
+
+/// The whole relay budget running out means the master is unreachable only
+/// until it has taken the call; after that, the call was not answered.  The
+/// slave's modem tells its caller which, so getting this wrong blamed the
+/// master for a BBS that was down.
+#[test]
+fn test_an_expired_relay_budget_blames_the_right_end() {
+    use super::{relay_budget_expired, RelayConnectError as E};
+    let budget = std::time::Duration::from_secs(50);
+    assert!(matches!(relay_budget_expired(false, budget, "m.example", 2222), E::Network(_)));
+    match relay_budget_expired(true, budget, "m.example", 2222) {
+        E::Refused(m) => assert!(m.contains("not answered") && m.contains("50s"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// And the marker that decides it is raised in the one right place: after
+/// the call has been placed (so a stall before it is still the master's) and
+/// immediately before the answer is awaited.  Bounded to the function's own
+/// body, so a copy elsewhere cannot satisfy it.
+#[test]
+fn test_the_answer_marker_is_raised_between_the_call_and_the_answer() {
+    let src = include_str!("../relay.rs");
+    let start = src.find("async fn connect_master_relay_inner(").expect("the function");
+    let body = &src[start..];
+    let body = &body[..body.find("\n}\n").expect("its end")];
+    let exec = body.find(".exec(true, exec_command.as_bytes())").expect("the call");
+    let mark = body.find("awaiting_answer.store(true, Ordering::SeqCst);").expect("the marker");
+    let hello = body.find("read_relay_hello(&mut stream, hello_wait)").expect("the answer");
+    assert!(exec < mark && mark < hello, "marker out of place: exec {exec}, mark {mark}, hello {hello}");
+    assert_eq!(body.matches("awaiting_answer.store(true").count(), 1, "raised in more than one place");
+    assert!(!body[mark..hello].contains(".await"), "something is awaited between the marker and the answer");
+}

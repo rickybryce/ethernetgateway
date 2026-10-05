@@ -1253,27 +1253,70 @@ async fn connect_relay_exec(
     // paths that answer at accept keep exactly the budget they had.
     let budget = RELAY_CONNECT_TIMEOUT
         .saturating_add(hello_wait.saturating_sub(RELAY_HELLO_TIMEOUT));
+    // Set once the master has taken the channel and the exec, so only its
+    // answer is outstanding.  A slow connect can leave that wait less than its
+    // full `hello_wait` before the budget runs out, and what is late then is
+    // the master's answer -- for a dial, the far end not picking up -- never
+    // the master's reachability.
+    let awaiting_answer = AtomicBool::new(false);
     match tokio::time::timeout(
         budget,
-        connect_master_relay_inner(host, port, username, password, exec_command, hello_wait),
+        connect_master_relay_inner(
+            host, port, username, password, exec_command, hello_wait, &awaiting_answer,
+        ),
     )
     .await
     {
         Ok(result) => result,
-        // A handshake/auth stall is a transport problem, not a credential
-        // one — classify as Network so the slave retries briskly.
-        // `budget`, not `RELAY_CONNECT_TIMEOUT`: the two are equal only for the
-        // targets the master answers at accept.  A Dial/Peer attempt is allowed
-        // the longer hello wait as well, so naming the constant reported 15s
-        // after a stall of up to 50 -- a number that sends whoever reads the
-        // log looking for the wrong thing.
-        Err(_) => Err(RelayConnectError::Network(format!(
-            "timed out after {}s connecting to master {}:{}",
+        Err(_) => Err(relay_budget_expired(
+            awaiting_answer.load(Ordering::SeqCst),
+            budget,
+            host,
+            port,
+        )),
+    }
+}
+
+/// What it means that [`connect_relay_exec`]'s whole budget ran out, given
+/// whether the master had already taken the call and only its answer was
+/// outstanding.
+///
+/// Before that point it is a transport problem -- the master is unreachable
+/// or stalled -- and `Network`, so a slave retries briskly.  After it, the
+/// master is there and the call was not answered: for a dial, the far end
+/// never picked up.  That is the refusal `read_relay_hello`'s own timeout
+/// already reports, and calling it `Network` had the slave's modem tell its
+/// caller "NOT CONNECTED TO MASTER" for a BBS that did not answer.  A slow
+/// connect is what makes the two differ: it leaves the answer wait less than
+/// its full `hello_wait` before the budget runs out.
+fn relay_budget_expired(
+    awaiting_answer: bool,
+    budget: std::time::Duration,
+    host: &str,
+    port: u16,
+) -> RelayConnectError {
+    if awaiting_answer {
+        return RelayConnectError::Refused(format!(
+            "no answer within {}s -- master {}:{} took the call but it was not \
+             answered (dial refused or unreachable), or relays are disabled",
             budget.as_secs(),
             host,
             port
-        ))),
+        ));
     }
+    // A handshake/auth stall is a transport problem, not a credential
+    // one — classify as Network so the slave retries briskly.
+    // `budget`, not `RELAY_CONNECT_TIMEOUT`: the two are equal only for the
+    // targets the master answers at accept.  A Dial/Peer attempt is allowed
+    // the longer hello wait as well, so naming the constant reported 15s
+    // after a stall of up to 50 -- a number that sends whoever reads the
+    // log looking for the wrong thing.
+    RelayConnectError::Network(format!(
+        "timed out after {}s connecting to master {}:{}",
+        budget.as_secs(),
+        host,
+        port
+    ))
 }
 
 async fn connect_master_relay_inner(
@@ -1283,6 +1326,7 @@ async fn connect_master_relay_inner(
     password: &str,
     exec_command: &str,
     hello_wait: std::time::Duration,
+    awaiting_answer: &AtomicBool,
 ) -> Result<MasterRelay, RelayConnectError> {
     // Keepalive (§9 #15): without it a silently-dropped relay link (master
     // powered off, cable pulled, NAT idle-eviction) isn't noticed until the
@@ -1522,6 +1566,7 @@ async fn connect_master_relay_inner(
     // channel to the caller.  This is what distinguishes an ACCEPTED relay
     // from a refused-but-open channel (russh `exec()` returns Ok even on
     // the master's `channel_failure`) and catches a protocol-version skew.
+    awaiting_answer.store(true, Ordering::SeqCst);
     read_relay_hello(&mut stream, hello_wait).await?;
     Ok(MasterRelay {
         _session: session,

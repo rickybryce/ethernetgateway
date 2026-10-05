@@ -381,14 +381,20 @@ pub fn cpm_peer_listen_exit() {
 /// registration).  Only one pool member announces, so the master's crossbar
 /// sees exactly one `CPM` entry for this gateway.  Returns `true` to the
 /// claimer, which must later [`cpm_announce_release`].
-pub fn cpm_announce_claim() -> bool {
+///
+/// **Private, and that is the guarantee.**  Outside this file the role is
+/// taken only through [`AnnouncerExit::claim`], which hands back the guard
+/// that releases it -- so no caller can hold the claim without holding what
+/// gives it back.  Two did, and between them they leaked it on a restart and
+/// on a session that ended before its announcer first ran.
+fn cpm_announce_claim() -> bool {
     CPM_ANNOUNCE_OWNER
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
 }
 
 /// Release the crossbar-announcer role.
-pub fn cpm_announce_release() {
+fn cpm_announce_release() {
     CPM_ANNOUNCE_OWNER.store(false, Ordering::SeqCst);
 }
 
@@ -411,7 +417,15 @@ pub fn cpm_announce_release() {
 /// have the old task's exit clear the flag and the claim out from under it.
 /// Flag first, then claim: once the claim is free a new announcer may set the
 /// flag, and that must not be undone.
-struct AnnouncerExit;
+pub struct AnnouncerExit(());
+
+impl AnnouncerExit {
+    /// Take the announcer role, or `None` if someone holds it.  The only way
+    /// to make one, so the claim and what releases it cannot be separated.
+    pub fn claim() -> Option<Self> {
+        cpm_announce_claim().then_some(AnnouncerExit(()))
+    }
+}
 
 impl Drop for AnnouncerExit {
     fn drop(&mut self) {
@@ -914,10 +928,10 @@ pub fn spawn_cpm_slave_announcer(shutdown: Arc<AtomicBool>) {
     ) {
         return;
     }
-    if !cpm_announce_claim() {
+    let Some(exit) = AnnouncerExit::claim() else {
         return; // a session's announcer already holds it
-    }
-    tokio::spawn(cpm_slave_announce(shutdown));
+    };
+    tokio::spawn(cpm_slave_announce(shutdown, exit));
 }
 
 pub fn start_serial(
@@ -2591,10 +2605,14 @@ async fn cpm_announce_backoff(stop: &Arc<AtomicBool>, dur: Duration) {
 /// duplex.  The async analog of [`modem_slave_announce_tick`], but for a
 /// per-session endpoint rather than a fixed port — spawned by the CP/M driver
 /// (already on the tokio runtime) and stopped via `stop` when the shell exits.
-pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
-    // Owns the announcer claim and the "announced" flag from here to however
-    // this task ends -- see `AnnouncerExit`.
-    let _exit = AnnouncerExit;
+///
+/// `_exit` is the claim this task holds, taken by its caller with
+/// [`AnnouncerExit::claim`].  An argument rather than a local made inside, so
+/// it belongs to the future from the moment of the call: a task aborted
+/// before it was ever polled never runs a line of its body, and a local
+/// guard there was never made -- the claim stayed held for good, which a
+/// review caught.
+pub async fn cpm_slave_announce(stop: Arc<AtomicBool>, _exit: AnnouncerExit) {
     let mut attempt: u32 = 0; // announce attempts since the last success
     let mut backoff = RECONNECT_BACKOFF_MIN; // grows while the master is away
     let mut last_err: Option<String> = None; // so one reason logs once
@@ -10558,9 +10576,10 @@ mod tests {
 
         // Stopped (the restart path): the task returns at once.
         reset();
-        assert!(cpm_announce_claim());
+        let exit = AnnouncerExit::claim().expect("free to claim");
+        assert!(held());
         crate::relay::set_cpm_announced(true);
-        rt.block_on(cpm_slave_announce(Arc::new(AtomicBool::new(true))));
+        rt.block_on(cpm_slave_announce(Arc::new(AtomicBool::new(true)), exit));
         assert!(!held(), "a restart left the announcer claimed");
         cpm_announce_release();
         assert_eq!(crate::relay::slave_relay_status(), crate::relay::SlaveRelayStatus::Idle,
@@ -10568,11 +10587,11 @@ mod tests {
 
         // Cancelled where it is parked (a session's `abort()`).
         reset();
-        assert!(cpm_announce_claim());
+        let exit = AnnouncerExit::claim().expect("free to claim");
         crate::relay::set_cpm_announced(true);
         rt.block_on(async {
-            let jh = tokio::spawn(async {
-                let _exit = AnnouncerExit;
+            let jh = tokio::spawn(async move {
+                let _exit = exit;
                 std::future::pending::<()>().await;
             });
             tokio::task::yield_now().await;
@@ -10582,6 +10601,23 @@ mod tests {
         assert!(!held(), "a cancelled announcer left its claim held");
         cpm_announce_release();
         assert_eq!(crate::relay::slave_relay_status(), crate::relay::SlaveRelayStatus::Idle);
+
+        // Aborted before it was ever polled (a session that ended at once):
+        // the real announcer, spawned and aborted with no chance to run.
+        reset();
+        let exit = AnnouncerExit::claim().expect("free to claim");
+        rt.block_on(async {
+            let jh = tokio::spawn(cpm_slave_announce(Arc::new(AtomicBool::new(false)), exit));
+            jh.abort();
+            let _ = jh.await;
+        });
+        assert!(!held(), "an announcer aborted before its first poll kept the claim");
+        cpm_announce_release();
+        // And a future that is never spawned at all.
+        let exit = AnnouncerExit::claim().expect("free to claim");
+        drop(cpm_slave_announce(Arc::new(AtomicBool::new(false)), exit));
+        assert!(!held(), "a dropped announcer future kept the claim");
+        cpm_announce_release();
         reset();
     }
 }

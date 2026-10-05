@@ -557,10 +557,10 @@ pub(in crate::telnet) fn cpm_peer_register(modem_enabled: bool) -> Option<CpmPee
     // CP/M endpoint at all.
     let announce = if cfg.gateway_role == "slave"
         && !cfg.slave_master_host.is_empty()
-        && crate::serial::cpm_announce_claim()
+        && let Some(exit) = crate::serial::AnnouncerExit::claim()
     {
         let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let jh = tokio::spawn(crate::serial::cpm_slave_announce(stop.clone()));
+        let jh = tokio::spawn(crate::serial::cpm_slave_announce(stop.clone(), exit));
         Some((stop, jh))
     } else {
         None
