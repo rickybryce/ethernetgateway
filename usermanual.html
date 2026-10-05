@@ -1785,21 +1785,27 @@ the operator to reconnect at the new address after saving.
 <h3>6.4.1 Authentication and Network Gating</h3>
 
 <p>
-The web server respects the same <code>security_enabled</code> /
-<code>disable_ip_safety</code> flags telnet does:
+The web server reads the same <code>security_enabled</code> /
+<code>disable_ip_safety</code> flags telnet does, with one deliberate
+difference: login does <em>not</em> lift the address allowlist here.
 </p>
 
 <ul>
+    <li><strong>Only private addresses, whatever the login setting.</strong>
+        Unless <code>disable_ip_safety</code> is on, only private, loopback
+        and link-local source addresses are accepted &mdash; and, when
+        <code>disable_gateway_connections</code> is on, not this network's
+        router (&sect;7.6).  Telnet drops this allowlist once login is
+        required; the web server keeps it, because its page shows the
+        password and the API key.  To reach the web UI from a public address,
+        <code>disable_ip_safety</code> is the one switch.</li>
     <li>When <code>security_enabled</code> is <strong>off</strong> (the
-        default), access is gated on source IP — only private /
-        loopback / link-local addresses are accepted, and
-        gateway-style <code>*.*.*.1</code> addresses are rejected.  No
-        password is required.</li>
+        default), no password is asked for: the address check above is the
+        gate.</li>
     <li>When <code>security_enabled</code> is <strong>on</strong>, the
-        web server prompts via HTTP Basic Auth against the unified
+        web server also prompts via HTTP Basic Auth against the unified
         <code>username</code> / <code>password</code> pair (the same
-        one telnet and SSH use).  The IP-safety allowlist is bypassed
-        because the password is now the gate.</li>
+        one telnet and SSH use).</li>
     <li>Three failed Basic-Auth attempts from the same source IP trip
         the shared 5-minute lockout used by telnet and SSH.  Subsequent
         requests get <code>HTTP 429 Too Many Requests</code> with a
@@ -1807,6 +1813,26 @@ The web server respects the same <code>security_enabled</code> /
         The lock fires <em>before</em> request parsing, so a flood of
         malformed POSTs from a banned IP can't keep the server busy
         either.</li>
+    <li><strong>Only names this gateway answers to.</strong>  Every request's
+        <code>Host</code> header must be an IP address (IPv4 or IPv6, with or
+        without a port), <code>localhost</code> or a name ending
+        <code>.localhost</code> or <code>.local</code>, or this machine's own
+        name &mdash; bare, or followed by <code>.lan</code>, <code>.home</code>,
+        <code>.localdomain</code>, <code>.internal</code>,
+        <code>.home.arpa</code> or one of the resolver's own search domains.
+        On Windows the short NetBIOS name is accepted as well as the full one.
+        Anything else gets <code>HTTP 403</code> and a page asking you to use
+        the gateway's IP address, and the refusal is logged once per name.
+        This stops <em>DNS rebinding</em>, where a web page you visit points
+        its own domain at your gateway's address to read the configuration
+        page.  <code>disable_ip_safety</code> turns it off.</li>
+    <li><strong>Every POST must come from the configuration page
+        itself.</strong>  A form submission whose <code>Origin</code> (or,
+        failing that, <code>Referer</code>) names a different site is refused,
+        so a page you happen to visit cannot save settings, or type at a
+        booted CP/M disk through <code>/vdm</code>, on your behalf.  Tools
+        such as <code>curl</code>, which send neither header, are still
+        allowed; the password, when set, still gates them.</li>
 </ul>
 
 <h3>6.4.2 Defense-in-Depth Caps</h3>
@@ -4963,12 +4989,22 @@ Only the SSH transport is implemented (<code>relay_transport = ssh</code>).
 
 <h3>9.14.4 Relay Limitations and Operational Notes</h3>
 <ul>
-    <li><strong>A modem-mode relay reports only <code>NO&nbsp;CARRIER</code> on
-        any failure.</strong>  Master unreachable, wrong credentials, a
-        protocol-version skew, or a number not in the <em>slave's</em> dial map
-        all look identical at the device — the specific cause is in the
-        <strong>slave's</strong> server log, so check there when a relay dial
-        won't connect.</li>
+    <li><strong>A modem-mode relay says why when the fault is certainly the
+        master's.</strong>  In verbose mode (<code>ATV1</code>) the slave's
+        modem prints one line before <code>NO&nbsp;CARRIER</code>:
+        <code>NOT CONNECTED TO MASTER</code> (the master is unreachable),
+        <code>MASTER REFUSED LOGIN</code> (wrong credentials),
+        <code>MASTER NOT CONFIGURED</code> (no master address is set), or,
+        for <code>ATDT&nbsp;ethernetgateway</code> only,
+        <code>MASTER REFUSED CALL</code>.  A refusal on an onward
+        <code>ATDT&nbsp;&lt;host&gt;</code> or a peer dial stays a plain
+        <code>NO&nbsp;CARRIER</code>, because it can equally be the far end
+        not answering, and blaming the master would send you after the wrong
+        machine.  <code>ATV0</code> and <code>ATQ1</code> are unchanged
+        &mdash; a program parsing result codes sees exactly what it did
+        before.  Anything else (a protocol-version skew, a number not in the
+        <em>slave's</em> dial map) is still a plain <code>NO&nbsp;CARRIER</code>,
+        with the cause in the <strong>slave's</strong> server log.</li>
     <li><strong>Relay and console-registration channels count against the
         master's <code>max_sessions</code>.</strong>  Each active relay call
         <em>and each idle console-port registration</em> uses one master

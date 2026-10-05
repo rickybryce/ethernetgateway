@@ -7,8 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-10-05
+
+### Security
+
+- **The web UI answers only to names that are this gateway's own.**  Every
+  request's `Host` header must be an IP address, `localhost`, a `.local` name,
+  or this machine's own name (bare, or with `.lan`, `.home`, `.localdomain`,
+  `.internal`, `.home.arpa` or one of the resolver's search domains); anything
+  else gets a 403 asking for the IP address.  This stops DNS rebinding, where
+  a page you visit points its own domain at your gateway to read the settings
+  page.  On Windows the full DNS name is read from the system (it used to be
+  the 15-character NetBIOS name, which would have refused a longer name as
+  itself) and the NetBIOS name is accepted too.  `disable_ip_safety` turns it
+  off.
+- **Every web POST must come from the configuration page.**  The cross-site
+  check guarded only Save, so `/vdm/key` and `/vdm/joy` &mdash; typing at a
+  booted CP/M disk &mdash; accepted a POST from any page you visited.
+- **A connection cannot hold a place by never logging in.**  Telnet took a
+  session slot at connect, bounded only by the idle timeout, so one address
+  could fill every slot by sending nothing.  Telnet's detection, colour and
+  login now have 120 seconds from the connection (a client still at the door
+  is told "login timed out").  SSH runs its own accept loop: a rate-limited
+  address is refused at connect, at most 64 connections may wait to log in
+  (8 per address, IPv6 per /64), and the same 120 seconds applies &mdash; even
+  to a peer that never sends its version string.  Neither counts as a failed
+  login, so a neighbour cannot be locked out by connecting and waiting.
+- **The text browser's SSRF guard sees through NAT64 and 6to4.**
+  `64:ff9b::/96` and `2002::/16` are judged by the IPv4 address inside them.
+
+### Added
+
+- **A slave's modem says why a call to the master failed.**  A slave's serial
+  port never shows the slave's own menu, so with the master down the caller
+  got a bare `NO CARRIER`.  In verbose mode (`ATV1`) the modem now prints
+  `NOT CONNECTED TO MASTER`, `MASTER REFUSED LOGIN`, `MASTER NOT CONFIGURED`
+  or, for `ATDT ethernetgateway`, `MASTER REFUSED CALL` first &mdash; only when
+  the fault is certainly the master's.  `ATV0` and `ATQ1` are unchanged.
+- **YMODEM has its own key on the Upload menu.**  `X` is XMODEM and asks for a
+  name; `Y` is YMODEM and, like ZMODEM and Kermit, asks none.
+
 ### Changed
 
+- **The Upload menu asks for the protocol first, and files keep the sender's
+  names.**  YMODEM, ZMODEM and Kermit name their own files, so they no longer
+  ask for one: a name is converted rather than refused (`My Report.pdf`
+  becomes `My_Report.pdf`), a file already on disk is skipped and never
+  overwritten, and the summary gives the reason for every file not saved.
+  XMODEM and Punter ask for a name as before.  Scripts that drive the Upload
+  menu must send the protocol key before the name.
 - **Upgrade note: `AT+PETSCII=1` now applies to a slave's relayed dial.**  A
   slave port saved with `AT+PETSCII=1` used to reach a BBS through the master
   as a raw pipe, so a Commodore behind a slave saw no translation, while the
@@ -17,6 +64,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   port dials a board that already speaks PETSCII to a Commodore and it worked
   only because the relay passed bytes untouched, set that port to
   `AT+PETSCII=0` &mdash; otherwise the text is case-swapped twice.
+- **The text browser is easier to read, especially on a C64.**  Layout tables
+  are drawn without borders (a search result went from a screen to about six
+  lines); a file that is not text is refused by name instead of drawn as
+  bytes; HTTP errors, empty pages and fetch failures are said in plain words;
+  drop-down choices no longer spill into the page; form fields are named from
+  their labels.  Link numbers are laid out with the page, so no number is lost
+  at the screen edge, split across rows or repeated.  PETSCII and ASCII
+  sessions get plain letters for accented ones.  16 page rows on 80 columns,
+  15 on a C64.
+
+### Fixed
+
+- **Kermit.**  One lost packet or ACK no longer ends a transfer: each retry
+  gets its own timeout.  Sliding windows past 22 packets no longer stall.  A
+  receiver no longer answers a stale packet for ever.  Kermit server mode from
+  a File Transfer folder works in that folder, and a resume reads its partial
+  from where the file is saved; in a folder whose name Kermit cannot start in,
+  a resume is turned off rather than splicing another file's bytes in.
+- **XMODEM / YMODEM / ZMODEM.**  After a bad block the receiver waits for the
+  line to go quiet and NAKs once, instead of once per stray byte; a sender's
+  cancel is recognised during that wait, and `18 18` inside a block is not
+  mistaken for one.  Line noise can no longer confirm an EOT.  A YMODEM file
+  arriving well short of its declared size is checked again before it is
+  accepted, never refused (NovaTerm's sizes are in 254-byte blocks).  A
+  ZMODEM upload too large to accept is reported instead of vanishing.
+- **CP/M emulator and booted disks.**  `SAVE` on a read-only 88-DCDD floppy
+  no longer hangs MITS CP/M.  WD1771 boards (Tarbell, Cromemco) end a seek
+  past the disk with Record Not Found instead of hanging, and a reselect or a
+  new command mid-transfer can no longer move the sector.  A mounted image's
+  write-protect now stops erase, and erase or rename cannot race another
+  session's write.  Windows device names (`CON`, `COM1.TXT`) and trailing
+  dots are refused where a name is created, without breaking `TYPE FOO.`.
+  Cromemco double-density disks over 16 KB no longer read scrambled.  The
+  printer's memory and spool folder are bounded.  The speed governor no longer
+  repays a stall with an unpaced burst.  A memory full of DD/FD prefixes can
+  no longer wedge the CPU.  On a C64, bare CR and LF now move the cursor the
+  way the guest meant.
+- **Gateway Shell and file transfer.**  A write that fails part-way removes
+  the partial file; `MOVE` says when the original was not erased; `COPY`
+  checks free space; `TYPE` strips control characters; the folder list is
+  paged; prompts and listings fit a C64 and stop at column 79 on an 80-column
+  terminal.
+- **The slave's CP/M endpoint survives Save and Restart.**  The announcer could
+  keep its claim after a restart, so the master lost the slave's CP/M entry
+  until the process was restarted.
+- **Startup.**  The port check is tied to its own server cycle; on Windows only
+  a sharing violation means another copy; a handover request outranks a
+  pending restart.
+- **`cpm_boot_machine` is validated on load**, so a hand-edited value cannot
+  silently turn detection off.  Gopher fetches have one deadline for the whole
+  page.  A long line from a hostile page no longer makes AI Chat's wrapping
+  quadratic.
+- **Third-party notices** named `russh 0.62.7` in 1.0.1 and 1.0.2; they now
+  match the shipped 0.63.3.
+
+### Dependencies
+
+- html2text 0.17.1 with html5ever 0.39, ureq 3.4.2, rand 0.10.3, and two
+  CodeQL action bumps.  `gethostname` (already in the tree) is now used
+  directly on Windows.
 
 ## [1.0.2] - 2026-09-19
 
@@ -7713,7 +7820,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.3
 [1.0.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.2
 [1.0.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.1
 [1.0.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0
