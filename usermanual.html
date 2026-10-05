@@ -2741,7 +2741,7 @@ received files.
 <table>
     <thead><tr><th>Peer command</th><th>Wire packet</th><th>Effect</th></tr></thead>
     <tbody>
-        <tr><td><code>send &lt;file&gt;</code></td><td>S + F + A + D&hellip; + Z + B</td><td>Upload a file from the peer to the gateway's <code>transfer_dir</code> (or current sub-directory). A name that already exists is renamed, not overwritten or dropped &mdash; see the note below.</td></tr>
+        <tr><td><code>send &lt;file&gt;</code></td><td>S + F + A + D&hellip; + Z + B</td><td>Upload a file from the peer into the server's current folder: its starting folder (see <code>remote cd</code> below) or a sub-directory of it. A name that already exists is renamed, not overwritten or dropped &mdash; see the note below.</td></tr>
         <tr><td><code>get &lt;file&gt;</code></td><td>R, then we send</td><td>Download a file from the gateway to the peer.</td></tr>
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
         <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7. Bare <code>remote cd</code> (no argument) resets to the server's starting folder &mdash; the <code>transfer_dir</code> root, or for File Transfer <span class="kbd">K</span> the folder the menu was in; <code>remote cd ..</code> (cdup) pops one component and never climbs above that folder; a target that doesn't exist on disk is refused with E-packet rather than silently ACKed. The optional second &sect;6.7 field (a per-directory password) is <strong>accepted and ignored</strong> &mdash; see the note below.</td></tr>

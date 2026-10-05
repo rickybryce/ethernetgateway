@@ -5529,8 +5529,8 @@ async fn kermit_server_dispatch(
                         // C-Kermit (`remote cwd <path>`) sends exactly
                         // this on the wire.  A bare `C` with no length
                         // byte, or an explicit length of zero, means
-                        // "reset to home" (we map that to the configured
-                        // transfer_dir root).
+                        // "reset to home" (we map that to the server's
+                        // base folder).
                         let raw_arg = parse_g_field_argument(&raw[1..])
                             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
                             .unwrap_or_default();
@@ -5540,11 +5540,11 @@ async fn kermit_server_dispatch(
                         // matching a real C-Kermit / FTP server and a
                         // shell.  `..` pops one component — that's what
                         // `remote cdup` sends (`setgen('C', "..", ...)`,
-                        // ckuus7.c:7762) — and popping stops at the root,
+                        // ckuus7.c:7762) — and popping stops at the base,
                         // so no argument can escape the sandbox.  A
-                        // leading `/` resets from the transfer root.  An
-                        // empty argument is the spec's "reset to home"
-                        // (§6.7) and returns to the root.
+                        // leading `/` resets to the base.  An empty
+                        // argument is the spec's "reset to home" (§6.7)
+                        // and returns to the base.
                         let new_subdir = if raw_arg.is_empty() {
                             String::new()
                         } else {
@@ -6064,8 +6064,8 @@ async fn kermit_server_dispatch(
                 // subdir so the saver knows where to land it.  The
                 // receiver state machine itself is subdir-oblivious —
                 // it just collects bytes — so without this step the
-                // telnet `on_file` callback would join the filename
-                // onto the base `transfer_dir` and a `remote cd assembly`
+                // `on_file` callback would join the filename onto the
+                // server's base folder and a `remote cd assembly`
                 // followed by `put hello.txt` would silently land in
                 // the wrong directory.
                 for rx in &mut received {
@@ -6102,7 +6102,8 @@ async fn kermit_server_dispatch(
                 continue;
             }
             TYPE_R => {
-                // Peer asks us to send a named file from `transfer_dir`.
+                // Peer asks us to send a named file from the current folder
+                // (the base plus any `remote cd`).
                 // Decode + validate the filename, look the file up on
                 // disk, then hand off to the sender state machine
                 // starting at seq+1 (so its S follows our just-received
