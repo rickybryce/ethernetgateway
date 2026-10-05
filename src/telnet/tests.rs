@@ -119,6 +119,25 @@ fn test_truncate_to_width() {
 
 // ─── Filename validation ─────────────────────────────
 
+/// The menu's Kermit server resumes only in a folder it can start in.  A
+/// folder failing Kermit's subdir rule is served from the root while files are
+/// saved into the folder, so a resume there would splice a root file's bytes
+/// onto the upload -- it must be `Never`, and the server must start at the root.
+#[test]
+fn test_the_menu_kermit_server_resumes_only_where_it_saves() {
+    use crate::kermit::Resume;
+    assert_eq!(TelnetSession::menu_kermit_server_start(""), (String::new(), Resume::FromSaveDir));
+    assert_eq!(TelnetSession::menu_kermit_server_start("work"), ("work".to_string(), Resume::FromSaveDir));
+    assert_eq!(TelnetSession::menu_kermit_server_start("a/b"), ("a/b".to_string(), Resume::FromSaveDir));
+    for unsafe_name in ["My Disks", "foo+bar", "b\u{fc}ro", ".hidden", "../up"] {
+        assert_eq!(
+            TelnetSession::menu_kermit_server_start(unsafe_name),
+            (String::new(), Resume::Never),
+            "{unsafe_name:?} is served from the root, so it must not resume",
+        );
+    }
+}
+
 #[test]
 fn test_validate_filename_valid() {
     assert!(TelnetSession::validate_filename("test.txt").is_ok());
@@ -201,13 +220,18 @@ fn test_menu_kermit_server_starts_in_the_menu_folder() {
     let body = &src[at..at + src[at..].find("\n    }\n").unwrap()];
     assert!(body.contains(concat!("kermit_server_with_outcome", "_in(")), "starts in a folder");
     assert!(body.contains("&start_subdir,"), "the menu's own");
+    assert!(body.contains("resume,"), "and with the menu's resume choice");
+    // Which folder is started in, and whether it may resume, is
+    // `menu_kermit_server_start` and its own test; this holds the save
+    // directory the body picks from that choice.
+    assert!(body.contains("menu_kermit_server_start(&self.transfer_subdir)"), "one rule for the choice");
     assert!(
-        body.contains("(std::path::PathBuf::from(config::get_config().transfer_dir), self.transfer_subdir.clone())"),
+        body.contains("Resume::FromSaveDir => std::path::PathBuf::from(config::get_config().transfer_dir)"),
         "saves relative to the root, since rx.subdir already names the folder"
     );
+    let never = &body[body.find("Resume::Never =>").expect("the fallback arm")..];
     assert!(
-        body.contains("is_safe_relative_subdir(&self.transfer_subdir)")
-            && body.contains("(self.transfer_path(), String::new())"),
+        never[..never.find("\n        };").expect("arm end")].contains("self.transfer_path()"),
         "and a folder Kermit's rule refuses keeps the old behaviour: saved into, server at the root"
     );
 }

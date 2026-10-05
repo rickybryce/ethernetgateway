@@ -3818,7 +3818,8 @@ pub(crate) async fn kermit_receive_with_init(
     init_pkt: Option<Packet>,
 ) -> Result<Vec<KermitReceive>, String> {
     let root = std::path::PathBuf::from(config::get_config().transfer_dir);
-    kermit_receive_with_init_in(reader, writer, is_tcp, is_petscii, verbose, init_pkt, &root).await
+    kermit_receive_with_init_in(reader, writer, is_tcp, is_petscii, verbose, init_pkt, &root, Resume::FromSaveDir)
+        .await
 }
 
 /// [`kermit_receive`] for a caller that saves somewhere other than the
@@ -3831,7 +3832,27 @@ pub(crate) async fn kermit_receive_in(
     verbose: bool,
     save_dir: &std::path::Path,
 ) -> Result<Vec<KermitReceive>, String> {
-    kermit_receive_with_init_in(reader, writer, is_tcp, is_petscii, verbose, None, save_dir).await
+    kermit_receive_with_init_in(reader, writer, is_tcp, is_petscii, verbose, None, save_dir, Resume::FromSaveDir)
+        .await
+}
+
+/// Whether a receive may offer to resume a partial file
+/// (`kermit_resume_partial` still has to be on as well).
+///
+/// A type, not a bool, because it sits beside `retain_data` in
+/// [`kermit_server_dispatch`] and two adjacent bools swap silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Resume {
+    /// The partial is read from the receive's own `save_dir`, which is where
+    /// the caller saves -- so a resume continues the right file.
+    FromSaveDir,
+    /// The caller saves somewhere the receiver cannot see.  The menu's
+    /// server does this when its folder fails Kermit's subdir rule
+    /// (`My Disks`): the server runs from the transfer root while files are
+    /// saved into the folder, so a partial read from the root would be an
+    /// unrelated file's bytes spliced onto the sender's tail.  A whole
+    /// transfer is slower; a spliced one is corrupt.
+    Never,
 }
 
 /// [`kermit_receive_with_init`] with the directory the caller will save
@@ -3839,6 +3860,7 @@ pub(crate) async fn kermit_receive_in(
 /// transfer root whatever the caller's directory, so a resumed upload into
 /// `work/` spliced the root's file onto the sender's tail and then replaced
 /// `work/`'s file with the result.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn kermit_receive_with_init_in(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -3847,6 +3869,7 @@ pub(crate) async fn kermit_receive_with_init_in(
     verbose: bool,
     init_pkt: Option<Packet>,
     save_dir: &std::path::Path,
+    resume: Resume,
 ) -> Result<Vec<KermitReceive>, String> {
     let cfg = config::get_config();
     let save_dir_str = save_dir.to_string_lossy().into_owned();
@@ -4295,7 +4318,11 @@ pub(crate) async fn kermit_receive_with_init_in(
                 // looser gate (skip session.resend) would mean older
                 // peers that don't expect disposition='R' in our ACK
                 // payload could mishandle it.
-                if cfg.kermit_resume_partial && session.attribute_packets && session.resend {
+                if cfg.kermit_resume_partial
+                    && resume == Resume::FromSaveDir
+                    && session.attribute_packets
+                    && session.resend
+                {
                     let off = compute_resume_offset(
                         &fname,
                         &save_dir_str,
@@ -5220,7 +5247,7 @@ pub(crate) async fn kermit_server(
 ) -> Result<Vec<KermitReceive>, String> {
     // Tests read the file bytes back off the returned Vec, so retain them
     // (`retain_data = true`); the production `_with_outcome` path frees them.
-    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, true, "")
+    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, true, "", Resume::FromSaveDir)
         .await
         .map(|outcome| outcome.files)
 }
@@ -5266,13 +5293,15 @@ pub(crate) async fn kermit_server_with_outcome(
     verbose: bool,
     on_file: impl FnMut(&KermitReceive),
 ) -> Result<KermitServerOutcome, String> {
-    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, false, "").await
+    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, false, "", Resume::FromSaveDir)
+        .await
 }
 
 /// [`kermit_server_with_outcome`] starting in `start_subdir` of the transfer
 /// directory rather than its root -- the File Transfer menu's current folder.
 /// The server started at the root whatever folder the user was in, so its
 /// GET, DIR and resume lookups all disagreed with where the menu saved.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn kermit_server_with_outcome_in(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -5281,8 +5310,9 @@ pub(crate) async fn kermit_server_with_outcome_in(
     verbose: bool,
     on_file: impl FnMut(&KermitReceive),
     start_subdir: &str,
+    resume: Resume,
 ) -> Result<KermitServerOutcome, String> {
-    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, false, start_subdir)
+    kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, false, start_subdir, resume)
         .await
 }
 
@@ -5303,6 +5333,7 @@ async fn kermit_server_dispatch(
     mut on_file: impl FnMut(&KermitReceive),
     retain_data: bool,
     start_subdir: &str,
+    resume: Resume,
 ) -> Result<KermitServerOutcome, String> {
     let cfg = config::get_config();
     if verbose {
@@ -6041,6 +6072,7 @@ async fn kermit_server_dispatch(
                     verbose,
                     Some(pkt),
                     &into,
+                    resume,
                 )
                 .await?;
                 if verbose {
@@ -8611,6 +8643,52 @@ mod tests {
         assert_eq!(received.len(), 1, "exactly one file should round-trip");
         assert_eq!(received[0].filename, "uploaded.bin");
         assert_eq!(received[0].data, payload);
+    }
+
+    /// The server hands its `Resume` to every receive it dispatches.  Run as
+    /// the menu runs it from a folder Kermit cannot start in: from the root,
+    /// with resume switched on and an unrelated, shorter `foo.bin` in the
+    /// root.  Under `Never` the whole upload arrives with none of the
+    /// bystander's bytes; under `FromSaveDir` -- the positive control -- the
+    /// same session resumes from the bystander, which proves the set-up
+    /// reaches the resume path at all.
+    #[tokio::test]
+    async fn test_server_passes_its_resume_choice_to_the_receive() {
+        let _guard = ConfigTestGuard::acquire().await;
+        let dir = std::env::temp_dir().join(format!("xmodem_server_resume_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        config::update_config_value("transfer_dir", dir.to_str().unwrap());
+        config::update_config_value("kermit_resume_partial", "true");
+        let full: Vec<u8> = (0..8192u32).map(|i| (i ^ (i >> 8)) as u8).collect();
+        let bystander = vec![0xA5u8; 3072];
+
+        let mut results = Vec::new();
+        for resume in [Resume::Never, Resume::FromSaveDir] {
+            std::fs::write(dir.join("foo.bin"), &bystander).unwrap();
+            let (server_side, client_side) = duplex(65536);
+            let (mut s_read, mut s_write) = split(server_side);
+            let (mut c_read, mut c_write) = split(client_side);
+            let server = tokio::spawn(async move {
+                kermit_server_dispatch(&mut s_read, &mut s_write, false, false, false, |_| {}, true, "", resume)
+                    .await
+            });
+            let kfile = KermitSendFile { name: "foo.bin", data: &full, modtime: None, mode: None };
+            kermit_send(&mut c_read, &mut c_write, &[kfile], false, false, false).await.unwrap();
+            c_write.write_all(&wire_packet(TYPE_GENERIC, 0, b"F")).await.unwrap();
+            let _ = read_server_packet(&mut c_read).await;
+            results.push(server.await.unwrap());
+        }
+
+        config::update_config_value("kermit_resume_partial", "false");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let never = &results[0].as_ref().unwrap().files[0];
+        assert!(!never.resumed, "the server resumed under Resume::Never");
+        assert_eq!(never.data, full, "the whole file must arrive, with nothing spliced in");
+        let control = &results[1].as_ref().unwrap().files[0];
+        assert!(control.resumed, "the control did not resume, so this test proves nothing");
+        assert_eq!(&control.data[..3072], &bystander[..]);
     }
 
     #[tokio::test]
@@ -11282,6 +11360,15 @@ mod tests {
     async fn round_trip(
         files: Vec<(String, Vec<u8>)>,
     ) -> Result<Vec<KermitReceive>, String> {
+        round_trip_resume(files, Resume::FromSaveDir).await
+    }
+
+    /// [`round_trip`] with the receiver's [`Resume`] chosen, saving into the
+    /// transfer root as `kermit_receive` does.
+    async fn round_trip_resume(
+        files: Vec<(String, Vec<u8>)>,
+        resume: Resume,
+    ) -> Result<Vec<KermitReceive>, String> {
         // Two duplex streams.  Each pair is internally connected — data
         // written to one half appears on the other.  We split each into
         // a read+write pair, then route them so sender's writes flow
@@ -11317,12 +11404,16 @@ mod tests {
         });
 
         let recv_task = tokio::spawn(async move {
-            kermit_receive(
+            let root = std::path::PathBuf::from(config::get_config().transfer_dir);
+            kermit_receive_with_init_in(
                 &mut sx_r_for_recv,
                 &mut rx_w_for_recv,
                 false,
                 false,
                 false,
+                None,
+                &root,
+                resume,
             )
             .await
         });
@@ -11539,6 +11630,40 @@ mod tests {
              the saver depends on this to atomic-replace the partial \
              instead of refusing the write with AlreadyExists"
         );
+    }
+
+    /// `Resume::Never` offers no resume even with resume switched on and an
+    /// unrelated, shorter file of the same name in the directory -- the
+    /// menu's server when its folder fails Kermit's subdir rule, where the
+    /// partial would be read from the root while the file is saved into the
+    /// folder.  The whole file must arrive, none of the bystander's bytes in
+    /// it.  The same set-up under `FromSaveDir` is the positive control: it
+    /// must resume, or this test would pass on a receiver that never resumes.
+    #[tokio::test]
+    async fn test_no_resume_when_the_partial_is_not_where_the_file_is_saved() {
+        let _guard = ConfigTestGuard::acquire().await;
+        let dir = std::env::temp_dir().join(format!("xmodem_resume_never_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let full: Vec<u8> = (0..8192u32).map(|i| (i ^ (i >> 8)) as u8).collect();
+        let bystander = vec![0xA5u8; 3072];
+        config::update_config_value("transfer_dir", dir.to_str().unwrap());
+        config::update_config_value("kermit_resume_partial", "true");
+
+        std::fs::write(dir.join("foo.bin"), &bystander).unwrap();
+        let never = round_trip_resume(vec![("foo.bin".into(), full.clone())], Resume::Never).await;
+        std::fs::write(dir.join("foo.bin"), &bystander).unwrap();
+        let control = round_trip_resume(vec![("foo.bin".into(), full.clone())], Resume::FromSaveDir).await;
+
+        config::update_config_value("kermit_resume_partial", "false");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let never = never.unwrap();
+        assert!(!never[0].resumed, "Resume::Never resumed anyway");
+        assert_eq!(never[0].data, full, "the whole file must arrive, with nothing spliced in");
+        let control = control.unwrap();
+        assert!(control[0].resumed, "the control did not resume, so this test proves nothing");
+        assert_eq!(&control[0].data[..3072], &bystander[..], "the control resumed from the bystander");
     }
 
     #[tokio::test]

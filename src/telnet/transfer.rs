@@ -602,6 +602,23 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// Where the menu's Kermit server starts, and whether it may resume.
+    ///
+    /// A folder passing Kermit's own subdir rule is started in, and a resume
+    /// reads its partial from where the file is saved.  Any other folder
+    /// (`My Disks`, `foo+bar`, non-ASCII) is served from the transfer root
+    /// while files are saved into the folder -- so a resume would read an
+    /// unrelated root file's bytes and splice them onto the sender's tail.
+    /// `Never` is exactly that fallback, which is why the caller can pick the
+    /// save directory from it.
+    pub(in crate::telnet) fn menu_kermit_server_start(subdir: &str) -> (String, crate::kermit::Resume) {
+        if crate::kermit::is_safe_relative_subdir(subdir) {
+            (subdir.to_string(), crate::kermit::Resume::FromSaveDir)
+        } else {
+            (String::new(), crate::kermit::Resume::Never)
+        }
+    }
+
     pub(crate) fn validate_filename(name: &str) -> Result<(), &'static str> {
         if name.is_empty() {
             return Err("Filename cannot be empty");
@@ -2094,11 +2111,22 @@ impl TelnetSession {
         // and the server would refuse such a start and fall back to the root
         // -- saving there while the screen still showed the folder.  For
         // those the server starts at the root and saves into the menu's
-        // folder, exactly as before it learned to start anywhere.
-        let (target_dir, start_subdir) = if crate::kermit::is_safe_relative_subdir(&self.transfer_subdir) {
-            (std::path::PathBuf::from(config::get_config().transfer_dir), self.transfer_subdir.clone())
-        } else {
-            (self.transfer_path(), String::new())
+        // folder, exactly as before it learned to start anywhere -- and with
+        // no resume, because a resume would read its partial from the root
+        // the server runs in, not from the folder the file is saved into.
+        let (start_subdir, resume) = Self::menu_kermit_server_start(&self.transfer_subdir);
+        let target_dir = match resume {
+            crate::kermit::Resume::FromSaveDir => std::path::PathBuf::from(config::get_config().transfer_dir),
+            crate::kermit::Resume::Never => {
+                if config::get_config().kermit_resume_partial {
+                    glog!(
+                        "Kermit server: resume is off for folder '{}' -- its name is not one Kermit can start in, \
+                         so an interrupted upload is resent whole",
+                        self.transfer_subdir
+                    );
+                }
+                self.transfer_path()
+            }
         };
 
         let start = std::time::Instant::now();
@@ -2168,6 +2196,7 @@ impl TelnetSession {
                     }
                 },
                 &start_subdir,
+                resume,
             )
             .await
         };
