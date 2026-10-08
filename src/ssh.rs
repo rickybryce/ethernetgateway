@@ -947,8 +947,8 @@ impl russh::server::Server for SshServer {
             password: cfg.password.clone(),
             peer_addr: peer_addr.map(|a| a.ip()),
             pty_term: None,
-            duplex_writer: None,
-            relay_writers: std::collections::HashMap::new(),
+            shell_input: None,
+            relay_inputs: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
             session_writers: self.session_writers.clone(),
             lockouts: self.lockouts.clone(),
@@ -984,19 +984,16 @@ struct SshHandler {
     /// terminal is not asked to press BACKSPACE — the same shortcut telnet
     /// already takes from TTYPE.  `None` for a shell opened without a pty.
     pty_term: Option<String>,
-    /// Write half of the duplex bridge to the TelnetSession.
-    /// Set once a shell is opened; prevents duplicate shell requests.
-    duplex_writer:
-        Option<Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>>,
-    /// Per-channel write halves for master/slave **relay** channels
+    /// Input pump into the duplex bridge to the TelnetSession -- see
+    /// [`spawn_input_pump`].  Set once a shell is opened; prevents duplicate
+    /// shell requests.
+    shell_input: Option<InputPump>,
+    /// Per-channel input pumps for master/slave **relay** channels
     /// (`exec "serial-relay <port>"`).  Keyed by channel so one SSH
     /// connection from a slave can carry several relay channels (Ports A
     /// and B) concurrently — `data()`/`channel_eof()` route by channel.
-    /// Separate from `duplex_writer` (the single interactive shell).
-    relay_writers: std::collections::HashMap<
-        russh::ChannelId,
-        Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
-    >,
+    /// Separate from `shell_input` (the single interactive shell).
+    relay_inputs: std::collections::HashMap<russh::ChannelId, InputPump>,
     /// Console-mode **registration** channels (`exec "serial-register
     /// <port>"`): channel -> `(port label, registration generation)`.  Lets
     /// channel teardown remove the matching entry from the global
@@ -1165,10 +1162,7 @@ impl SshHandler {
         // reading from it yields the slave's bytes.
         let (gateway_stream, handler_stream) = tokio::io::duplex(65536);
         let (handler_read, handler_write) = tokio::io::split(handler_stream);
-        self.relay_writers.insert(
-            channel,
-            Arc::new(tokio::sync::Mutex::new(handler_write)),
-        );
+        self.relay_inputs.insert(channel, spawn_input_pump(handler_write));
         spawn_channel_reader(session.handle(), channel, handler_read);
 
         let label = label.to_string();
@@ -1198,14 +1192,56 @@ impl SshHandler {
             }
             self.session_count.fetch_sub(1, Ordering::SeqCst);
         }
-        if let Some(writer) = self.relay_writers.remove(&channel) {
-            let mut w = writer.lock().await;
-            let _ = w.shutdown().await;
-        } else if let Some(writer) = self.duplex_writer.take() {
-            let mut w = writer.lock().await;
-            let _ = w.shutdown().await;
+        // Dropping a pump's sender is the EOF: the pump writes whatever is
+        // still queued and then shuts the duplex down, so a peer's last bytes
+        // are not overtaken by its own end-of-file.
+        if self.relay_inputs.remove(&channel).is_none() {
+            self.shell_input = None;
         }
     }
+}
+
+/// The sending end of one channel's input pump: SSH bytes in, in order.
+type InputPump = tokio::sync::mpsc::Sender<bytes::Bytes>;
+
+/// How many SSH data packets one channel may queue before `data()` waits.
+///
+/// A packet is at most `maximum_packet_size` (32 KB by default), so this
+/// bounds a channel's queue at 512 KB however fast its peer sends -- and it
+/// has to be bounded, because russh refills the peer's window *before* calling
+/// `data()`, whether or not the bytes were consumed.  The window is no
+/// backpressure at all; the only brake on a peer is the connection's loop not
+/// reading, and that is what a full queue does.  Keystrokes are one packet
+/// each, so sixteen is also sixteen keys typed ahead of the duplex's own 4 KB.
+const INPUT_PUMP_PACKETS: usize = 16;
+
+/// Feed one channel's input into its duplex bridge from a task of its own.
+///
+/// `data()` used to `write_all` into the duplex itself, which **holds the
+/// connection's whole russh loop** for as long as the session is not reading:
+/// no other channel's packets, and none of the session's *output* either,
+/// because `Handle::data` is a message to that same loop.  So a session busy
+/// writing more than the duplex and russh's event buffer hold, while its
+/// peer kept typing, waited on a loop that was waiting on it.  The queue
+/// moves that point from the duplex's 4 KB to [`INPUT_PUMP_PACKETS`] packets
+/// beyond it, and one channel's stall no longer blocks another's.
+///
+/// Dropping the sender is end-of-file: the pump writes what is queued, then
+/// shuts the duplex down.
+fn spawn_input_pump(mut writer: tokio::io::WriteHalf<tokio::io::DuplexStream>) -> InputPump {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(INPUT_PUMP_PACKETS);
+    tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
+            if writer.write_all(&chunk).await.is_err() {
+                // The session has gone.  Returning drops the receiver, which
+                // makes every later `send` fail at once rather than queue
+                // for no one.
+                return;
+            }
+        }
+        let _ = writer.shutdown().await;
+    });
+    tx
 }
 
 /// Pump a duplex bridge's gateway-output half back to the SSH client
@@ -1490,7 +1526,7 @@ impl russh::server::Handler for SshHandler {
             return Ok(());
         }
         // Only allow one shell per connection.
-        if self.duplex_writer.is_some() {
+        if self.shell_input.is_some() {
             session.channel_failure(channel)?;
             return Ok(());
         }
@@ -1502,9 +1538,8 @@ impl russh::server::Handler for SshHandler {
         let (gateway_read, gateway_write) = tokio::io::split(gateway_stream);
         let (handler_read, handler_write) = tokio::io::split(handler_stream);
 
-        // Store the handler-side writer so data() can forward SSH input.
-        self.duplex_writer =
-            Some(Arc::new(tokio::sync::Mutex::new(handler_write)));
+        // Store the handler-side pump so data() can forward SSH input.
+        self.shell_input = Some(spawn_input_pump(handler_write));
 
         // Wrap the gateway write half as a SharedWriter for TelnetSession.
         let writer_box: Box<dyn tokio::io::AsyncWrite + Unpin + Send> =
@@ -1808,10 +1843,7 @@ impl russh::server::Handler for SshHandler {
         let (handler_read, handler_write) = tokio::io::split(handler_stream);
 
         // Route this channel's inbound data to the relay bridge.
-        self.relay_writers.insert(
-            channel,
-            Arc::new(tokio::sync::Mutex::new(handler_write)),
-        );
+        self.relay_inputs.insert(channel, spawn_input_pump(handler_write));
 
         let shutdown = self.shutdown.clone();
         let restart = self.restart.clone();
@@ -1880,23 +1912,18 @@ impl russh::server::Handler for SshHandler {
         _session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
         // Route by channel: a relay channel's bytes go to its relay
-        // session; otherwise to the single interactive shell bridge.
-        //
-        // NOTE (head-of-line blocking): `write_all().await` here holds the
-        // per-connection handler callback while the duplex drains.  Today
-        // a slave opens one channel per connection (connect-per-call), so
-        // there is no contention.  If the deferred concurrent multi-channel
-        // design lands (Ports A+B on one connection), a stalled channel
-        // would block the others — the correct fix then is a per-channel
-        // mpsc pump with the SSH window providing backpressure, NOT a
-        // try_send (drops data) or unbounded buffer (grows without bound).
-        // Left as-is deliberately rather than half-fixed.
-        if let Some(writer) = self.relay_writers.get(&channel) {
-            let mut w = writer.lock().await;
-            let _ = w.write_all(data).await;
-        } else if let Some(writer) = &self.duplex_writer {
-            let mut w = writer.lock().await;
-            let _ = w.write_all(data).await;
+        // session; otherwise to the single interactive shell bridge.  A send
+        // waits only when that channel's queue is full -- see
+        // `spawn_input_pump` for why waiting at all is the backpressure, and
+        // why it no longer happens at the session's first pause.  A pump
+        // that has gone (its session ended) refuses the bytes, which is the
+        // same outcome the old write to a closed duplex had.
+        let pump = match self.relay_inputs.get(&channel) {
+            Some(p) => Some(p),
+            None => self.shell_input.as_ref(),
+        };
+        if let Some(pump) = pump {
+            let _ = pump.send(bytes::Bytes::copy_from_slice(data)).await;
         }
         Ok(())
     }
@@ -1931,6 +1958,85 @@ impl russh::server::Handler for SshHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A channel's input is queued, not written from the connection's loop.
+    ///
+    /// The duplex here holds 64 bytes and nothing reads it, which is a session
+    /// busy doing something else.  The old `data()` wrote into the duplex
+    /// itself and would have stopped at byte 64 with the whole connection's
+    /// loop waiting behind it; through the pump, a full queue's worth of
+    /// packets is accepted at once.  Then the reader catches up and must see
+    /// every byte, in order, and only **then** end-of-file -- dropping the
+    /// sender is the EOF, and it must not overtake the bytes still queued.
+    #[tokio::test]
+    async fn test_input_pump_queues_while_the_session_is_not_reading() {
+        let (mut session_end, handler_end) = tokio::io::duplex(64);
+        let (_unused_read, handler_write) = tokio::io::split(handler_end);
+        let pump = spawn_input_pump(handler_write);
+        let mut sent = Vec::new();
+        for i in 0..INPUT_PUMP_PACKETS {
+            let chunk = vec![i as u8; 100];
+            sent.extend_from_slice(&chunk);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                pump.send(bytes::Bytes::from(chunk)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("packet {i} waited on a session that is not reading"))
+            .expect("the pump is alive");
+        }
+        drop(pump);
+        let mut got = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            session_end.read_to_end(&mut got),
+        )
+        .await
+        .expect("the pump delivers and then closes")
+        .expect("read");
+        assert_eq!(got, sent);
+    }
+
+    /// A session that has ended makes the pump refuse further input rather
+    /// than queue it for nobody.
+    #[tokio::test]
+    async fn test_input_pump_refuses_once_the_session_is_gone() {
+        let (session_end, handler_end) = tokio::io::duplex(64);
+        let (_unused_read, handler_write) = tokio::io::split(handler_end);
+        let pump = spawn_input_pump(handler_write);
+        drop(session_end);
+        let mut refused = false;
+        for _ in 0..(INPUT_PUMP_PACKETS * 4) {
+            let r = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                pump.send(bytes::Bytes::from_static(b"x")),
+            )
+            .await
+            .expect("a send to a dead session must not wait");
+            if r.is_err() {
+                refused = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(refused, "the pump went on accepting input for a closed session");
+    }
+
+    /// `data()` hands bytes to a pump and nothing else: no lock, no write of
+    /// its own.  The pump's tests cannot see a `data()` that went back to
+    /// writing the duplex directly, so this reads the handler.
+    #[test]
+    fn test_data_never_writes_the_duplex_from_the_connection_loop() {
+        let src = include_str!("ssh.rs").replace("\r\n", "\n");
+        let prod = &src[..src.find("#[cfg(test)]\nmod tests").expect("test module")];
+        let start = prod.find("    async fn data(").expect("data()");
+        let end = start + prod[start..].find("\n    }\n").expect("end of data()");
+        let body = &prod[start..end];
+        assert!(body.contains("pump.send("), "data() no longer feeds the pump");
+        for banned in ["write_all", ".lock()", "write("] {
+            assert!(!body.contains(banned), "data() calls {banned} itself");
+        }
+    }
 
     /// The name **and** the folder it is composed from.
     ///
@@ -2216,8 +2322,8 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some(addr.ip()),
             pty_term: None,
-            duplex_writer: None,
-            relay_writers: std::collections::HashMap::new(),
+            shell_input: None,
+            relay_inputs: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -2389,8 +2495,8 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some(addr.ip()),
             pty_term: None,
-            duplex_writer: None,
-            relay_writers: std::collections::HashMap::new(),
+            shell_input: None,
+            relay_inputs: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -2695,8 +2801,8 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some("10.0.0.9".parse().unwrap()),
             pty_term: None,
-            duplex_writer: None,
-            relay_writers: std::collections::HashMap::new(),
+            shell_input: None,
+            relay_inputs: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -2721,8 +2827,8 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some("10.0.0.1".parse().unwrap()),
             pty_term: None,
-            duplex_writer: None,
-            relay_writers: std::collections::HashMap::new(),
+            shell_input: None,
+            relay_inputs: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -2806,8 +2912,8 @@ mod tests {
             password: pass.into(),
             peer_addr: Some("10.0.0.2".parse().unwrap()),
             pty_term: None,
-            duplex_writer: None,
-            relay_writers: std::collections::HashMap::new(),
+            shell_input: None,
+            relay_inputs: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -3100,8 +3206,8 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some(ip),
             pty_term: None,
-            duplex_writer: None,
-            relay_writers: std::collections::HashMap::new(),
+            shell_input: None,
+            relay_inputs: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
@@ -3137,8 +3243,8 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some(ip),
             pty_term: None,
-            duplex_writer: None,
-            relay_writers: std::collections::HashMap::new(),
+            shell_input: None,
+            relay_inputs: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
@@ -3189,8 +3295,8 @@ mod tests {
             password: "secret".into(),
             peer_addr: Some(ip),
             pty_term: None,
-            duplex_writer: None,
-            relay_writers: std::collections::HashMap::new(),
+            shell_input: None,
+            relay_inputs: std::collections::HashMap::new(),
             registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),

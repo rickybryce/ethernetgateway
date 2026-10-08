@@ -12073,7 +12073,7 @@ fn test_ssh_trust_rests_on_the_shell_refusing_a_relay_key() {
     // nothing.
     let refuse = body.find("if self.key_authed").expect("checked above");
     let grant = body
-        .find("duplex_writer")
+        .find("self.shell_input = Some(")
         .expect("shell_request no longer sets up a session -- wrong function");
     assert!(
         refuse < grant,
