@@ -27,6 +27,69 @@ use super::*;
 /// costing two rows of the twenty-two.
 pub(in crate::telnet) const SERIAL_MENU_SECOND_COL: usize = 26;
 
+/// The keys the port settings screen answers, for one port mode, as lowercase
+/// letters in alphabetical order.
+///
+/// `on_own_port` is a caller dialled in on this very port: `T` and `I` are
+/// hidden from them, because flipping the mode or ringing the line would tear
+/// down the connection they are typing on.  Any mode other than `modem` is a
+/// raw wire and loses every Hayes-only key; only `console` gains the erase key.
+///
+/// **This is the one statement of the rule**, and both the screen's wrong-key
+/// hint and its key arms are measured against it.  The hint used to be four
+/// hand-written strings keyed on `console_mode` alone, so Kermit mode was told
+/// to press six keys that did nothing, `G` and `K` were never named, and the
+/// full modem line printed at 47 columns on a 40-column C64.
+pub(in crate::telnet) fn serial_menu_keys(mode: &str, on_own_port: bool) -> Vec<char> {
+    let modem = mode == "modem";
+    let mut keys = vec!['b', 'e', 'f', 'h', 'p', 'q', 's'];
+    if !on_own_port {
+        keys.push('t');
+    }
+    if mode == "console" {
+        keys.push('k');
+    }
+    if modem {
+        keys.extend(['c', 'd', 'g', 'x']);
+        if !on_own_port {
+            keys.push('i');
+        }
+    }
+    keys.sort_unstable();
+    keys
+}
+
+/// The wrong-key hint for [`serial_menu_keys`]: alphabetical, with a run of
+/// three or more adjacent letters written as a range, so the busiest screen --
+/// thirteen keys in modem mode -- still prints inside a C64's 38 columns after
+/// `show_error`'s indent (`Press B-I, P, Q, S, T, or X.`).  Same idiom as the
+/// main menu's `A-C` and `R-T`.
+pub(in crate::telnet) fn serial_menu_key_hint(keys: &[char]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < keys.len() {
+        let mut j = i;
+        while j + 1 < keys.len() && keys[j + 1] as u32 == keys[j] as u32 + 1 {
+            j += 1;
+        }
+        let first = keys[i].to_ascii_uppercase();
+        if j - i >= 2 {
+            parts.push(format!("{}-{}", first, keys[j].to_ascii_uppercase()));
+            i = j + 1;
+        } else {
+            parts.push(first.to_string());
+            i += 1;
+        }
+    }
+    match parts.split_last() {
+        Some((last, rest)) if !rest.is_empty() => {
+            format!("Press {}, or {}.", rest.join(", "), last)
+        }
+        Some((last, _)) => format!("Press {}.", last),
+        None => String::new(),
+    }
+}
+
 impl TelnetSession {
     // ─── MODEM EMULATOR ──────────────────────────────────────
 
@@ -497,10 +560,15 @@ impl TelnetSession {
                 status, mode_label
             ))
             .await?;
+            // A device path is the one value on this screen with no length
+            // limit -- `/dev/serial/by-id/usb-FTDI_...-if00-port0` is ordinary
+            // -- and a row that wraps on a C64 costs two of the twenty-two.
+            // The tail names the device, so it is the front that is elided.
             let port_display = if port.port.is_empty() {
                 "(not set)".to_string()
             } else {
-                port.port.clone()
+                let w = if self.terminal_type == TerminalType::Petscii { 29 } else { 69 };
+                crate::webbrowser::truncate_path_to_width(&port.port, w)
             };
             self.send_line(&format!(
                 "  Port:   {}",
@@ -696,7 +764,12 @@ impl TelnetSession {
                 }
             };
 
-            match input.as_str() {
+            // The key set gates every arm below, so an arm cannot answer a key
+            // the hint does not name, nor the hint name one no arm answers.
+            let on_own_port = self.is_serial && self.serial_port_id == Some(id);
+            let keys = serial_menu_keys(&port.mode, on_own_port);
+            let accepted = matches!(input.as_bytes(), [b] if keys.contains(&(*b as char)));
+            match if accepted { input.as_str() } else { "" } {
                 "e" => {
                     let new_val = if port.enabled { "false" } else { "true" };
                     let v = new_val.to_string();
@@ -707,7 +780,7 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "k" if console_mode => {
+                "k" => {
                     // Cycled in the shared list's own order, like every other
                     // choice here.  A hand-edited value lands on the first
                     // choice next, which is `passthrough` -- the end that
@@ -730,7 +803,7 @@ impl TelnetSession {
                     // have the wire changed under them.
                     crate::serial::restart_serial(id);
                 }
-                "g" if !raw_mode => {
+                "g" => {
                     // Cycled in the shared list's own order, like every other
                     // choice on this screen.  A hand-edited value lands on the
                     // first choice next, which is `default` -- the end that
@@ -749,7 +822,7 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "t" if !(self.is_serial && self.serial_port_id == Some(id)) => {
+                "t" => {
                     self.toggle_serial_mode(id).await?;
                 }
                 "s" => {
@@ -764,7 +837,7 @@ impl TelnetSession {
                 "f" => {
                     self.modem_set_flow(id).await?;
                 }
-                "x" if !raw_mode => {
+                "x" => {
                     // Toggle PETSCII translation and persist immediately —
                     // it's a sticky per-port preference, the same field the
                     // AT+PETSCII command and the web/GUI surfaces write.
@@ -777,7 +850,7 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "c" if !raw_mode => {
+                "c" => {
                     // Toggle the drive-carrier (DCD proxy) opt-in and
                     // persist immediately — same per-port field the web and
                     // GUI surfaces write.  Takes effect on the next port
@@ -792,12 +865,10 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "d" if !raw_mode => {
+                "d" => {
                     self.dialup_mapping().await?;
                 }
-                "i" if !(raw_mode
-                    || self.is_serial && self.serial_port_id == Some(id)) =>
-                {
+                "i" => {
                     self.modem_ring_emulator(id).await?;
                 }
                 "h" => {
@@ -808,18 +879,7 @@ impl TelnetSession {
                     return Ok(());
                 }
                 _ => {
-                    // T and I are hidden only when the caller is
-                    // dialed in on THIS port (toggling/ringing your
-                    // own port isn't useful).  Any other combination
-                    // shows the full menu.
-                    let on_own_port = self.is_serial && self.serial_port_id == Some(id);
-                    let msg = match (console_mode, on_own_port) {
-                        (true, true) => "Press E, S, B, P, F, H, or Q.",
-                        (true, false) => "Press E, T, S, B, P, F, H, or Q.",
-                        (false, true) => "Press E, S, B, P, C, D, F, X, H, or Q.",
-                        (false, false) => "Press E, T, S, B, P, C, D, F, X, I, H, or Q.",
-                    };
-                    self.show_error(msg).await?;
+                    self.show_error(&serial_menu_key_hint(&keys)).await?;
                 }
             }
         }

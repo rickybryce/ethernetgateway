@@ -122,7 +122,7 @@ mod serial_ui;
 /// key at.  Test-only re-export -- the screen's own rows are built through
 /// `serial_menu_row`, which is what the alignment test drives.
 #[cfg(test)]
-pub(in crate::telnet) use serial_ui::SERIAL_MENU_SECOND_COL;
+pub(in crate::telnet) use serial_ui::{serial_menu_key_hint, serial_menu_keys, SERIAL_MENU_SECOND_COL};
 mod web;
 mod aichat_ui;
 mod weather;

@@ -14494,3 +14494,104 @@ async fn test_a_session_abandoned_on_the_welcome_page_still_says_goodbye() {
          got: {seen:?}"
     );
 }
+
+/// The port settings screen's wrong-key hint, for every mode it can be in.
+///
+/// It was four hand-written strings keyed on `console_mode` alone, so a port in
+/// Kermit-server mode was told to press `C`, `D`, `X` and `I` -- none of which
+/// it answers -- while `G` (modem) and `K` (console) were named nowhere, and the
+/// modem line printed at 47 columns on a C64.  The expected sets below are the
+/// specification, written out rather than derived, so a change to
+/// `serial_menu_keys` has to be a change to this list too.
+#[test]
+fn test_the_port_settings_hint_names_exactly_the_keys_each_mode_answers() {
+    let expected: &[(&str, bool, &str)] = &[
+        ("modem", false, "bcdefghipqstx"),
+        ("modem", true, "bcdefghpqsx"),
+        ("console", false, "befhkpqst"),
+        ("console", true, "befhkpqs"),
+        ("kermit", false, "befhpqst"),
+        ("kermit", true, "befhpqs"),
+        // A hand-edited mode is a raw wire, as the screen draws it.
+        ("bogus", false, "befhpqst"),
+    ];
+    for &(mode, own, want) in expected {
+        let keys = serial_menu_keys(mode, own);
+        assert_eq!(keys.iter().collect::<String>(), want, "{mode} own={own}");
+        let hint = serial_menu_key_hint(&keys);
+        // Measured as `show_error` prints it, indent included.
+        let printed = format!("  {}", hint);
+        assert!(
+            printed.chars().count() <= PETSCII_WIDTH,
+            "{mode} own={own}: {printed:?} is {} columns",
+            printed.chars().count(),
+        );
+        // Read the hint back -- ranges expanded -- and it must name the set.
+        let body = hint.strip_prefix("Press ").and_then(|h| h.strip_suffix('.')).unwrap();
+        let mut named: Vec<char> = Vec::new();
+        for part in body.split(", ") {
+            let part = part.strip_prefix("or ").unwrap_or(part);
+            let b = part.as_bytes();
+            let (lo, hi) = if b.len() == 3 && b[1] == b'-' { (b[0], b[2]) } else { (b[0], b[0]) };
+            assert!(part.len() == 1 || part.len() == 3, "{hint:?}: odd part {part:?}");
+            named.extend((lo..=hi).map(|c| (c as char).to_ascii_lowercase()));
+        }
+        assert_eq!(named, keys, "{mode} own={own}: {hint:?} names the wrong keys");
+    }
+    assert_eq!(
+        serial_menu_key_hint(&serial_menu_keys("modem", false)),
+        "Press B-I, P, Q, S, T, or X.",
+    );
+}
+
+/// Every key the port settings screen draws or handles belongs to the key set,
+/// and no arm carries a guard of its own -- the set is the only gate, which is
+/// what keeps the hint and the arms from drifting apart again.
+#[test]
+fn test_the_port_settings_arms_are_gated_only_by_the_key_set() {
+    let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
+    let name = "async fn modem_settings(";
+    let start = src.find(name).expect("modem_settings");
+    let next = src[start + name.len()..].find("async fn ").expect("a following fn");
+    let body: String = src[start..start + name.len() + next]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut all: Vec<char> = Vec::new();
+    for mode in ["modem", "console", "kermit"] {
+        for own in [false, true] {
+            for k in serial_menu_keys(mode, own) {
+                if !all.contains(&k) {
+                    all.push(k);
+                }
+            }
+        }
+    }
+    let mut arms = 0;
+    for k in 'a'..='z' {
+        let plain = format!("\n                \"{k}\" => {{");
+        let guarded = format!("\n                \"{k}\" if ");
+        assert!(!body.contains(&guarded), "the {k} arm has its own guard");
+        if body.contains(&plain) {
+            arms += 1;
+            assert!(all.contains(&k), "{k} is handled but in no mode's key set");
+        } else {
+            assert!(!all.contains(&k), "{k} is in a key set but never handled");
+        }
+    }
+    assert!(arms >= 13, "read only {arms} arms -- this scan is not reading the screen");
+    let mut drawn = 0;
+    for pat in ["self.cyan(\"", "self.action_prompt(\"", "Some((\"", "serial_menu_row(\""] {
+        for (i, _) in body.match_indices(pat) {
+            let rest = &body[i + pat.len()..];
+            let k = rest.chars().next().unwrap();
+            if !rest[k.len_utf8()..].starts_with('"') {
+                continue;
+            }
+            drawn += 1;
+            assert!(all.contains(&k.to_ascii_lowercase()), "{k} is drawn but in no key set");
+        }
+    }
+    assert!(drawn >= 13, "read only {drawn} drawn keys -- this scan is not reading the screen");
+}
