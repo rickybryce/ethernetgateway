@@ -1086,6 +1086,28 @@ async fn write_response(
 
 // ─── Form-post handling ─────────────────────────────────────────────
 
+/// The slave's master password, typed into the red panel; the notice to show
+/// if one was taken.
+///
+/// **Whichever button posted the form.**  The panel's own "Save and retry" is
+/// the obvious one, but a frame's Save sits a scroll away and submits the same
+/// form -- and an operator who typed the password and pressed that one, saw a
+/// normal save notice, and was still locked out would have been told nothing.
+/// Non-empty only: an empty box is somebody saving an unrelated setting, not a
+/// request to forget the credential (and `autocomplete="new-password"` keeps a
+/// browser from filling it unasked).
+fn take_master_password_entry(fields: &HashMap<String, String>) -> Option<String> {
+    let pw = fields.get("master_password_entry").filter(|v| !v.trim().is_empty())?;
+    // In memory only -- see `relay::set_pending_master_password`.
+    crate::relay::set_pending_master_password(pw.trim());
+    crate::relay::clear_master_credential_needed();
+    Some(
+        "Master password saved. The slave will retry, and erase it again once \
+         its key works."
+            .to_string(),
+    )
+}
+
 /// Apply every recognized field from a `POST /save` body in a single
 /// read-modify-write of the config file.  Returns a human-readable
 /// notice + the action the operator's button asked for, so the
@@ -1188,18 +1210,7 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // a file (`gateway_hosts`), not the config, and it must be an explicit press
     // -- the gateway will not re-pin a changed host key on its own, because a
     // reinstalled master and a man-in-the-middle look identical from here.
-    // The slave's master password, typed into the red panel.  Non-empty only:
-    // an empty box is somebody saving an unrelated setting, not a request to
-    // forget the credential.
-    if fields.contains_key("master_password_save")
-        && let Some(pw) = fields.get("master_password_entry").filter(|v| !v.trim().is_empty())
-    {
-        // In memory only -- see `relay::set_pending_master_password`.
-        crate::relay::set_pending_master_password(pw.trim());
-        crate::relay::clear_master_credential_needed();
-        let msg = "Master password saved. The slave will retry, and erase it \
-                   again once its key works."
-            .to_string();
+    if let Some(msg) = take_master_password_entry(&fields) {
         notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
     }
 
@@ -2464,7 +2475,8 @@ fn render_master_password_panel() -> String {
     // setting below this panel from the page's form and made this button post
     // a lone password to `/save` (no checkboxes, so every boolean saved as
     // off).  An empty box riding along on an unrelated Save is harmless:
-    // `apply_form_post` acts only on the button's name and a non-empty value.
+    // `take_master_password_entry` acts only on a non-empty value, whichever
+    // button was pressed.
     // `new-password`, not `off`: browsers ignore `off` on a password box, and
     // an autofilled one would ride along on every Enter-key save.
     out.push_str(
@@ -2476,6 +2488,13 @@ fn render_master_password_panel() -> String {
     out.push_str("</div>");
     out
 }
+
+/// The form's default button -- what Enter in a text box presses.  See
+/// `render_main_page`.
+const DEFAULT_SUBMIT: &str = "<button type=\"submit\" name=\"action\" value=\"save_and_restart\" \
+     tabindex=\"-1\" aria-hidden=\"true\" \
+     style=\"position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden\">\
+     Save and Restart</button>";
 
 fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool) -> String {
     let mut out = String::with_capacity(32 * 1024);
@@ -2499,6 +2518,17 @@ fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool)
     // submit buttons inside one form is the canonical HTML way to
     // model "same data, different intent."
     out.push_str("<form method=\"post\" action=\"/save\" id=\"cfg-form\">");
+    // **What Enter does.**  A browser submits a form from Enter in a text box
+    // by "clicking" its *first* submit button in tree order -- so whatever is
+    // drawn first decides it.  That was the Server frame's Save and Restart
+    // until the panels below went first: then Enter in any field pressed
+    // "Save and retry" (a save that applies nothing until a restart, and says
+    // nothing about it) or, worse, a resolve button -- re-pinning a changed
+    // master host key because someone pressed Enter in a port box.  So the
+    // default is drawn first, on purpose, and kept out of sight and out of the
+    // tab order.  Moved off-screen rather than `hidden`: some browsers will not
+    // submit through a button that is not rendered.
+    out.push_str(DEFAULT_SUBMIT);
     // Problems an operator can fix: first inside the form, and *inside* is the
     // point -- its buttons are `submit`s carrying the problem's id, so a panel
     // drawn before the form opens would render perfectly and do nothing.  Only
@@ -5131,6 +5161,20 @@ textarea.pubkey {
 </style>";
 
 const SCRIPT: &str = "<script>
+// Enter in the master-password box presses its own Save and retry.  The form's
+// default button is Save and Restart (see DEFAULT_SUBMIT), right for every
+// setting and wrong here: the password is taken either way, and a restart
+// would drop every session on the box to deliver it.
+(function() {
+  var box = document.querySelector('input[name=master_password_entry]');
+  var btn = document.querySelector('button[name=master_password_save]');
+  if (!box || !btn) return;
+  box.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    if (btn.form.requestSubmit) btn.form.requestSubmit(btn); else btn.click();
+  });
+})();
 function openModal(id) { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 document.querySelectorAll('button.more').forEach(function(b) {
@@ -6354,16 +6398,61 @@ mod tests {
         let (start, end) = (html.find("<form").unwrap(), html.find("</form>").unwrap());
         assert!(start < panel && panel < end, "the panel is outside the form");
 
-        let src = include_str!("webserver.rs").replace("\r\n", "\n");
-        let body = &src[src.find("fn apply_form_post(").unwrap()..];
-        let body = &body[..body.find("\n}\n").unwrap()];
-        for (rendered, read) in [
-            ("name=\"master_password_entry\"", "fields.get(\"master_password_entry\")"),
-            ("name=\"master_password_save\"", "fields.contains_key(\"master_password_save\")"),
-        ] {
-            assert!(html[panel..end].contains(rendered), "the panel no longer submits {rendered}");
-            assert!(body.contains(read), "apply_form_post no longer reads {read}");
-        }
+        assert!(
+            html[panel..end].contains("name=\"master_password_entry\""),
+            "the panel no longer submits the box take_master_password_entry reads"
+        );
+
+        // **The box is read whichever button posted the form**: a frame's own
+        // Save, with the panel's button absent, still delivers the password.
+        let mut fields: HashMap<String, String> = HashMap::new();
+        fields.insert("action".to_string(), "save_and_restart".to_string());
+        fields.insert("master_password_entry".to_string(), "  hunter2 ".to_string());
+        assert!(take_master_password_entry(&fields).is_some(), "a frame's Save dropped the typed password");
+        assert_eq!(
+            crate::relay::master_password_state(""),
+            crate::relay::MasterPasswordState::Entered,
+            "the typed password never reached the in-memory holder"
+        );
+        crate::relay::clear_pending_master_password();
+        // And an empty box is no request at all.
+        fields.insert("master_password_entry".to_string(), "  ".to_string());
+        assert!(take_master_password_entry(&fields).is_none(), "an empty box was taken as a password");
+        assert_ne!(crate::relay::master_password_state(""), crate::relay::MasterPasswordState::Entered);
+    }
+
+    /// **Enter in a text box presses Save and Restart, whatever is drawn
+    /// above the settings.**  A browser's implicit submission uses the form's
+    /// first submit button; with the master-password or resolve panel first,
+    /// that was "Save and retry" or a resolve button -- which re-pins a changed
+    /// master host key.  Rendered with both panels up, the first submit after
+    /// `<form` must be the default.
+    #[test]
+    fn test_enter_presses_save_and_restart_even_under_the_panels() {
+        let _lock = crate::relay::key_auth_test_lock();
+        crate::relay::note_master_credential_needed("192.0.2.1", 2222);
+        let html = render_main_page(&Config::default(), None, false);
+        crate::relay::clear_master_credential_needed();
+        assert!(html.contains("Master password needed"), "the panel is not up, so this proves nothing");
+
+        let form = &html[html.find("<form").expect("the form")..];
+        let first = form.find("type=\"submit\"").expect("a submit button in the form");
+        let tag_start = form[..first].rfind('<').unwrap();
+        let tag = &form[tag_start..tag_start + form[tag_start..].find('>').unwrap()];
+        assert!(
+            tag.contains("name=\"action\"") && tag.contains("value=\"save_and_restart\""),
+            "Enter would press {tag:?}, not Save and Restart"
+        );
+        assert!(!tag.contains(" hidden"), "a button that is not rendered may not submit on Enter");
+        // Except in the master-password box, where Enter presses the panel's
+        // own button: a restart would drop every session to take a password.
+        assert!(
+            SCRIPT.contains("querySelector('input[name=master_password_entry]')")
+                && SCRIPT.contains("requestSubmit(btn)")
+                && SCRIPT.contains("e.preventDefault();"),
+            "Enter in the master-password box would restart the server"
+        );
+        assert_eq!(SaveAction::from_form(Some("save_and_restart")), SaveAction::SaveAndRestart);
     }
 
     /// **A connected relay must not be able to blank its own credentials.**
@@ -8516,6 +8605,13 @@ mod tests {
             // holder is pinned separately, by
             // `test_the_master_password_is_held_in_memory_not_written_or_echoed`.
             "slave_master_password".to_string(),
+            // The red panel's box, for the same reason: it goes to
+            // `take_master_password_entry` and the in-memory holder, never to
+            // the config.  On the page only while the panel is up, which is a
+            // process-wide flag other tests raise -- so whether this scan sees
+            // it at all is timing, and a name it does see must not be expected
+            // in the config.
+            "master_password_entry".to_string(),
             // **Sets a different key on purpose.**  It is the web's way past
             // the boot picker, which lists only disks measured to boot here, so
             // it writes `cpm_boot_image` rather than a key of its own -- there

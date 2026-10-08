@@ -248,6 +248,41 @@ fn may_read_keys(
     now.duration_since(since) >= KEY_STALL
 }
 
+/// How many client bytes the pump may read at this seam.
+///
+/// **Backpressure is for a socket only.**  A telnet session reads its own TCP
+/// socket, so bytes left unread wait in the kernel and the sender's window and
+/// cost nothing else.  Every other session -- serial, relay, SSH -- reads a pipe
+/// whose far end is one task that also carries this session's *output*: the
+/// modem's online loop writes the wire into the pipe under a five-second
+/// timeout and only then drains the guest's echo.  Leave that pipe full and the
+/// loop blocks writing it, stops draining, the echo fills the output pipe, this
+/// pump blocks in `send_raw` before it can read again, and the call drops with
+/// NO CARRIER.  So a pipe-backed session reads at the full rate and the guest's
+/// queue drops what it cannot hold, as a real UART would: a clipped paste, not
+/// a lost call.
+fn key_budget(
+    room: usize,
+    socket_backed: bool,
+    full_since: &mut Option<tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> usize {
+    if !socket_backed {
+        *full_since = None;
+        return 256;
+    }
+    if !may_read_keys(room, full_since, now) {
+        0
+    } else if room == 0 {
+        // Wedged: read -- and drop -- at the full rate, so ESC ESC behind a
+        // pasted backlog gets out in seconds.  One byte a seam would take an
+        // hour.
+        256
+    } else {
+        room.min(256)
+    }
+}
+
 /// Instructions between yields to the runtime.
 ///
 /// Without this the emulator loop starves every other task on the thread —
@@ -1357,6 +1392,9 @@ impl TelnetSession {
         let mut last_key = tokio::time::Instant::now();
         // When the guest's console queue was first seen full -- see `KEY_STALL`.
         let mut keys_full_since: Option<tokio::time::Instant> = None;
+        // Only a session on its own socket may hold the client back -- see
+        // `key_budget`.
+        let socket_backed = self.speaks_telnet();
 
         loop {
             // `step`, not `execute_instruction`: a blocking console needs the
@@ -1396,20 +1434,14 @@ impl TelnetSession {
                 // pasted command or a file being sent into the guest's console
                 // moves at the wire's pace instead of one byte per 20,000
                 // instructions.  Bounded so a flood cannot hold the loop here,
-                // and by the guest's queue, so a paste longer than it waits
-                // rather than being dropped (`KEY_STALL`).
-                let room = machine.key_room();
-                let budget = if !may_read_keys(room, &mut keys_full_since, tokio::time::Instant::now()) {
-                    0
-                } else if room == 0 {
-                    // Wedged: read -- and drop -- at the full rate, so ESC ESC
-                    // behind a pasted backlog gets out in seconds, and a serial
-                    // caller's input pipe drains before its write timeout hangs
-                    // the call up.  One byte a seam would take an hour.
-                    256
-                } else {
-                    room.min(256)
-                };
+                // and, on a socket, by the guest's queue, so a paste longer
+                // than it waits rather than being dropped (`key_budget`).
+                let budget = key_budget(
+                    machine.key_room(),
+                    socket_backed,
+                    &mut keys_full_since,
+                    tokio::time::Instant::now(),
+                );
                 while keys < budget {
                     let Some(read) = poll_once(self.session_read_byte()) else {
                         break; // nothing waiting right now
@@ -1647,15 +1679,33 @@ mod tests {
         assert!(may_read_keys(1, &mut full_since, t0 + KEY_STALL));
         assert!(!may_read_keys(0, &mut full_since, t0 + KEY_STALL * 2));
 
-        // The pump asks the machine, rather than reading regardless -- and
-        // reads at the full rate once wedged.  Production source only: the
-        // slice must not run into this test, whose own literals would match.
+    }
+
+    /// **Only a socket may be held back.**  On a socket the budget is the
+    /// queue's room, nothing while waiting, and the full rate once wedged.  A
+    /// pipe-backed session (serial, relay, SSH) always reads at the full rate:
+    /// holding its pipe full deadlocks the modem's one-thread online loop and
+    /// drops the call.
+    #[test]
+    fn test_only_a_socket_session_applies_paste_backpressure() {
+        let t0 = tokio::time::Instant::now();
+        let mut since = None;
+        assert_eq!(key_budget(10, true, &mut since, t0), 10, "room bounds a socket");
+        assert_eq!(key_budget(4096, true, &mut since, t0), 256, "and so does the cap");
+        assert_eq!(key_budget(0, true, &mut since, t0), 0, "full means wait");
+        assert_eq!(key_budget(0, true, &mut since, t0 + KEY_STALL), 256, "a wedge drains");
+
+        let mut since = None;
+        for room in [0, 10, 4096] {
+            assert_eq!(key_budget(room, false, &mut since, t0), 256, "a pipe never waits (room {room})");
+        }
+        assert_eq!(since, None, "and starts no stall clock");
+
+        // The pump feeds it the session's real transport, not a constant.
         let src = include_str!("cpm_boot_ui.rs").replace("\r\n", "\n");
         let src = &src[..src.find("#[cfg(test)]\nmod tests").expect("the test module")];
-        let at = src.find("let room = machine.key_room();").expect("the pump reads key_room");
-        let pump = &src[at..at + src[at..].find("while keys < budget {").expect("the read loop honours the budget")];
-        assert!(pump.contains("room.min(256)"), "the budget no longer comes from the queue's room");
-        assert!(pump.contains("} else if room == 0 {\n                    // Wedged"), "the wedge case lost its branch");
+        assert!(src.contains("let socket_backed = self.speaks_telnet();"), "the transport is not what decides");
+        assert!(src.contains("key_budget(\n                    machine.key_room(),\n                    socket_backed,"), "the pump does not use key_budget");
     }
 
     /// **The monitor-ROM warning fits a C64 and says what to do about it.**

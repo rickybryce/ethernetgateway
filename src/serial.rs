@@ -257,6 +257,43 @@ fn send_peer_outcome_result(state: &mut ModemState, outcome: PeerCallOutcome) {
     };
 }
 
+/// Wait for a placed peer call's outcome from the target's progress bytes
+/// (`0` RING, `1` answered, anything else an error).  Shared by
+/// [`request_peer_call`] and [`request_cpm_call`] so the two cannot disagree
+/// about when a line is busy.
+///
+/// **Until the first RING the wait is [`PEER_PICKUP_SECS`], not `S7`.**  A
+/// target that is idle takes the call at its next poll and rings at once; one
+/// that has not rung by then is on another call, parked, or not at its prompt,
+/// and the caller should hear BUSY now.  The pickup deadline used to be checked
+/// only after a progress byte arrived -- and a target that never picks up sends
+/// none, so it was never checked, and every busy line cost the caller its whole
+/// answer wait (50 s at the default `S7`) before BUSY.
+async fn await_peer_outcome(
+    rx: &mut tokio::sync::mpsc::Receiver<u8>,
+    answer_wait: Duration,
+) -> PeerCallOutcome {
+    let start = tokio::time::Instant::now();
+    let answer_deadline = start + answer_wait;
+    let pickup_deadline = start + Duration::from_secs(PEER_PICKUP_SECS);
+    let mut saw_ring = false;
+    loop {
+        let deadline = if saw_ring { answer_deadline } else { answer_deadline.min(pickup_deadline) };
+        let now = tokio::time::Instant::now();
+        let silent = if saw_ring { PeerCallOutcome::NoAnswer } else { PeerCallOutcome::Busy };
+        if now >= deadline {
+            return silent;
+        }
+        match tokio::time::timeout(deadline - now, rx.recv()).await {
+            Ok(Some(0)) => saw_ring = true,                 // RING
+            Ok(Some(1)) => return PeerCallOutcome::Answered,
+            Ok(Some(_)) => return PeerCallOutcome::Error,   // 2 = port error
+            Ok(None) => return PeerCallOutcome::Error,      // target dropped it
+            Err(_) => return silent,
+        }
+    }
+}
+
 /// Place a peer-dial call to a local **modem-mode** target and wait for it
 /// to ring and answer per its own AT rules.  On success returns the caller
 /// end of a duplex whose far end the target is pumping its UART against;
@@ -280,26 +317,7 @@ pub async fn request_peer_call(
     // outcome the guard's drop does the reclaim (replacing an explicit take).
     let mut slot_guard = PeerSlotGuard { id: target, armed: true };
 
-    let start = tokio::time::Instant::now();
-    let answer_deadline = start + answer_wait;
-    let pickup_deadline = start + Duration::from_secs(PEER_PICKUP_SECS);
-    let mut saw_ring = false;
-    let outcome = loop {
-        let now = tokio::time::Instant::now();
-        if now >= answer_deadline {
-            break if saw_ring { PeerCallOutcome::NoAnswer } else { PeerCallOutcome::Busy };
-        }
-        match tokio::time::timeout(answer_deadline - now, rx.recv()).await {
-            Ok(Some(0)) => saw_ring = true,          // RING
-            Ok(Some(1)) => break PeerCallOutcome::Answered,
-            Ok(Some(_)) => break PeerCallOutcome::Error, // 2 = port error
-            Ok(None) => break PeerCallOutcome::Error,    // target dropped it
-            Err(_) => break if saw_ring { PeerCallOutcome::NoAnswer } else { PeerCallOutcome::Busy },
-        }
-        if !saw_ring && tokio::time::Instant::now() >= pickup_deadline {
-            break PeerCallOutcome::Busy;
-        }
-    };
+    let outcome = await_peer_outcome(&mut rx, answer_wait).await;
 
     if outcome == PeerCallOutcome::Answered {
         // Target claimed the slot and is bridging; leave it be.
@@ -472,26 +490,7 @@ pub async fn request_cpm_call(
     // member would otherwise "answer" a dead call and real callers would see
     // spurious BUSY.  Mirrors `PeerSlotGuard` for the single CP/M slot.
     let mut slot_guard = CpmSlotGuard { armed: true };
-    let start = tokio::time::Instant::now();
-    let answer_deadline = start + answer_wait;
-    let pickup_deadline = start + Duration::from_secs(PEER_PICKUP_SECS);
-    let mut saw_ring = false;
-    let outcome = loop {
-        let now = tokio::time::Instant::now();
-        if now >= answer_deadline {
-            break if saw_ring { PeerCallOutcome::NoAnswer } else { PeerCallOutcome::Busy };
-        }
-        match tokio::time::timeout(answer_deadline - now, rx.recv()).await {
-            Ok(Some(0)) => saw_ring = true,
-            Ok(Some(1)) => break PeerCallOutcome::Answered,
-            Ok(Some(_)) => break PeerCallOutcome::Error,
-            Ok(None) => break PeerCallOutcome::Error,
-            Err(_) => break if saw_ring { PeerCallOutcome::NoAnswer } else { PeerCallOutcome::Busy },
-        }
-        if !saw_ring && tokio::time::Instant::now() >= pickup_deadline {
-            break PeerCallOutcome::Busy;
-        }
-    };
+    let outcome = await_peer_outcome(&mut rx, answer_wait).await;
     if outcome == PeerCallOutcome::Answered {
         // The emulator claimed the slot and is bridging; leave it be.
         slot_guard.armed = false;
@@ -6893,11 +6892,10 @@ fn ring_loop(state: &mut ModemState, progress: &tokio::sync::mpsc::Sender<u8>) -
 /// runs russh's `Drop` on this bare serial thread, which spawns onto a tokio
 /// runtime that is not there and panics.  A real modem with a call up gives
 /// the next caller a busy line, so the request is simply left in its slot:
-/// a peer caller hears `BUSY` once its answer wait runs out (its own `S7`, or
-/// `RELAY_PEER_ANSWER_WAIT` on a relay leg -- `request_peer_call` checks the
-/// pickup deadline only when a message arrives, and none will) and its guard
-/// reclaims the slot; the Ring Emulator times out and cancels.  `ATH`,
-/// `ATZ` or a dial frees the line, and a still-waiting caller then rings.
+/// a peer caller hears `BUSY` after `PEER_PICKUP_SECS` without a ring (see
+/// `await_peer_outcome`) and its guard reclaims the slot; the Ring Emulator
+/// times out and cancels.  `ATH`, `ATZ` or a dial frees the line, and a caller
+/// still inside its pickup wait then rings.
 fn line_free_for_incoming(mode: ModemMode, call_parked: bool) -> bool {
     mode == ModemMode::Command && !call_parked
 }
@@ -9117,7 +9115,13 @@ mod tests {
         let src = include_str!("serial.rs").replace("\r\n", "\n");
         let call = "line_free_for_incoming(state.mode, state.active_connection.is_some())";
         let at = src.find(&format!("let line_free = {call};")).expect("the modem loop computes line_free");
-        let lp = &src[at..at + 800];
+        // Cut on a char boundary: a multibyte character at the cut would
+        // panic here instead of failing with the message below.
+        let mut end = (at + 800).min(src.len());
+        while !src.is_char_boundary(end) {
+            end -= 1;
+        }
+        let lp = &src[at..end];
         for take in ["Some(sender) = take_ring_request(id)", "Some(call) = take_peer_call_request(id)"] {
             assert!(
                 lp.contains(&format!("if line_free\n            && let {take}")),
@@ -9125,6 +9129,38 @@ mod tests {
             );
         }
         assert_eq!(lp.matches("if line_free\n").count(), 2, "one of the two takes lost its gate");
+    }
+
+    /// **A line that never picks up is BUSY in [`PEER_PICKUP_SECS`], not in
+    /// `S7`.**  The pickup deadline used to be checked only after a progress
+    /// byte, and a busy target sends none, so a caller waited its whole answer
+    /// wait.  Once the target rings, the answer wait is what bounds it.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_line_that_never_picks_up_is_busy_at_the_pickup_deadline() {
+        let wait = Duration::from_secs(50);
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let t0 = tokio::time::Instant::now();
+        assert_eq!(await_peer_outcome(&mut rx, wait).await, PeerCallOutcome::Busy);
+        assert_eq!(t0.elapsed(), Duration::from_secs(PEER_PICKUP_SECS), "BUSY waited past the pickup deadline");
+
+        // Rung once: now it is NO ANSWER, and only after the full answer wait.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
+        tx.send(0).await.unwrap();
+        let t0 = tokio::time::Instant::now();
+        assert_eq!(await_peer_outcome(&mut rx, wait).await, PeerCallOutcome::NoAnswer);
+        assert_eq!(t0.elapsed(), wait, "a ringing line was cut short");
+
+        // An answer wait shorter than the pickup still bounds the call.
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let t0 = tokio::time::Instant::now();
+        assert_eq!(await_peer_outcome(&mut rx, Duration::from_secs(1)).await, PeerCallOutcome::Busy);
+        assert_eq!(t0.elapsed(), Duration::from_secs(1));
+
+        // And an answer is an answer.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
+        tx.send(0).await.unwrap();
+        tx.send(1).await.unwrap();
+        assert_eq!(await_peer_outcome(&mut rx, wait).await, PeerCallOutcome::Answered);
     }
 
     #[test]

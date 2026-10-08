@@ -988,7 +988,7 @@ IAC DO   NAWS     <span class="output-text">"tell me your window size"</span></c
                     <code>gateway_petscii_translate</code> makes the gateway a plain pipe; an ASCII terminal has every one
                     stripped; an ANSI terminal keeps them, less the remote's window-title
                     sequence (<code>ESC ] 0 ; &hellip; BEL</code>), which is dropped for
-                    every terminal type because no client here has a title bar and a
+                    every terminal type the gateway filters for (a plain pipe passes it) because no client here has a title bar and a
                     terminal without OSC prints the payload in front of the prompt. See
                     <a href="sshreference.html#ansi">ANSI Filtering</a> for the whole rule,
                     including why a title is held and weighed rather than swallowed &mdash;

@@ -4065,7 +4065,9 @@ wherever <code>A@&lt;ip&gt;</code> / <code>B@&lt;ip&gt;</code> do.
 <span class="label">Answering requires a running comms program</span>
 The emulator picks up an inbound call only while a program is running its modem
 (that's when it polls for the ring) — run your terminal/BBS software first,
-exactly as on real hardware. Set <code>ATS0=</code><em>n</em> to auto-answer, or
+exactly as on real hardware. A caller whose call is not picked up within three
+seconds hears <code>BUSY</code>, which is what a session sitting at
+<code>A&gt;</code> gives. Set <code>ATS0=</code><em>n</em> to auto-answer, or
 answer manually with <code>ATA</code> when you see <code>RING</code>.
 <code>CPM@&lt;ip&gt;</code> is a single dialable address, but every
 modem-enabled CP/M session joins an answer <em>pool</em> (a hunt group): the
@@ -4720,7 +4722,7 @@ want to drive it remotely.
     <li>From the main menu, press <span class="kbd">G</span> (Serial Gateway).  An A/B picker appears showing both ports' status; ineligible ports (disabled, modem mode, no device) are dimmed.</li>
     <li>Press <span class="kbd">A</span> or <span class="kbd">B</span> to pick a port.  The gateway prints that port's active framing (port, baud, data/parity/stop, flow) and asks <code>Connect now? (Y/N):</code>.  Press <span class="kbd">Y</span> to enter the bridge.</li>
     <li>Type to the wire; the wire types back. The connection is fully 8-bit transparent and the gateway does not interpret AT commands or insert IAC sequences.</li>
-    <li>Press <span class="kbd">ESC</span> twice in a row to leave the bridge (PETSCII <span class="kbd">&larr;</span> twice on Commodore terminals). A single <span class="kbd">ESC</span> is held for one read cycle; if you type any other key after it the held <span class="kbd">ESC</span> goes through to the wire, so editors that need <span class="kbd">ESC</span> (vi, ed, emacs) keep working.</li>
+    <li>Press <span class="kbd">ESC</span> twice, quickly, to leave the bridge (PETSCII <span class="kbd">&larr;</span> twice on Commodore terminals). Every <span class="kbd">ESC</span> goes straight through to the wire &mdash; nothing is held &mdash; so editors that need <span class="kbd">ESC</span> (vi, ed, emacs) keep working; only two in a row, within half a second, leave.</li>
 </ol>
 
 <aside class="note">
@@ -5114,7 +5116,9 @@ reverse video, clear screen, home and the four cursor moves become single
 PETSCII control bytes &mdash; and dropped where it has none (cursor addressing,
 background colour); text is case-swapped for PETSCII.  That is the default:
 with <code>gateway_petscii_translate</code> off (or a port's own setting at
-<em>passthrough</em>) the gateway is a plain pipe for a Commodore-aware host.  For an ASCII terminal every
+<em>passthrough</em>) the gateway is a plain pipe for a Commodore-aware host.
+A port's own setting wins whenever it is not <em>default</em>: a port set to
+<em>translate</em> translates even with the server-wide key off.  For an ASCII terminal every
 sequence is stripped.
 ANSI terminals keep their sequences &mdash; colour and cursor addressing are
 why a terminal asks for ANSI &mdash; except for the remote's <strong>window
@@ -5244,10 +5248,12 @@ Port (23): 23</code></pre>
 
 <p>
 Press <span class="kbd">ESC</span> twice, quickly, to disconnect &mdash; a
-single ESC goes to the remote (§10.3). For PETSCII and ASCII
-terminals, ANSI escape sequences from the remote are filtered out; an ANSI
-terminal keeps them, apart from the remote's window title, which is dropped
-for every terminal type (§10.3 &mdash; the same filter serves both gateways).
+single ESC goes to the remote (§10.3). For a PETSCII terminal, ANSI escape
+sequences from the remote are translated to PETSCII where a Commodore has an
+equivalent and dropped where it has none; an ASCII terminal has them stripped;
+an ANSI terminal keeps them, apart from the remote's window title, which is
+dropped for every terminal type the gateway filters for (§10.3 &mdash; the same
+filter serves both gateways).
 The
 gateway also has an 8 KiB cap on subnegotiation body length, so a malicious
 remote cannot exhaust memory by sending huge <code>SB</code> bodies without a
@@ -6108,7 +6114,7 @@ numeric values fall back to the default.
         <tr><td><code>cpm_screen_input</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>May the web UI's <em>VDM / Dazzler</em> page send keystrokes to a booted disk?  The screen is readable either way.  See &sect;6.4.3.</td></tr>
         <tr><td><code>cpm_joystick</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Give a booted machine the Cromemco D+7A joystick board, played from the browser watching its screen.  Player 1 <kbd>W</kbd>/<kbd>A</kbd>/<kbd>S</kbd>/<kbd>Z</kbd>, fire <kbd>X</kbd>; player 2 <kbd>I</kbd>/<kbd>J</kbd>/<kbd>K</kbd>/<kbd>M</kbd>, fire <kbd>N</kbd>.  See &sect;6.4.3.</td></tr>
         <tr><td><code>cpm_emu_max_minstr</code></td><td>u32</td><td><code>2000</code></td><td>1&ndash;1000000</td><td>CP/M emulator runaway ceiling, in millions of instructions per program run (2000&nbsp;=&nbsp;2&nbsp;billion). A compute-bound <code>.COM</code> that never reads the console is aborted at this count so the <code>A&gt;</code> prompt always returns. Values above <strong>1000000</strong> are capped at it rather than refused, so a setting meant as &ldquo;no limit&rdquo; is kept as far as it goes instead of dropping to the default. See §8.11.</td></tr>
-        <tr><td><code>cpm_boot_image</code></td><td>string</td><td><em>(empty)</em></td><td>empty, or a filename in <code>CPM/images</code></td><td>What the CP/M menu item runs. Empty = the CP/M emulator. A bare filename cold-boots that disk on the emulated controller its boot loader names and gives the disk&rsquo;s own operating system the whole machine &mdash; no jail, no <code>A&gt;</code> from us, no EGT8080, no <code>EXIT</code>; press ESC twice to leave. Opened <strong>writable</strong> unless <code>cpm_boot_writable</code> is turned off, and held by one session. A name that is not in the folder falls back to the emulator and is shown as <code>(missing)</code>; one that will not start here, whether because it carries no boot program or because it needs hardware this gateway does not emulate, shows <code>(not bootable)</code>. See §8.11.</td></tr>
+        <tr><td><code>cpm_boot_image</code></td><td>string</td><td><em>(empty)</em></td><td>empty, or a filename in <code>CPM/images</code></td><td>What the CP/M menu item runs. Empty = the CP/M emulator. A bare filename cold-boots that disk on the emulated controller its boot loader names and gives the disk&rsquo;s own operating system the whole machine &mdash; no jail, no <code>A&gt;</code> from us, no EGT8080, no <code>EXIT</code>; press ESC twice to leave. Over telnet a long paste is held back while the guest reads it rather than dropped, so ESC ESC typed behind one waits its turn &mdash; or about two seconds, if the guest has stopped reading. Opened <strong>writable</strong> unless <code>cpm_boot_writable</code> is turned off, and held by one session. A name that is not in the folder falls back to the emulator and is shown as <code>(missing)</code>; one that will not start here, whether because it carries no boot program or because it needs hardware this gateway does not emulate, shows <code>(not bootable)</code>. See §8.11.</td></tr>
         <tr><td><code>cpm_boot_machine</code></td><td>string</td><td><code>auto</code></td><td><code>auto</code>, <code>altair_2sio</code>, <code>altair_sio</code>, <code>console_04</code>, <code>console_04_cuter</code>, <code>z80pack</code>, <code>cromemco</code></td><td>Which machine a <em>booted</em> disk runs on &mdash; its console <strong>and</strong> the set of disk controllers it carries, which is why a machine is one setting rather than two: z80pack&rsquo;s disk device answers on the same ports as the Altair console, so the two cannot be mixed. <code>auto</code> reads the ports the disk&rsquo;s own boot loader drives and falls back to <code>altair_2sio</code>; the boot screen reports which happened. See §8.11.</td></tr>
         <tr><td><code>cpm_boot_rom</code></td><td>string</td><td><code>off</code></td><td><code>off</code>, <code>cuter_vdm</code></td><td>A monitor ROM loaded into a <em>booted</em> disk&rsquo;s machine before it starts, and left <strong>writable</strong> &mdash; these monitors were loaded into RAM on the real machines too, and their callers patch them. Off by default because a ROM occupies memory the guest may want (2&nbsp;KB at <code>0xC000</code> for the one on offer). The synthesised entry behind <code>console_04_cuter</code> is a different and much narrower thing: it is six instructions at one address, and a disk that calls several of the monitor&rsquo;s routines or patches its image needs the real file. Ignored by the emulator, which has no console to place. See &sect;8.11.</td></tr>
         <tr><td><code>cpm_boot_backspace</code></td><td>string</td><td><code>backspace</code></td><td><code>backspace</code>, <code>rubout</code></td><td>Which byte a <em>booted</em> disk gets for the Backspace key. Measured across 38 bootable images: 29 erase on BS (<code>08h</code>) and read DEL as a rubout that reprints the deleted character; 7 accept either; CP/M 1.3, 1.4 and the 1975 build are the opposite and need <code>rubout</code>. Ignored by the emulator. See §8.11.</td></tr>

@@ -97,8 +97,8 @@ options, and the full AT command set.
 - **Outbound gateways** — proxy a telnet session to a remote **telnet** or
   **SSH** host (ANSI translated to PETSCII colour and cursor control for a
   Commodore, stripped for ASCII terminals, and the remote's
-  window-title sequence dropped for everyone, since no terminal here has a
-  title bar; TOFU host-key verification for SSH). A single **ESC** goes
+  window-title sequence dropped wherever the gateway filters, since no
+  terminal here has a title bar; TOFU host-key verification for SSH). A single **ESC** goes
   through to the remote, so `vi` and friends work; two in quick succession
   disconnect.
 - **Master/slave relay** — extend a slave gateway's serial ports to a master

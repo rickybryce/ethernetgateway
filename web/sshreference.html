@@ -734,7 +734,7 @@
                         <li>Enter the remote <strong>hostname / IP</strong>, the <strong>port</strong> (default 22), and your <strong>username</strong> on the remote.</li>
                         <li>The gateway connects and verifies the remote's <strong>host key</strong> against <code>gateway_hosts</code> (see <a href="#hostkey">Host-Key Verification</a>).</li>
                         <li>It authenticates using the <strong>one configured method</strong> &mdash; password <em>or</em> gateway key (see <a href="#auth">Authentication</a>).</li>
-                        <li>On success you get a full interactive shell. ANSI from the remote is translated to PETSCII colour and cursor control for a Commodore and stripped for an ASCII terminal, and the remote's window-title sequence is dropped for everyone (see <a href="#ansi">ANSI Filtering</a>).</li>
+                        <li>On success you get a full interactive shell. ANSI from the remote is translated to PETSCII colour and cursor control for a Commodore and stripped for an ASCII terminal, and the remote's window-title sequence is dropped for every terminal the gateway filters for (see <a href="#ansi">ANSI Filtering</a>).</li>
                         <li>Press <strong>Esc</strong> twice <em>quickly</em> (PETSCII: the back-arrow key twice) to disconnect and return to the menu. A single Esc is passed through to the remote, so ESC-driven software keeps working &mdash; see <a href="#esc">The Esc Key</a>.</li>
                     </ol>
                 </div>
@@ -904,7 +904,7 @@ example.com:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
                     first place &mdash; with one exception, below.
                 </p>
                 <p class="dim-text">
-                    <strong>The window title goes for everyone.</strong> A shell sets the
+                    <strong>The window title goes for every filtered terminal.</strong> A shell sets the
                     title of the window it thinks it is in: bash's default
                     <code>PS1</code> sends <code>ESC ] 0 ; user@host: ~ BEL</code> before
                     every prompt. No client of this gateway has a title bar, and a terminal
