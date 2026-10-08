@@ -4693,6 +4693,53 @@ impl App {
         }
     }
 
+    /// Whether anything bound to a control differs from the last-synced
+    /// snapshot: the config itself (credentials compared by `edits_differ`'s
+    /// rule) and every text buffer behind a numeric field.
+    fn has_unsaved_edits(&self) -> bool {
+        edits_differ(&self.cfg, &self.last_synced_cfg)
+            || self.telnet_port_buf != self.last_synced_cfg.telnet_port.to_string()
+            || self.ssh_port_buf != self.last_synced_cfg.ssh_port.to_string()
+            || self.kermit_server_port_buf != self.last_synced_cfg.kermit_server_port.to_string()
+            || self.web_port_buf != self.last_synced_cfg.web_port.to_string()
+            || self.slave_master_port_buf != self.last_synced_cfg.slave_master_port.to_string()
+            || self.max_sessions_buf != self.last_synced_cfg.max_sessions.to_string()
+            || self.conn_rate_max_buf != self.last_synced_cfg.conn_rate_max.to_string()
+            || self.conn_rate_window_buf != self.last_synced_cfg.conn_rate_window_secs.to_string()
+            || self.idle_timeout_buf != self.last_synced_cfg.idle_timeout_secs.to_string()
+            || self.negotiation_timeout_buf != self.last_synced_cfg.xmodem_negotiation_timeout.to_string()
+            || self.block_timeout_buf != self.last_synced_cfg.xmodem_block_timeout.to_string()
+            || self.max_retries_buf != self.last_synced_cfg.xmodem_max_retries.to_string()
+            || self.negotiation_retry_interval_buf != self.last_synced_cfg.xmodem_negotiation_retry_interval.to_string()
+            || self.zmodem_negotiation_timeout_buf != self.last_synced_cfg.zmodem_negotiation_timeout.to_string()
+            || self.zmodem_frame_timeout_buf != self.last_synced_cfg.zmodem_frame_timeout.to_string()
+            || self.zmodem_max_retries_buf != self.last_synced_cfg.zmodem_max_retries.to_string()
+            || self.zmodem_negotiation_retry_interval_buf != self.last_synced_cfg.zmodem_negotiation_retry_interval.to_string()
+            || self.kermit_negotiation_timeout_buf != self.last_synced_cfg.kermit_negotiation_timeout.to_string()
+            || self.kermit_packet_timeout_buf != self.last_synced_cfg.kermit_packet_timeout.to_string()
+            || self.kermit_idle_timeout_buf != self.last_synced_cfg.kermit_idle_timeout.to_string()
+            || self.kermit_max_retries_buf != self.last_synced_cfg.kermit_max_retries.to_string()
+            || self.kermit_resume_max_age_hours_buf != self.last_synced_cfg.kermit_resume_max_age_hours.to_string()
+            || self.kermit_max_packet_length_buf != self.last_synced_cfg.kermit_max_packet_length.to_string()
+            || self.kermit_window_size_buf != self.last_synced_cfg.kermit_window_size.to_string()
+            || self.kermit_block_check_type_buf != self.last_synced_cfg.kermit_block_check_type.to_string()
+            || self.punter_block_size_buf != self.last_synced_cfg.punter_block_size.to_string()
+            || self.punter_negotiation_timeout_buf != self.last_synced_cfg.punter_negotiation_timeout.to_string()
+            || self.punter_block_timeout_buf != self.last_synced_cfg.punter_block_timeout.to_string()
+            || self.punter_max_retries_buf != self.last_synced_cfg.punter_max_retries.to_string()
+            || self.punter_max_bad_rounds_buf != self.last_synced_cfg.punter_max_bad_rounds.to_string()
+            || self.punter_negotiation_retry_interval_buf != self.last_synced_cfg.punter_negotiation_retry_interval.to_string()
+            || self.cpm_emu_max_minstr_buf != self.last_synced_cfg.cpm_emu_max_minstr.to_string()
+            || self.log_max_size_kb_buf != self.last_synced_cfg.log_max_size_kb.to_string()
+            || self.log_max_files_buf != self.last_synced_cfg.log_max_files.to_string()
+            || self.gateway_term_width_buf != self.last_synced_cfg.gateway_term_width.to_string()
+            || self.gateway_term_height_buf != self.last_synced_cfg.gateway_term_height.to_string()
+            || self.cpm_emu_x_code_buf != self.last_synced_cfg.cpm_emu_modem.x_code.to_string()
+            || self.cpm_emu_dcd_mode_buf != self.last_synced_cfg.cpm_emu_modem.dcd_mode.to_string()
+            || self.serial_baud_buf[0] != self.last_synced_cfg.serial_a.baud.to_string()
+            || self.serial_baud_buf[1] != self.last_synced_cfg.serial_b.baud.to_string()
+    }
+
     fn refresh_from_global(&mut self) {
         if self.dirty {
             return; // Don't overwrite fields the user is actively editing.
@@ -5231,6 +5278,27 @@ fn labeled_password(ui: &mut egui::Ui, label: &str, buf: &mut String, hint: &str
 /// setting instead of an outcome.
 fn password_box_hint(stored: &str) -> &'static str {
     if stored.is_empty() { "(not set)" } else { "(hidden)" }
+}
+
+/// Whether the editor holds edits the snapshot does not -- the dirty check's
+/// comparison of the bound config.
+///
+/// **Not `cfg != synced`.**  The two credential boxes are blanked on purpose
+/// (empty means "leave it alone") while the snapshot keeps the stored values,
+/// so a plain comparison is true on every frame of every install that has a
+/// password -- which is all of them.  That left `dirty` permanently set, so
+/// `refresh_from_global` never ran again and a Save wrote this window's stale
+/// copy over whatever the web UI or telnet had changed since.  An empty box is
+/// therefore compared as if it held the stored value; a typed one still counts.
+fn edits_differ(cfg: &Config, synced: &Config) -> bool {
+    let mut probe = cfg.clone();
+    if probe.password.is_empty() {
+        probe.password.clone_from(&synced.password);
+    }
+    if probe.slave_master_password.is_empty() {
+        probe.slave_master_password.clone_from(&synced.slave_master_password);
+    }
+    probe != *synced
 }
 
 /// What a save must write for `slave_master_password`, given what is in the
@@ -7277,47 +7345,7 @@ impl eframe::App for App {
         // config fields against the last-synced snapshot so that
         // refresh_from_global will not overwrite in-progress changes.
         if !self.dirty {
-            self.dirty = self.cfg != self.last_synced_cfg
-                || self.telnet_port_buf != self.last_synced_cfg.telnet_port.to_string()
-                || self.ssh_port_buf != self.last_synced_cfg.ssh_port.to_string()
-                || self.kermit_server_port_buf != self.last_synced_cfg.kermit_server_port.to_string()
-                || self.web_port_buf != self.last_synced_cfg.web_port.to_string()
-                || self.slave_master_port_buf != self.last_synced_cfg.slave_master_port.to_string()
-                || self.max_sessions_buf != self.last_synced_cfg.max_sessions.to_string()
-                || self.conn_rate_max_buf != self.last_synced_cfg.conn_rate_max.to_string()
-                || self.conn_rate_window_buf != self.last_synced_cfg.conn_rate_window_secs.to_string()
-                || self.idle_timeout_buf != self.last_synced_cfg.idle_timeout_secs.to_string()
-                || self.negotiation_timeout_buf != self.last_synced_cfg.xmodem_negotiation_timeout.to_string()
-                || self.block_timeout_buf != self.last_synced_cfg.xmodem_block_timeout.to_string()
-                || self.max_retries_buf != self.last_synced_cfg.xmodem_max_retries.to_string()
-                || self.negotiation_retry_interval_buf != self.last_synced_cfg.xmodem_negotiation_retry_interval.to_string()
-                || self.zmodem_negotiation_timeout_buf != self.last_synced_cfg.zmodem_negotiation_timeout.to_string()
-                || self.zmodem_frame_timeout_buf != self.last_synced_cfg.zmodem_frame_timeout.to_string()
-                || self.zmodem_max_retries_buf != self.last_synced_cfg.zmodem_max_retries.to_string()
-                || self.zmodem_negotiation_retry_interval_buf != self.last_synced_cfg.zmodem_negotiation_retry_interval.to_string()
-                || self.kermit_negotiation_timeout_buf != self.last_synced_cfg.kermit_negotiation_timeout.to_string()
-                || self.kermit_packet_timeout_buf != self.last_synced_cfg.kermit_packet_timeout.to_string()
-                || self.kermit_idle_timeout_buf != self.last_synced_cfg.kermit_idle_timeout.to_string()
-                || self.kermit_max_retries_buf != self.last_synced_cfg.kermit_max_retries.to_string()
-                || self.kermit_resume_max_age_hours_buf != self.last_synced_cfg.kermit_resume_max_age_hours.to_string()
-                || self.kermit_max_packet_length_buf != self.last_synced_cfg.kermit_max_packet_length.to_string()
-                || self.kermit_window_size_buf != self.last_synced_cfg.kermit_window_size.to_string()
-                || self.kermit_block_check_type_buf != self.last_synced_cfg.kermit_block_check_type.to_string()
-                || self.punter_block_size_buf != self.last_synced_cfg.punter_block_size.to_string()
-                || self.punter_negotiation_timeout_buf != self.last_synced_cfg.punter_negotiation_timeout.to_string()
-                || self.punter_block_timeout_buf != self.last_synced_cfg.punter_block_timeout.to_string()
-                || self.punter_max_retries_buf != self.last_synced_cfg.punter_max_retries.to_string()
-                || self.punter_max_bad_rounds_buf != self.last_synced_cfg.punter_max_bad_rounds.to_string()
-                || self.punter_negotiation_retry_interval_buf != self.last_synced_cfg.punter_negotiation_retry_interval.to_string()
-                || self.cpm_emu_max_minstr_buf != self.last_synced_cfg.cpm_emu_max_minstr.to_string()
-                || self.log_max_size_kb_buf != self.last_synced_cfg.log_max_size_kb.to_string()
-                || self.log_max_files_buf != self.last_synced_cfg.log_max_files.to_string()
-                || self.gateway_term_width_buf != self.last_synced_cfg.gateway_term_width.to_string()
-                || self.gateway_term_height_buf != self.last_synced_cfg.gateway_term_height.to_string()
-                || self.cpm_emu_x_code_buf != self.last_synced_cfg.cpm_emu_modem.x_code.to_string()
-                || self.cpm_emu_dcd_mode_buf != self.last_synced_cfg.cpm_emu_modem.dcd_mode.to_string()
-                || self.serial_baud_buf[0] != self.last_synced_cfg.serial_a.baud.to_string()
-                || self.serial_baud_buf[1] != self.last_synced_cfg.serial_b.baud.to_string();
+            self.dirty = self.has_unsaved_edits();
         }
     }
 }
@@ -7448,6 +7476,47 @@ mod tests {
             app.last_synced_cfg.password, cfg.password,
             "the sync snapshot lost the credential, so the editor will churn"
         );
+    }
+
+    /// **A freshly opened editor has no unsaved edits, so it keeps following
+    /// the config.**
+    ///
+    /// The credential boxes are blanked while the snapshot keeps the stored
+    /// values, and the dirty check compared the two with `!=` -- true on every
+    /// frame of every install with a password.  `dirty` stuck on from the first
+    /// frame, `refresh_from_global` never ran again, and a desktop Save wrote
+    /// its stale copy over changes made from the web UI or telnet.  The
+    /// positive controls matter as much: a check that can never go true would
+    /// pass the first assertion just as well.
+    #[test]
+    fn test_blank_credential_boxes_are_not_unsaved_edits() {
+        let cfg = Config {
+            password: crate::credential::hash_for_test("hunter2"),
+            slave_master_password: "relay-secret".to_string(),
+            ..Config::default()
+        };
+        let mut app = App::new(
+            cfg,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        assert!(!app.has_unsaved_edits(), "a fresh editor reads as dirty");
+
+        app.cfg.password = "new-one".to_string();
+        assert!(app.has_unsaved_edits(), "a typed password is not an edit");
+        app.cfg.password.clear();
+
+        app.cfg.slave_master_password = "typed".to_string();
+        assert!(app.has_unsaved_edits(), "a typed master password is not an edit");
+        app.cfg.slave_master_password.clear();
+
+        app.cfg.telnet_enabled = !app.cfg.telnet_enabled;
+        assert!(app.has_unsaved_edits(), "an ordinary toggle is not an edit");
+        app.cfg.telnet_enabled = !app.cfg.telnet_enabled;
+
+        app.telnet_port_buf.push('9');
+        assert!(app.has_unsaved_edits(), "a numeric buffer edit is not an edit");
     }
 
     /// **The title bar reports the role, and standalone is left alone.**

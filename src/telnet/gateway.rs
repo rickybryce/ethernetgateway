@@ -25,8 +25,12 @@ pub(in crate::telnet) enum GatewayInboundEvent {
 }
 
 /// Read one event from the local user's side of a Telnet Gateway session.
+///
+/// `telnet` is the session's [`TelnetSession::speaks_telnet`]: an SSH or serial
+/// user's link is 8-bit clean, so there every byte is data -- `0xFF` included.
 pub(in crate::telnet) async fn read_gateway_event(
     reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    telnet: bool,
 ) -> std::io::Result<GatewayInboundEvent> {
     let mut buf = [0u8; 1];
     loop {
@@ -36,7 +40,7 @@ pub(in crate::telnet) async fn read_gateway_event(
             Err(e) => return Err(e),
         }
         let byte = buf[0];
-        if byte != IAC {
+        if byte != IAC || !telnet {
             return Ok(GatewayInboundEvent::Data(byte));
         }
         // Read the command byte.
@@ -1849,6 +1853,8 @@ impl TelnetSession {
         let (mut ssh_reader, mut ssh_writer) = tokio::io::split(stream);
 
         let gw_filter = self.gateway_filter();
+        // Whether the *local* user's link is telnet -- see `speaks_telnet`.
+        let local_telnet = self.speaks_telnet();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let erase_char = self.erase_char;
@@ -1924,11 +1930,11 @@ impl TelnetSession {
                                 filter_buf.len(), gw_hexdump(&filter_buf));
                         }
                         let mut w = writer.lock().await;
-                        if w.write_all(&filter_buf).await.is_err() { break; }
+                        if write_local_data(&mut **w, &filter_buf, local_telnet).await.is_err() { break; }
                         if w.flush().await.is_err() { break; }
                     }
                 }
-                byte = read_byte_iac_filtered(reader, true) => {
+                byte = read_byte_iac_filtered(reader, local_telnet) => {
                     match byte {
                         Ok(Some(b)) => {
                             // ESC is forwarded like any other byte -- see
@@ -2010,7 +2016,7 @@ impl TelnetSession {
                             }
                             if !data.is_empty() {
                                 let mut w = writer.lock().await;
-                                if w.write_all(data).await.is_err() { break; }
+                                if write_local_data(&mut **w, data, local_telnet).await.is_err() { break; }
                                 if w.flush().await.is_err() { break; }
                             }
                             // Restart the release window from this read: a
@@ -2033,7 +2039,7 @@ impl TelnetSession {
         ansi_state.flush_pending(&mut filter_buf);
         if !filter_buf.is_empty() {
             let mut w = writer.lock().await;
-            let _ = w.write_all(&filter_buf).await;
+            let _ = write_local_data(&mut **w, &filter_buf, local_telnet).await;
             let _ = w.flush().await;
         }
 
@@ -2201,6 +2207,8 @@ impl TelnetSession {
         let (mut remote_reader, mut remote_writer) = remote.into_split();
 
         let gw_filter = self.gateway_filter();
+        // Whether the *local* user's link is telnet -- see `speaks_telnet`.
+        let local_telnet = self.speaks_telnet();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
@@ -2304,11 +2312,11 @@ impl TelnetSession {
                         let mut w = writer.lock().await;
                         // The same IAC escaping the read branch uses: one
                         // loop must not have two ways out to the client.
-                        if write_telnet_data(&mut **w, &filter_buf).await.is_err() { break; }
+                        if write_local_data(&mut **w, &filter_buf, local_telnet).await.is_err() { break; }
                         if w.flush().await.is_err() { break; }
                     }
                 }
-                event = read_gateway_event(reader) => {
+                event = read_gateway_event(reader, local_telnet) => {
                     match event {
                         Ok(GatewayInboundEvent::Data(b)) => {
                             // ESC is forwarded like any other byte -- see
@@ -2424,11 +2432,10 @@ impl TelnetSession {
                             }
                             if !data.is_empty() {
                                 let mut w = writer.lock().await;
-                                // Always IAC-escape when writing to the
-                                // local user — their client is a real
-                                // telnet peer and a literal 0xFF would
-                                // be misinterpreted as IAC.
-                                if write_telnet_data(&mut **w, data).await.is_err() { break; }
+                                // IAC-escaped only when the local user is on
+                                // telnet: an SSH or serial link is 8-bit
+                                // clean and would receive 0xFF twice.
+                                if write_local_data(&mut **w, data, local_telnet).await.is_err() { break; }
                                 if w.flush().await.is_err() { break; }
                             }
                             // As above: the window runs from the remote's
@@ -2455,7 +2462,7 @@ impl TelnetSession {
         ansi_state.flush_pending(&mut filter_buf);
         if !filter_buf.is_empty() {
             let mut w = writer.lock().await;
-            let _ = write_telnet_data(&mut **w, &filter_buf).await;
+            let _ = write_local_data(&mut **w, &filter_buf, local_telnet).await;
             let _ = w.flush().await;
         }
 
@@ -3136,6 +3143,8 @@ impl TelnetSession {
 
         let (mut bridge_read, mut bridge_write) = tokio::io::split(bridge);
 
+        // Whether the *local* user's link is telnet -- see `speaks_telnet`.
+        let local_telnet = self.speaks_telnet();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
@@ -3183,7 +3192,7 @@ impl TelnetSession {
                     // session and leak its max_sessions slot.
                     break;
                 }
-                event = read_gateway_event(reader) => {
+                event = read_gateway_event(reader, local_telnet) => {
                     match event {
                         Ok(GatewayInboundEvent::Data(b)) => {
                             // ESC is forwarded like any other byte -- see
@@ -3218,11 +3227,9 @@ impl TelnetSession {
                         Ok(n) => {
                             let data = &bridge_buf[..n];
                             let mut w = writer.lock().await;
-                            // Always IAC-escape on the wire to the
-                            // local user — they're a real telnet peer
-                            // and a literal 0xFF would be misread as
-                            // IAC.
-                            if write_telnet_data(&mut **w, data).await.is_err() {
+                            // IAC-escaped only when the local user is on
+                            // telnet -- see `speaks_telnet`.
+                            if write_local_data(&mut **w, data, local_telnet).await.is_err() {
                                 break;
                             }
                             if w.flush().await.is_err() {

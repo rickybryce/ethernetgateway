@@ -99,6 +99,23 @@ where
     Ok(())
 }
 
+/// Write `bytes` to the local user, IAC-escaped only if their link is telnet.
+///
+/// The gateways' half of [`TelnetSession::speaks_telnet`]: an SSH or serial
+/// user's link is 8-bit clean, so doubling `0xFF` there delivers two bytes
+/// where the remote sent one -- invisible in text, fatal to any file transfer
+/// run through the gateway.
+pub(crate) async fn write_local_data<W>(w: &mut W, bytes: &[u8], telnet: bool) -> std::io::Result<()>
+where
+    W: AsyncWriteExt + Unpin + ?Sized,
+{
+    if telnet {
+        write_telnet_data(w, bytes).await
+    } else {
+        w.write_all(bytes).await
+    }
+}
+
 impl TelnetSession {
     // ─── I/O helpers ───────────────────────────────────────
 
@@ -132,7 +149,7 @@ impl TelnetSession {
         if self.trace_bytes {
             glog!("cpmkey TX {} bytes: {}", bytes.len(), super::cpm_emu::render_bytes(bytes, 48));
         }
-        let needs_escape = !self.is_serial && !self.is_ssh;
+        let needs_escape = self.speaks_telnet();
         if !needs_escape || !bytes.contains(&IAC) {
             return self.writer.lock().await.write_all(bytes).await;
         }
@@ -252,7 +269,7 @@ impl TelnetSession {
             self.last_was_cr = b == b'\r';
             return Ok(Some(b));
         }
-        let filter_iac = !self.is_serial && !self.is_ssh;
+        let filter_iac = self.speaks_telnet();
         let mut buf = [0u8; 1];
         loop {
             // `mid_iac_cmd` is a resume point: if a previous call was cancelled
@@ -264,6 +281,7 @@ impl TelnetSession {
             // toggle within one call, so behavior is unchanged.
             if !self.mid_iac_cmd {
                 if self.reader.read(&mut buf).await? == 0 {
+                    self.peer_eof = true;
                     return Ok(None);
                 }
                 let byte = buf[0];
@@ -298,6 +316,7 @@ impl TelnetSession {
             }
             if self.reader.read(&mut buf).await? == 0 {
                 self.mid_iac_cmd = false;
+                self.peer_eof = true;
                 return Ok(None);
             }
             self.mid_iac_cmd = false;
@@ -314,6 +333,9 @@ impl TelnetSession {
                 }
                 SB => {
                     self.telnet_negotiated = true;
+                    // Not marked `peer_eof`: `None` here is also a 15 s stall,
+                    // and a slow peer is not a gone one.  A real EOF is seen
+                    // by the next read, which does mark it.
                     let Some(payload) = self.read_subneg_payload().await? else {
                         return Ok(None);
                     };
@@ -324,6 +346,7 @@ impl TelnetSession {
                 WILL | WONT | DO | DONT => {
                     self.telnet_negotiated = true;
                     if self.reader.read(&mut buf).await? == 0 {
+                        self.peer_eof = true;
                         return Ok(None);
                     }
                     let opt = buf[0];

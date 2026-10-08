@@ -2173,12 +2173,21 @@ const MAX_KERMIT_SUBDIR_LEN: usize = 255;
 /// that could escape the directory or hit a hidden file: separator
 /// characters, parent-traversal sequences, NUL bytes, leading dots,
 /// empty strings, and over-cap lengths.
+///
+/// **And `:`, which is a separator too, on Windows.**  `Path::join` with a
+/// drive-prefixed name (`C:x`, `D:\\`) *replaces* the base rather than
+/// extending it, so a peer naming `C:x` in a GET, an R/E/T/m/d command or a
+/// resume lookup was addressing whatever directory drive C: was sitting in --
+/// outside `transfer_dir`.  It also refuses NTFS alternate streams
+/// (`file.txt:hidden`).  Refused on every platform: one rule, and a colon is
+/// no ordinary filename character on any machine this talks to.
 pub(crate) fn is_safe_resume_filename(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_KERMIT_FILENAME_LEN
         && !name.starts_with('.')
         && !name.contains('/')
         && !name.contains('\\')
+        && !name.contains(':')
         && !name.contains("..")
         && !name.contains('\0')
 }
@@ -3850,6 +3859,32 @@ pub(crate) async fn kermit_receive_with_init_in(
     init_pkt: Option<Packet>,
     save_dir: &std::path::Path,
 ) -> Result<Vec<KermitReceive>, String> {
+    kermit_receive_committing(reader, writer, is_tcp, is_petscii, verbose, init_pkt, save_dir, |_| {})
+        .await
+}
+
+/// The receiver, with `on_complete` run on each file the moment it is
+/// complete and verified -- at its Z packet, **before** that Z is ACKed.
+///
+/// **A batch is not one transaction to the sender.**  Each file's Z is ACKed
+/// on its own, and to the peer an ACKed Z is a delivered file.  The server
+/// used to commit the whole batch only after the B packet, so an error on
+/// file three (a short file, a dropped line, an idle peer) returned `Err` and
+/// discarded files one and two that the sender had already been told were
+/// safe -- and held every file of the batch in memory until then.  The hook
+/// may take the record's `data` (the server frees it once written), and the
+/// record stays in the returned list either way for the summary.
+#[allow(clippy::too_many_arguments)]
+async fn kermit_receive_committing(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    init_pkt: Option<Packet>,
+    save_dir: &std::path::Path,
+    mut on_complete: impl FnMut(&mut KermitReceive),
+) -> Result<Vec<KermitReceive>, String> {
     let cfg = config::get_config();
     let save_dir_str = save_dir.to_string_lossy().into_owned();
     if verbose {
@@ -4744,6 +4779,12 @@ pub(crate) async fn kermit_receive_with_init_in(
                             last.data.len()
                         );
                     }
+                }
+                // Complete and verified: commit it before the sender hears
+                // the ACK that tells it the file is delivered.  Not after a
+                // discard -- `last` is then the previous file, already done.
+                if !discarded && let Some(last) = received.last_mut() {
+                    on_complete(last);
                 }
                 send_ack(
                     writer,
@@ -6048,7 +6089,25 @@ async fn kermit_server_dispatch(
                 // Into the session's `remote cd` directory, which is where
                 // the caller saves -- and so where a resume's partial is.
                 let into = session_dir(base, &subdir);
-                let mut received = kermit_receive_with_init_in(
+                // Each file is committed through the caller's hook at its
+                // own Z, before that Z is ACKed (see
+                // `kermit_receive_committing`): an error later in the batch
+                // cannot take back a file the sender was told was delivered.
+                //
+                // Stamped with the per-session subdir first, so the saver
+                // knows where to land it -- the receiver is subdir-oblivious,
+                // and without this a `remote cd assembly` followed by `put
+                // hello.txt` would silently land in the server's base.
+                //
+                // Then, unless the caller asked to retain it (`retain_data`,
+                // used only by the `#[cfg(test)]` `kermit_server` wrapper for
+                // round-trip assertions), the payload is freed: a long-lived
+                // server session (many uploads with no intervening
+                // Finish/BYE — the norm on the always-on serial and
+                // standalone-TCP Kermit servers, both reachable without auth)
+                // would otherwise hold every completed file in memory.  No
+                // production caller reads `.data` off the returned outcome.
+                let received = kermit_receive_committing(
                     reader,
                     writer,
                     is_tcp,
@@ -6056,6 +6115,13 @@ async fn kermit_server_dispatch(
                     verbose,
                     Some(pkt),
                     &into,
+                    |rx| {
+                        rx.subdir = subdir.clone();
+                        on_file(rx);
+                        if !retain_data {
+                            rx.data = Vec::new();
+                        }
+                    },
                 )
                 .await?;
                 if verbose {
@@ -6063,44 +6129,6 @@ async fn kermit_server_dispatch(
                         "Kermit server: S-dispatch returned {} file(s)",
                         received.len()
                     );
-                }
-                // Stamp every received file with the current per-session
-                // subdir so the saver knows where to land it.  The
-                // receiver state machine itself is subdir-oblivious —
-                // it just collects bytes — so without this step the
-                // `on_file` callback would join the filename onto the
-                // server's base folder and a `remote cd assembly`
-                // followed by `put hello.txt` would silently land in
-                // the wrong directory.
-                for rx in &mut received {
-                    rx.subdir = subdir.clone();
-                }
-                // Commit each file via the caller's hook before the
-                // next dispatch.  Doing this here (instead of after
-                // `kermit_server` returns) means the file is on disk
-                // by the time we go back to reading the next command,
-                // so a peer disconnect or idle-timeout afterwards
-                // can't strand the data in memory.
-                for rx in &received {
-                    on_file(rx);
-                }
-                // The on_file hook has committed each file to disk, so in
-                // production its payload is no longer needed.  Unless the
-                // caller asked to retain it (`retain_data`, used only by the
-                // `#[cfg(test)]` `kermit_server` wrapper for round-trip
-                // assertions), free the bytes before adding the record to
-                // `all_received`: a long-lived server session (many uploads
-                // with no intervening Finish/BYE — the norm on the always-on
-                // serial and standalone-TCP Kermit servers, both reachable
-                // without auth) would otherwise retain every completed file's
-                // full contents in memory until the session ended.  No
-                // production caller reads `.data` off the returned outcome —
-                // all committing goes through on_file — so keeping just the
-                // filename + metadata is enough for the post-session summary.
-                if !retain_data {
-                    for rx in &mut received {
-                        rx.data = Vec::new();
-                    }
                 }
                 all_received.extend(received);
                 continue;
@@ -8208,7 +8236,9 @@ mod tests {
     #[test]
     fn test_resume_reads_the_partial_from_the_save_directory() {
         let src = include_str!("kermit.rs").replace('\r', "");
-        let start = src.find("pub(crate) async fn kermit_receive_with_init_in(").expect("receiver");
+        // The receiver's body lives in `kermit_receive_committing`, which
+        // every public receiver delegates to.
+        let start = src.find("async fn kermit_receive_committing(").expect("receiver");
         let body = &src[start..];
         let body = &body[..body.find("\n}\n").expect("end of receiver")];
         let root = concat!("cfg.transfer", "_dir");
@@ -8350,6 +8380,10 @@ mod tests {
         assert!(!is_safe_resume_filename("win\\style"));
         assert!(!is_safe_resume_filename("nul\0byte"));
         assert!(!is_safe_resume_filename(".."));
+        // Windows: a drive prefix makes `Path::join` replace the base.
+        assert!(!is_safe_resume_filename("C:x"));
+        assert!(!is_safe_resume_filename("C:"));
+        assert!(!is_safe_resume_filename("file.txt:stream"));
     }
 
     #[test]
@@ -12200,6 +12234,66 @@ mod tests {
         assert!(
             output.windows(4).any(|w| w[0] == 0x01 && w[3] == b'E'),
             "expected an E-packet in the receiver's output"
+        );
+    }
+
+    /// **A file whose Z was ACKed is committed, whatever the batch does next.**
+    ///
+    /// To the sender an ACKed Z is a delivered file.  The server committed a
+    /// batch only after its B packet, so a failure on a later file -- here a
+    /// short one, refused with an E-packet -- returned `Err` and threw away
+    /// the earlier file the sender had already been told was safe.  Driven
+    /// through `kermit_server` itself, since the server is where the commit
+    /// happens.
+    #[tokio::test]
+    async fn test_server_commits_each_file_before_a_later_one_fails() {
+        let _guard = ConfigTestGuard::acquire().await;
+        let q = plain_peer_quoting();
+        let short = Attributes { length: Some(4096), ..Attributes::default() };
+        let mut wire = wire_with_send_init();
+        for (ty, seq, body) in [
+            (TYPE_FILE, 1, b"good.bin".to_vec()),
+            (TYPE_DATA, 2, encode_data(b"complete file", q)),
+            (TYPE_EOF, 3, Vec::new()),
+            (TYPE_FILE, 4, b"short.bin".to_vec()),
+            (TYPE_ATTRIBUTE, 5, encode_data(&encode_attributes(&short), q)),
+            (TYPE_DATA, 6, encode_data(b"a few bytes", q)),
+            (TYPE_EOF, 7, Vec::new()),
+        ] {
+            wire.extend_from_slice(&build_packet(ty, seq, &body, b'1', 0, 0, CR));
+        }
+
+        let (peer_to_gw, gw_in) = tokio::io::duplex(65536);
+        let (gw_out, peer_from_gw) = tokio::io::duplex(65536);
+        let (mut gw_r, _) = tokio::io::split(gw_in);
+        let (_, mut gw_w) = tokio::io::split(gw_out);
+        let (mut peer_r, mut peer_w) =
+            (tokio::io::split(peer_from_gw).0, tokio::io::split(peer_to_gw).1);
+        let peer = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            peer_w.write_all(&wire).await.ok();
+            let mut tmp = vec![0u8; 4096];
+            while let Ok(n) = peer_r.read(&mut tmp).await {
+                if n == 0 {
+                    break;
+                }
+            }
+            drop(peer_w);
+        });
+        let mut committed: Vec<(String, Vec<u8>)> = Vec::new();
+        let result = kermit_server(&mut gw_r, &mut gw_w, false, false, false, |rx| {
+            committed.push((rx.filename.clone(), rx.data.clone()));
+        })
+        .await;
+        drop(gw_w);
+        peer.await.unwrap();
+
+        let err = result.expect_err("the short second file must still be refused");
+        assert!(err.contains("truncated"), "unexpected failure: {err}");
+        assert_eq!(
+            committed,
+            vec![("good.bin".to_string(), b"complete file".to_vec())],
+            "the first file was ACKed and then not committed"
         );
     }
 

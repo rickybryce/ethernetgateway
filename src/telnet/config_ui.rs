@@ -664,7 +664,7 @@ impl TelnetSession {
 
     // ─── CP/M EMULATOR SETTINGS ──────────────────────────────
 
-    /// CP/M-emulator submenu, reached from Other Settings → `E`.
+    /// CP/M-emulator submenu, reached from Configuration → `C`.
     /// Holds the enable toggle (on by default) and the runaway instruction
     /// ceiling (millions of Z80 instructions per program run).  Its own
     /// screen so both fit comfortably inside the 22-row PETSCII budget.
@@ -2270,7 +2270,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press L, U, P, R, H, or Q.").await?;
+                    self.show_error("Press L, G, U, P, R, H, or Q.").await?;
                 }
             }
         }
@@ -3682,7 +3682,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press T, C, S, W, R, H, or Q.").await?;
+                    self.show_error("Press T, C, S, P, W, R, H, or Q.").await?;
                 }
             }
         }

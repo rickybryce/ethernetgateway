@@ -1112,7 +1112,14 @@ where
                 // keeps streaming files can't grow the in-memory list without
                 // limit — and so exactly MAX_BATCH_FILES are accepted (rejecting
                 // the (N+1)th's data outright), matching YMODEM/Kermit.
-                if files.len() >= MAX_BATCH_FILES {
+                //
+                // Counted on files *offered*, not accepted: a skipped ZFILE
+                // pushes nothing and resets the chatty-peer budget, so a peer
+                // offering file after file we decline (too large, refused by
+                // name) held the session -- and its `max_sessions` slot --
+                // for as long as it cared to.  `zfile_seen >= files.len()`
+                // always, so an all-accepted batch is bounded exactly as before.
+                if zfile_seen >= MAX_BATCH_FILES {
                     send_cancel(writer, is_tcp).await?;
                     return Err("ZMODEM batch exceeds file-count limit".into());
                 }
@@ -3330,6 +3337,29 @@ mod tests {
             err.contains("file-count"),
             "must reject for the file-count cap specifically, got: {err}"
         );
+    }
+
+    /// **Declined files count toward the cap too.**  A skipped ZFILE pushes
+    /// nothing and resets the progress budget, so a peer offering files we
+    /// refuse could hold the session indefinitely.
+    #[tokio::test]
+    async fn test_zmodem_batch_cap_counts_skipped_files() {
+        let batch: Vec<(String, Vec<u8>)> = (0..=MAX_BATCH_FILES)
+            .map(|i| (format!("f{i}.dat"), Vec::new()))
+            .collect();
+        let (sender_half, receiver_half) = tokio::io::duplex(1 << 20);
+        let (mut s_read, mut s_write) = tokio::io::split(sender_half);
+        let (mut r_read, mut r_write) = tokio::io::split(receiver_half);
+        let send_task = tokio::spawn(async move {
+            let refs: Vec<(&str, &[u8])> =
+                batch.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+            zmodem_send(&mut s_read, &mut s_write, &refs, false, false).await
+        });
+        let recv_result =
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| false).await;
+        send_task.abort();
+        let Err(err) = recv_result else { panic!("an endless run of declined files must end") };
+        assert!(err.contains("file-count"), "must end on the file-count cap, got: {err}");
     }
 
     #[tokio::test]

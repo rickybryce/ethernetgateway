@@ -420,8 +420,7 @@ impl CpmModem {
     /// `host:port`.
     /// Carrier-wait timeout for a local serial-port peer-dial, from S7
     /// (seconds; power-on default 50).  `S7=0` selects the built-in
-    /// `ANSWER_WAIT` fallback.  Only the peer-dial path consults this; a TCP
-    /// `ATDT host:port` uses the OS connect timeout.
+    /// `ANSWER_WAIT` fallback.  Bounds a TCP `ATDT host:port` connect too.
     fn carrier_wait(&self) -> Duration {
         match self.s_regs[7] {
             0 => ANSWER_WAIT,
@@ -547,7 +546,16 @@ impl CpmModem {
         // A phone number is looked up in the dialup phonebook, as on the
         // physical modem; anything else is taken as a host.
         if let Some((host, port)) = resolve_host_port(t) {
-            match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+            // Bounded by S7, like every other dial here and the physical
+            // modem's: an unbounded connect to a host that drops SYNs waits
+            // out the OS's own retry schedule (over two minutes on Linux),
+            // and the guest -- spinning on its UART status for a result code
+            // -- looks hung for all of it.
+            let connect = tokio::net::TcpStream::connect((host.as_str(), port));
+            match tokio::time::timeout(self.carrier_wait(), connect)
+                .await
+                .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
+            {
                 Ok(stream) => {
                     self.conn = Some(Box::new(stream));
                     self.mode = Mode::Online;
@@ -965,6 +973,23 @@ fn parse_host_port(t: &str) -> Option<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The outbound TCP dial is bounded by S7.**  A connect to a host that
+    /// drops SYNs waited out the OS retry schedule -- minutes -- with the guest
+    /// polling for a result code.  Pinned on the source: no loopback peer can
+    /// make a connect hang, and a test reaching for a black-holed address is a
+    /// test that depends on the network it runs on.
+    #[test]
+    fn test_the_tcp_dial_is_bounded_by_s7() {
+        let src = include_str!("cpm_modem.rs").replace("\r\n", "\n");
+        let src = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert_eq!(src.matches("TcpStream::connect(").count(), 1, "a second TCP connect appeared");
+        let at = src.find("TcpStream::connect(").unwrap();
+        assert!(
+            src[at..].starts_with("TcpStream::connect((host.as_str(), port));\n            match tokio::time::timeout(self.carrier_wait(), connect)"),
+            "the dial's connect is no longer bounded by S7"
+        );
+    }
 
     #[tokio::test]
     async fn test_disabled_is_inert() {

@@ -219,6 +219,35 @@ struct BootDisk {
 /// frequent enough that typing feels immediate and rare enough to be free.
 const KEY_POLL_INTERVAL: u64 = 20_000;
 
+/// How long the guest's console queue may sit full before the pump reads its
+/// client again regardless.
+///
+/// **Full is backpressure, until it is a wedge.**  The pump stops reading the
+/// client while the guest's queue is full, so a pasted file waits in the socket
+/// (and the sender's flow control) instead of everything past 4 KB being
+/// dropped.  But `ESC ESC` is read off that same socket, and a guest that has
+/// stopped reading its console altogether would then hold the user in it with
+/// no way out.  A guest that is reading drains a byte at least every few
+/// milliseconds; one that leaves the queue full for this long is not reading,
+/// and the pump goes back to reading -- and dropping, as a real UART would --
+/// so the way out works.
+const KEY_STALL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether the pump may read client bytes at this seam: whenever the guest's
+/// queue has room, and once it has sat full for [`KEY_STALL`].
+fn may_read_keys(
+    room: usize,
+    full_since: &mut Option<tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> bool {
+    if room > 0 {
+        *full_since = None;
+        return true;
+    }
+    let since = *full_since.get_or_insert(now);
+    now.duration_since(since) >= KEY_STALL
+}
+
 /// Instructions between yields to the runtime.
 ///
 /// Without this the emulator loop starves every other task on the thread —
@@ -1326,6 +1355,8 @@ impl TelnetSession {
         // the bound on an abandoned session is the operator's idle timeout,
         // exactly as it is for a program parked on a blocking modem read.
         let mut last_key = tokio::time::Instant::now();
+        // When the guest's console queue was first seen full -- see `KEY_STALL`.
+        let mut keys_full_since: Option<tokio::time::Instant> = None;
 
         loop {
             // `step`, not `execute_instruction`: a blocking console needs the
@@ -1364,8 +1395,22 @@ impl TelnetSession {
                 // Drain everything waiting rather than one byte per seam, so a
                 // pasted command or a file being sent into the guest's console
                 // moves at the wire's pace instead of one byte per 20,000
-                // instructions.  Bounded so a flood cannot hold the loop here.
-                while keys < 256 {
+                // instructions.  Bounded so a flood cannot hold the loop here,
+                // and by the guest's queue, so a paste longer than it waits
+                // rather than being dropped (`KEY_STALL`).
+                let room = machine.key_room();
+                let budget = if !may_read_keys(room, &mut keys_full_since, tokio::time::Instant::now()) {
+                    0
+                } else if room == 0 {
+                    // Wedged: read -- and drop -- at the full rate, so ESC ESC
+                    // behind a pasted backlog gets out in seconds, and a serial
+                    // caller's input pipe drains before its write timeout hangs
+                    // the call up.  One byte a seam would take an hour.
+                    256
+                } else {
+                    room.min(256)
+                };
+                while keys < budget {
                     let Some(read) = poll_once(self.session_read_byte()) else {
                         break; // nothing waiting right now
                     };
@@ -1584,6 +1629,34 @@ impl TelnetSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A full console queue holds the client back, until the guest is
+    /// plainly not reading.**  Past 4 KB a paste used to be dropped; now the
+    /// pump stops reading while the queue is full -- but not for ever, or a
+    /// wedged guest would leave `ESC ESC` unread in the socket.
+    #[test]
+    fn test_a_full_console_queue_pauses_reading_until_it_is_a_wedge() {
+        let t0 = tokio::time::Instant::now();
+        let mut full_since = None;
+        assert!(may_read_keys(10, &mut full_since, t0), "room means read");
+        assert!(!may_read_keys(0, &mut full_since, t0), "full means wait, not drop");
+        assert!(!may_read_keys(0, &mut full_since, t0 + KEY_STALL / 2), "still waiting");
+        assert!(may_read_keys(0, &mut full_since, t0 + KEY_STALL), "a wedge reads again");
+        // A guest that drains a byte resets the clock, so a slow reader is
+        // backpressure and never a wedge.
+        assert!(may_read_keys(1, &mut full_since, t0 + KEY_STALL));
+        assert!(!may_read_keys(0, &mut full_since, t0 + KEY_STALL * 2));
+
+        // The pump asks the machine, rather than reading regardless -- and
+        // reads at the full rate once wedged.  Production source only: the
+        // slice must not run into this test, whose own literals would match.
+        let src = include_str!("cpm_boot_ui.rs").replace("\r\n", "\n");
+        let src = &src[..src.find("#[cfg(test)]\nmod tests").expect("the test module")];
+        let at = src.find("let room = machine.key_room();").expect("the pump reads key_room");
+        let pump = &src[at..at + src[at..].find("while keys < budget {").expect("the read loop honours the budget")];
+        assert!(pump.contains("room.min(256)"), "the budget no longer comes from the queue's room");
+        assert!(pump.contains("} else if room == 0 {\n                    // Wedged"), "the wedge case lost its branch");
+    }
 
     /// **The monitor-ROM warning fits a C64 and says what to do about it.**
     ///

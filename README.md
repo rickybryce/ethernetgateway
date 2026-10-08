@@ -95,7 +95,8 @@ options, and the full AT command set.
   independent serial ports**, each selectable as *Modem*, *Telnet-Serial
   console bridge*, or *always-on Kermit server*.
 - **Outbound gateways** — proxy a telnet session to a remote **telnet** or
-  **SSH** host (ANSI stripped for PETSCII/ASCII terminals, and the remote's
+  **SSH** host (ANSI translated to PETSCII colour and cursor control for a
+  Commodore, stripped for ASCII terminals, and the remote's
   window-title sequence dropped for everyone, since no terminal here has a
   title bar; TOFU host-key verification for SSH). A single **ESC** goes
   through to the remote, so `vi` and friends work; two in quick succession

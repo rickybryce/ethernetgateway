@@ -1504,6 +1504,7 @@ impl TelnetSession {
         // Show rings as they happen.  Q or ESC cancels (drops rx
         // which signals the serial thread to abort).  Timeout if the
         // serial thread never picks up the request.
+        let local_telnet = self.speaks_telnet();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
@@ -1537,7 +1538,7 @@ impl TelnetSession {
                         _ => break, // channel closed
                     }
                 }
-                byte = read_byte_iac_filtered(reader, true) => {
+                byte = read_byte_iac_filtered(reader, local_telnet) => {
                     match byte {
                         Ok(Some(b)) if is_esc_key(b, is_petscii)
                             || b == b'q' || b == b'Q' =>

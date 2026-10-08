@@ -982,7 +982,10 @@ IAC DO   NAWS     <span class="output-text">"tell me your window size"</span></c
                 </div>
                 <div class="callout callout-info">
                     <strong>Output filtering is shared with the SSH gateway.</strong> A
-                    PETSCII or ASCII terminal has every escape sequence from the remote
+                    PETSCII terminal has the remote's escape sequences translated where a
+                    Commodore has an equivalent (colour, reverse video, clear, home, cursor
+                    moves) and dropped where it has none, unless
+                    <code>gateway_petscii_translate</code> makes the gateway a plain pipe; an ASCII terminal has every one
                     stripped; an ANSI terminal keeps them, less the remote's window-title
                     sequence (<code>ESC ] 0 ; &hellip; BEL</code>), which is dropped for
                     every terminal type because no client here has a title bar and a

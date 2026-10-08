@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SSH Reference &mdash; Ethernet Gateway v1.0.4</title>
-    <meta name="description" content="Reference for the Ethernet Gateway SSH implementation (russh): the inbound SSH server (Ed25519 host key, unified credentials, per-IP lockout, the duplex bridge to a session), and the outbound SSH gateway/proxy (trust-on-first-use host-key verification against gateway_hosts, password or gateway-key authentication, ANSI stripping for PETSCII/ASCII terminals, and window-title removal for every terminal type).">
+    <meta name="description" content="Reference for the Ethernet Gateway SSH implementation (russh): the inbound SSH server (Ed25519 host key, unified credentials, per-IP lockout, the duplex bridge to a session), and the outbound SSH gateway/proxy (trust-on-first-use host-key verification against gateway_hosts, password or gateway-key authentication, ANSI translated to PETSCII for Commodore terminals and stripped for ASCII ones, and window-title removal).">
     <style>
         :root {
             --green: #33ff33;
@@ -734,7 +734,7 @@
                         <li>Enter the remote <strong>hostname / IP</strong>, the <strong>port</strong> (default 22), and your <strong>username</strong> on the remote.</li>
                         <li>The gateway connects and verifies the remote's <strong>host key</strong> against <code>gateway_hosts</code> (see <a href="#hostkey">Host-Key Verification</a>).</li>
                         <li>It authenticates using the <strong>one configured method</strong> &mdash; password <em>or</em> gateway key (see <a href="#auth">Authentication</a>).</li>
-                        <li>On success you get a full interactive shell. ANSI from the remote is stripped for PETSCII / ASCII terminals, and the remote's window-title sequence is dropped for everyone (see <a href="#ansi">ANSI Filtering</a>).</li>
+                        <li>On success you get a full interactive shell. ANSI from the remote is translated to PETSCII colour and cursor control for a Commodore and stripped for an ASCII terminal, and the remote's window-title sequence is dropped for everyone (see <a href="#ansi">ANSI Filtering</a>).</li>
                         <li>Press <strong>Esc</strong> twice <em>quickly</em> (PETSCII: the back-arrow key twice) to disconnect and return to the menu. A single Esc is passed through to the remote, so ESC-driven software keeps working &mdash; see <a href="#esc">The Esc Key</a>.</li>
                     </ol>
                 </div>
@@ -885,11 +885,19 @@ example.com:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
                 <div class="section-title">ANSI Filtering for Vintage Terminals</div>
                 <p class="intro">A remote shell assumes a VT-style terminal. A Commodore 64 isn't one.</p>
                 <p class="dim-text">
-                    When you reach the SSH gateway from a <strong>PETSCII</strong> or
-                    <strong>ASCII</strong> terminal, the gateway strips ANSI escape sequences
-                    from the remote's output &mdash; CSI, OSC, DCS, PM, APC, and SOS
-                    sequences &mdash; so raw colour and cursor-control codes don't splatter
-                    across a screen that can't interpret them. The escape-state machine is
+                    When you reach the SSH gateway from an <strong>ASCII</strong> terminal,
+                    the gateway strips ANSI escape sequences from the remote's output
+                    &mdash; CSI, OSC, DCS, PM, APC, and SOS sequences &mdash; so raw colour
+                    and cursor-control codes don't splatter across a screen that can't
+                    interpret them. A <strong>PETSCII</strong> terminal gets the same
+                    filter with one difference: what a Commodore <em>can</em> show is
+                    <strong>translated</strong> rather than dropped &mdash; SGR colour,
+                    reverse video, clear screen, home and the four cursor moves become
+                    single PETSCII control bytes &mdash; and only what it has no equivalent
+                    for (cursor addressing, background colour) is discarded. That is the
+                    default; with <code>gateway_petscii_translate</code> (or the port's own
+                    setting) off, the gateway is a plain pipe for a Commodore-aware host and
+                    translates nothing. The escape-state machine is
                     carried across reads so sequences split over packet boundaries are still
                     caught. <strong>ANSI</strong> terminals keep their sequences &mdash;
                     colour and cursor addressing are why the terminal asked for ANSI in the

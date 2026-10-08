@@ -226,6 +226,12 @@ pub fn parse_intel_hex(text: &str) -> Result<Vec<(u16, Vec<u8>)>, String> {
         }
         let at = || format!("line {}", n + 1);
         let body = line.strip_prefix(':').ok_or_else(|| format!("{}: no ':'", at()))?;
+        // ASCII first: the pairs below are sliced by byte offset, and a
+        // multi-byte character puts a slice boundary inside it -- a panic, not
+        // an error, from one stray `é` in a hand-edited file.
+        if !body.is_ascii() {
+            return Err(format!("{}: not hexadecimal", at()));
+        }
         if body.len() < 10 || body.len() % 2 != 0 {
             return Err(format!("{}: truncated record", at()));
         }
@@ -280,10 +286,13 @@ pub fn image_from_bytes(f: &RomFile, raw: &[u8]) -> Result<RomImage, String> {
     };
     let (lo, hi) = f.span;
     for (at, bytes) in &chunks {
-        let last = at
-            .checked_add(bytes.len().saturating_sub(1) as u16)
-            .ok_or_else(|| format!("a record at {at:04X} runs past the top of memory"))?;
-        if *at < lo || last > hi {
+        // Widened before adding: `len - 1` cast to `u16` wrapped, so a raw file
+        // of 65 537 bytes measured as one byte long and passed the window.
+        let last = *at as usize + bytes.len().saturating_sub(1);
+        if last > u16::MAX as usize {
+            return Err(format!("a record at {at:04X} runs past the top of memory"));
+        }
+        if *at < lo || last > hi as usize {
             return Err(format!(
                 "it puts bytes at {at:04X}-{last:04X}, outside {lo:04X}-{hi:04X} — \
                  this is not the ROM this setting expects"
@@ -537,6 +546,22 @@ mod tests {
         let too_long = vec![0u8; 0x900];
         assert!(image_from_bytes(f, &too_long).is_err(), "past the window");
         assert!(image_from_bytes(f, &[]).is_err(), "an empty file says nothing");
+        // The length used to be cast to `u16` before adding, so 65 537 bytes
+        // measured as one and passed the window.
+        let wraps = vec![0u8; 0x1_0001];
+        assert!(image_from_bytes(f, &wraps).is_err(), "a 64K+1 file wrapped past the check");
+    }
+
+    /// **A non-ASCII character is an error, not a panic.**  Records are sliced
+    /// by byte offset in pairs, and a multi-byte character puts a boundary
+    /// inside it.
+    #[test]
+    fn test_a_non_ascii_hex_file_is_refused_not_a_panic() {
+        // The first splits `é` across a pair boundary, which is the panic.
+        for text in [":1é00000000000\n", ":10C0é0000000000\n", ":é\n"] {
+            let err = parse_intel_hex(text).expect_err("non-ASCII must be refused");
+            assert!(err.contains("not hexadecimal"), "{text:?} gave {err:?}");
+        }
     }
 
     /// A file that is not there is an error naming the path, not a silent `off`

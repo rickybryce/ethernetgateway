@@ -905,6 +905,22 @@ impl TelnetSession {
                 }
             };
 
+            // **Locked out is checked per guess, not per session.**  Checked
+            // only on arrival, every connection already sitting at a prompt
+            // when the lockout tripped still had its guess verified -- one
+            // extra guess per open session (and `conn_rate_max` allows twenty
+            // a minute), and a correct one would log in from a locked-out
+            // address.  Refused before the KDF runs, so it costs nothing.
+            if let Some(ip) = self.peer_addr
+                && is_locked_out(&self.lockouts, ip)
+            {
+                glog!("Telnet: auth rejected for {} (locked out mid-login)", ip);
+                self.send_line(&format!("  {}", self.red("Too many attempts. Try later.")))
+                    .await?;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                return Ok(false);
+            }
+
             // Evaluate BOTH comparisons before combining (no `&&`
             // short-circuit): short-circuiting skips the password compare when
             // the username is wrong, so the response time would leak whether
@@ -1214,7 +1230,14 @@ impl TelnetSession {
                 // error.
                 Some(_) => continue,
                 None => {
-                    // ESC pressed, or the session dropped — go to main menu.
+                    // A dropped session ends here.  It used to be "go to the
+                    // main menu" like ESC, which on the main menu itself is a
+                    // redraw -- so a half-closed peer (writes still succeed)
+                    // spun this loop for ever.  See `peer_eof`.
+                    if self.peer_eof {
+                        break;
+                    }
+                    // ESC pressed — go to main menu.
                     if self.current_menu == Menu::Browser {
                         self.web_reset();
                     }

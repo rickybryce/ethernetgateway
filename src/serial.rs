@@ -3723,15 +3723,17 @@ fn serial_thread(
     let restart_flag = &SERIAL_RESTART[id.index()];
     let mut port_lost = false;
     while !state.shutdown.load(Ordering::SeqCst) && !restart_flag.load(Ordering::SeqCst) {
-        // Check for a pending ring request.
-        if state.mode == ModemMode::Command
+        // Check for a pending ring request.  Not while a call is parked: see
+        // `line_free_for_incoming`.
+        let line_free = line_free_for_incoming(state.mode, state.active_connection.is_some());
+        if line_free
             && let Some(sender) = take_ring_request(id)
         {
             process_ring(&mut state, sender);
             continue;
         }
         // Check for a pending peer-dial call (another port dialed us).
-        if state.mode == ModemMode::Command
+        if line_free
             && let Some(call) = take_peer_call_request(id)
         {
             process_peer_ring(&mut state, call);
@@ -6882,6 +6884,24 @@ fn ring_loop(state: &mut ModemState, progress: &tokio::sync::mpsc::Sender<u8>) -
     }
 }
 
+/// Whether this port may take an incoming call (a Ring Emulator ring or a
+/// peer dial) right now.
+///
+/// **A call parked by `+++` holds the line.**  Both answer paths assign
+/// `active_connection` outright, so taking a call while one was parked
+/// silently dropped the parked call -- and a parked `Relay` dropped that way
+/// runs russh's `Drop` on this bare serial thread, which spawns onto a tokio
+/// runtime that is not there and panics.  A real modem with a call up gives
+/// the next caller a busy line, so the request is simply left in its slot:
+/// a peer caller hears `BUSY` once its answer wait runs out (its own `S7`, or
+/// `RELAY_PEER_ANSWER_WAIT` on a relay leg -- `request_peer_call` checks the
+/// pickup deadline only when a message arrives, and none will) and its guard
+/// reclaims the slot; the Ring Emulator times out and cancels.  `ATH`,
+/// `ATZ` or a dial frees the line, and a still-waiting caller then rings.
+fn line_free_for_incoming(mode: ModemMode, call_parked: bool) -> bool {
+    mode == ModemMode::Command && !call_parked
+}
+
 /// Simulate an incoming call from the telnet "Ring Emulator": ring per the
 /// port's AT rules and, on answer, drop the device into the gateway menu.
 fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
@@ -9078,6 +9098,33 @@ mod tests {
         // Take Port A's request to clean up
         assert!(take_ring_request(id).is_some());
         assert!(take_ring_request(id).is_none());
+    }
+
+    /// **A call parked by `+++` holds the line against incoming calls.**
+    ///
+    /// Both answer paths assign `active_connection` outright, so answering
+    /// over a parked call dropped it -- and a parked `Relay` dropped on the
+    /// bare serial thread panics in russh's `Drop`.  The rule is pinned, and so
+    /// is the main loop's use of it, because a predicate nobody calls is a
+    /// guard that cannot go red.
+    #[test]
+    fn test_a_parked_call_holds_the_line_against_incoming_calls() {
+        assert!(line_free_for_incoming(ModemMode::Command, false));
+        assert!(!line_free_for_incoming(ModemMode::Command, true), "answered over a parked call");
+        assert!(!line_free_for_incoming(ModemMode::Online, false));
+        assert!(!line_free_for_incoming(ModemMode::Online, true));
+
+        let src = include_str!("serial.rs").replace("\r\n", "\n");
+        let call = "line_free_for_incoming(state.mode, state.active_connection.is_some())";
+        let at = src.find(&format!("let line_free = {call};")).expect("the modem loop computes line_free");
+        let lp = &src[at..at + 800];
+        for take in ["Some(sender) = take_ring_request(id)", "Some(call) = take_peer_call_request(id)"] {
+            assert!(
+                lp.contains(&format!("if line_free\n            && let {take}")),
+                "the modem loop takes {take} without asking whether the line is free"
+            );
+        }
+        assert_eq!(lp.matches("if line_free\n").count(), 2, "one of the two takes lost its gate");
     }
 
     #[test]

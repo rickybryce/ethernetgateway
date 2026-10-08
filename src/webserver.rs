@@ -2458,10 +2458,20 @@ fn render_master_password_panel() -> String {
     }
     out.push_str(&para);
     out.push_str("</p>");
-    // Its own form: the main settings form must not carry this, or saving any
-    // unrelated setting would submit an empty password and read as "clear it".
+    // Fields of the main form, like the resolve buttons -- never a `<form>` of
+    // its own.  HTML has no nested forms: the parser drops the inner start tag
+    // and the inner `</form>` closes the *outer* one, which detached every
+    // setting below this panel from the page's form and made this button post
+    // a lone password to `/save` (no checkboxes, so every boolean saved as
+    // off).  An empty box riding along on an unrelated Save is harmless:
+    // `apply_form_post` acts only on the button's name and a non-empty value.
+    // `new-password`, not `off`: browsers ignore `off` on a password box, and
+    // an autofilled one would ride along on every Enter-key save.
     out.push_str(
-        "<form method=\"post\" action=\"/master-password\" style=\"margin-top:.6em\">         <input type=\"password\" name=\"master_password\" placeholder=\"Master password\"          style=\"max-width:18em\">          <button type=\"submit\">Save and retry</button></form>",
+        "<div style=\"margin-top:.6em\">\
+         <input type=\"password\" name=\"master_password_entry\" placeholder=\"Master password\" \
+         autocomplete=\"new-password\" style=\"max-width:18em\"> \
+         <button type=\"submit\" name=\"master_password_save\" value=\"1\">Save and retry</button></div>",
     );
     out.push_str("</div>");
     out
@@ -6320,6 +6330,40 @@ mod tests {
         );
 
         crate::relay::clear_pending_master_password();
+    }
+
+    /// **The master-password panel is part of the page's one form.**
+    ///
+    /// It used to be a `<form>` of its own inside `cfg-form`.  HTML has no
+    /// nested forms: the inner start tag is dropped and the inner `</form>`
+    /// closes the outer one, so while the panel was shown every setting below
+    /// it was outside any form, and its button posted a lone password to
+    /// `/save` -- no checkboxes, so every boolean saved as off.  Both halves are
+    /// pinned: one form on the page, and the names the panel submits are the
+    /// ones `apply_form_post` reads (they had drifted apart as well).
+    #[test]
+    fn test_the_master_password_panel_is_inside_the_one_form() {
+        let _lock = crate::relay::key_auth_test_lock();
+        crate::relay::note_master_credential_needed("192.0.2.1", 2222);
+        let html = render_main_page(&Config::default(), None, false);
+        crate::relay::clear_master_credential_needed();
+
+        let panel = html.find("Master password needed").expect("the panel is shown while needed");
+        assert_eq!(html.matches("<form").count(), 1, "a second <form> on the page");
+        assert_eq!(html.matches("</form>").count(), 1, "a second </form> on the page");
+        let (start, end) = (html.find("<form").unwrap(), html.find("</form>").unwrap());
+        assert!(start < panel && panel < end, "the panel is outside the form");
+
+        let src = include_str!("webserver.rs").replace("\r\n", "\n");
+        let body = &src[src.find("fn apply_form_post(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        for (rendered, read) in [
+            ("name=\"master_password_entry\"", "fields.get(\"master_password_entry\")"),
+            ("name=\"master_password_save\"", "fields.contains_key(\"master_password_save\")"),
+        ] {
+            assert!(html[panel..end].contains(rendered), "the panel no longer submits {rendered}");
+            assert!(body.contains(read), "apply_form_post no longer reads {read}");
+        }
     }
 
     /// **A connected relay must not be able to blank its own credentials.**

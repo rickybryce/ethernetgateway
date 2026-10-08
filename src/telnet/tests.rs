@@ -426,6 +426,52 @@ fn test_lockout_flow() {
     assert!(!is_locked_out(&lockouts, ip));
 }
 
+/// **A lockout that trips mid-login stops the next guess.**  It was checked
+/// once, on arrival, so a session already at the password prompt when the
+/// address locked still had its guess verified -- an extra guess per open
+/// connection, and a correct one would have logged in.  Observed through the
+/// failure count: a guess refused unverified records nothing.
+#[tokio::test]
+async fn test_a_lockout_is_checked_before_every_guess() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let (mut s, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+    let ip: IpAddr = "192.0.2.77".parse().unwrap();
+    s.peer_addr = Some(ip);
+    let lockouts = s.lockouts.clone();
+    let driver = async {
+        peer.write_all(b"nobody\r").await.unwrap();
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 256];
+        while !String::from_utf8_lossy(&seen).contains("Password:") {
+            let n = peer.read(&mut buf).await.unwrap();
+            assert!(n > 0, "the session hung up before asking for a password");
+            seen.extend_from_slice(&buf[..n]);
+        }
+        // Another connection from the same address uses up the budget.
+        for _ in 0..MAX_AUTH_ATTEMPTS {
+            record_auth_failure(&lockouts, ip);
+        }
+        peer.write_all(b"guess\r").await.unwrap();
+        // Keep draining so the session's writes never block.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while peer.read(&mut buf).await.map(|n| n > 0).unwrap_or(false) {}
+        })
+        .await;
+    };
+    let (ok, ()) = tokio::join!(
+        async {
+            let r = s.authenticate().await;
+            drop(s);
+            r
+        },
+        driver
+    );
+    assert!(!ok.unwrap(), "a locked-out address logged in");
+    let count = lockouts.lock().unwrap().get(&ip).map(|e| e.0);
+    assert_eq!(count, Some(MAX_AUTH_ATTEMPTS), "the guess was verified after the lockout tripped");
+}
+
 #[test]
 fn test_lockout_different_ips() {
     let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
@@ -951,6 +997,25 @@ fn test_petscii_color() {
     assert_eq!(*result.as_bytes().last().unwrap(), PETSCII_DEFAULT);
 }
 
+/// **A half-closed peer ends the session; it does not spin the main menu.**
+///
+/// Every prompt maps EOF to the same `None` as ESC, and the main menu answered
+/// ESC by redrawing itself -- so a client that shut its sending side (writes
+/// still succeed) had the loop redraw, read EOF and redraw for ever, holding a
+/// `max_sessions` slot.  The reader here is at EOF from the first byte and the
+/// writer accepts everything, which is exactly a half-closed socket.
+#[tokio::test]
+async fn test_a_half_closed_peer_ends_the_menu_loop() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let mut s = make_test_session(TerminalType::Ansi);
+    s.reader = Box::new(tokio::io::empty());
+    let sink: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = Box::new(tokio::io::sink());
+    s.writer = Arc::new(tokio::sync::Mutex::new(sink));
+    let done = tokio::time::timeout(std::time::Duration::from_secs(10), s.run_menu_loop()).await;
+    assert!(done.is_ok(), "the main menu spun on a closed reader");
+    assert!(s.peer_eof, "EOF was not recorded");
+}
+
 // ─── Test session helper ─────────────────────────────
 
 /// Build a minimal TelnetSession with the given terminal type for testing
@@ -999,6 +1064,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         idle_timeout: std::time::Duration::ZERO,
         pushback: None,
         mid_iac_cmd: false,
+        peer_eof: false,
         last_was_cr: false,
         neg_sent_will: Box::new([false; 256]),
         neg_sent_do: Box::new([false; 256]),
@@ -1063,6 +1129,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         idle_timeout: std::time::Duration::ZERO,
         pushback: None,
         mid_iac_cmd: false,
+        peer_eof: false,
         last_was_cr: false,
         neg_sent_will: Box::new([false; 256]),
         neg_sent_do: Box::new([false; 256]),
@@ -3015,7 +3082,7 @@ fn test_all_menu_items_fit_petscii() {
         "  F  Set log file name",
         "  S  Set rotate size (KB, 0 = never)",
         "  K  Set old logs to keep (0 = none)",
-        // CP/M emulator submenu (Other Settings -> E)
+        // CP/M emulator submenu (Configuration -> C)
         "  E  Toggle emulator on/off",
         "  C  Set runaway ceiling (M-instr)",
         "  U  Cycle virtual-modem port",
@@ -3492,6 +3559,45 @@ fn test_cpm_settings_row_count() {
     let rows = header + warning + status + actions + footer;
     assert_eq!(rows, 22, "the CP/M settings screen is {rows} rows");
     assert!(rows <= 22, "CP/M settings is {rows} rows, exceeds 22");
+}
+
+/// **The Security and Gateway screens hint every key they draw.**  Security
+/// drew `G` (block outbound gateway connections) and Gateway drew `P` and
+/// handled both, but each wrong-key hint left its key out -- so the one line
+/// meant to say what this screen accepts disagreed with the screen.  The keys
+/// are read out of the function itself (drawn rows and the Back/Help prompts)
+/// rather than listed here, so a key added later is checked too.
+#[test]
+fn test_security_and_gateway_hints_list_every_drawn_key() {
+    let src = include_str!("config_ui.rs").replace("\r\n", "\n");
+    for name in ["async fn security_settings(", "async fn gateway_configuration("] {
+        let start = src.find(name).unwrap_or_else(|| panic!("{name} not found"));
+        let next = src[start + name.len()..].find("async fn ").expect("a following fn");
+        let body = &src[start..start + name.len() + next];
+        let hint_at = body.find("show_error(\"Press ").expect("a wrong-key hint");
+        let hint = &body[hint_at..hint_at + body[hint_at..].find(".\")").unwrap()];
+        let mut drawn: Vec<char> = Vec::new();
+        for pat in ["self.cyan(\"", "self.action_prompt(\""] {
+            for (i, _) in body.match_indices(pat) {
+                // A key label is one character; `cyan("gateway/...")` is the prompt.
+                let rest = &body[i + pat.len()..];
+                let k = rest.chars().next().unwrap();
+                if !rest[k.len_utf8()..].starts_with('"') {
+                    continue;
+                }
+                if !drawn.contains(&k) {
+                    drawn.push(k);
+                }
+            }
+        }
+        assert!(drawn.len() >= 4, "{name}: read only {drawn:?} -- this scan is not reading the screen");
+        for k in drawn {
+            assert!(hint.contains(&format!("{k},")) || hint.contains(&format!("or {k}")),
+                "{name}: {k} is drawn but missing from `{hint}`");
+            assert!(body.contains(&format!("\"{}\" =>", k.to_ascii_lowercase())),
+                "{name}: {k} is drawn but never handled");
+        }
+    }
 }
 
 /// Every key the CP/M settings screen displays must also be one it handles,
@@ -8637,28 +8743,28 @@ fn test_qmethod_error_recovery_will_in_wantno() {
 #[tokio::test]
 async fn test_gateway_event_data_byte() {
     let mut data = &b"Ahello"[..];
-    let ev = read_gateway_event(&mut data).await.unwrap();
+    let ev = read_gateway_event(&mut data, true).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(b'A'));
 }
 
 #[tokio::test]
 async fn test_gateway_event_iac_iac_unescapes() {
     let mut data: &[u8] = &[IAC, IAC, b'B'];
-    let ev = read_gateway_event(&mut data).await.unwrap();
+    let ev = read_gateway_event(&mut data, true).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(0xFF));
 }
 
 #[tokio::test]
 async fn test_gateway_event_drops_2byte_iac() {
     let mut data: &[u8] = &[IAC, 0xF1, b'X']; // IAC NOP X
-    let ev = read_gateway_event(&mut data).await.unwrap();
+    let ev = read_gateway_event(&mut data, true).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(b'X'));
 }
 
 #[tokio::test]
 async fn test_gateway_event_drops_negotiation() {
     let mut data: &[u8] = &[IAC, WILL, OPT_ECHO, b'Y'];
-    let ev = read_gateway_event(&mut data).await.unwrap();
+    let ev = read_gateway_event(&mut data, true).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(b'Y'));
 }
 
@@ -8669,7 +8775,7 @@ async fn test_gateway_event_surfaces_naws() {
         IAC, SB, OPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE,
         b'Z',
     ];
-    let ev = read_gateway_event(&mut data).await.unwrap();
+    let ev = read_gateway_event(&mut data, true).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::NawsResize(80, 24));
 }
 
@@ -8682,7 +8788,7 @@ async fn test_gateway_event_naws_with_escaped_iac_in_body() {
         0x00, 0x18,
         IAC, SE,
     ];
-    let ev = read_gateway_event(&mut data).await.unwrap();
+    let ev = read_gateway_event(&mut data, true).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::NawsResize(0x00FF, 0x0018));
 }
 
@@ -8693,14 +8799,14 @@ async fn test_gateway_event_drops_non_naws_subneg() {
         IAC, SB, OPT_TTYPE, TTYPE_SEND, IAC, SE,
         b'Q',
     ];
-    let ev = read_gateway_event(&mut data).await.unwrap();
+    let ev = read_gateway_event(&mut data, true).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(b'Q'));
 }
 
 #[tokio::test]
 async fn test_gateway_event_eof() {
     let mut data: &[u8] = &[];
-    let ev = read_gateway_event(&mut data).await.unwrap();
+    let ev = read_gateway_event(&mut data, true).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Eof);
 }
 
@@ -8749,6 +8855,59 @@ async fn test_write_telnet_data_passthrough_without_ff() {
     let mut buf: Vec<u8> = Vec::new();
     write_telnet_data(&mut buf, b"hello").await.unwrap();
     assert_eq!(buf, b"hello");
+}
+
+/// **An SSH or serial user's link is 8-bit clean through every gateway.**
+///
+/// The three bridges framed the *local* side as telnet whatever it was: the
+/// SSH gateway IAC-filtered input and wrote output unescaped, the Telnet and
+/// serial bridges parsed and escaped always.  So a file transfer through a
+/// gateway lost `0xFF` (and the byte after it) from an SSH user, and doubled
+/// it towards one.  Both halves of the helpers are pinned, and so is their use:
+/// a flag the bridges never pass is a guard that cannot go red.
+#[tokio::test]
+async fn test_gateway_local_io_is_raw_unless_the_session_speaks_telnet() {
+    // Reading: off telnet every byte is data, IAC and what follows it included.
+    let wire: &[u8] = &[IAC, WILL, OPT_ECHO, IAC, IAC, b'A'];
+    let mut data = wire;
+    let mut got = Vec::new();
+    while let Ok(GatewayInboundEvent::Data(b)) = read_gateway_event(&mut data, false).await {
+        got.push(b);
+    }
+    assert_eq!(got, wire, "a raw link lost bytes to telnet framing");
+    // Control: on telnet the same wire is one negotiation, one data 0xFF, 'A'.
+    let mut data = wire;
+    let mut got = Vec::new();
+    while let Ok(GatewayInboundEvent::Data(b)) = read_gateway_event(&mut data, true).await {
+        got.push(b);
+    }
+    assert_eq!(got, vec![0xFF, b'A']);
+
+    // Writing: escaped on telnet only.
+    let mut buf: Vec<u8> = Vec::new();
+    write_local_data(&mut buf, &[b'A', 0xFF, b'B'], false).await.unwrap();
+    assert_eq!(buf, vec![b'A', 0xFF, b'B'], "a raw link received 0xFF doubled");
+    let mut buf: Vec<u8> = Vec::new();
+    write_local_data(&mut buf, &[b'A', 0xFF, b'B'], true).await.unwrap();
+    assert_eq!(buf, vec![b'A', 0xFF, 0xFF, b'B']);
+
+    // And every bridge asks: no local read or write in gateway.rs decides on
+    // its own.
+    // gateway.rs has no test module (its tests live here), so the whole file
+    // is production source.
+    let src = include_str!("gateway.rs").replace("\r\n", "\n");
+    assert_eq!(src.matches("let local_telnet = self.speaks_telnet();").count(), 3);
+    for fixed in [
+        "read_byte_iac_filtered(reader, true)",
+        "read_gateway_event(reader)",
+        "write_telnet_data(&mut **w",
+        "w.write_all(",
+    ] {
+        assert!(!src.contains(fixed), "gateway.rs writes or reads the local user with `{fixed}`");
+    }
+    assert_eq!(src.matches("read_byte_iac_filtered(reader, local_telnet)").count(), 1);
+    assert_eq!(src.matches("read_gateway_event(reader, local_telnet)").count(), 2);
+    assert_eq!(src.matches(", local_telnet).await").count(), 7, "a local write lost its flag");
 }
 
 /// **RFC 856 BINARY is agreed, both ways.**
@@ -9576,6 +9735,21 @@ fn test_apply_ymodem_meta_modtime() {
     let _ = std::fs::remove_file(&tmp);
 }
 
+/// **A hostile modtime is ignored, not a panic.**  The sender's octal field
+/// parses up to `u64::MAX`, and `UNIX_EPOCH + Duration` panicked on it -- on a
+/// file already written, taking the session's task with it.
+#[test]
+fn test_apply_ymodem_meta_survives_an_absurd_modtime() {
+    assert!(TelnetSession::peer_modtime(u64::MAX).is_none());
+    assert!(TelnetSession::peer_modtime(1_500_000_000).is_some(), "an ordinary time is lost");
+    let tmp = std::env::temp_dir().join(format!("ymeta_huge_{}", std::process::id()));
+    std::fs::write(&tmp, b"x").unwrap();
+    let meta = crate::xmodem::YmodemReceiveMeta { size: Some(1), modtime: Some(u64::MAX), mode: None };
+    TelnetSession::apply_ymodem_meta(&tmp, Some(&meta));
+    assert_eq!(std::fs::read(&tmp).unwrap(), b"x");
+    let _ = std::fs::remove_file(&tmp);
+}
+
 /// Mode application is Unix-only; on Unix, the block-0 `mode`
 /// field (already masked to 0o7777 by the parser) is masked
 /// further to 0o777 by the apply path before reaching `chmod`.
@@ -9640,7 +9814,7 @@ async fn test_read_gateway_event_sb_stall_times_out() {
     // Time is paused; tokio auto-advances to the SB_DRAIN_TIMEOUT deadline
     // once the stalled read is the only pending work, so this resolves
     // promptly instead of waiting the real 15s.
-    let ev = read_gateway_event(&mut reader).await.unwrap();
+    let ev = read_gateway_event(&mut reader, true).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Eof);
 }
 

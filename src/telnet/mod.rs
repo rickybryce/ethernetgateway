@@ -47,7 +47,7 @@ pub(in crate::telnet) use gateway::{GatewayTelnetIac, GatewayIacState, OptState,
     normalize_gateway_input, gateway_default_window,
     gateway_input_for_remote, is_gateway_leave_key};
 mod io;
-pub(crate) use io::{read_byte_iac_filtered, write_telnet_data};
+pub(crate) use io::{read_byte_iac_filtered, write_local_data, write_telnet_data};
 
 /// Is this the ordinary end of a session rather than a fault?
 ///
@@ -1499,6 +1499,13 @@ pub(crate) struct TelnetSession {
     // the CP/M out-of-band drain's zero-timeout) resumes at the command byte
     // instead of losing the IAC and desyncing telnet parsing.
     mid_iac_cmd: bool,
+    /// The client's side of the connection has ended: a read returned EOF.
+    /// (Not a stalled subnegotiation -- a slow peer is not a gone one.)  Sticky,
+    /// because a closed reader keeps answering EOF -- and every prompt maps
+    /// EOF to the same `None` as ESC, so without this the main menu answered a
+    /// half-closed peer by redrawing itself, reading EOF, and redrawing again,
+    /// for ever, holding a `max_sessions` slot.  Read by `run_menu_loop`.
+    peer_eof: bool,
     // RFC 854 NVT: a bare CR is sent as `CR NUL`, so the NUL that follows a CR
     // is an encoding artefact and not a keystroke.  Set when a CR is handed to a
     // caller, cleared by the next byte.  Telnet only -- a serial or SSH client
@@ -1564,6 +1571,19 @@ impl TelnetSession {
     /// because telnet UI math is `usize`-shaped.
     const MAX_FILE_SIZE: usize = crate::tnio::MAX_FILE_SIZE as usize;
     const MAX_FILENAME_LEN: usize = 64;
+
+    /// Whether this session's own link is telnet, and so frames `0xFF` as IAC.
+    ///
+    /// An SSH session and a serial (or relay) caller are 8-bit clean: there
+    /// `0xFF` is data.  The session's own reader and writer have always asked
+    /// this; the gateways did not -- the SSH gateway IAC-filtered its input and
+    /// sent output unescaped whatever the transport, and the Telnet and serial
+    /// bridges parsed and escaped always -- so a file transfer run through a
+    /// gateway lost or doubled every `0xFF` on one transport or another.  One
+    /// predicate, so no bridge can answer it differently again.
+    pub(in crate::telnet) fn speaks_telnet(&self) -> bool {
+        !self.is_serial && !self.is_ssh
+    }
 
     /// Create a session for a serial modem connection.  Starts in
     /// ASCII as a safe default, then runs the BACKSPACE-key terminal
@@ -1645,6 +1665,7 @@ impl TelnetSession {
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
             mid_iac_cmd: false,
+            peer_eof: false,
             last_was_cr: false,
             neg_sent_will: Box::new([false; 256]),
             neg_sent_do: Box::new([false; 256]),
@@ -1729,6 +1750,7 @@ impl TelnetSession {
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
             mid_iac_cmd: false,
+            peer_eof: false,
             last_was_cr: false,
             neg_sent_will: Box::new([false; 256]),
             neg_sent_do: Box::new([false; 256]),
@@ -1833,6 +1855,7 @@ impl TelnetSession {
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
             mid_iac_cmd: false,
+            peer_eof: false,
             last_was_cr: false,
             neg_sent_will: Box::new([false; 256]),
             neg_sent_do: Box::new([false; 256]),
@@ -2710,6 +2733,7 @@ pub fn start_server(
                                     idle_timeout: std::time::Duration::from_secs(cfg.idle_timeout_secs),
                                     pushback: None,
                                     mid_iac_cmd: false,
+                                    peer_eof: false,
             last_was_cr: false,
                                     neg_sent_will: Box::new([false; 256]),
                                     neg_sent_do: Box::new([false; 256]),

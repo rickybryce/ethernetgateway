@@ -954,6 +954,14 @@ impl BootMachine {
         }
     }
 
+    /// How many more console bytes the guest's queue will take before
+    /// [`send_key`](Self::send_key) starts dropping them.  The session pump
+    /// reads its client only while this is non-zero, so a paste waits in the
+    /// socket instead of being cut off at the queue's size.
+    pub fn key_room(&self) -> usize {
+        KEY_QUEUE_CAP.saturating_sub(self.rx.len())
+    }
+
     /// Take everything the guest has printed *to the console*.
     pub fn take_output(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.tx)
@@ -2463,6 +2471,7 @@ pub(crate) mod tests {
             m.send_key((i & 0xFF) as u8);
         }
         assert_eq!(m.rx.len(), KEY_QUEUE_CAP, "the queue stops growing");
+        assert_eq!(m.key_room(), 0, "a full queue reports no room, or the pump would read and drop");
         // And the bytes kept are the *earliest*, so a guest that starts reading
         // sees the beginning of what was typed rather than an arbitrary window.
         // A character time between the two reads because the console models a

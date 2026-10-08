@@ -478,6 +478,18 @@ impl TelnetSession {
         Err(SaveError::AlreadyExists)
     }
 
+    /// A sender's declared modification time as a `SystemTime`, or `None`.
+    ///
+    /// **Checked, because the number is the peer's.**  YMODEM's block 0 and
+    /// ZMODEM's ZFILE carry it as free-form octal, so any value up to
+    /// `u64::MAX` parses, and `UNIX_EPOCH + Duration` *panics* on overflow --
+    /// one hostile header took the session's task down after the file was
+    /// already written.  An unrepresentable time is simply not applied, which
+    /// is what this function already did for every other failure.
+    pub(in crate::telnet) fn peer_modtime(secs: u64) -> Option<std::time::SystemTime> {
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
+    }
+
     /// Apply YMODEM block-0 metadata to a freshly saved file.  Both
     /// modtime and mode are best-effort — failures are ignored because
     /// they don't affect data integrity.  Mode is masked to `0o777` so
@@ -491,10 +503,9 @@ impl TelnetSession {
         meta: Option<&crate::xmodem::YmodemReceiveMeta>,
     ) {
         let Some(m) = meta else { return };
-        if let Some(secs) = m.modtime
+        if let Some(when) = m.modtime.and_then(Self::peer_modtime)
             && let Ok(file) = std::fs::OpenOptions::new().write(true).open(path)
         {
-            let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
             let _ = file.set_modified(when);
         }
         #[cfg(unix)]

@@ -425,7 +425,7 @@ Commodore, ANSI escape sequences on modern terminals, and plain text on ASCII.
     <li><strong>SSH gateway</strong> — outbound proxy for SSH servers, with TOFU host-key trust and Ed25519 public-key auth.</li>
     <li><strong>Telnet gateway</strong> — outbound proxy with RFC-1143 Q-method option negotiation or a raw-TCP escape hatch.</li>
     <li><strong>Web browser</strong> — text-mode HTTP/HTTPS/Gopher with forms, bookmarks, and 40-column-friendly layout.</li>
-    <li><strong>AI chat</strong> — Groq API, <code>llama-3.3-70b-versatile</code>, paginated answers wrapped to the terminal width.</li>
+    <li><strong>AI chat</strong> — Groq API, <code>openai/gpt-oss-120b</code> by default (the model is a setting, <code>ai_model</code>), paginated answers wrapped to the terminal width.</li>
     <li><strong>Weather</strong> — current conditions and a 3-day forecast from Open-Meteo for any city or postal code worldwide (MET Norway fallback).</li>
     <li><strong>GUI console</strong> — eframe/egui configuration editor with live server log.</li>
 </ul>
@@ -5108,8 +5108,14 @@ key turns out to be a man-in-the-middle attempt.
 <h2>10.3 Output Filtering</h2>
 
 <p>
-For PETSCII and ASCII terminals, ANSI escape sequences from the remote are
-automatically stripped and text is converted to the appropriate encoding.
+For a PETSCII terminal, ANSI escape sequences from the remote are
+<strong>translated</strong> where a Commodore has an equivalent &mdash; colour,
+reverse video, clear screen, home and the four cursor moves become single
+PETSCII control bytes &mdash; and dropped where it has none (cursor addressing,
+background colour); text is case-swapped for PETSCII.  That is the default:
+with <code>gateway_petscii_translate</code> off (or a port's own setting at
+<em>passthrough</em>) the gateway is a plain pipe for a Commodore-aware host.  For an ASCII terminal every
+sequence is stripped.
 ANSI terminals keep their sequences &mdash; colour and cursor addressing are
 why a terminal asks for ANSI &mdash; except for the remote's <strong>window
 title</strong>. PTY size is set to 40&times;25
@@ -5254,7 +5260,8 @@ terminating <code>IAC SE</code>.
 <p>
 The AI Chat feature sends prompts to the Groq API and displays the responses
 in the terminal. It is free to use — you need a Groq account and an API key
-— and the model is <code>llama-3.3-70b-versatile</code>.
+— and the model is <code>openai/gpt-oss-120b</code> unless you choose another
+with <code>ai_model</code> (see the note at the end of this chapter).
 </p>
 
 <h2>12.1 Setup</h2>
@@ -5992,8 +5999,8 @@ not recognise and <em>prints the rest</em> &mdash; and since the title is
 user@host, the result reads as the prompt printed twice. No client of this
 gateway has a title bar, so the sequence had no destination in the first place.
 It reached ANSI terminals because the ANSI path bypassed the output filter
-entirely; PETSCII and ASCII terminals, which have every sequence stripped,
-never saw it. Seen under both EGT80 and QTERM, which is what ruled out a fault
+entirely; PETSCII and ASCII terminals, whose filters translate or strip
+every sequence, never saw it. Seen under both EGT80 and QTERM, which is what ruled out a fault
 in either terminal and put the fix in the gateway.
 </p>
 
