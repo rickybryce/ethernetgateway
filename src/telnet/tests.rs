@@ -9661,6 +9661,48 @@ fn test_save_received_file_sync_no_replace_refuses_existing() {
     let _ = std::fs::remove_file(&tmp);
 }
 
+/// The resume save writes a side file and renames it over the partial.  A
+/// symlink planted at the side file's name must not be written through --
+/// a truncating open would follow it and overwrite its target.
+#[cfg(unix)]
+#[test]
+fn test_resume_save_does_not_write_through_a_planted_link() {
+    let dir = std::env::temp_dir()
+        .join(format!("save_resume_link_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let partial = dir.join("f.bin");
+    let victim = dir.join("victim.txt");
+    std::fs::write(&partial, vec![0xAAu8; 64]).unwrap();
+    std::fs::write(&victim, b"must survive").unwrap();
+    std::os::unix::fs::symlink(&victim, dir.join("f.bin.kermit-resume.tmp")).unwrap();
+    let merged = vec![0x55u8; 256];
+    TelnetSession::save_received_file_sync(&partial, &merged, None, true).unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"must survive", "wrote through the link");
+    assert_eq!(std::fs::read(&partial).unwrap(), merged);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `is_symlink` is what stops a menu upload's overwrite from writing
+/// through a link: it must see the link itself, dangling or not, and
+/// nothing else.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_is_symlink_sees_the_link_not_its_target() {
+    let dir = std::env::temp_dir()
+        .join(format!("is_symlink_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("plain"), b"x").unwrap();
+    std::os::unix::fs::symlink(dir.join("plain"), dir.join("link")).unwrap();
+    std::os::unix::fs::symlink(dir.join("gone"), dir.join("dangling")).unwrap();
+    assert!(TelnetSession::is_symlink(&dir.join("link")).await);
+    assert!(TelnetSession::is_symlink(&dir.join("dangling")).await);
+    assert!(!TelnetSession::is_symlink(&dir.join("plain")).await);
+    assert!(!TelnetSession::is_symlink(&dir.join("missing")).await);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `numbered_received_name` implements the DOS/CP-M-Kermit 8.3 collision
 /// scheme exactly as the user specified (and as kercpm3 does on a
 /// download collision): keep the base within 8 chars, appending the

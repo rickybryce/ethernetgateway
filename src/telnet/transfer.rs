@@ -235,6 +235,13 @@ impl TelnetSession {
         }
     }
 
+    /// Is `path` itself a symlink (not followed)?  Missing answers `false`.
+    pub(in crate::telnet) async fn is_symlink(path: &std::path::Path) -> bool {
+        tokio::fs::symlink_metadata(path)
+            .await
+            .is_ok_and(|m| m.file_type().is_symlink())
+    }
+
     pub(in crate::telnet) async fn ensure_transfer_dir(&mut self) -> Result<(), std::io::Error> {
         tokio::fs::create_dir_all(self.transfer_path()).await
     }
@@ -319,10 +326,14 @@ impl TelnetSession {
                 .unwrap_or_default();
             tmp_name.push(".kermit-resume.tmp");
             tmp_path.set_file_name(tmp_name);
+            // Clear a leftover first and then claim the name with
+            // `create_new`: a truncating open would follow a symlink
+            // sitting at this name and write through it.  `remove_file`
+            // removes a link itself, never its target.
+            let _ = std::fs::remove_file(&tmp_path);
             let mut file = match std::fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .open(&tmp_path)
             {
                 Ok(f) => f,
@@ -907,6 +918,14 @@ impl TelnetSession {
 
             let filepath = self.transfer_path().join(&filename);
 
+            // A link is never replaced: overwriting opens without
+            // `create_new`, which would write *through* it to wherever it
+            // points.  Refused before the transfer, not after it.
+            if Self::is_symlink(&filepath).await {
+                self.show_error("That name is a link; not replaced.").await?;
+                return Ok(());
+            }
+
             // Detect duplicates up-front so the user doesn't sit through a
             // whole transfer only to have the save-step fail.  Prompt to
             // overwrite; if declined, cancel cleanly.
@@ -1259,6 +1278,13 @@ impl TelnetSession {
                     }
                     _ => (filename.clone(), filepath.clone()),
                 };
+                // Checked again here: the codec may have refined the name,
+                // and the overwrite answer carries to the new one.
+                if overwrite && Self::is_symlink(&save_path).await {
+                    self.post_transfer_settle().await;
+                    self.show_error("That name is a link; not replaced.").await?;
+                    return Ok(());
+                }
                 let mut opts = tokio::fs::OpenOptions::new();
                 opts.write(true);
                 if overwrite {

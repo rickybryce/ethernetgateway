@@ -5000,8 +5000,8 @@ fn resolve_cwd_target(current: &str, arg: &str) -> String {
 /// has already validated `subdir` via `is_safe_relative_subdir`.
 ///
 /// `base` is the server's whole world: the transfer root for the
-/// standalone server, the serial port's Kermit mode and the relay; the
-/// folder the File Transfer menu was in for the menu's server.  Nothing a
+/// standalone server, `ATDT KERMIT`, the serial port's Kermit mode and the
+/// relay; the folder the File Transfer menu was in for the menu's server.  Nothing a
 /// peer sends can climb above it -- [`resolve_cwd_target`] stops `..` at
 /// the base, and `subdir` is relative to it.
 fn session_dir(base: &std::path::Path, subdir: &str) -> std::path::PathBuf {
@@ -5010,6 +5010,24 @@ fn session_dir(base: &std::path::Path, subdir: &str) -> std::path::PathBuf {
         p.push(subdir);
     }
     p
+}
+
+/// Does `path`, with every symlink followed, still land inside `base`?
+///
+/// The name checks above stop a *peer* from spelling its way out, but not
+/// a link already on disk: `remote cd link` or `get link` would follow a
+/// symlink the operator (or anyone with access to the folder) placed there,
+/// to wherever it points.  Nothing a peer sends can create one -- no
+/// protocol here writes a link -- so this closes a door only a local hand
+/// can open; every other surface (the File Transfer menu, the Gateway
+/// Shell, the CP/M drives) already canonicalizes and checks `starts_with`,
+/// and this is the same rule.  A link that stays inside the base is fine.
+/// Either path failing to resolve answers `false`.
+fn resolves_inside(base: &std::path::Path, path: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(base), std::fs::canonicalize(path)) {
+        (Ok(b), Ok(p)) => p.starts_with(&b),
+        _ => false,
+    }
 }
 
 /// Resolve a GET-requested filename against `dir`, preferring an exact
@@ -5728,6 +5746,18 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
             }
             return Ok(());
         }
+        if !new_subdir.is_empty()
+            && !resolves_inside(self.base, &session_dir(self.base, &new_subdir))
+        {
+            self.refuse(seq, "Access denied").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: G C '{}' refused (links outside the base)",
+                    new_subdir
+                );
+            }
+            return Ok(());
+        }
         self.subdir = new_subdir;
         self.ack(seq).await?;
         if self.verbose {
@@ -5948,6 +5978,13 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
             return Ok(());
         }
         let path = self.dir().join(&fname);
+        if path.exists() && !resolves_inside(self.base, &path) {
+            self.refuse(seq, "Access denied").await?;
+            if self.verbose {
+                glog!("Kermit server: G T '{}' refused (links outside the base)", fname);
+            }
+            return Ok(());
+        }
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
             Err(e) => {
@@ -6195,6 +6232,13 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
             // Stay idle for the next command per spec.
             return Ok(Next::Idle);
         };
+        if !resolves_inside(self.base, &path) {
+            self.refuse(pkt.seq, "Access denied").await?;
+            if self.verbose {
+                glog!("Kermit server: refused R '{}' (links outside the base)", fname);
+            }
+            return Ok(Next::Idle);
+        }
         let Ok(bytes) = tokio::fs::read(&path).await else {
             self.refuse(pkt.seq, "File not found").await?;
             if self.verbose {
@@ -8696,6 +8740,52 @@ mod tests {
             }
             w.write_all(&wire_packet(TYPE_R, 0, b"inside.bin")).await.unwrap();
             assert_eq!(read_server_packet(r).await.kind, TYPE_ACK, "a file in the base was not found");
+            let s_pkt = read_server_packet(r).await;
+            assert_eq!(s_pkt.kind, TYPE_SEND_INIT);
+            let got = kermit_receive_with_init(r, w, false, false, false, Some(s_pkt)).await.unwrap();
+            assert_eq!(got[0].data, b"inside the base");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        let _ = std::fs::remove_dir_all(&root);
+        result.unwrap();
+    }
+
+    /// A symlink already on disk must not carry a peer out of the base --
+    /// not by `remote cd`, `get` or `remote type` -- while one that stays
+    /// inside the base keeps working.  Nothing a peer sends can create a
+    /// link, so this is the operator's own link turned against them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_a_symlink_cannot_carry_a_peer_out_of_the_base() {
+        use std::os::unix::fs::symlink;
+        let _guard = ConfigTestGuard::acquire().await;
+        let root = std::env::temp_dir().join(format!("xmodem_server_symlink_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("base");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(base.join("real")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        config::update_config_value("transfer_dir", base.to_str().unwrap());
+        std::fs::write(outside.join("secret.bin"), b"outside the base").unwrap();
+        std::fs::write(base.join("real").join("inside.bin"), b"inside the base").unwrap();
+        symlink(&outside, base.join("away")).unwrap();
+        symlink(outside.join("secret.bin"), base.join("leak.bin")).unwrap();
+        symlink(base.join("real"), base.join("near")).unwrap();
+
+        let ((), result) = run_server_in(base.clone(), async |w, r| {
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"away"))).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ERROR, "cd through a link out of the base");
+            w.write_all(&wire_packet(TYPE_R, 0, b"leak.bin")).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ERROR, "get through a link out of the base");
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &g_single_arg_body(b'T', b"leak.bin"))).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ERROR, "type through a link out of the base");
+            // Positive control: a link that stays inside is followed.
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, &g_cwd_body(b"near"))).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ACK, "cd through a link inside the base");
+            w.write_all(&wire_packet(TYPE_R, 0, b"inside.bin")).await.unwrap();
+            assert_eq!(read_server_packet(r).await.kind, TYPE_ACK, "a file through an inside link was not found");
             let s_pkt = read_server_packet(r).await;
             assert_eq!(s_pkt.kind, TYPE_SEND_INIT);
             let got = kermit_receive_with_init(r, w, false, false, false, Some(s_pkt)).await.unwrap();
