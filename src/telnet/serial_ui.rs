@@ -1567,6 +1567,12 @@ impl TelnetSession {
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         let mut answered = false;
         let mut serial_error = false;
+        // The timeout is its own outcome, not a port error: with no ring
+        // ever sent, the serial side never took the request -- the line is
+        // busy (a call parked by `+++`, or not in command mode; see
+        // `line_free_for_incoming`).  With rings, nobody answered.
+        let mut timed_out = false;
+        let mut rang = false;
         let timeout = tokio::time::sleep(std::time::Duration::from_secs(15));
         tokio::pin!(timeout);
 
@@ -1576,6 +1582,7 @@ impl TelnetSession {
                     match event {
                         Some(0) => {
                             // RING — reset timeout on each ring
+                            rang = true;
                             timeout.as_mut().reset(tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(15));
                             let mut w = writer.lock().await;
@@ -1607,7 +1614,7 @@ impl TelnetSession {
                     }
                 }
                 _ = &mut timeout => {
-                    serial_error = true;
+                    timed_out = true;
                     break;
                 }
             }
@@ -1631,6 +1638,13 @@ impl TelnetSession {
                 self.red("Serial connection failed.")
             ))
             .await?;
+        } else if timed_out {
+            let msg = if rang {
+                "No answer."
+            } else {
+                "Line busy: no ring was sent."
+            };
+            self.send_line(&format!("  {}", self.yellow(msg))).await?;
         } else {
             self.send_line(&format!(
                 "  {}",

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Telnet checks the login lockout before every password guess.**  It was
+  checked when the connection arrived, so every connection already at the
+  prompt when its address was locked out still had its next guess checked
+  &mdash; and a correct one logged in from the locked-out address.
+- **A symlink in the transfer folder cannot lead outside it.**  Every surface
+  but Kermit already refused one; the Kermit server's `remote cd`, `get` and
+  `remote type` now refuse a link that leads out of the server's folder (one
+  that stays inside still works).  A File Transfer upload no longer
+  overwrites *through* a link of the same name, and a Kermit resume no longer
+  writes through a link planted at its temporary file's name.  Nothing a
+  caller sends can create a link, so this needed someone with access to the
+  folder itself.
+
 ### Changed
 
 - **Kermit server mode from the File Transfer menu works in the menu's folder,
@@ -23,6 +38,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   &mdash; the Kermit TCP port, `ATDT KERMIT`, a serial port in Kermit mode, and
   a slave's relayed Kermit call &mdash; always starts at the top of the
   transfer folder and is unchanged.
+
+- **The Kermit server saves each file when it completes**, at its end-of-file
+  packet, so a failure later in the session no longer loses the files before
+  it.  A file the sender abandons without that packet is not saved, as the
+  Kermit spec requires.
+
+### Fixed
+
+- **Web: the master-password panel broke the settings form.**  The panel was a
+  form nested inside the main one, so while it was showing, every setting
+  below it was outside the form: their Save buttons did nothing, the panel's
+  own button saved every checkbox below it as off, and the password typed
+  into it was never taken.  The panel is part of the one form now, and its
+  password is taken whichever Save is pressed.
+- **Web: Enter in a text box presses Save and Restart.**  It pressed whichever
+  panel button was drawn first &mdash; the master-password panel's, or a
+  resolve button that re-pins a changed master host key.  In the
+  master-password box itself, Enter presses that panel's button.
+- **Desktop: the editor no longer always counts as changed.**  Its empty
+  password boxes counted as unsaved edits, so a desktop Save could overwrite
+  settings changed meanwhile from the web UI or telnet.
+- **SSH: closing one channel no longer ends the shell.**  Any other channel on
+  the same connection closing (an OpenSSH ControlMaster's refused command, a
+  key enrolment, a relay) ended the user's session, and a stray channel's
+  bytes were typed into it.  Each channel's input now goes through a short
+  queue of its own rather than straight from the connection's loop.
+- **Serial: an incoming ring or peer call no longer drops a parked call.**  A
+  call parked with `+++` holds the line, as on a real modem: a peer caller
+  hears `BUSY` after three seconds, and the Ring Emulator says the line is
+  busy.  A call that never rings is `BUSY` in three seconds rather than
+  after the caller's whole `S7` wait.
+- **Serial port screen: the wrong-key hint names the keys each mode answers.**
+  Kermit mode was told to press keys it ignores, `G` and `K` were never
+  named, and the modem hint was 47 columns on a C64.  Each mode's help page
+  now lists every key its screen answers, and a long device path no longer
+  wraps the Port row.
+- **Help pages are never cut mid-entry**, and a last page that fits is no
+  longer split into a page of one or two lines.
+- **CP/M: a paste over telnet into a booted disk is no longer cut off.**  Input
+  larger than the guest's console queue was dropped; a telnet session now
+  waits while the guest catches up.  The virtual modem's TCP dial is bounded by `S7`.
+- **The gateway's own screens no longer apply telnet framing to SSH and
+  serial sessions**, which do not use it.
+- **A half-closed connection no longer makes the menu loop spin.**
+- **Crashes fixed:** a YMODEM file with an absurd timestamp; a monitor ROM
+  file with a non-ASCII line in its Intel HEX, or a raw image running past
+  `FFFF`.  Files a ZMODEM receiver skips now count toward the batch limit.
 
 ## [1.0.3] - 2026-10-05
 

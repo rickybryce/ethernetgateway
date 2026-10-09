@@ -6425,8 +6425,12 @@ mod tests {
     /// above the settings.**  A browser's implicit submission uses the form's
     /// first submit button; with the master-password or resolve panel first,
     /// that was "Save and retry" or a resolve button -- which re-pins a changed
-    /// master host key.  Rendered with both panels up, the first submit after
-    /// `<form` must be the default.
+    /// master host key.  Rendered with the master-password panel up, the first
+    /// submit after `<form` must be the default.  The resolve panel is not
+    /// raised here -- its registry is global, and a pending entry adds a row
+    /// to the telnet Configuration menu that row-count tests running at the
+    /// same moment would see -- but it is drawn after the default button
+    /// too, so the same first-submit rule covers it.
     #[test]
     fn test_enter_presses_save_and_restart_even_under_the_panels() {
         let _lock = crate::relay::key_auth_test_lock();
