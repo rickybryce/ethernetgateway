@@ -1520,7 +1520,9 @@ impl TelnetSession {
         fn is_blank(s: &str) -> bool {
             s.trim().is_empty()
         }
-        // **Content that already fits is one page.**  Without this, the
+        // **Content that already fits is one page.**  The loop's tail rule
+        // now gives the same answer on its first pass, so this is a fast
+        // path; it was the fix before that rule existed.  Without either, the
         // prefer-a-blank rule below fires even when nothing overflows: it
         // scans back from `take` for the last blank and splits there, so a
         // table well inside the budget still paged if it had a blank line
