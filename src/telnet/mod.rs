@@ -2070,6 +2070,10 @@ impl TelnetSession {
                 "  G  Serial Gateway: pick Port A or B",
                 "     and bridge to its wire (when",
                 "     that port is in console mode)",
+                // A blank, so the pager breaks here rather than mid-entry: the
+                // page runs past `HELP_MAX_CONTENT_LINES` with or without the
+                // optional items.
+                "",
             ];
             // Gated with the row and the error hint: `cpm_emu_enabled = false`
             // takes `K` off the menu, so it comes off this page too.

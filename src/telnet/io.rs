@@ -1547,10 +1547,22 @@ impl TelnetSession {
             // blanks, but we don't want to loop forever on malformed
             // input.
             let mut split = take;
-            for i in (1..=take).rev() {
-                if is_blank(remaining[i - 1]) {
-                    split = i;
-                    break;
+            // What is left fits on one page: take it whole, for the same
+            // reason as the whole-table check above.  Without this the scan
+            // below still breaks the tail at its last blank, and a C64 user
+            // pays a keypress for a final page of one line.
+            let mut rest = remaining.len();
+            while rest > 0 && is_blank(remaining[rest - 1]) {
+                rest -= 1;
+            }
+            if rest <= max_per_page {
+                split = remaining.len();
+            } else {
+                for i in (1..=take).rev() {
+                    if is_blank(remaining[i - 1]) {
+                        split = i;
+                        break;
+                    }
                 }
             }
             // Emit the page with trailing blanks trimmed.

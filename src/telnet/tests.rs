@@ -3318,7 +3318,8 @@ fn test_main_menu_error_hint() {
     }
 }
 
-/// Main help screen content is 18 lines, plus two for each optional item that
+/// Main help screen content is 19 lines (one a blank, so the pager breaks
+/// between entries rather than inside one), plus two for each optional item that
 /// is on the menu: `K` when the CP/M emulator is on, `2` where the second page
 /// has anything on it (Unix only).  The `show_help_page` paginator handles
 /// overflow gracefully, so the total still fits the 22-row PETSCII budget for
@@ -3331,7 +3332,7 @@ fn test_main_menu_error_hint() {
 /// not draw that key.
 #[test]
 fn test_main_help_content_line_count() {
-    const BASE: usize = 18;
+    const BASE: usize = 19;
     for cpm in [false, true] {
         for second in [false, true] {
             let items = MenuItems { cpm, second_page: second };
@@ -5130,6 +5131,37 @@ fn test_paginate_help_empty() {
     assert!(pages.is_empty());
 }
 
+/// A tail that fits on one page is one page, blanks and all.  The loop used to
+/// break it at its last blank anyway, so the blank lines that keep a long table
+/// from being cut mid-entry left a final page of one line ("Takes effect on
+/// next transfer.") that a C64 user paid a keypress to read.
+#[test]
+fn test_paginate_help_keeps_a_tail_that_fits_whole() {
+    let lines = [
+        "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "",
+        "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10", "",
+        "c1",
+    ];
+    let pages = TelnetSession::paginate_help(&lines, 15);
+    assert_eq!(pages.len(), 2, "{pages:?}");
+    assert_eq!(pages[1].first(), Some(&"b1"));
+    assert_eq!(pages[1].last(), Some(&"c1"));
+    assert_eq!(pages[1].len(), 12);
+
+    // At the boundary: a tail of exactly the budget, with a blank inside it and
+    // one trailing.  Counting the trailing blank, or `<` for `<=`, would send
+    // the scan back to the inner blank and make three pages.
+    let lines = [
+        "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "",
+        "b1", "b2", "b3", "b4", "b5", "b6", "b7", "",
+        "b8", "b9", "b10", "b11", "b12", "b13", "b14", "",
+    ];
+    let pages = TelnetSession::paginate_help(&lines, 15);
+    assert_eq!(pages.len(), 2, "{pages:?}");
+    assert_eq!(pages[1].len(), 15);
+    assert_eq!(pages[1].last(), Some(&"b14"), "the trailing blank is still trimmed");
+}
+
 /// When content overflows, split at the last blank line within the
 /// page-size budget. Trailing blanks are stripped so each page
 /// starts and ends on a real content line.
@@ -6076,6 +6108,54 @@ fn all_help_line_groups(petscii: bool) -> Vec<&'static [&'static str]> {
     #[cfg(unix)]
     groups.push(TelnetSession::more_help_lines());
     groups
+}
+
+/// No help page is cut where the author did not leave a break.  The pager
+/// breaks at a blank line when it can and at the line budget when it cannot, so
+/// a run of more than `HELP_MAX_CONTENT_LINES` lines with no blank in it is split
+/// wherever the count lands -- measured 2026-10-08 on the serial help, where a
+/// C64 got a page ending "(XON/XOFF), or hardware" and the next opening on an
+/// orphaned "(RTS/CTS)", and on the modem's AT list, which left one command
+/// alone on a page.  So every page break must land on a blank line: break any
+/// longer run with one.  Every main-help variant is paged, not only the full one
+/// `all_help_line_groups` lists, because each optional item moves the breaks.
+#[test]
+fn test_no_help_page_is_split_mid_entry() {
+    let mut tables: Vec<(String, &'static [&'static str])> = Vec::new();
+    for petscii in [true, false] {
+        for (g, lines) in all_help_line_groups(petscii).into_iter().enumerate() {
+            tables.push((format!("group {g} (petscii={petscii})"), lines));
+        }
+    }
+    for cpm in [false, true] {
+        for second_page in [false, true] {
+            let lines = TelnetSession::main_help_lines(MenuItems { cpm, second_page });
+            tables.push((format!("main help (cpm={cpm} second={second_page})"), lines));
+        }
+    }
+    let mut cuts = Vec::new();
+    for (name, lines) in tables {
+        let pages = TelnetSession::paginate_help(lines, HELP_MAX_CONTENT_LINES);
+        let mut at = 0;
+        for page in &pages {
+            while lines[at].trim().is_empty() {
+                at += 1;
+            }
+            assert_eq!(&lines[at..at + page.len()], page.as_slice(), "{name}: pager reordered lines");
+            at += page.len();
+            // After the last page `next` is empty, so this only fires between
+            // pages: a break the pager forced rather than one the author left.
+            let next = lines.get(at).copied().unwrap_or("");
+            if !next.trim().is_empty() {
+                cuts.push(format!(
+                    "{name}: a page ends {:?} and the next starts {:?}",
+                    page.last().unwrap(),
+                    next,
+                ));
+            }
+        }
+    }
+    assert!(cuts.is_empty(), "help pages split where no blank line was left:\n{}", cuts.join("\n"));
 }
 
 /// Every help screen's PETSCII variant must fit 40 cols.  Catch-all that
@@ -13839,7 +13919,8 @@ fn test_the_main_help_explains_only_keys_the_menu_draws() {
                     && c[3] == ' '
                     && c[4] == ' '
                     && c[5] != ' ')
-                    .then_some(c[2])
+                    // Lazy: `then_some(c[2])` indexes a blank line and panics.
+                    .then(|| c[2])
             })
             .collect();
         keys.sort_unstable();
@@ -14496,7 +14577,9 @@ async fn test_a_session_abandoned_on_the_welcome_page_still_says_goodbye() {
 /// The rows are `  K  text`; H and Q are the prompt line, not settings.  A key
 /// the screen answers and the page omits is a key nobody can learn, and one the
 /// page explains and the screen refuses is a promise broken.  Until 2026-10-08
-/// the modem page listed no menu keys at all, and the console page lacked K.
+/// the modem page listed no menu keys at all, and the console and Kermit pages
+/// lacked a T row (and the console page K).  T and I are hidden on the
+/// caller's own port, and each page has to say so.
 #[test]
 fn test_each_serial_help_page_explains_exactly_its_screens_keys() {
     for mode in ["modem", "console", "kermit"] {
@@ -14521,6 +14604,19 @@ fn test_each_serial_help_page_explains_exactly_its_screens_keys() {
                 .filter(|k| !matches!(k, 'h' | 'q'))
                 .collect();
             assert_eq!(explained, want, "{mode} help (petscii={petscii})");
+            for key in ['T', 'I'] {
+                let Some(at) = lines.iter().position(|l| l.starts_with(&format!("  {key}  "))) else {
+                    continue;
+                };
+                let entry: String = std::iter::once(lines[at])
+                    .chain(lines[at + 1..].iter().copied().take_while(|l| l.starts_with("     ")))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(
+                    entry.contains("not offered"),
+                    "{mode} help (petscii={petscii}): {key} does not say it is hidden on the caller's own port: {entry}",
+                );
+            }
         }
     }
 }
@@ -14611,10 +14707,23 @@ fn test_the_port_settings_arms_are_gated_only_by_the_key_set() {
         }
     }
     assert!(arms >= 13, "read only {arms} arms -- this scan is not reading the screen");
+    // And the set must be the caller's: built once, from this port's mode and
+    // whether the caller arrived on it.  `serial_menu_keys(&port.mode, false)`
+    // would pass every check here and offer T and I on the caller's own line.
+    assert!(
+        body.contains("let on_own_port = self.is_serial && self.serial_port_id == Some(id);"),
+        "on_own_port no longer asks whether the caller arrived on this port",
+    );
+    assert!(
+        body.contains("let keys = serial_menu_keys(&port.mode, on_own_port);"),
+        "the key set is not built from this port's mode and the caller",
+    );
+    assert_eq!(body.matches("let keys").count(), 1, "the key set is rebound later");
+    assert_eq!(body.matches("let on_own_port").count(), 1, "on_own_port is rebound later");
     // The arms carry no guards because the match itself is gated: a key outside
     // the set is matched as "" and falls to the hint.  Without these two lines a
     // bare `match input.as_str()` passes every check above, and a Kermit port
-    // answers X, D, C and K again -- and I rings the caller's own line.
+    // answers G, X, D, C and K again -- and I rings the caller's own line.
     assert!(
         body.contains("let accepted = matches!(input.as_bytes(), [b] if keys.contains(&(*b as char)));"),
         "the key set no longer decides `accepted`",

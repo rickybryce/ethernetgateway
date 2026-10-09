@@ -1394,6 +1394,7 @@ impl TelnetSession {
             "  REN new=old Rename in place",
             "  COPY d s    Copy file (CP,PIP)",
             "  MOVE d s    Move file (MV)",
+            "",
             "  MKDIR name  New directory (MD)",
             "  RMDIR name  Remove empty dir (RD)",
             "  CD [path]   Change dir (CHDIR)",
