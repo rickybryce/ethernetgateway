@@ -1977,23 +1977,13 @@ async fn send_ymodem_end_of_batch(
 }
 
 // =============================================================================
-// XMODEM CRC-16 (CCITT polynomial 0x1021)
+// XMODEM CRC-16 (CCITT polynomial 0x1021, seed 0)
 // =============================================================================
 
-fn crc16_xmodem(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0;
-    for &byte in data {
-        crc ^= (byte as u16) << 8;
-        for _ in 0..8 {
-            if crc & 0x8000 != 0 {
-                crc = (crc << 1) ^ 0x1021;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-    crc
-}
+// The same CRC ZMODEM uses, so there is one implementation of it, in
+// `zmodem.rs`; the two copies were line-for-line identical.  Kermit's CRC is
+// the *reflected* 0x8408 form and is a different function -- it stays apart.
+use crate::zmodem::crc16 as crc16_xmodem;
 
 // =============================================================================
 // SINGLE-BYTE WRITER (multi-byte raw_write_bytes lives in tnio.rs)
