@@ -2594,7 +2594,16 @@ mod tests {
         // as the other session-running tests do, and date the stamp past its
         // seven days so the session goes straight to the menu.
         let _cfg_lock = crate::config::CONFIG_TEST_LOCK.lock().await;
-        let previous = crate::config::get_config().welcome_first_shown;
+        // Put the stamp back however the test ends: a failed assertion would
+        // otherwise leave it at "1" for every later test in the process.
+        struct RestoreStamp(String);
+        impl Drop for RestoreStamp {
+            fn drop(&mut self) {
+                crate::config::update_config_value("welcome_first_shown", &self.0);
+            }
+        }
+        let _restore =
+            RestoreStamp(crate::config::get_config().welcome_first_shown.to_string());
         crate::config::update_config_value("welcome_first_shown", "1");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2678,7 +2687,6 @@ mod tests {
 
         drop(session);
         server.abort();
-        crate::config::update_config_value("welcome_first_shown", &previous.to_string());
     }
 
     /// Serialise the enrolment tests and give each a clean file.

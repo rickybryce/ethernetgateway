@@ -31,8 +31,8 @@ pub(in crate::telnet) const SERIAL_MENU_SECOND_COL: usize = 26;
 /// letters in alphabetical order.
 ///
 /// `on_own_port` is a caller dialled in on this very port: `T` and `I` are
-/// hidden from them, because flipping the mode or ringing the line would tear
-/// down the connection they are typing on.  Any mode other than `modem` is a
+/// hidden from them -- flipping the mode would tear down the connection they
+/// are typing on, and ringing their own line is no use to anyone.  Any mode other than `modem` is a
 /// raw wire and loses every Hayes-only key; only `console` gains the erase key.
 ///
 /// **This is the one statement of the rule**, and both the screen's wrong-key
@@ -1692,7 +1692,9 @@ impl TelnetSession {
                 "  C  Drive DTR as a carrier (DCD)",
                 "     signal for the terminal",
                 "  I  Ring this port, as if a call",
-                "     were coming in",
+                "     were coming in (not offered",
+                "     on the port you are",
+                "     connected through)",
                 "",
                 "  Dialing:",
                 "  ATDT ethernetgateway",
@@ -1770,7 +1772,8 @@ impl TelnetSession {
                 "  C  Drive DTR as a carrier (DCD) signal for",
                 "     a terminal wired DTR->DCD",
                 "  I  Ring this port, as if a call were coming",
-                "     in",
+                "     in (not offered on the port you are",
+                "     connected through)",
                 "",
                 "  Dialing:",
                 "  ATDT ethernetgateway",

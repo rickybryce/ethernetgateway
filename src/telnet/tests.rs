@@ -14495,8 +14495,8 @@ async fn test_a_session_abandoned_on_the_welcome_page_still_says_goodbye() {
 /// Each mode's help page explains exactly the keys that mode's screen answers.
 /// The rows are `  K  text`; H and Q are the prompt line, not settings.  A key
 /// the screen answers and the page omits is a key nobody can learn, and one the
-/// page explains and the screen refuses is a promise broken -- K, G, X, C, D
-/// and I were all missing from these pages until 2026-10-08.
+/// page explains and the screen refuses is a promise broken.  Until 2026-10-08
+/// the modem page listed no menu keys at all, and the console page lacked K.
 #[test]
 fn test_each_serial_help_page_explains_exactly_its_screens_keys() {
     for mode in ["modem", "console", "kermit"] {
@@ -14611,6 +14611,18 @@ fn test_the_port_settings_arms_are_gated_only_by_the_key_set() {
         }
     }
     assert!(arms >= 13, "read only {arms} arms -- this scan is not reading the screen");
+    // The arms carry no guards because the match itself is gated: a key outside
+    // the set is matched as "" and falls to the hint.  Without these two lines a
+    // bare `match input.as_str()` passes every check above, and a Kermit port
+    // answers X, D, C and K again -- and I rings the caller's own line.
+    assert!(
+        body.contains("let accepted = matches!(input.as_bytes(), [b] if keys.contains(&(*b as char)));"),
+        "the key set no longer decides `accepted`",
+    );
+    assert!(
+        body.contains("match if accepted { input.as_str() } else { \"\" } {"),
+        "the key arms are no longer gated by `accepted`",
+    );
     let mut drawn = 0;
     for pat in ["self.cyan(\"", "self.action_prompt(\"", "Some((\"", "serial_menu_row(\""] {
         for (i, _) in body.match_indices(pat) {
