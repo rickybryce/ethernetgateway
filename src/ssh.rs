@@ -1185,8 +1185,8 @@ impl SshHandler {
     }
 
     /// Shut down the bridge for a closed channel.  A relay channel closes
-    /// only that channel's session; any non-relay channel falls back to the
-    /// single interactive shell bridge.  Shared by channel_eof and
+    /// only that channel's session, the shell's channel closes the shell, and
+    /// any other channel touches neither.  Shared by channel_eof and
     /// channel_close (a peer may send either, or both — idempotent).
     async fn teardown_channel(&mut self, channel: russh::ChannelId) {
         // A registration channel: drop its registry entry (only if it is
@@ -2589,6 +2589,14 @@ mod tests {
             }
         }
 
+        // The shell runs a real session, which reads the global config and,
+        // on a fresh stamp, writes `welcome_first_shown` -- so hold the lock
+        // as the other session-running tests do, and date the stamp past its
+        // seven days so the session goes straight to the menu.
+        let _cfg_lock = crate::config::CONFIG_TEST_LOCK.lock().await;
+        let previous = crate::config::get_config().welcome_first_shown;
+        crate::config::update_config_value("welcome_first_shown", "1");
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handler = loopback_handler(addr, None);
@@ -2670,6 +2678,7 @@ mod tests {
 
         drop(session);
         server.abort();
+        crate::config::update_config_value("welcome_first_shown", &previous.to_string());
     }
 
     /// Serialise the enrolment tests and give each a clean file.

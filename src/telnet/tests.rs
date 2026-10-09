@@ -14598,9 +14598,13 @@ fn test_the_port_settings_arms_are_gated_only_by_the_key_set() {
     // The arms never ask the set about one key (they are gated by `accepted`),
     // so a `keys.contains(&'g')` can only be the draw site's condition.
     let always: Vec<char> = "befhpqs".chars().collect();
+    // Counted, not merely found: `K` is drawn at two sites (its value row and
+    // beside `F`), and a presence check would let either go back to
+    // `console_mode` while the other kept the test green.
     for k in all.iter().filter(|k| !always.contains(k)) {
         let cond = format!("keys.contains(&'{k}')");
-        assert!(body.contains(&cond), "{k} is drawn without asking the key set ({cond})");
+        let sites = if *k == 'k' { 2 } else { 1 };
+        assert_eq!(body.matches(&cond).count(), sites, "{k} is drawn without asking the key set ({cond})");
     }
     // At the start of a line: `} else if console_mode {` picks the title,
     // which is not a key row.
