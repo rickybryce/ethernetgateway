@@ -186,6 +186,11 @@ impl Wizard {
     /// value rather than substituting a default.
     pub(super) fn apply_to(&self, cfg: &mut Config) {
         cfg.username = self.username.trim().to_string();
+        // **Plaintext into the draft, never a hash.**  The draft is the
+        // desktop editor's own `cfg`, and Finish saves it through
+        // `persist_config`, whose `password_for_save` hashes whatever was
+        // typed -- so hashing here as well stored hash(hash(password)) and
+        // refused every login after the wizard.  One place hashes.
         cfg.password = self.password.clone();
 
         cfg.telnet_enabled = self.telnet_enabled;
@@ -275,11 +280,8 @@ impl Wizard {
     fn validate(&self, cfg: &Config) -> Result<(), String> {
         match self.step {
             Step::Credentials => {
-                if self.username.trim().is_empty() {
-                    return Err("Username cannot be empty.".into());
-                }
-                if self.username.trim().contains(char::is_whitespace) {
-                    return Err("Username cannot contain spaces.".into());
+                if let Some(why) = crate::credential::username_problem(&self.username) {
+                    return Err(why.into());
                 }
                 if self.password.is_empty() {
                     return Err("Password cannot be empty.".into());
@@ -361,8 +363,9 @@ impl Wizard {
     /// The inbound TCP ports this configuration will listen on, with what each
     /// one is for — the firewall list on the final screen.  Includes listeners
     /// the wizard doesn't ask about (the standalone Kermit server) so the
-    /// operator isn't left guessing, and covers the master role's SSH port even
-    /// when the SSH checkbox was left clear, because `apply_to` turns it on.
+    /// operator isn't left guessing.  The SSH port is listed only when the SSH
+    /// checkbox is ticked, master or not: `apply_to` deliberately never turns
+    /// SSH on for a master, and `warnings` says so instead.
     fn inbound_ports(&self, cfg: &Config) -> Vec<(u16, &'static str)> {
         let mut out = Vec::new();
         if self.telnet_enabled {
@@ -1359,6 +1362,27 @@ mod tests {
         assert_eq!(parse_port("80x"), None);
     }
 
+    /// **The wizard's Finish, end to end: the password logs in.**  `apply_to`
+    /// writes the draft and Finish saves it through `persist_config`; each was
+    /// tested alone, and with both hashing, the stored value was
+    /// hash(hash(password)) and every login after the wizard was refused.
+    /// Chained here through the same two steps, with a hash-shaped password
+    /// so the `$ecret$2024` case is covered on this path too.
+    #[test]
+    fn test_a_password_set_in_the_wizard_logs_in_after_finish() {
+        let _rounds = crate::credential::CheapRounds::new();
+        let stored = crate::credential::hash_for_test("old");
+        for typed in ["hunter2", "$ecret$2024"] {
+            let mut draft = Config::default();
+            let mut w = Wizard::new(&draft);
+            w.password = typed.into();
+            w.password_confirm = typed.into();
+            w.apply_to(&mut draft);
+            let saved = super::super::password_for_save(&draft.password, &stored);
+            assert!(crate::credential::verify(&saved, typed), "{typed:?} cannot log in after Finish");
+        }
+    }
+
     #[test]
     fn test_credentials_validation() {
         let cfg = Config::default();
@@ -1380,6 +1404,10 @@ mod tests {
         assert!(w.validate(&cfg).is_err());
         w.username = "two words".into();
         assert!(w.validate(&cfg).unwrap_err().contains("spaces"));
+        // The web UI's Basic auth splits at the first colon, so this name
+        // could never log in there.
+        w.username = "ops:pi".into();
+        assert!(w.validate(&cfg).unwrap_err().contains("':'"));
     }
 
     #[test]
@@ -1527,6 +1555,7 @@ mod tests {
         w.apply_to(&mut cfg);
 
         assert_eq!(cfg.username, "bob"); // trimmed
+        // Plaintext in the draft: the save that follows hashes it, once.
         assert_eq!(cfg.password, "hunter2");
         assert!(cfg.telnet_enabled && cfg.telnet_port == 2400);
         assert!(cfg.ssh_enabled && cfg.ssh_port == 2201);

@@ -409,9 +409,11 @@ pub(crate) fn display_for_terminal(s: &str) -> String {
 /// the typography raw: a Groq answer about a "PLC-5" arrives with U+2011
 /// non-breaking hyphens and U+202F narrow spaces in it, which a PETSCII or
 /// 7-bit terminal renders as two or three pieces of rubbish per character.
-/// Reported from a C64 on 2026-08-23. It is called from
-/// [`sanitize_for_terminal`] now, so a new consumer gets it by construction
-/// rather than by remembering.
+/// Reported from a C64 on 2026-08-23. It is called through
+/// [`display_for_terminal`] now -- deliberately not from
+/// [`sanitize_for_terminal`], which also sanitizes URLs (see there) -- so a
+/// new consumer gets it by calling that one function rather than by
+/// remembering two.
 ///
 /// **Deliberately narrow.** Only characters with an unambiguous ASCII
 /// equivalent are folded: box drawing, the smart quotes and dashes that word

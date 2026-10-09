@@ -337,6 +337,14 @@ pub fn load(cpm_base: &Path, key: &str) -> Result<Option<RomImage>, String> {
 /// verifies size and SHA-256 before anything is written — see [`super::fetch`],
 /// whose rules these are.
 pub fn download(cpm_base: &Path, key: &str) -> Result<String, String> {
+    download_outcome(cpm_base, key).map(|(msg, _)| msg)
+}
+
+/// [`download`], plus whether a file was actually written -- `false` when it
+/// was already there, before the run or by the time it finished.  The sample
+/// download counts with this, so a ROM it did not fetch is never reported as
+/// downloaded.
+pub(crate) fn download_outcome(cpm_base: &Path, key: &str) -> Result<(String, bool), String> {
     let Some(f) = file_for(key) else {
         return Err("that setting needs no ROM file".to_string());
     };
@@ -344,7 +352,7 @@ pub fn download(cpm_base: &Path, key: &str) -> Result<String, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let done = dir.join(f.file);
     if done.exists() {
-        return Ok(format!("{} is already here — left untouched", f.file));
+        return Ok((format!("{} is already here — left untouched", f.file), false));
     }
     let body = super::fetch::get(f.url, "EthernetGateway (CP/M monitor ROM)", 1 << 20)?;
     if body.len() as u64 != f.bytes {
@@ -358,19 +366,37 @@ pub fn download(cpm_base: &Path, key: &str) -> Result<String, String> {
     // written: the checksum says the bytes are the ones we tested, and this says
     // this build can still use them.
     image_from_bytes(f, &body)?;
-    let tmp = dir.join(format!("{}.part", f.file));
-    std::fs::write(&tmp, &body)
-        .and_then(|_| std::fs::rename(&tmp, &done))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("{e}")
-        })?;
-    Ok(format!("fetched {} ({} bytes)", f.file, f.bytes))
+    // Never over a file that appeared while this ran -- see `place_new`.
+    match super::fetch::place_new(&dir, f.file, &body) {
+        Ok(()) => Ok((format!("fetched {} ({} bytes)", f.file, f.bytes), true)),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok((format!("{} is already here — left untouched", f.file), false))
+        }
+        Err(e) => Err(format!("{e}")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ROM that is already in place is reported as *not* placed, so the
+    /// sample download counts it as already there rather than downloaded.
+    /// Exercised on the up-front check, which needs no network; the same
+    /// `false` comes back when `place_new` finds the name taken at the end.
+    #[test]
+    fn test_a_rom_already_here_is_not_counted_as_downloaded() {
+        let base = std::env::temp_dir().join(format!("egw_rom_outcome_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let choice = ROM_CHOICES.iter().find(|c| c.rom.is_some()).expect("a catalogued ROM");
+        let f = choice.rom.as_ref().unwrap();
+        std::fs::create_dir_all(roms_dir(&base)).unwrap();
+        std::fs::write(roms_dir(&base).join(f.file), b"the operator's own").unwrap();
+        let (msg, placed) = download_outcome(&base, choice.key).unwrap();
+        assert!(!placed, "an existing ROM was counted as downloaded: {msg}");
+        assert_eq!(std::fs::read(roms_dir(&base).join(f.file)).unwrap(), b"the operator's own");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// A record, built the way the format says, so the fixtures below are
     /// checksummed rather than transcribed.

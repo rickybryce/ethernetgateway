@@ -1471,6 +1471,13 @@ fn collect_form_updates(
             if *key == "password" && v.is_empty() {
                 continue;
             }
+            // Hashed as typed, whatever it looks like: a typed `$a$b` left to
+            // the save's own `hash_if_cleartext` passes for a stored hash and
+            // locks every login out.  See `credential::store_typed`.
+            if *key == "password" {
+                updates.push(((*key).to_string(), crate::credential::store_typed(v)));
+                continue;
+            }
             // **The master's password is never written to `egateway.conf`.**
             // It is needed for exactly one login -- the one that enrols this
             // slave's key -- so a typed value goes to the in-memory holder and
@@ -1489,6 +1496,19 @@ fn collect_form_updates(
             // through would blank the credential that link depends on the next
             // time anything reconnects.
             if *key == "slave_master_username" && v.is_empty() {
+                continue;
+            }
+            // The login name keeps its old value rather than taking one no
+            // surface could log in with (`credential::username_problem`).
+            if *key == "username"
+                && let Some(why) = crate::credential::username_problem(v)
+            {
+                warning = format!("{why} The username was not changed. {warning}").trim_end().to_string();
+                continue;
+            }
+            // Judged trimmed, so stored trimmed.
+            if *key == "username" {
+                updates.push(((*key).to_string(), v.trim().to_string()));
                 continue;
             }
             updates.push(((*key).to_string(), v.clone()));
@@ -2009,6 +2029,11 @@ const VDM_LIST_MS: u32 = 2000;
 
 const VDM_SCRIPT: &str = "<script>
 var vdmCurrent = null;
+/* True once the session being watched has ended, until the operator picks
+   another.  The list must not move the keyboard and the stick on to whatever
+   session is first: that is somebody else's, and driving it is not something
+   a keystroke may do (see `cpm_screen_input`). */
+var vdmChoosing = false;
 function vdmEsc(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -2111,7 +2136,7 @@ function vdmRefreshList() {
     var sel = document.getElementById('vdm-id');
     var note = document.getElementById('vdm-note');
     var want = sel.value;
-    var built = '';
+    var built = vdmChoosing ? '<option value=\"\">(choose a session)</option>' : '';
     for (var i = 0; i < data.screens.length; i++) {
       var s = data.screens[i];
       built += '<option value=\"' + s.id + '\">' + vdmEsc(s.label)
@@ -2122,8 +2147,19 @@ function vdmRefreshList() {
     if (sel.innerHTML !== built) {
       sel.innerHTML = built;
       if (want) { sel.value = want; }
-      if (!sel.value && data.screens.length > 0) { sel.selectedIndex = 0; }
+      if (want && sel.value !== want) {
+        /* The watched session ended.  Let go of the stick (its last report
+           would otherwise ride the heartbeat on), and wait for a choice. */
+        joyRelease();
+        vdmChoosing = true;
+        sel.insertAdjacentHTML('afterbegin', '<option value=\"\">(choose a session)</option>');
+        sel.value = '';
+      } else if (!vdmChoosing && !sel.value && data.screens.length > 0) {
+        sel.selectedIndex = 0;
+      }
       vdmCurrent = sel.value ? parseInt(sel.value, 10) : null;
+      /* Say so where the joystick and keyboard notes are, as a pick does. */
+      if (vdmChoosing) { joyNote(); vdmKbNote(); }
     }
     if (data.screens.length === 0) {
       vdmCurrent = null;
@@ -2381,6 +2417,7 @@ document.getElementById('vdm-id').addEventListener('change', function() {
      helm over because somebody changed sessions is nobody's intention. */
   joyRelease();
   vdmCurrent = this.value ? parseInt(this.value, 10) : null;
+  vdmChoosing = vdmCurrent === null;
   JOY_SEEN = false;
   joyNote();
   vdmPoll();
@@ -6272,6 +6309,36 @@ mod tests {
         assert!(!html.contains("value=\"hunter2\""), "a cleartext password was echoed");
     }
 
+    /// The web form will not store a username its own Basic auth could never
+    /// accept; the old one stays and the notice says why.
+    #[test]
+    fn test_the_web_form_keeps_the_username_when_the_new_one_has_a_colon() {
+        let old = Config::default();
+        let mut fields: HashMap<String, String> = HashMap::new();
+        fields.insert("username".into(), "ops:pi".into());
+        let (updates, notice) = collect_form_updates(&fields, &old);
+        assert!(!updates.iter().any(|(k, _)| k == "username"), "a colon username was saved");
+        assert!(notice.contains("not changed"), "the notice did not say so: {notice}");
+        fields.insert("username".into(), "ops-pi".into());
+        let (updates, _) = collect_form_updates(&fields, &old);
+        assert!(updates.iter().any(|(k, v)| k == "username" && v == "ops-pi"), "a good name was dropped");
+    }
+
+    /// **A typed password shaped like a stored hash still logs in.**  `$ecret$2024`
+    /// passes `credential::is_hashed`, so left to the save's own
+    /// `hash_if_cleartext` it was stored in the clear and `verify` then
+    /// refused every login -- a lockout.  The web form hashes what was typed.
+    #[test]
+    fn test_a_typed_password_shaped_like_a_hash_still_logs_in() {
+        let _rounds = crate::credential::CheapRounds::new();
+        let old = Config::default();
+        let mut fields: HashMap<String, String> = HashMap::new();
+        fields.insert("password".into(), "$ecret$2024".into());
+        let (updates, _) = collect_form_updates(&fields, &old);
+        let stored = &updates.iter().find(|(k, _)| k == "password").expect("the password").1;
+        assert!(crate::credential::verify(stored, "$ecret$2024"), "the operator is locked out");
+    }
+
     /// An empty password field is "leave it alone", never "blank the
     /// credential" -- a blank stored password refuses every login
     /// (`credential::verify`'s empty guard), which on a headless gateway is a
@@ -6288,11 +6355,12 @@ mod tests {
             !updates.iter().any(|(k, _)| k == "password"),
             "an empty password box was saved as the new password"
         );
-        // Positive control: a typed password still gets through.
+        // Positive control: a typed password still gets through -- hashed.
+        let _rounds = crate::credential::CheapRounds::new();
         fields.insert("password".into(), "newsecret".into());
         let (updates, _) = collect_form_updates(&fields, &old);
         assert!(
-            updates.iter().any(|(k, v)| k == "password" && v == "newsecret"),
+            updates.iter().any(|(k, v)| k == "password" && crate::credential::verify(v, "newsecret")),
             "a typed password did not reach the config"
         );
         // ...and the neighbouring field is unaffected either way.
@@ -6419,6 +6487,25 @@ mod tests {
         fields.insert("master_password_entry".to_string(), "  ".to_string());
         assert!(take_master_password_entry(&fields).is_none(), "an empty box was taken as a password");
         assert_ne!(crate::relay::master_password_state(""), crate::relay::MasterPasswordState::Entered);
+    }
+
+    /// **When the watched session ends, the screen page waits for a choice.**
+    /// The list refresh used to select whatever session was first and point
+    /// the keyboard and a held joystick at it -- somebody else's booted disk,
+    /// reached without anybody choosing it.  It now lets go of the stick and
+    /// selects nothing until the operator picks.  The behaviour was checked by
+    /// running this script under Node against a fake page; this pins its shape.
+    #[test]
+    fn test_an_ended_session_does_not_hand_its_keyboard_to_another() {
+        let ended = VDM_SCRIPT.find("if (want && sel.value !== want) {").expect("the ended-session branch");
+        let branch = &VDM_SCRIPT[ended..ended + 400];
+        assert!(branch.contains("joyRelease();"), "the stick is not let go");
+        assert!(branch.contains("vdmChoosing = true;"), "the page does not wait for a choice");
+        assert!(
+            VDM_SCRIPT.contains("} else if (!vdmChoosing && !sel.value && data.screens.length > 0) {"),
+            "the first session is picked automatically while the operator is choosing"
+        );
+        assert!(VDM_SCRIPT.contains("vdmChoosing = vdmCurrent === null;"), "a pick does not end the wait");
     }
 
     /// **Enter in a text box presses Save and Restart, whatever is drawn
@@ -8638,6 +8725,7 @@ mod tests {
         );
 
         const PROBE: &str = "zzprobe";
+        let _rounds = crate::credential::CheapRounds::new();
         let mut form = empty_form();
         for name in &controls {
             form.insert(name.clone(), PROBE.to_string());
@@ -8658,6 +8746,16 @@ mod tests {
                 continue;
             }
             let got = updates.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+            // The password is the one value that may not arrive verbatim: a
+            // typed one is stored hashed (`credential::store_typed`), so it must
+            // arrive as a hash of exactly what was typed.
+            if name == "password" {
+                assert!(
+                    got.is_some_and(|v| crate::credential::verify(v, PROBE)),
+                    "the typed password did not arrive as a hash of itself: {got:?}",
+                );
+                continue;
+            }
             assert_eq!(
                 got,
                 Some(PROBE),

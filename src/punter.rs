@@ -459,6 +459,15 @@ async fn send_code(
     raw_write_bytes(writer, code.bytes(), is_tcp).await
 }
 
+/// How long an ESC (or a Commodore's back-arrow) must stand alone before
+/// [`accept_code`] reads it as the user giving up.  A key pressed at a
+/// terminal arrives by itself; the leftovers of a block that came in late --
+/// `read_block` gives up at its first per-byte timeout, and the rest lands in
+/// the next handshake wait -- arrive as a burst, a byte every few milliseconds
+/// even at 300 baud.  Without this, any `0x1B` or `_` in that tail cancelled a
+/// transfer that was working.
+const ESC_ALONE_MS: u64 = 300;
+
 /// Wait up to `timeout_secs` for one of the `allowed` handshake codes,
 /// sliding a 3-byte window over the incoming bytes (mirrors `accept`,
 /// `punter.src` line 111).  Returns `Ok(Some(code))` on a match, `Ok(None)`
@@ -477,12 +486,23 @@ async fn accept_code(
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
     let mut window = [0u8; 3];
     let mut filled = 0usize;
+    // A byte read while deciding whether an ESC stood alone, to be handled on
+    // the next turn exactly as if it had just arrived.
+    let mut carried: Option<u8> = None;
     loop {
+        // The deadline holds even with a byte carried: a peer sending ESCs
+        // under `ESC_ALONE_MS` apart would otherwise carry one into the next
+        // turn for ever.  A byte carried at the deadline is simply dropped,
+        // as one arriving a moment later would have been.
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Ok(None);
         }
-        let byte = match tokio::time::timeout(remaining, nvt_read_byte(reader, is_tcp, state)).await
+        let read = match carried.take() {
+            Some(b) => Ok(Ok(b)),
+            None => tokio::time::timeout(remaining, nvt_read_byte(reader, is_tcp, state)).await,
+        };
+        let byte = match read
         {
             Ok(Ok(b)) => b,
             // A mid-IAC-sequence timeout from tnio (N4) is a transient stall in
@@ -507,12 +527,20 @@ async fn accept_code(
                 glog!("PUNTER rx byte: 0x{:02X}", b);
             }
         }
-        // Between blocks the only bytes that should appear are the 3-byte
-        // ASCII handshake codes, none of which contain ESC — so honouring a
-        // local user's ESC/PETSCII-stop here is safe and lets them bail.
-        // (C1 has no in-band CAN abort; that's an XMODEM/Kermit convention.)
+        // Between blocks the codes are 3-byte ASCII with no ESC in them, so a
+        // local user's ESC/PETSCII-stop is honoured here and lets them bail
+        // (C1 has no in-band CAN abort; that's an XMODEM/Kermit convention).
+        // But the tail of a late block can land here too, so only an ESC
+        // that stands alone for `ESC_ALONE_MS` is a keypress; one followed
+        // at once by more bytes is data, and goes through the window below.
         if is_esc_key(byte, is_petscii) {
-            return Err("Transfer cancelled".into());
+            let quiet = tokio::time::Duration::from_millis(ESC_ALONE_MS);
+            match tokio::time::timeout(quiet, nvt_read_byte(reader, is_tcp, state)).await {
+                Err(_) => return Err("Transfer cancelled".into()),
+                Ok(Ok(next)) => carried = Some(next),
+                Ok(Err(e)) if e.contains("IAC sequence timed out") => return Ok(None),
+                Ok(Err(e)) => return Err(e),
+            }
         }
         window[0] = window[1];
         window[1] = window[2];
@@ -1214,6 +1242,29 @@ async fn end_off_sender(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A byte that only looks like a cancel is data when more follows it.**
+    /// The tail of a late block lands in the next handshake wait, and an ESC
+    /// (or a C64's `_`) in it used to end a working transfer.  A real keypress
+    /// stands alone, and still cancels.
+    #[tokio::test]
+    async fn test_an_esc_inside_a_burst_does_not_cancel_but_a_lone_one_does() {
+        use tokio::io::AsyncWriteExt;
+        for (petscii, stray) in [(false, 0x1Bu8), (true, b'_')] {
+            let (mut peer, mut ours) = tokio::io::duplex(64);
+            let mut burst = vec![0x41, stray, 0x42, 0x43];
+            burst.extend_from_slice(Code::Ack.bytes());
+            peer.write_all(&burst).await.unwrap();
+            let mut state = ReadState::default();
+            let got = accept_code(&mut ours, false, petscii, &mut state, &[Code::Ack], 5, false).await;
+            assert_eq!(got, Ok(Some(Code::Ack)), "{stray:#04x} in a burst cancelled the transfer");
+
+            peer.write_all(&[stray]).await.unwrap();
+            let got = accept_code(&mut ours, false, petscii, &mut state, &[Code::Ack], 5, false).await;
+            assert_eq!(got, Err("Transfer cancelled".to_string()), "a lone {stray:#04x} no longer cancels");
+            drop(peer);
+        }
+    }
     use tokio::io::duplex;
 
     // Live interop against the real CCGMS receiver (compiled from

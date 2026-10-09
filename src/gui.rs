@@ -4181,8 +4181,16 @@ impl App {
         // credential forward rather than saving a blank one -- a blank
         // password is "refuse every login", which would lock the operator out.
         let mut out = self.cfg.clone();
-        if out.password.is_empty() {
-            out.password = config::get_config().password;
+        out.password = password_for_save(&out.password, &config::get_config().password);
+        // A username no surface could log in with keeps the stored one, and
+        // the box goes back to it below, or the editor would read as unsaved.
+        let username_refused = crate::credential::username_problem(&out.username);
+        if let Some(why) = username_refused {
+            logger::log(format!("{why} The username was not changed."));
+            out.username = config::get_config().username;
+        } else {
+            // Judged trimmed, so stored trimmed -- as the wizard always did.
+            out.username = out.username.trim().to_string();
         }
         out.slave_master_password = master_password_for_save(
             &out.slave_master_password,
@@ -4194,6 +4202,9 @@ impl App {
         // actually stored can be read back from.  Syncing to anything else
         // would leave `refresh_from_global` seeing a difference every frame.
         self.last_synced_cfg = config::get_config();
+        if username_refused.is_some() {
+            self.cfg.username = self.last_synced_cfg.username.clone();
+        }
         self.cfg.password = String::new();
         self.cfg.slave_master_password = String::new();
         self.dirty = false;
@@ -5299,6 +5310,18 @@ fn edits_differ(cfg: &Config, synced: &Config) -> bool {
         probe.slave_master_password.clone_from(&synced.slave_master_password);
     }
     probe != *synced
+}
+
+/// What the gateway password box saves as.  Empty means "unchanged", so the
+/// stored credential is carried forward rather than blanked (a blank password
+/// is "refuse every login", a lockout).  Anything typed is hashed whatever it
+/// looks like -- see `credential::store_typed`.
+fn password_for_save(typed: &str, stored: &str) -> String {
+    if typed.is_empty() {
+        stored.to_string()
+    } else {
+        crate::credential::store_typed(typed)
+    }
 }
 
 /// What a save must write for `slave_master_password`, given what is in the
@@ -7585,6 +7608,20 @@ mod tests {
         // where a panel might be.
         assert_eq!(clamped_window_position((0, 11), None), (0, 11));
         assert_eq!(clamped_window_position((-20, -50), None), (-20, -50));
+    }
+
+    /// The gateway password box: empty keeps the stored credential, and a
+    /// typed one is hashed whatever it looks like -- a typed `$ecret$2024`
+    /// used to pass for a stored hash and lock every login out.
+    #[test]
+    fn test_the_password_box_saves_what_was_typed_hashed() {
+        let _rounds = crate::credential::CheapRounds::new();
+        let stored = crate::credential::hash_for_test("hunter2");
+        assert_eq!(password_for_save("", &stored), stored, "an untouched box changed the credential");
+        for typed in ["new-one", "$ecret$2024"] {
+            let saved = password_for_save(typed, &stored);
+            assert!(crate::credential::verify(&saved, typed), "{typed:?} cannot log in");
+        }
     }
 
     /// **The master's password must not reach the saved config, from either

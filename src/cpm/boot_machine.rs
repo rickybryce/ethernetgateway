@@ -24,8 +24,8 @@
 //!   filesystem path's, and easier to state, but the per-file write claim that
 //!   stops two sessions interleaving records has no meaning here. A booted
 //!   image is therefore held by one session, and every disk in the machine is
-//!   opened read-only unless the operator says otherwise — one answer for the
-//!   whole machine, which is what a set of write-protect tabs is.
+//!   writable unless the operator says otherwise (`cpm_boot_writable`) — one
+//!   answer for the whole machine, which is what a set of write-protect tabs is.
 //! * Unknown ports read as `0xFF` (an idle bus) rather than as whatever was
 //!   last driven, so a guest probing for hardware we do not have sees nothing
 //!   instead of an echo of itself.
@@ -156,18 +156,21 @@ pub struct BootMachine {
     mem: Vec<u8>,
     /// Which controller took the disk in each drive.
     ///
-    /// Recorded at insert time because a drive number alone is ambiguous once
-    /// there is more than one board: drive 0 of the floppy controller and
-    /// drive 0 of the hard disk are different drives. Without this, booting a
-    /// hard disk asked the *floppy* to cold-start and got told its drive was
-    /// empty — true, and completely misleading.
+    /// Recorded at insert time because a slot number alone does not say which
+    /// board took the image once there is more than one: every board shares
+    /// the one sixteen-slot `disks` list, so slot 0 holds one image whichever
+    /// board owns it, and it is *that* board that must cold-start from it.
+    /// Without this, booting a hard disk asked the *floppy* to cold-start and
+    /// got told its drive was empty — true, and completely misleading.
     disk_controller: Vec<Option<usize>>,
 
     /// The controllers this machine carries, each claiming its own ports.
     ///
     /// A list rather than a field per board: adding the 88-HDSK should be
     /// writing a `Controller` and pushing it here, not surgery on the port
-    /// dispatch.  One entry today.
+    /// dispatch.  How many depends on the machine: the Altair machines carry
+    /// three (88-DCDD, 88-HDSK and Tarbell), the z80pack and Cromemco ones one
+    /// each.
     controllers: Vec<Box<dyn Controller>>,
     disks: Vec<Option<Mounted>>,
     /// Bytes the guest has written to the console.
@@ -1030,9 +1033,11 @@ impl BootMachine {
 
     /// Hand this machine's screen to a watching viewer, if there is one.
     ///
-    /// Costs one relaxed atomic load when nobody is watching, which is what
-    /// lets the driver call it at every key-poll seam — thousands of times a
-    /// second — without the price showing up anywhere.
+    /// Costs one relaxed atomic swap when nobody is watching -- a
+    /// read-modify-write rather than a plain load, on a flag nobody but a
+    /// viewer's poll contends for, so it is uncontended -- which is what lets
+    /// the driver call it at every key-poll seam, thousands of times a second,
+    /// without the price showing up anywhere.
     ///
     /// The read goes through `peek`, so a banked guest is sampled through its
     /// MMU rather than out of the array behind it.  That distinction has
@@ -2151,27 +2156,47 @@ pub(crate) mod tests {
         assert!(crlf.find("\n#[cfg(test)]\nmod tests").is_none(), "CRLF really does defeat it");
         assert!(crlf.replace("\r\n", "\n").find("\n#[cfg(test)]\nmod tests").is_some());
 
-        let start = src.find("impl Machine for BootMachine").expect("the impl");
-        // **Both spellings, because the declaration changed.** The test module
-        // gained `pub(crate)` when `signon_of` became the one measurement that
-        // `fetch`'s download gate shares, and this bound is a literal — so it
-        // went red naming the module rather than silently scanning to
-        // end-of-file, which is the one thing a bound like this has to do. The
-        // `probe_elevation_within` scan learned the same lesson the other way
-        // round, by not going red.
         let end = src
             .find("\n#[cfg(test)]\npub(crate) mod tests")
             .or_else(|| src.find("\n#[cfg(test)]\nmod tests"))
             .expect("the test module");
-        let body = &src[start..end];
-        // Inside the trait impl and everything after it — the DMA service loop
-        // included — nothing indexes the memory array directly.
-        for pattern in ["self.mem[at as usize]", "self.mem[address as usize]"] {
-            assert!(
-                !body.contains(pattern),
-                "{pattern} bypasses mem_read/mem_write — the CP/M 3 DMA defect, again"
-            );
+        // **The whole of the production code, not from the trait impl on.**
+        // This scan used to start at `impl Machine for BootMachine` and so
+        // could not see `service()`, which sits above it and is where the DMA
+        // loop that once caused the CP/M 3 empty-directory defect lives:
+        // putting `self.mem[at as usize] = *b` back there passed.  Now every
+        // line that indexes the array has to sit in a function allowed to:
+        // the two doors themselves, and the boot-time loaders that run before
+        // any banking exists.  The bound above still names the module in both
+        // spellings, so it goes red rather than scanning to end-of-file.
+        const ALLOWED: [&str; 5] =
+            ["mem_read", "mem_write", "place_rom_image", "boot_with_step", "load_boot_program"];
+        let mut current_fn = "";
+        let mut seen = 0;
+        for line in src[..end].lines() {
+            let code = line.split("//").next().unwrap_or("");
+            let trimmed = code.trim_start();
+            for prefix in ["pub(crate) fn ", "pub fn ", "fn "] {
+                if let Some(rest) = trimmed.strip_prefix(prefix) {
+                    current_fn = rest.split(['(', '<']).next().unwrap_or("");
+                }
+            }
+            let indexes = code.contains("self.mem[") || code.contains(" mem[") || code.contains("(mem[");
+            if indexes {
+                seen += 1;
+                assert!(
+                    ALLOWED.contains(&current_fn),
+                    "{current_fn} indexes guest memory directly, bypassing mem_read/mem_write -- \
+                     the CP/M 3 DMA defect, again: {line:?}"
+                );
+            }
         }
+        assert!(seen >= 6, "the scan found {seen} direct accesses; it is not reading the code");
+        // And the DMA loop goes through the door, positively.
+        let service = &src[src.find("    fn service(").expect("service")..end];
+        let service = &service[..service.find("\n    }\n").expect("service's end")];
+        assert!(service.contains("self.mem_write("), "the DMA write no longer goes through mem_write");
+        assert!(service.contains("self.mem_read("), "the DMA read no longer goes through mem_read");
     }
 
     /// An unrecognised setting must leave a working console rather than none.

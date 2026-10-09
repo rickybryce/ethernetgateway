@@ -91,9 +91,13 @@ const PBKDF2_OUTPUT_LEN: usize = 32;
 /// it cannot check rather than falling back to a literal comparison.
 ///
 /// The cost is that a *cleartext* password shaped like `$foo$bar` would be
-/// read as a hash and refused. That is the safe failure (a login that does not
-/// work, rather than a file that authenticates itself), and the migration
-/// below removes cleartext anyway.
+/// read as a hash and refused -- the safe failure (a login that does not work,
+/// rather than a file that authenticates itself).  The migration cannot remove
+/// that case, because to it the value already *is* a hash, so it is closed at
+/// the other end: a password an operator types never reaches this test. Every
+/// surface stores a typed value through [`store_typed`], which hashes it
+/// whatever it looks like. Only a value hand-edited into `egateway.conf` can
+/// still be misread this way.
 pub(crate) fn is_hashed(stored: &str) -> bool {
     let rest = match stored.strip_prefix('$') {
         Some(r) => r,
@@ -108,6 +112,60 @@ pub(crate) fn is_hashed(stored: &str) -> bool {
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         }
         None => false,
+    }
+}
+
+/// The stored form of a password an operator has just **typed**.
+///
+/// A typed value is plaintext by definition, so it is hashed whatever its
+/// shape -- unlike [`hash_if_cleartext`], which reads a value out of the file
+/// and cannot tell `$ecret$2024` from a hash.  Routing a typed `$ecret$2024`
+/// through that test stored it in the clear, where `verify` then refused every
+/// login: a lockout on a headless box.  Empty stays empty ("leave it alone" /
+/// "no password"), since a hash of the empty string would accept an empty
+/// login.  If hashing fails the value is kept as typed, as `hash_if_cleartext`
+/// does, rather than blanked.
+pub(crate) fn store_typed(plain: &str) -> String {
+    if plain.is_empty() {
+        return String::new();
+    }
+    match hash(plain) {
+        Some(h) => h,
+        None => {
+            glog!("Warning: could not hash the new password; it is stored as typed.");
+            plain.to_string()
+        }
+    }
+}
+
+/// Why `name` cannot be the login username, if it cannot -- one rule for the
+/// wizard, telnet, the web UI and the desktop editor.  A `:` is refused because
+/// HTTP Basic auth splits `user:password` at the first colon, so the web UI
+/// could never accept that name; whitespace and an empty name for the reasons
+/// the wizard always gave.  Judged on the trimmed name, as it is stored.
+pub(crate) fn username_problem(name: &str) -> Option<&'static str> {
+    let name = name.trim();
+    if name.is_empty() {
+        Some("Username cannot be empty.")
+    } else if name.contains(char::is_whitespace) {
+        Some("Username cannot contain spaces.")
+    } else if name.contains(':') {
+        Some("Username cannot contain ':'.")
+    } else {
+        None
+    }
+}
+
+/// The value to store for config key `key` when an operator typed `typed` --
+/// the password hashed by [`store_typed`], the username trimmed, anything else
+/// as typed.  For the
+/// screens that set one key at a time (telnet's Security menu).
+pub(crate) fn typed_config_value(key: &str, typed: String) -> String {
+    match key {
+        "password" => store_typed(&typed),
+        // Judged trimmed by `username_problem`, so stored trimmed.
+        "username" => typed.trim().to_string(),
+        _ => typed,
     }
 }
 
@@ -577,5 +635,38 @@ mod tests {
         assert_ne!(cache_key("ab", "c"), cache_key("a", "bc"));
         assert_eq!(cache_key("a", "b"), cache_key("a", "b"));
         assert_ne!(cache_key("a", "b"), cache_key("a", "c"));
+    }
+
+    /// A typed password is hashed whatever it looks like, and the one that
+    /// looks like a hash is the reason: `hash_if_cleartext` would leave it.
+    /// Empty stays empty -- a hash of "" would accept an empty login.
+    #[test]
+    fn test_store_typed_hashes_whatever_was_typed() {
+        let _rounds = CheapRounds::new();
+        for typed in ["plain", "$ecret$2024", "$pbkdf2-sha256$not-really"] {
+            let stored = store_typed(typed);
+            assert!(verify(&stored, typed), "{typed:?} cannot log in");
+            assert!(!verify(&stored, "wrong"));
+        }
+        let mut left = "$ecret$2024".to_string();
+        hash_if_cleartext(&mut left);
+        assert_eq!(left, "$ecret$2024", "the migration's rule changed; this test's premise is gone");
+        assert_eq!(store_typed(""), "");
+        // The one-key-at-a-time screens (telnet) route through this.
+        assert!(verify(&typed_config_value("password", "$ecret$2024".into()), "$ecret$2024"));
+        assert_eq!(typed_config_value("username", " ops ".into()), "ops", "a username is stored trimmed");
+    }
+
+    /// One username rule for every surface.  `:` is the one that matters most:
+    /// HTTP Basic auth splits at the first colon, so `ops:pi` could log in to
+    /// telnet and SSH and never to the web UI.
+    #[test]
+    fn test_a_username_any_surface_could_not_log_in_with_is_refused() {
+        for bad in ["", "   ", "ops pi", "ops:pi", ":"] {
+            assert!(username_problem(bad).is_some(), "{bad:?} was accepted");
+        }
+        for good in ["admin", "ops-pi", "ops.pi", " padded "] {
+            assert_eq!(username_problem(good), None, "{good:?} was refused");
+        }
     }
 }

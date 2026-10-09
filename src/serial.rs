@@ -6327,12 +6327,12 @@ where
 /// across packets still decodes.
 struct PetsciiLink {
     ansi: crate::petscii::AnsiToPetscii,
-    punct: PetsciiPunctState,
+    text: crate::petscii::PetsciiText,
 }
 
 impl PetsciiLink {
     fn new() -> Self {
-        PetsciiLink { ansi: crate::petscii::AnsiToPetscii::new(), punct: PetsciiPunctState::default() }
+        PetsciiLink { ansi: crate::petscii::AnsiToPetscii::new(), text: crate::petscii::PetsciiText::default() }
     }
 
     /// C64 keystrokes on their way to an ASCII host.  A cursor key is one
@@ -6354,22 +6354,16 @@ impl PetsciiLink {
         mapped
     }
 
-    /// A host's ASCII/ANSI on its way to the C64.  Text goes through the
-    /// punctuation folder and the case swap; the escape translator's own
-    /// PETSCII control bytes must not, because `PetsciiPunctState` drops
-    /// 0x80..=0x9F -- which is where nine of the sixteen colour codes live.
-    /// Keeping the two apart is why `feed` takes the caller's text handler
-    /// rather than doing the mapping itself.
+    /// A host's ASCII/ANSI on its way to the C64.  Text goes through
+    /// `PetsciiText` (the punctuation folder and the case swap); the escape
+    /// translator's own PETSCII control bytes must not, because the folder
+    /// drops 0x80..=0x9F -- which is where nine of the sixteen colour codes
+    /// live.  Keeping the two apart is why `feed` takes the caller's text
+    /// handler rather than doing the mapping itself.
     fn for_device(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut translated = Vec::with_capacity(bytes.len());
-        let punct = &mut self.punct;
-        let mut text = |b: u8, out: &mut Vec<u8>| {
-            let start = out.len();
-            punct.feed(b, out);
-            for v in out[start..].iter_mut() {
-                *v = translate_ascii_to_petscii_byte(*v);
-            }
-        };
+        let host_text = &mut self.text;
+        let mut text = |b: u8, out: &mut Vec<u8>| host_text.feed(b, out);
         for &b in bytes {
             self.ansi.feed(b, &mut text, &mut translated);
         }
@@ -6393,49 +6387,6 @@ fn translate_petscii_to_ascii_byte(byte: u8) -> u8 {
     }
 }
 
-/// Map an ASCII byte received from a host into a byte that displays
-/// correctly on a C64 in text (lower/upper) mode.  The C64's
-/// character mapping is case-shifted relative to ASCII — sending
-/// `'a'` (0x61) renders as uppercase `A`, sending `'A'` (0x41) renders
-/// as lowercase `a` — so we case-swap letters before writing them to
-/// the wire.
-///
-/// ASCII BS (0x08) becomes PETSCII **CRSR LEFT (0x9D)**, not PETSCII DEL
-/// (0x14).  This mapping was `0x14` and that was wrong for the same reason it
-/// was wrong in the gateway's `filter_gateway_output` — both sites had the same
-/// defect, so fixing only one would have left a C64 dialling out through the
-/// modem emulator (`AT+PETSCII=1`) still corrupted:
-///
-///   ASCII 0x08   = move the cursor left one column, erasing nothing
-///   PETSCII 0x14 = DELETE the character to the left, pulling the line back
-///   PETSCII 0x9D = move the cursor left one column — the real equivalent
-///
-/// A host uses BS both to reposition the cursor (readline emits runs of bare
-/// BS after redrawing a line, which used to delete characters the host still
-/// believed were on screen) and to erase via the universal `BS SPACE BS`
-/// (which became `DEL SPACE DEL`).  With `0x9D` the erase idiom renders as
-/// left, space, left — the character is overwritten and the cursor ends up
-/// before it, exactly as intended.
-///
-/// Note the contrast with the AT-command echo in `process_at_byte`, which
-/// deliberately writes a bare `0x14`: there the emulator is *originating* an
-/// erase for its own local echo, so the self-contained destructive delete is
-/// the right primitive.  Here we are *translating someone else's* stream.
-/// ASCII DEL (0x7F) is treated exactly like BS, which is how this codebase
-/// treats the pair everywhere else — `is_backspace_key` accepts both, terminal
-/// detection accepts both, and the gateway's `filter_gateway_output` maps both.
-/// Leaving 0x7F to fall through rendered it as an arbitrary PETSCII glyph on
-/// the C64, so the two PETSCII output translators disagreed about a byte they
-/// agree about on input.
-fn translate_ascii_to_petscii_byte(byte: u8) -> u8 {
-    match byte {
-        b'A'..=b'Z' => byte + 32,
-        b'a'..=b'z' => byte - 32,
-        0x08 | 0x7F => 0x9D,
-        _ => byte,
-    }
-}
-
 // The ANSI stripper that used to live here is gone: `crate::petscii` now
 // *translates* what it can into PETSCII (colour, clear screen, cursor moves)
 // and drops only the rest.  Stripping meant a C64 dialling an ASCII BBS got
@@ -6445,68 +6396,7 @@ fn translate_ascii_to_petscii_byte(byte: u8) -> u8 {
 // defects in this area (the BS -> 0x9D mapping, twice) were one rule written
 // in two places.
 
-/// State machine that normalizes inbound punctuation so it renders
-/// legibly on a C64 in lower/upper (text) mode.  Old ASCII text files
-/// use back-tick as a "left single quote" and tilde as a dash; on the
-/// C64 0x60 renders as a horizontal bar (the "thick underscore" users
-/// reported) and 0x7E as a graphic.  Modern hosts emit UTF-8 "smart"
-/// quotes, dashes, and ellipses (all `0xE2 0x80 0xXX`).  None of these
-/// land on the intended glyph in PETSCII, so we fold them down to plain
-/// ASCII before the case-swap step.  High bytes the C64 can't display
-/// are dropped (PETSCII color/control range) or replaced with '?'.
-/// Stateful so a UTF-8 sequence split across TCP reads is still decoded.
-#[derive(Default)]
-enum PetsciiPunctState {
-    #[default]
-    Normal,
-    SawE2,   // got 0xE2, awaiting 0x80
-    SawE280, // got 0xE2 0x80, awaiting the final byte
-}
 
-impl PetsciiPunctState {
-    /// Push one input byte, appending its normalized replacement (zero
-    /// or more bytes — the ellipsis expands to three) to `out`.
-    fn feed(&mut self, byte: u8, out: &mut Vec<u8>) {
-        match self {
-            PetsciiPunctState::Normal => self.feed_ground(byte, out),
-            PetsciiPunctState::SawE2 => {
-                if byte == 0x80 {
-                    *self = PetsciiPunctState::SawE280;
-                } else {
-                    // The 0xE2 wasn't the lead of a U+2018-range glyph.
-                    // Emit '?' for the orphaned lead byte and reprocess
-                    // this one from the ground state (it may itself be a
-                    // fresh 0xE2 or other meaningful byte).
-                    out.push(b'?');
-                    *self = PetsciiPunctState::Normal;
-                    self.feed_ground(byte, out);
-                }
-            }
-            PetsciiPunctState::SawE280 => {
-                match byte {
-                    0x98 | 0x99 => out.push(0x27),         // ‘ ’ → '
-                    0x9C | 0x9D => out.push(0x22),         // “ ” → "
-                    0x93 | 0x94 => out.push(b'-'),         // en/em dash → -
-                    0xA6 => out.extend_from_slice(b"..."), // … → ...
-                    _ => out.push(b'?'),                   // other U+20xx
-                }
-                *self = PetsciiPunctState::Normal;
-            }
-        }
-    }
-
-    /// Handle one byte in the ground state (not mid-UTF-8 sequence).
-    fn feed_ground(&mut self, byte: u8, out: &mut Vec<u8>) {
-        match byte {
-            0xE2 => *self = PetsciiPunctState::SawE2,
-            0x60 => out.push(0x27),        // back-tick → apostrophe
-            0x7E => out.push(b'-'),        // tilde → dash
-            0x80..=0x9F => {}              // PETSCII color/control — drop
-            0xA0..=0xFF => out.push(b'?'), // other high bytes
-            _ => out.push(byte),
-        }
-    }
-}
 
 /// A run of bytes off the wire for the pump's trace -- **control bytes named,
 /// everything else reduced to a dot.**
@@ -7163,6 +7053,7 @@ fn send_result(state: &mut ModemState, msg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::petscii::{translate_ascii_to_petscii_byte, PetsciiPunctState};
 
     /// **A session backlog is measured in seconds, not bytes.**
     ///

@@ -29,14 +29,15 @@ pub(crate) fn petscii_to_ascii_byte(byte: u8) -> u8 {
 /// The byte-at-a-time twin of [`swap_case_for_petscii`], for output that is
 /// never a `&str` — a booted disk image's console stream, which arrives as raw
 /// bytes from an emulated UART and has to keep every non-letter untouched.
-/// Deliberately the same two ranges as that function: if the mapping is ever
-/// wrong it should be wrong in one place and fixed in one place.
+/// The letters use deliberately the same two ranges as that function: if the
+/// case mapping is ever wrong it should be wrong in one place and fixed in one
+/// place.  Unlike that function it also maps the erase bytes, below.
 ///
 /// ASCII BS (0x08) becomes PETSCII **CRSR LEFT (0x9D)**, never PETSCII DEL
-/// (0x14), and ASCII DEL (0x7F) is treated the same as BS.  This is the third
-/// PETSCII output translator in the gateway and the rule is identical in all
-/// three — see `serial.rs`'s `translate_ascii_to_petscii_byte` for the full
-/// write-up.  It matters here because every booted operating system measured
+/// (0x14), and ASCII DEL (0x7F) is treated the same as BS.  This is not the
+/// gateway's only PETSCII output translator, and the rule is the same as the
+/// one the Telnet/SSH Gateways and the modem share — see `petscii.rs`'s
+/// `translate_ascii_to_petscii_byte` for the full write-up.  It matters here because every booted operating system measured
 /// erases with the universal `BS SPACE BS`: mapped to 0x14 that reads as
 /// *delete, space, delete* on a C64 and pulls the line about, where 0x9D gives
 /// left, space, left — the character overwritten and the cursor before it.

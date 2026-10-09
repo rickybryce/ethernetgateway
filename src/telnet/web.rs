@@ -43,6 +43,17 @@ impl TelnetSession {
         }
     }
 
+    /// Text from the internet, as this terminal can show it: cleaned by
+    /// `display_for_terminal` (control bytes, typographic punctuation), then
+    /// folded by [`Self::web_text`] (accents to plain letters for PETSCII and
+    /// ASCII).  The three surfaces that print remote text -- the browser, AI
+    /// Chat and weather -- had the first step and only the browser had the
+    /// second, so "Zurich" with an umlaut reached a C64 as a graphics glyph.
+    /// Both steps are idempotent, so text cleaned earlier is safe to pass.
+    pub(in crate::telnet) fn remote_text(&self, s: &str) -> String {
+        self.web_text(&crate::aichat::display_for_terminal(s))
+    }
+
     /// Content width for HTML rendering.
     /// Slightly narrower than the display to leave room for link number suffixes
     /// like `[12]` that are appended after html2text wraps.

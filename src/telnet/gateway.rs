@@ -234,6 +234,9 @@ pub(in crate::telnet) struct GatewayOutState {
     /// *discard*, this one decides what an escape sequence becomes on a
     /// Commodore.  Unused in the other two modes.
     petscii: crate::petscii::AnsiToPetscii,
+    /// The text half for a Commodore -- the same `PetsciiText` the modem's
+    /// `AT+PETSCII=1` path uses.  Stateful: a UTF-8 dash split across reads.
+    petscii_text: crate::petscii::PetsciiText,
 }
 
 /// How long a candidate may be withheld once the remote stops sending.
@@ -260,6 +263,7 @@ impl GatewayOutState {
             swallowed: 0,
             held: Vec::new(),
             petscii: crate::petscii::AnsiToPetscii::new(),
+            petscii_text: crate::petscii::PetsciiText::default(),
         }
     }
 
@@ -345,25 +349,15 @@ pub(in crate::telnet) fn filter_gateway_output(
     // was.  The character mapping stays the caller's: a translator that also
     // case-swapped would have to be told which caller it was serving.
     if st.mode == GatewayFilter::Petscii {
-        // ASCII BS (0x08) becomes PETSCII **CRSR LEFT (0x9D)**, never PETSCII
-        // DEL (0x14).  They are not equivalents: 0x08 moves the cursor left
-        // and erases nothing, 0x14 deletes the character to the left and pulls
-        // the rest of the line back.  A host uses BS both to reposition (a
-        // readline redraw emits runs of bare BS -- each one silently deleted a
-        // character the remote still believed was on screen) and to erase with
-        // the universal `BS SPACE BS`, which became `DEL SPACE DEL`.  With
-        // 0x9D that idiom renders as left, space, left: the character is
-        // overwritten and the cursor ends up before it, exactly as meant.
-        // 0x7F is treated the same, as it is everywhere else in this codebase.
-        // The same rule, and the same write-up, lives in `serial.rs`'s
-        // `translate_ascii_to_petscii_byte`.
-        let mut text = |b: u8, out: &mut Vec<u8>| match b {
-            b'~' => {}  // tilde has no PETSCII equivalent
-            0x08 | 0x7F => out.push(0x9D),
-            b'A'..=b'Z' => out.push(b + 32),
-            b'a'..=b'z' => out.push(b - 32),
-            _ => out.push(b),
-        };
+        // Text goes through `crate::petscii::PetsciiText`, the one the modem's
+        // `AT+PETSCII=1` path uses: BS/DEL become CRSR LEFT (never PETSCII
+        // DEL -- see `translate_ascii_to_petscii_byte`), letters are
+        // case-swapped, UTF-8 quotes and dashes fold to ASCII, a tilde shows
+        // as a dash, and a high byte is dropped or shown as `?`.  This path
+        // used to pass 0x80-0xFF raw, so UTF-8 from a modern host reached the
+        // C64 as control codes -- an en dash cleared its screen.
+        let host_text = &mut st.petscii_text;
+        let mut text = |b: u8, out: &mut Vec<u8>| host_text.feed(b, out);
         for &b in input {
             st.petscii.feed(b, &mut text, out);
         }

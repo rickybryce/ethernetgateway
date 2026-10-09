@@ -207,6 +207,54 @@ pub fn outstanding(cpm_base: &Path) -> (Vec<Disk>, Vec<&'static super::rom::RomF
     (disks, roms)
 }
 
+/// Put a verified download in place as `dir/name`, **never** replacing
+/// anything already there.
+///
+/// Checking for the file once, before a run that takes a minute, was not
+/// enough: an operator copying their own `DISKxx.DSK` in meanwhile lost it to
+/// `rename`, which replaces on every platform we ship.  So the final name is
+/// claimed with a hard link, which fails if anything holds it; a filesystem
+/// without hard links falls back to look-then-rename, the old behaviour.  The
+/// temporary name is unique to this process and call, so two surfaces
+/// downloading at once no longer share one `.part` file and fail each other.
+/// `AlreadyExists` means the name was taken and the download was discarded.
+pub(in crate::cpm) fn place_new(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    sweep_stale_parts(dir);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!("{name}.{}.{n}.part", std::process::id()));
+    let done = dir.join(name);
+    let placed = std::fs::write(&tmp, bytes).and_then(|()| match std::fs::hard_link(&tmp, &done) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        // No hard links here (FAT, some network shares): the old way, with the
+        // window it always had.
+        Err(_) if done.exists() => Err(std::io::ErrorKind::AlreadyExists.into()),
+        Err(_) => std::fs::rename(&tmp, &done),
+    });
+    let _ = std::fs::remove_file(&tmp);
+    placed
+}
+
+/// Remove `.part` files an interrupted download left in `dir` -- unique names
+/// are never overwritten by the next run, so nothing else would.  Only ones
+/// more than an hour old: a download still running elsewhere writes its file
+/// and claims it within seconds, so an hour cannot take one from under it.
+fn sweep_stale_parts(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let hour = std::time::Duration::from_secs(3600);
+    for e in entries.flatten() {
+        let stale = e.file_name().to_string_lossy().ends_with(".part")
+            && e.metadata().ok().and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > hour);
+        if stale {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// How a download ended.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Report {
@@ -274,11 +322,6 @@ impl Report {
     }
 }
 
-/// SHA-256, for verifying what arrived is what was tested.
-///
-/// Written out rather than pulled in: this is the only hash this crate needs,
-/// a dependency for it would be a supply-chain decision taken for one function,
-/// and the algorithm is fixed for ever by its own specification.
 /// Lower-case hex of a byte slice, for tests that compare a digest by string.
 ///
 /// It exists because `format!("{:x}", Sha256::digest(..))` is not portable
@@ -305,6 +348,14 @@ pub(crate) fn hex_of(bytes: &[u8]) -> String {
     out
 }
 
+/// SHA-256, for verifying what arrived is what was tested.
+///
+/// Written out, and kept that way: the algorithm is fixed for ever by its own
+/// specification, and a byte-for-byte check against an independent
+/// implementation (`test_sha256_agrees_with_an_independent_implementation`)
+/// holds it.  `sha2` does reach this crate now, through `pbkdf2` for the
+/// password hash, so this is no longer the only SHA-256 in the build -- only
+/// the one the downloads depend on.
 pub(in crate::cpm) fn sha256(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -465,7 +516,7 @@ mod report_tests {
 /// `progress` is called before each download with the name and the position in
 /// the run, so a caller can say something on a screen that is about to be quiet
 /// for a minute. Failures do not stop the run: one unavailable disk should not
-/// cost the operator the other twenty-nine.
+/// cost the operator all the others.
 pub fn download_missing(
     cpm_base: &Path,
     mut progress: impl FnMut(&str, usize, usize),
@@ -489,17 +540,16 @@ pub fn download_missing(
         progress(&disk.name, i + 1, total);
         match fetch_one(disk) {
             Ok(bytes) => {
-                // Written to a temporary name and renamed, so an interrupted
-                // download cannot leave a half a disk image behind under a name
-                // the rest of the gateway will then try to mount.
-                let tmp = images.join(format!("{}.part", disk.name));
-                let done = images.join(&disk.name);
-                match std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, &done)) {
+                // Written to a temporary name and then claimed, so an
+                // interrupted download cannot leave half a disk image under a
+                // name the gateway will try to mount, and a file that appeared
+                // during the run is left alone -- see `place_new`.
+                match place_new(images, &disk.name, &bytes) {
                     Ok(()) => report.fetched.push(disk.name.clone()),
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&tmp);
-                        report.failed.push((disk.name.clone(), format!("{e}")));
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        report.skipped.push(disk.name.clone())
                     }
+                    Err(e) => report.failed.push((disk.name.clone(), format!("{e}"))),
                 }
             }
             Err(e) => report.failed.push((disk.name.clone(), e)),
@@ -529,8 +579,9 @@ pub fn download_missing(
         }
         let at = wanted.len() + wanted_roms.iter().position(|w| w.file == f.file).unwrap_or(0) + 1;
         progress(f.file, at, total);
-        match super::rom::download(cpm_base, c.key) {
-            Ok(_) => report.fetched.push(f.file.to_string()),
+        match super::rom::download_outcome(cpm_base, c.key) {
+            Ok((_, true)) => report.fetched.push(f.file.to_string()),
+            Ok((_, false)) => report.skipped.push(f.file.to_string()),
             Err(e) => report.failed.push((f.file.to_string(), e)),
         }
     }
@@ -590,7 +641,7 @@ mod generate {
         // Which source serves which disk.  Hansel's collection is taken whole;
         // McNeely's contributes only what Hansel does not have, because the four
         // names they share are *different disks* and Hansel's are the documented
-        // ones.  Listing the five explicitly rather than diffing the folders:
+        // ones.  Listing the four explicitly rather than diffing the folders:
         // a diff would silently pick up whatever a future checkout added, and
         // this file's whole promise is that a human decided each line.
         // NOT `DISK17.DSK`, and the reason is the whole point of this list being
@@ -707,7 +758,7 @@ mod generate {
             "# are CP/M 3.0 disk 1 and 2, Felix and CP/M 2.2 MITS+Tarbell, and are documented".to_string(),
             "# as such; McNeely's four files of those names are DIFFERENT disks, undocumented".to_string(),
             "# in its own catalogue, one of which does not boot.  So the contested names come".to_string(),
-            "# from Hansel and only the five McNeely uniquely has come from McNeely.".to_string(),
+            "# from Hansel and only the four McNeely uniquely has come from McNeely.".to_string(),
             "#".to_string(),
             "# The disks are not ours and are not shipped -- this fetches them from the".to_string(),
             "# original repositories on the operator's behalf.  The vintage software on them".to_string(),
@@ -738,7 +789,7 @@ mod generate {
     fn describe(name: &str) -> &'static str {
         match name {
             "TDISK04.DSK" => "CP/M 1.4 for the VDM-1 - paints the VDM screen, not the terminal",
-            // The five from McNeely are named one by one, because unlike the
+            // The McNeely disks are named one by one, because unlike the
             // families below we know exactly what each is: its own catalogue
             // says so, and they are the reason that repository was added.
             "HDSK04.DSK" => "Altair 88-HDSK hard disk - Infocom adventures under CP/M",
@@ -757,6 +808,30 @@ mod generate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A download never replaces a file that is already there -- including one
+    /// that appeared after the run's own up-front check -- and leaves no
+    /// temporary file behind either way.
+    #[test]
+    fn test_place_new_never_replaces_and_leaves_no_part_file() {
+        let dir = std::env::temp_dir().join(format!("egw_place_new_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        place_new(&dir, "NEW.DSK", b"downloaded").unwrap();
+        assert_eq!(std::fs::read(dir.join("NEW.DSK")).unwrap(), b"downloaded");
+
+        std::fs::write(dir.join("MINE.DSK"), b"the operator's own").unwrap();
+        let e = place_new(&dir, "MINE.DSK", b"downloaded").unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(dir.join("MINE.DSK")).unwrap(), b"the operator's own", "replaced");
+
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".part"))
+            .collect();
+        assert!(left.is_empty(), "temporary files left behind: {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The catalogue is generated, so what matters is that every row survives
     /// the parse — a row silently dropped is a disk quietly missing from the

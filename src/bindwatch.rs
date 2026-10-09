@@ -10,7 +10,8 @@
 //!
 //! So the listeners report here as they bind, and a watcher says out loud what
 //! the individual lines only imply: *none of your listeners came up, something
-//! else is holding the ports.*  Diagnostics only — nothing here changes what
+//! else is holding the ports* -- or, when only some failed, which ones and how
+//! many of the rest are running.  Diagnostics only — nothing here changes what
 //! the gateway does.
 
 use std::collections::BTreeMap;

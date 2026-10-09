@@ -11,6 +11,21 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Write one line to stderr, and carry on if that fails.
+///
+/// **Never `eprintln!` in this file.**  It panics when the write fails, and
+/// the write fails as soon as nobody is reading: a closed terminal (EIO) or a
+/// pipe whose reader has exited (`| tee` after `tee` quits, EPIPE).  The
+/// gateway outlives its terminal by design -- closing it sends SIGHUP, which is
+/// a reload -- so every log call would then panic inside whichever task made
+/// it, and a server that accepts connections and drops every one of them is
+/// what an operator would see.  Logging is the one thing that must not be able
+/// to take the program down; the file and the rings still get the line.
+fn to_stderr(args: std::fmt::Arguments) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{}", args);
+}
+
 const MAX_LINES: usize = 2000;
 
 static LOG_BUFFER: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
@@ -236,7 +251,7 @@ fn rotate(policy: &FilePolicy) -> std::io::Result<std::fs::File> {
     let oldest = rotated_path(&policy.path, policy.max_files);
     if oldest.exists() {
         if let Err(e) = std::fs::remove_file(&oldest) {
-            eprintln!("Log rotation: could not delete {}: {}", oldest.display(), e);
+            to_stderr(format_args!("Log rotation: could not delete {}: {}", oldest.display(), e));
         }
     }
     for n in (1..policy.max_files).rev() {
@@ -246,12 +261,12 @@ fn rotate(policy: &FilePolicy) -> std::io::Result<std::fs::File> {
             if let Err(e) = std::fs::rename(&from, &to) {
                 // Abort: the next rename in the sequence would overwrite the
                 // generation this one failed to move out of the way.
-                eprintln!(
+                to_stderr(format_args!(
                     "Log rotation: could not rename {}: {} — rotation abandoned, the \
                      current log is left intact.",
                     from.display(),
                     e
-                );
+                ));
                 return Err(e);
             }
         }
@@ -259,12 +274,12 @@ fn rotate(policy: &FilePolicy) -> std::io::Result<std::fs::File> {
     if policy.path.exists() {
         let to = rotated_path(&policy.path, 1);
         if let Err(e) = std::fs::rename(&policy.path, &to) {
-            eprintln!(
+            to_stderr(format_args!(
                 "Log rotation: could not rename {}: {} — keeping the current log rather \
                  than truncating it.",
                 policy.path.display(),
                 e
-            );
+            ));
             return Err(e);
         }
     }
@@ -350,12 +365,12 @@ pub fn configure_file_logging(policy: Option<FilePolicy>) {
                     // than off — a log directory that does not exist yet, or a
                     // volume that has not finished mounting at boot, is exactly
                     // the case that fixes itself a minute later.
-                    eprintln!(
+                    to_stderr(format_args!(
                         "Warning: could not open log file {}: {} — retrying every {}s.",
                         p.path.display(),
                         e,
                         RETRY_BACKOFF_START.as_secs()
-                    );
+                    ));
                     *slot = Sink::Paused {
                         policy: p,
                         retry_at: Instant::now() + RETRY_BACKOFF_START,
@@ -399,7 +414,7 @@ fn drain_backlog_into(lines: VecDeque<String>, sink: &mut FileSink) {
         // bury it.  The next ordinary log() call pauses the sink and tells the
         // operator; this only explains the startup lines that did not make it.
         if let Err(e) = write_line_to(sink, &line) {
-            eprintln!("Log write failed while writing the startup backlog: {}", e);
+            to_stderr(format_args!("Log write failed while writing the startup backlog: {}", e));
             break;
         }
     }
@@ -599,10 +614,6 @@ pub fn init() {
     HISTORY_BUFFER.get_or_init(|| Mutex::new(VecDeque::with_capacity(MAX_LINES)));
 }
 
-/// Log a message to stderr and append it to both shared buffers.  The
-/// drain buffer feeds the GUI's per-frame console accumulator; the
-/// history buffer is a non-draining ring that lets the web-config
-/// console poll for recent lines without competing with the GUI.
 /// The local-time prefix every log line carries, e.g. `[2026-09-13 06:46:31] `.
 ///
 /// **Local, not UTC, and that is the operator's choice made once.**  Whoever
@@ -619,6 +630,10 @@ fn stamp() -> String {
     chrono::Local::now().format("[%Y-%m-%d %H:%M:%S] ").to_string()
 }
 
+/// Log a message to stderr and append it to both shared buffers.  The
+/// drain buffer feeds the GUI's per-frame console accumulator; the
+/// history buffer is a non-draining ring that lets the web-config
+/// console poll for recent lines without competing with the GUI.
 pub fn log(msg: String) {
     // Stamped HERE, above the sink and the rings, so that every consumer --
     // stderr, the file, the GUI console and the web `/logs` view -- shows the
@@ -630,7 +645,7 @@ pub fn log(msg: String) {
     // `drain_backlog_into`) therefore still take an unadorned line, which is
     // what their own tests assert on.
     let msg = format!("{}{}", stamp(), msg);
-    eprintln!("{}", msg);
+    to_stderr(format_args!("{}", msg));
     // Before the rings, so a line is on disk even if a ring lock is contended.
     // A line that predates the config (the version banner, the config-load
     // diagnostics) has no file to go to yet, so it waits in the backlog and is
@@ -650,7 +665,7 @@ pub fn log(msg: String) {
         // Stamped like everything else: this notice says logging stopped or
         // resumed, and "when" is the only interesting thing about it.
         let notice = format!("{}{}", stamp(), notice);
-        eprintln!("{}", notice);
+        to_stderr(format_args!("{}", notice));
         push_to_rings(notice);
     }
 }
@@ -1497,5 +1512,24 @@ mod tests {
             snap.iter().any(|l| l.ends_with(&sentinel)),
             "drain() removed a line from snapshot's history buffer"
         );
+    }
+
+    /// **A dead stderr must not take the gateway down.**  `eprintln!` panics
+    /// when its write fails, which is what a closed terminal or an exited
+    /// `| tee` makes of every write, so the logger writes through
+    /// [`to_stderr`] and nothing else.  Scanned rather than driven: pointing
+    /// this process's fd 2 at a dead pipe would break every other test's
+    /// output.  Bounded at the test module, or the scan reads its own literal.
+    #[test]
+    fn test_the_logger_never_panics_on_a_dead_stderr() {
+        let src = include_str!("logger.rs").replace("\r\n", "\n");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").expect("the test module")];
+        let live: Vec<&str> = prod
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains("eprintln!") || l.contains("eprint!"))
+            .collect();
+        assert!(live.is_empty(), "a panicking stderr write in the logger: {live:?}");
+        assert!(prod.matches("to_stderr(format_args!").count() >= 7, "the scan found no writes at all");
     }
 }

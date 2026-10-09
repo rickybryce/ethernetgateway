@@ -135,6 +135,12 @@ pub struct Z80pack {
     status: u8,
     /// What is in each drive, by drive number.
     disks: Vec<Option<Geometry>>,
+    /// Which drives hold a disk that may not be written, by drive number.
+    /// A write to one gets `WRITE_FAILED` -- what `cpmsim` reports when its
+    /// `write` to a read-only image fails -- rather than `OK` for bytes the
+    /// machine then quietly discards, which is what a guest saving to a
+    /// read-only boot (`cpm_boot_writable = false`) used to be told.
+    read_only: [bool; DRIVES],
     /// A write's bytes, handed up by the machine and handed back to it.
     ///
     /// Present only because [`Controller`] routes a write through
@@ -159,6 +165,7 @@ impl Z80pack {
             // "fine", which is what it would see there.
             status: status::OK,
             disks: (0..DRIVES).map(|_| None).collect(),
+            read_only: [false; DRIVES],
             buf: vec![0; SECTOR_LEN],
         }
     }
@@ -222,6 +229,10 @@ impl Z80pack {
                     addr: self.dma,
                     to_memory: true,
                 }
+            }
+            1 if self.read_only.get(self.drive as usize).copied().unwrap_or(false) => {
+                self.status = status::WRITE_FAILED;
+                HostRequest::None
             }
             1 => {
                 self.status = status::OK;
@@ -305,7 +316,7 @@ impl Controller for Z80pack {
         ]
     }
 
-    fn insert(&mut self, drive: u8, image_len: u64, _read_only: bool) -> Result<(), String> {
+    fn insert(&mut self, drive: u8, image_len: u64, read_only: bool) -> Result<(), String> {
         let geom = geometry_for(image_len)
             .ok_or_else(|| format!("{image_len} bytes is not a z80pack disk"))?;
         let slot = self
@@ -313,6 +324,7 @@ impl Controller for Z80pack {
             .get_mut(drive as usize)
             .ok_or_else(|| format!("this device has drives 0-{}", DRIVES - 1))?;
         *slot = Some(geom);
+        self.read_only[drive as usize] = read_only;
         Ok(())
     }
 
@@ -536,6 +548,27 @@ mod tests {
         // Sector 1 at the same track is fine, so nothing broader was broken.
         c.port_out(0x0C, 1);
         assert!(matches!(c.port_out(0x0D, 0), HostRequest::Dma { offset: 0, .. }));
+    }
+
+    /// A write to a read-only disk is refused with the device's own failure
+    /// status, as every other board here refuses it.  It used to report `OK`
+    /// and leave the machine to drop the bytes, so the guest believed a save
+    /// had worked.  Reads of the same disk, and writes to a writable one in
+    /// another drive, are untouched.
+    #[test]
+    fn test_a_write_to_a_read_only_disk_reports_a_failure() {
+        let mut c = Z80pack::new();
+        c.insert(0, 256_256, true).unwrap();
+        c.insert(1, 256_256, false).unwrap();
+        c.port_out(0x0B, 2);
+        c.port_out(0x0C, 1);
+        assert_eq!(c.port_out(0x0D, 1), HostRequest::None, "a protected write became a transfer");
+        assert_eq!(c.port_in(0x0E).0, status::WRITE_FAILED);
+        assert!(matches!(c.port_out(0x0D, 0), HostRequest::Dma { to_memory: true, .. }), "reads still work");
+        assert_eq!(c.port_in(0x0E).0, status::OK);
+        c.port_out(0x0A, 1);
+        assert!(matches!(c.port_out(0x0D, 1), HostRequest::Dma { to_memory: false, .. }), "drive 1 is writable");
+        assert_eq!(c.port_in(0x0E).0, status::OK);
     }
 
     /// The last track is *inclusive* in the original's checks, so it addresses

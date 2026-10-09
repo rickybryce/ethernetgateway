@@ -11,12 +11,18 @@ impl TelnetSession {
     /// Lines of answer content per page (screen minus header/footer).
     pub(in crate::telnet) const PAGE_CONTENT_LINES: usize = 14;
 
+    /// How wide an answer line may be before its two-space indent.  **The last
+    /// column stays empty**: a C64 (and an ADM-3A-style terminal at 80) wraps
+    /// the moment a character lands in it, so a full-width line plus its CRLF
+    /// is two rows, and a page of them pushed the header off the screen.  The
+    /// same `- 1` the browser's `web_content_width` and `separator` take.
+    pub(in crate::telnet) fn ai_content_width(petscii: bool) -> usize {
+        let screen = if petscii { PETSCII_WIDTH } else { 80 };
+        screen - 1 - 2
+    }
+
     pub(in crate::telnet) async fn ai_chat(&mut self, api_key: &str) -> Result<(), std::io::Error> {
-        let content_width = if self.terminal_type == TerminalType::Petscii {
-            PETSCII_WIDTH - 2
-        } else {
-            78
-        };
+        let content_width = Self::ai_content_width(self.terminal_type == TerminalType::Petscii);
 
         self.clear_screen().await?;
         let sep = self.separator();
@@ -74,7 +80,9 @@ impl TelnetSession {
                     let normalized = answer.replace("\r\n", "\n").replace('\r', "\n");
                     let lines: Vec<String> = normalized
                         .lines()
-                        .map(crate::aichat::display_for_terminal)
+                        // Folded before wrapping, so the width is counted in
+                        // the characters the terminal will actually draw.
+                        .map(|line| self.remote_text(line))
                         .flat_map(|line| crate::aichat::wrap_line(&line, content_width))
                         .collect();
 
@@ -119,11 +127,7 @@ impl TelnetSession {
         lines: &[String],
     ) -> Result<Option<String>, std::io::Error> {
         let page_h = Self::PAGE_CONTENT_LINES;
-        let content_max = if self.terminal_type == TerminalType::Petscii {
-            PETSCII_WIDTH - 2
-        } else {
-            78
-        };
+        let content_max = Self::ai_content_width(self.terminal_type == TerminalType::Petscii);
         let mut scroll = 0usize;
 
         loop {

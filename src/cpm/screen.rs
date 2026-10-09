@@ -15,8 +15,9 @@
 //!
 //! The whole "don't do work nobody is watching" design lives in one flag.  A
 //! session checks it at every key-poll seam — thousands of times a second, so
-//! it has to be exactly that cheap — and only samples memory when a viewer has
-//! actually asked.  It is also self-pacing: one publish per request means a
+//! it has to be cheap: one uncontended atomic swap, beside an uncontended lock
+//! of the browser key queue at the same seam — and only samples memory when a
+//! viewer has actually asked.  It is also self-pacing: one publish per request means a
 //! browser polling every 150 ms costs seven snapshots a second and no timer
 //! exists anywhere.
 
@@ -386,8 +387,9 @@ pub enum Look {
 /// Ask one screen for its latest frame.
 ///
 /// Asking is also how a session learns that anybody is watching, so a viewer
-/// that stops polling costs a parked guest one atomic load per seam and nothing
-/// else.  The frame returned is the one published *before* this request; at a
+/// that stops polling costs a parked guest, per seam, one uncontended atomic
+/// swap for the screen (beside the key-queue check every seam makes anyway) and
+/// no copying.  The frame returned is the one published *before* this request; at a
 /// 150 ms poll the display is at most one poll behind, which is the price of
 /// not running a timer for a screen nobody has open.
 pub fn look(id: u64) -> Look {
@@ -605,7 +607,9 @@ mod tests {
         let screen = register("TEST.DSK");
         assert!(set_joystick(screen.id(), bit::P1_RIGHT));
         assert_ne!(screen.joystick(), crate::cpm::d7a::Held::none(), "held while talking");
-        // Backdate the report past the idle window rather than sleeping for it.
+        // Read the stick at a supplied time past the idle window rather than
+        // sleeping for it -- backdating the stored stamp cannot work, see
+        // `joystick_at`.
         let live = {
             let list = screens().lock().unwrap();
             list.iter().find(|(id, _)| *id == screen.id()).map(|(_, l)| l.clone()).unwrap()

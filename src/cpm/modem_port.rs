@@ -130,10 +130,10 @@ impl ModemPort {
 
     /// Answer an `IN`, or `None` if this port is not the modem's.
     ///
-    /// `None` rather than a default byte because the two machines disagree
-    /// about what an unclaimed port reads: our own returns 0, a booted Altair
-    /// returns an idle bus of `0xFF`. That is the caller's business, not this
-    /// module's.
+    /// `None` rather than a default byte because what an unclaimed port reads
+    /// is the machine's business, not this module's.  Both machines answer an
+    /// idle bus of `0xFF` today -- the emulator's `CpmMachine` and a booted
+    /// `BootMachine` alike -- but each decides that for itself.
     pub fn port_in(&mut self, port: u8) -> Option<u8> {
         let ModemAccess::Ports(u) = self.access else {
             return None;

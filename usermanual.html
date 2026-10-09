@@ -5114,7 +5114,12 @@ For a PETSCII terminal, ANSI escape sequences from the remote are
 <strong>translated</strong> where a Commodore has an equivalent &mdash; colour,
 reverse video, clear screen, home and the four cursor moves become single
 PETSCII control bytes &mdash; and dropped where it has none (cursor addressing,
-background colour); text is case-swapped for PETSCII.  That is the default:
+background colour); text is case-swapped for PETSCII, and the punctuation a
+C64 cannot show is folded exactly as <code>AT+PETSCII=1</code> folds it
+&mdash; back-tick and UTF-8 single quotes to <code>'</code>, double quotes to
+<code>"</code>, tilde and dashes to <code>-</code>, the ellipsis to
+<code>...</code>, other high bytes dropped or shown as <code>?</code> &mdash; so
+a modern host's UTF-8 cannot reach the C64 as control codes.  That is the default:
 with <code>gateway_petscii_translate</code> off (or a port's own setting at
 <em>passthrough</em>) the gateway is a plain pipe for a Commodore-aware host.
 A port's own setting wins whenever it is not <em>default</em>: a port set to

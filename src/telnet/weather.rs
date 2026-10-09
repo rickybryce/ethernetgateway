@@ -743,7 +743,7 @@ impl TelnetSession {
                 .copied()
                 .collect::<Vec<_>>()
                 .join(", ");
-            let loc_display = truncate_to_width(&location, max_loc);
+            let loc_display = truncate_to_width(&self.remote_text(&location), max_loc);
             self.send_line(&format!("  {}", self.yellow(&loc_display)))
                 .await?;
             self.send_line(&sep).await?;
@@ -753,7 +753,7 @@ impl TelnetSession {
             let max_desc = if is_petscii { 26 } else { 40 };
             self.send_line(&format!(
                 "  Current: {}",
-                self.white(&truncate_to_width(&w.desc, max_desc))
+                self.white(&truncate_to_width(&self.remote_text(&w.desc), max_desc))
             ))
             .await?;
             self.send_line(&format!(
@@ -783,16 +783,19 @@ impl TelnetSession {
                 self.send_line(&format!("  {}", self.yellow("Forecast:")))
                     .await?;
                 for (i, day) in w.forecast.iter().enumerate() {
+                    // The date and description come from the forecast API
+                    // and were printed raw; through `remote_text` like the rest.
+                    let date = self.remote_text(&day.date);
                     let label = match i {
                         0 => "Today",
                         1 => "Tomorrow",
-                        _ => &day.date,
+                        _ => &date,
                     };
                     let max_fd = if is_petscii { 12 } else { 20 };
                     let desc_part = if day.desc.is_empty() {
                         String::new()
                     } else {
-                        format!(" {}", truncate_to_width(&day.desc, max_fd))
+                        format!(" {}", truncate_to_width(&self.remote_text(&day.desc), max_fd))
                     };
                     self.send_line(&format!(
                         "  {}: {}{} / {}{}{}",

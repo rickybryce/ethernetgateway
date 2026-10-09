@@ -1,11 +1,11 @@
 //! The seam between a booted machine and the disk controller it carries.
 //!
-//! There is one controller today — the MITS 88-DCDD floppy board — and this
-//! module exists because there is about to be more than one. The plan for the
-//! 88-HDSK hard disk, the Tarbell and the Cromemco says to do this *before* the
-//! second controller rather than after, and the reason is arithmetic: adapting
-//! one implementation to a trait is a mechanical change, while unpicking three
-//! interleaved ones is not.
+//! There are five controllers today — the MITS 88-DCDD floppy board, the
+//! 88-HDSK hard disk, the Tarbell, the Cromemco and z80pack's device — and this
+//! module was written while there was still only the first. The plan for the
+//! others said to do this *before* the second controller rather than after,
+//! and the reason is arithmetic: adapting one implementation to a trait is a
+//! mechanical change, while unpicking three interleaved ones is not.
 //!
 //! # What a controller is, from the machine's point of view
 //!

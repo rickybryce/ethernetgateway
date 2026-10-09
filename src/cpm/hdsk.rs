@@ -634,7 +634,7 @@ impl Hdsk {
                 // reports the line while still doing the read. Deliberately only
                 // this command and a write: reporting it on *every* read would be
                 // the more literal model of a hardware write-protect line, but
-                // these images are read-only by default and a guest that checks
+                // these images can be booted read-only and a guest that checks
                 // the whole error byte rather than masking it would then see every
                 // read fail. ADEXER masks with 7Fh on an ordinary read and 80h on
                 // this one, which is exactly the distinction being drawn here.

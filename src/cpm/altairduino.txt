@@ -18,7 +18,7 @@
 # are CP/M 3.0 disk 1 and 2, Felix and CP/M 2.2 MITS+Tarbell, and are documented
 # as such; McNeely's four files of those names are DIFFERENT disks, undocumented
 # in its own catalogue, one of which does not boot.  So the contested names come
-# from Hansel and only the five McNeely uniquely has come from McNeely.
+# from Hansel and only the four McNeely uniquely has come from McNeely.
 #
 # The disks are not ours and are not shipped -- this fetches them from the
 # original repositories on the operator's behalf.  The vintage software on them

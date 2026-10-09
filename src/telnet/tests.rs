@@ -1473,9 +1473,28 @@ fn test_filter_petscii_translates_and_swaps() {
 }
 
 #[test]
-fn test_filter_petscii_strips_tilde() {
-    assert_eq!(filter_output(b"~$ ", true), b"$ ");
-    assert_eq!(filter_output(b"user@host:~$ ", true), b"USER@HOST:$ ");
+fn test_filter_petscii_shows_tilde_as_a_dash() {
+    // PETSCII has no tilde.  It used to vanish here and show as `-` from the
+    // modem; one translator now serves both, and a dash keeps the path
+    // readable (Ricky's call, 2026-10-09).
+    assert_eq!(filter_output(b"~$ ", true), b"-$ ");
+    assert_eq!(filter_output(b"user@host:~$ ", true), b"USER@HOST:-$ ");
+}
+
+/// **UTF-8 from a modern host must not reach a C64 as control codes.**  This
+/// path passed 0x80-0xFF through raw: an en dash (`E2 80 93`) delivered 0x93,
+/// CLEAR SCREEN; `ls`'s quotes (`E2 80 98/99`) changed the text colour; `C3`
+/// drew a graphic.  It now shares the modem's `PetsciiText`.
+#[test]
+fn test_filter_petscii_folds_utf8_rather_than_sending_control_codes() {
+    assert_eq!(filter_output("a\u{2013}b".as_bytes(), true), b"A-B");
+    assert_eq!(filter_output("\u{2018}x\u{2019}".as_bytes(), true), b"'X'");
+    assert_eq!(filter_output("Z\u{fc}rich".as_bytes(), true), b"z??RICH");
+    // A raw control-range byte with no escape sequence around it is dropped.
+    assert_eq!(filter_output(b"a\x93b", true), b"AB");
+    // Colour from an escape sequence still arrives: that half is untouched.
+    let red = filter_output(b"\x1b[31mx", true);
+    assert!(red.iter().any(|&b| (0x80..=0x9F).contains(&b) || b == 0x1C), "colour lost: {red:02x?}");
 }
 
 #[test]
@@ -1520,16 +1539,12 @@ fn test_filter_petscii_translates_backspace_to_cursor_left() {
 #[test]
 fn test_no_petscii_translator_maps_backspace_to_destructive_del() {
     // (file label, source, marker that opens the translator, bytes to scan)
-    let sites: [(&str, &str, &str, usize); 3] = [
+    // The gateways and the modem now share one text translator (`petscii.rs`),
+    // so there are two byte translators to scan, not three.
+    let sites: [(&str, &str, &str, usize); 2] = [
         (
-            "telnet/gateway.rs filter_gateway_output",
-            include_str!("gateway.rs"),
-            "if st.mode == GatewayFilter::Petscii {",
-            400,
-        ),
-        (
-            "serial.rs translate_ascii_to_petscii_byte",
-            include_str!("../serial.rs"),
+            "petscii.rs translate_ascii_to_petscii_byte",
+            include_str!("../petscii.rs"),
             "fn translate_ascii_to_petscii_byte",
             300,
         ),
@@ -3499,8 +3514,56 @@ fn test_file_listing_row_count() {
     );
 }
 
-/// AI answer screen: header(3) + 14 content lines + padding + position
-/// + nav + prompt = ~22 rows max.
+/// AI Chat and weather print text from the internet; for a C64 or an ASCII
+/// terminal an accented letter must reach the screen as its plain letter, the
+/// way the browser already did -- a C64 drew the raw byte as a graphic.  And
+/// control bytes go for every terminal type.  An ANSI client keeps the text.
+#[test]
+fn test_remote_text_is_folded_for_the_terminal_that_shows_it() {
+    let raw = "Z\u{fc}rich \u{2013} caf\u{e9}\x1b[2J";
+    for t in [TerminalType::Petscii, TerminalType::Ascii] {
+        let shown = make_test_session(t).remote_text(raw);
+        assert!(shown.is_ascii(), "{t:?} got non-ASCII: {shown:?}");
+        assert!(shown.contains("Zurich") && shown.contains("cafe"), "{t:?}: {shown:?}");
+        assert!(!shown.contains('\x1b'), "{t:?} got an escape: {shown:?}");
+    }
+    let ansi = make_test_session(TerminalType::Ansi).remote_text(raw);
+    assert!(ansi.contains("Z\u{fc}rich"), "an ANSI client lost its accents: {ansi:?}");
+    assert!(!ansi.contains('\x1b'), "an ANSI client got an escape: {ansi:?}");
+}
+
+#[test]
+fn test_an_ai_answer_line_never_reaches_the_last_column() {
+    // Wrapped by the real `wrap_line` at the real width, then measured as
+    // printed (two-space indent).  A line that fills the last column costs a
+    // C64 two rows; at 38 + 2 = 40 that happened on most long answers.
+    // Inputs that must fill a line to the wrap width exactly: an unbroken
+    // run (a URL) and runs of one- and two-letter words.  A prose sample alone
+    // never landed on the width, and the test passed with the bug put back.
+    let texts = [
+        "x".repeat(200),
+        "a ".repeat(100),
+        "ab ".repeat(100),
+        "The quick brown fox jumps over the lazy dog while seventeen long-winded \
+         explanations about programmable logic controllers accumulate."
+            .to_string(),
+    ];
+    for (petscii, screen) in [(true, PETSCII_WIDTH), (false, 80)] {
+        let width = TelnetSession::ai_content_width(petscii);
+        let mut widest = 0;
+        for text in &texts {
+            for line in crate::aichat::wrap_line(text, width) {
+                let printed = 2 + line.chars().count();
+                widest = widest.max(printed);
+                assert!(printed < screen, "{printed}-column line on a {screen}-column screen: {line:?}");
+            }
+        }
+        assert_eq!(widest, screen - 1, "no input reached the wrap width, so this proves nothing");
+    }
+}
+
+/// AI answer screen: header(3) + 14 content lines + padding + position,
+/// nav and prompt = ~22 rows max.
 #[test]
 fn test_ai_answer_row_count() {
     let header = 3;  // sep + question + sep

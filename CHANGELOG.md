@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes through a link planted at its temporary file's name.  Nothing a
   caller sends can create a link, so this needed someone with access to the
   folder itself.
+- **A password typed in the shape of a stored hash no longer locks you out.**
+  A password such as `$ecret$2024` looked like an already-hashed value, so it
+  was saved unhashed and every login then failed.  A typed password is now
+  hashed on every surface whatever it looks like.
 
 ### Changed
 
@@ -82,6 +86,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The gateway's own screens no longer apply telnet framing to SSH and
   serial sessions**, which do not use it.
 - **A half-closed connection no longer makes the menu loop spin.**
+- **The gateway keeps working after the terminal it was started from closes.**
+  Every log line was also written to stderr, and that write panicked once
+  nobody was reading it (a closed terminal, or `| tee` after `tee` exits), so
+  every task that logged died and every connection was dropped.
+- **The Telnet, SSH and Serial Gateways no longer send UTF-8 to a C64 as
+  control codes.**  In PETSCII mode, bytes from 0x80 up passed straight
+  through: an en dash cleared the C64's screen and `ls`'s quotes changed the
+  text colour.  They are now folded exactly as `AT+PETSCII=1` folds them, by
+  one shared translator.  A tilde now shows as `-` everywhere (it used to
+  vanish through the gateways).
+- **The CP/M screen page no longer moves your keyboard and joystick to someone
+  else's session.**  When the session being watched ended, the page selected
+  the next one; it now lets go of the stick and waits for you to choose.
+- **AI Chat and weather fit a C64's screen.**  AI Chat lines filled all 40
+  columns, so each one took two rows and the header scrolled away; accented
+  letters in AI Chat and weather reached a C64 as graphics characters, and
+  are now plain letters as in the browser.
+- **The z80pack disk reports a write to a read-only disk as failed**, as the
+  other disk boards do, instead of reporting success and discarding it.
+- **A Punter receive no longer cancels itself** when a late block's data
+  contains an ESC or (from a C64) an underscore; only a key pressed on its
+  own cancels.
+- **The sample-disk download never replaces a file** that appears while it
+  runs, and two downloads at once no longer collide.  A ROM that was already
+  there is no longer counted as downloaded.
+- **A username containing `:` is refused**, on every surface: the web UI's
+  login could never accept it.  Usernames are stored trimmed.
 - **Crashes fixed:** a YMODEM file with an absurd timestamp; a monitor ROM
   file with a non-ASCII line in its Intel HEX, or a raw image running past
   `FFFF`.  Files a ZMODEM receiver skips now count toward the batch limit.

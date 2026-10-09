@@ -1527,7 +1527,7 @@ impl TelnetSession {
                 machine.set_joystick_held(screen.joystick());
 
                 // The screens, at the same seam and to whoever has them
-                // open in the browser.  A no-op — one atomic load — unless a
+                // open in the browser.  A no-op — one atomic swap — unless a
                 // viewer polled since the last one, so a guest nobody is
                 // watching runs exactly as it did before this existed.
                 //

@@ -2319,10 +2319,17 @@ impl TelnetSession {
             Some(s) if !s.is_empty() => s,
             _ => return Ok(()),
         };
+        if key == "username"
+            && let Some(why) = crate::credential::username_problem(&input)
+        {
+            self.show_error(why).await?;
+            return Ok(());
+        }
 
         let k = key.to_string();
         let v = input;
         tokio::task::spawn_blocking(move || {
+            let v = crate::credential::typed_config_value(&k, v);
             config::update_config_value(&k, &v);
         })
         .await
