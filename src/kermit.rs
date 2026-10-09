@@ -5351,6 +5351,11 @@ pub(crate) async fn kermit_server_with_outcome_in(
 /// the hook has already committed the file to disk and no production
 /// caller reads them back), tests pass `true` so they can assert on the
 /// round-tripped content.
+///
+/// This is the loop and nothing else: read a command, hand it to the
+/// [`KermitServer`] method that answers it, and stop when one of them says
+/// the session is over.  Every command used to be an arm of one 1,064-line
+/// `match` here, threading the same six values by hand into each.
 #[allow(clippy::too_many_arguments)]
 async fn kermit_server_dispatch(
     reader: &mut (impl AsyncRead + Unpin),
@@ -5370,14 +5375,17 @@ async fn kermit_server_dispatch(
             is_petscii
         );
     }
+    let mut server = KermitServer {
+        reader,
+        writer,
+        is_tcp,
+        is_petscii,
+        verbose,
+        base,
+        subdir: String::new(),
+        state: ReadState::default(),
+    };
     let mut all_received: Vec<KermitReceive> = Vec::new();
-    let mut state = ReadState::default();
-    // Per-session working subdir, settled by G C (CWD).  All R-pulls,
-    // S-receives (via the R/S handlers below), and G D / G $ replies
-    // resolve paths relative to `base / subdir`.  Starts at the base, which
-    // the caller chose and which is never validated against the wire rule:
-    // only what a peer sends is.
-    let mut subdir = String::new();
     // Server idles between commands with `kermit_idle_timeout` as the
     // inactivity bound so a wedged peer can't pin us forever.  Re-armed
     // per command.  A configured value of 0 disables the deadline
@@ -5395,13 +5403,13 @@ async fn kermit_server_dispatch(
             )
         };
         let pkt = match read_packet(
-            reader,
+            server.reader,
             is_tcp,
             is_petscii,
             b'1',
             CR,
             verbose,
-            &mut state,
+            &mut server.state,
             deadline,
         )
         .await
@@ -5420,25 +5428,7 @@ async fn kermit_server_dispatch(
                 // session cleanly (no idle_timeout flag).
                 let was_timeout = e == "Kermit: read timeout";
                 if was_timeout {
-                    let _ = send_error(
-                        writer,
-                        0,
-                        "Server idle timeout",
-                        b'1',
-                        0,
-                        0,
-                        CR,
-                        is_tcp,
-                    )
-                    .await;
-                    // Flush so the E-packet hits the wire before the
-                    // caller closes the transport.  Without this, a
-                    // tokio write buffer can swallow the bytes when
-                    // the underlying socket is shut down right after.
-                    {
-                        use tokio::io::AsyncWriteExt;
-                        let _ = writer.flush().await;
-                    }
+                    server.say_idle_timeout().await;
                 }
                 if verbose {
                     glog!(
@@ -5460,947 +5450,897 @@ async fn kermit_server_dispatch(
                 pkt.seq
             );
         }
-        match pkt.kind {
-            TYPE_HOST => {
-                // Host commands are a remote-code-execution primitive
-                // by design.  Refuse with E-packet regardless of any
-                // future config opt-in — actually executing them is
-                // out of scope and will stay that way unless the
-                // operator explicitly wires in a sandboxed backend.
-                send_error(
-                    writer,
-                    pkt.seq,
-                    "Host commands disabled",
-                    b'1',
-                    0,
-                    0,
-                    CR,
-                    is_tcp,
-                )
-                .await?;
-                if verbose {
-                    glog!("Kermit server: refused C-packet (host commands disabled)");
-                }
-                // Spec §6.7: E-packet reply keeps the server idle for
-                // the next command — refusal is not session-fatal.
-                continue;
-            }
-            TYPE_INIT => {
-                // Re-init mid-session: respond with Y-ACK whose payload
-                // is a fresh Send-Init advertising our current caps.
-                let our_caps = config_capabilities();
-                let ack_payload = build_send_init_payload(&our_caps);
-                send_ack_with_payload(
-                    writer,
-                    pkt.seq,
-                    &ack_payload,
-                    b'1',
-                    0,
-                    0,
-                    CR,
-                    is_tcp,
-                )
-                .await?;
-                if verbose {
-                    glog!("Kermit server: handled I-packet (re-init)");
-                }
-                continue;
-            }
-            TYPE_ERROR => {
-                // Peer signaled abort — log and exit without responding
-                // (per spec, E is fatal both ways; ACKing risks a loop).
-                if verbose {
-                    let q = Quoting {
-                        qctl: DEFAULT_QCTL,
-                        qbin: None,
-                        rept: None,
-                        locking_shifts: false,
-                    };
-                    let msg = decode_error_message(&pkt.payload, q);
-                    glog!("Kermit server: peer E-packet: {}", msg);
-                }
-                return Ok(KermitServerOutcome { files: all_received, idle_timeout: false });
-            }
-            TYPE_EOT => {
-                // Clean session-end signal.  ACK and exit.
-                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                if verbose {
-                    glog!("Kermit server: B-packet → clean exit");
-                }
-                return Ok(KermitServerOutcome { files: all_received, idle_timeout: false });
-            }
-            TYPE_GENERIC => {
-                // Generic-command dispatch.  Per Frank da Cruz spec §6:
-                // F=Finish, L=Logout, B=BYE end the session;
-                // C=CWD updates per-session subdir;
-                // D=DIR / $=SPACE / K=KERMIT / H=HELP / ?=HELP drive an
-                // inverse file transfer (S → X → D…D → Z → B) carrying
-                // the text body — the X header marks it as text-for-
-                // display per Frank da Cruz §5.3.
-                // Anything else is acknowledged and ignored — that's
-                // the spec-compliant fallback for unknown subcommands.
-                let recv_q = Quoting {
-                    qctl: DEFAULT_QCTL,
-                    qbin: None,
-                    rept: None,
-                    locking_shifts: false,
-                };
-                let raw = decode_data(&pkt.payload, recv_q).unwrap_or_default();
-                let action = raw.first().copied().unwrap_or(0);
-                match action {
-                    // F/L/B are spec-defined session-exit signals; I and
-                    // X are what real C-Kermit emits for `remote logout`
-                    // (`setgen('I',...)`) and `remote exit`
-                    // (`setgen('X',...)`).  Treating them all as
-                    // equivalent matches what the gateway actually
-                    // supports — the connection lives at the telnet/SSH
-                    // layer, so any of these just ends the protocol
-                    // session.  Note: G `I` is distinct from the I-packet
-                    // (TYPE_INIT, re-init) — different packet types
-                    // entirely, just letter overlap.
-                    b'F' | b'L' | b'B' | b'I' | b'X' => {
-                        send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                        if verbose {
-                            glog!("Kermit server: G '{}' → exit", action as char);
-                        }
-                        return Ok(KermitServerOutcome { files: all_received, idle_timeout: false });
-                    }
-                    b'C' => {
-                        // Per Kermit Protocol Manual §6.7, the CWD argument
-                        // is a *field-encoded* item — one length byte
-                        // (tochar(N)) followed by N bytes of path.  Real
-                        // C-Kermit (`remote cwd <path>`) sends exactly
-                        // this on the wire.  A bare `C` with no length
-                        // byte, or an explicit length of zero, means
-                        // "reset to home" (we map that to the server's
-                        // base folder).
-                        let raw_arg = parse_g_field_argument(&raw[1..])
-                            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-                            .unwrap_or_default();
-                        // `remote cd` follows standard `cd` semantics,
-                        // *relative to the current subdir*: `remote cd
-                        // CPM` then `remote cd B` descends into `CPM/B`,
-                        // matching a real C-Kermit / FTP server and a
-                        // shell.  `..` pops one component — that's what
-                        // `remote cdup` sends (`setgen('C', "..", ...)`,
-                        // ckuus7.c:7762) — and popping stops at the base,
-                        // so no argument can escape the sandbox.  A
-                        // leading `/` resets to the base.  An empty
-                        // argument is the spec's "reset to home" (§6.7)
-                        // and returns to the base.
-                        let new_subdir = if raw_arg.is_empty() {
-                            String::new()
-                        } else {
-                            resolve_cwd_target(&subdir, &raw_arg)
-                        };
-                        if !is_safe_relative_subdir(&new_subdir) {
-                            send_error(
-                                writer,
-                                pkt.seq,
-                                "Invalid directory",
-                                b'1',
-                                0,
-                                0,
-                                CR,
-                                is_tcp,
-                            )
-                            .await?;
-                            if verbose {
-                                glog!(
-                                    "Kermit server: G C '{}' refused (unsafe path)",
-                                    new_subdir
-                                );
-                            }
-                            // Spec §6.7: keep the server idle so the
-                            // peer can retry with a valid subdir.
-                            continue;
-                        }
-                        // Refuse non-existent directories so a typo'd
-                        // `remote cd asembly` fails fast instead of
-                        // silently ACKing and then dropping every
-                        // subsequent upload into a directory that
-                        // doesn't exist (the user's confused-bug
-                        // report from 2026-05-01 was caused by exactly
-                        // this footgun).  Empty subdir = the base, which
-                        // the caller creates before starting the server
-                        // (ensure_transfer_dir).  If it is removed while
-                        // the session runs, nothing panics: DIR comes
-                        // back empty and saves fail as write errors.
-                        if !new_subdir.is_empty() {
-                            let resolved = session_dir(base, &new_subdir);
-                            if !resolved.is_dir() {
-                                send_error(
-                                    writer,
-                                    pkt.seq,
-                                    "Directory not found",
-                                    b'1',
-                                    0,
-                                    0,
-                                    CR,
-                                    is_tcp,
-                                )
-                                .await?;
-                                if verbose {
-                                    glog!(
-                                        "Kermit server: G C '{}' refused (no such dir)",
-                                        new_subdir
-                                    );
-                                }
-                                continue;
-                            }
-                        }
-                        subdir = new_subdir;
-                        send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                        if verbose {
-                            glog!("Kermit server: G C → subdir='{}'", subdir);
-                        }
-                        continue;
-                    }
-                    b'D' => {
-                        // No Y-ACK to the G — go straight to S.
-                        // C-Kermit's <rgen>Y handler routes any Y the
-                        // client receives in this state through
-                        // rcv_shortreply(), which interprets the Y's
-                        // payload as the *entire* response and ends
-                        // the command.  An empty Y would therefore
-                        // close the conversation before we ever drive
-                        // the inverse transfer.  ckcpro.w protocol
-                        // comment: "packet number stays at zero
-                        // through I-G-S sequence" — there's no Y in
-                        // between G and S for long replies.
-                        let dir_path = session_dir(base, &subdir);
-                        // Directory enumeration is blocking (std::fs::read_dir
-                        // + per-entry stat); offload it so a large transfer
-                        // dir can't stall a runtime worker.
-                        let listing =
-                            tokio::task::spawn_blocking(move || format_dir_listing(&dir_path))
-                                .await
-                                .unwrap_or_default();
-                        // CRLF-encode so a hardware CP/M client (Kermit-80)
-                        // sees proper line breaks instead of a staircase.
-                        let listing = crlf_encode_text(listing.as_bytes());
-                        send_g_inverse_file_response(
-                            reader,
-                            writer,
-                            "DIR",
-                            &listing,
-                            is_tcp,
-                            is_petscii,
-                            verbose,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    b'U' | b'$' => {
-                        // SPACE — Frank da Cruz's Generic Command Letter
-                        // for "disk Usage" is 'U' (Kermit Protocol Manual
-                        // §6 Table 6-2), and that's what real C-Kermit
-                        // emits for `remote space` (ckuus7.c:7969 calls
-                        // `setgen('U', ...)`, ckcpro.w:1383 dispatches
-                        // <generic>U to REMOTE SPACE).  We additionally
-                        // accept '$' for backward compatibility with our
-                        // own `kermit_client_space` helper, which sent
-                        // '$' before this server was taught the standard
-                        // letter; any peer that follows the spec will hit
-                        // the 'U' arm.
-                        let dir_path = session_dir(base, &subdir);
-                        let body = match fs_free_bytes(&dir_path) {
-                            Some(b) => b.to_string(),
-                            None => "unknown".to_string(),
-                        };
-                        let payload = ensure_crlf_terminator(body.as_bytes());
-                        send_g_inverse_file_response(
-                            reader,
-                            writer,
-                            "SPACE",
-                            &payload,
-                            is_tcp,
-                            is_petscii,
-                            verbose,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    b'K' => {
-                        let body = format!(
-                            "Ethernet Gateway Kermit {}",
-                            env!("CARGO_PKG_VERSION")
-                        );
-                        let payload = ensure_crlf_terminator(body.as_bytes());
-                        send_g_inverse_file_response(
-                            reader,
-                            writer,
-                            "KERMIT",
-                            &payload,
-                            is_tcp,
-                            is_petscii,
-                            verbose,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    b'H' | b'?' => {
-                        // HELP — reply with the list of supported G
-                        // subcommands.  C-Kermit's `remote help`
-                        // sends G ?; some implementations use G H.
-                        // We accept both.  CRLF-encode so a CP/M client
-                        // (Kermit-80) renders the lines without staircasing.
-                        let help = crlf_encode_text(kermit_g_help_text().as_bytes());
-                        send_g_inverse_file_response(
-                            reader,
-                            writer,
-                            "HELP",
-                            &help,
-                            is_tcp,
-                            is_petscii,
-                            verbose,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    b'E' => {
-                        // DELETE — `remote delete <filename>`, spec §6.7.
-                        // Field-encoded filename argument.  We refuse
-                        // wildcards, traversal, and missing args — the
-                        // file lookup is rooted under the per-session
-                        // subdir (so deletes outside `<base>/<subdir>`
-                        // are impossible by construction).
-                        let fname = parse_g_field_argument(&raw[1..])
-                            .map(|b| String::from_utf8_lossy(b).into_owned())
-                            .unwrap_or_default();
-                        if !is_safe_resume_filename(&fname) {
-                            send_error(writer, pkt.seq, "Invalid filename",
-                                b'1', 0, 0, CR, is_tcp).await?;
-                            if verbose {
-                                glog!(
-                                    "Kermit server: G E '{}' refused (unsafe filename)",
-                                    fname
-                                );
-                            }
-                            continue;
-                        }
-                        let path = session_dir(base, &subdir).join(&fname);
-                        match tokio::fs::remove_file(&path).await {
-                            Ok(()) => {
-                                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                                if verbose {
-                                    glog!("Kermit server: G E '{}' → deleted", fname);
-                                }
-                            }
-                            Err(e) => {
-                                let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                                    "File not found"
-                                } else {
-                                    "Delete failed"
-                                };
-                                send_error(writer, pkt.seq, msg,
-                                    b'1', 0, 0, CR, is_tcp).await?;
-                                if verbose {
-                                    glog!(
-                                        "Kermit server: G E '{}' refused: {}",
-                                        fname, e
-                                    );
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    b'R' => {
-                        // RENAME — `remote rename <old> <new>`, spec §6.7.
-                        // Two field-encoded args back-to-back.  Both
-                        // names must pass `is_safe_resume_filename`;
-                        // both are rooted at the per-session subdir.
-                        let parsed = parse_g_field_argument_with_remainder(&raw[1..])
-                            .and_then(|(old, rest)| {
-                                parse_g_field_argument_with_remainder(rest)
-                                    .map(|(new, _)| (old, new))
-                            });
-                        let Some((old_bytes, new_bytes)) = parsed else {
-                            send_error(writer, pkt.seq,
-                                "Rename needs two field-encoded names",
-                                b'1', 0, 0, CR, is_tcp).await?;
-                            if verbose {
-                                glog!("Kermit server: G R refused (missing args)");
-                            }
-                            continue;
-                        };
-                        let old_name = String::from_utf8_lossy(old_bytes).into_owned();
-                        let new_name = String::from_utf8_lossy(new_bytes).into_owned();
-                        if !is_safe_resume_filename(&old_name)
-                            || !is_safe_resume_filename(&new_name)
-                        {
-                            send_error(writer, pkt.seq, "Invalid filename",
-                                b'1', 0, 0, CR, is_tcp).await?;
-                            if verbose {
-                                glog!(
-                                    "Kermit server: G R '{}' '{}' refused (unsafe)",
-                                    old_name, new_name
-                                );
-                            }
-                            continue;
-                        }
-                        let dir = session_dir(base, &subdir);
-                        let old_path = dir.join(&old_name);
-                        let new_path = dir.join(&new_name);
-                        // Refuse rename-to-existing — would silently
-                        // clobber an unrelated file.  Make the operator
-                        // delete the target first if that's their intent.
-                        if new_path.exists() {
-                            send_error(writer, pkt.seq, "Destination exists",
-                                b'1', 0, 0, CR, is_tcp).await?;
-                            if verbose {
-                                glog!(
-                                    "Kermit server: G R '{}' → '{}' refused (target exists)",
-                                    old_name, new_name
-                                );
-                            }
-                            continue;
-                        }
-                        match tokio::fs::rename(&old_path, &new_path).await {
-                            Ok(()) => {
-                                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                                if verbose {
-                                    glog!(
-                                        "Kermit server: G R '{}' → '{}' renamed",
-                                        old_name, new_name
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                                    "Source not found"
-                                } else {
-                                    "Rename failed"
-                                };
-                                send_error(writer, pkt.seq, msg,
-                                    b'1', 0, 0, CR, is_tcp).await?;
-                                if verbose {
-                                    glog!(
-                                        "Kermit server: G R '{}' → '{}' refused: {}",
-                                        old_name, new_name, e
-                                    );
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    b'T' => {
-                        // TYPE — `remote type <filename>`, spec §6.7.
-                        // Server delivers the file's contents to the
-                        // client via the same X-headed inverse transfer
-                        // we use for DIR/SPACE/KERMIT — the difference
-                        // is just where the bytes come from.  For binary
-                        // files this dumps raw bytes to the client's
-                        // screen; that's what real Kermit does too —
-                        // matching `remote type` on a binary is the
-                        // user's call.
-                        let fname = parse_g_field_argument(&raw[1..])
-                            .map(|b| String::from_utf8_lossy(b).into_owned())
-                            .unwrap_or_default();
-                        if !is_safe_resume_filename(&fname) {
-                            send_error(writer, pkt.seq, "Invalid filename",
-                                b'1', 0, 0, CR, is_tcp).await?;
-                            if verbose {
-                                glog!(
-                                    "Kermit server: G T '{}' refused (unsafe filename)",
-                                    fname
-                                );
-                            }
-                            continue;
-                        }
-                        let path = session_dir(base, &subdir).join(&fname);
-                        let bytes = match tokio::fs::read(&path).await {
-                            Ok(b) => b,
-                            Err(e) => {
-                                let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                                    "File not found"
-                                } else {
-                                    "Read failed"
-                                };
-                                send_error(writer, pkt.seq, msg,
-                                    b'1', 0, 0, CR, is_tcp).await?;
-                                if verbose {
-                                    glog!(
-                                        "Kermit server: G T '{}' refused: {}",
-                                        fname, e
-                                    );
-                                }
-                                continue;
-                            }
-                        };
-                        if bytes.len() as u64 > MAX_FILE_SIZE {
-                            send_error(writer, pkt.seq, "File too large",
-                                b'1', 0, 0, CR, is_tcp).await?;
-                            continue;
-                        }
-                        send_g_inverse_file_response(
-                            reader,
-                            writer,
-                            &fname,
-                            &bytes,
-                            is_tcp,
-                            is_petscii,
-                            verbose,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    b'm' => {
-                        // MKDIR — `remote mkdir <dirname>`.  C-Kermit
-                        // ships this as wire letter `m` (lowercase) per
-                        // ckuus7.c:8139 (`setgen('m', dirname, ...)`).
-                        // Lowercase keeps it distinct from `M` (which
-                        // C-Kermit reserves for `remote message`).
-                        // Field-encoded directory name; rooted at the
-                        // per-session subdir so we can't escape the
-                        // sandbox.  Reuses `is_safe_resume_filename` —
-                        // a single-component name with no traversal —
-                        // because directory names are leaves, not paths.
-                        let dname = parse_g_field_argument(&raw[1..])
-                            .map(|b| String::from_utf8_lossy(b).into_owned())
-                            .unwrap_or_default();
-                        if !is_safe_resume_filename(&dname) {
-                            send_error(writer, pkt.seq, "Invalid directory name",
-                                b'1', 0, 0, CR, is_tcp).await?;
-                            if verbose {
-                                glog!(
-                                    "Kermit server: G m '{}' refused (unsafe name)",
-                                    dname
-                                );
-                            }
-                            continue;
-                        }
-                        let path = session_dir(base, &subdir).join(&dname);
-                        match tokio::fs::create_dir(&path).await {
-                            Ok(()) => {
-                                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                                if verbose {
-                                    glog!("Kermit server: G m '{}' → created", dname);
-                                }
-                            }
-                            Err(e) => {
-                                let msg = if e.kind() == std::io::ErrorKind::AlreadyExists {
-                                    "Directory already exists"
-                                } else {
-                                    "Mkdir failed"
-                                };
-                                send_error(writer, pkt.seq, msg,
-                                    b'1', 0, 0, CR, is_tcp).await?;
-                                if verbose {
-                                    glog!(
-                                        "Kermit server: G m '{}' refused: {}",
-                                        dname, e
-                                    );
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    b'd' => {
-                        // RMDIR — `remote rmdir <dirname>`.  C-Kermit
-                        // ships this as wire letter `d` (lowercase) per
-                        // ckuus7.c:8139 (`setgen('d', dirname, ...)`).
-                        // Lowercase keeps it distinct from `D` (which
-                        // is the DIRECTORY listing command).  We use
-                        // `std::fs::remove_dir`, which only removes
-                        // *empty* directories — the operator must
-                        // delete the contents first via `remote delete`.
-                        // Refusing recursive delete by default avoids
-                        // the worst footgun.
-                        let dname = parse_g_field_argument(&raw[1..])
-                            .map(|b| String::from_utf8_lossy(b).into_owned())
-                            .unwrap_or_default();
-                        if !is_safe_resume_filename(&dname) {
-                            send_error(writer, pkt.seq, "Invalid directory name",
-                                b'1', 0, 0, CR, is_tcp).await?;
-                            if verbose {
-                                glog!(
-                                    "Kermit server: G d '{}' refused (unsafe name)",
-                                    dname
-                                );
-                            }
-                            continue;
-                        }
-                        let path = session_dir(base, &subdir).join(&dname);
-                        match tokio::fs::remove_dir(&path).await {
-                            Ok(()) => {
-                                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                                if verbose {
-                                    glog!("Kermit server: G d '{}' → removed", dname);
-                                }
-                            }
-                            Err(e) => {
-                                let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                                    "Directory not found"
-                                } else {
-                                    // ErrorKind::DirectoryNotEmpty is
-                                    // unstable on stable Rust; let the
-                                    // caller infer from the message.
-                                    "Rmdir failed (directory not empty?)"
-                                };
-                                send_error(writer, pkt.seq, msg,
-                                    b'1', 0, 0, CR, is_tcp).await?;
-                                if verbose {
-                                    glog!(
-                                        "Kermit server: G d '{}' refused: {}",
-                                        dname, e
-                                    );
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    _ => {
-                        // Per spec §6, a server that doesn't implement a
-                        // generic command should reply with E-packet —
-                        // not silently ACK.  Silent-ACK leaves the peer
-                        // believing the command succeeded (e.g.
-                        // `remote delete foo` reports "ok" while nothing
-                        // happened on disk).  An E-packet surfaces the
-                        // refusal cleanly so the operator sees the right
-                        // failure.  Pre-2026-05 builds silently ACKed.
-                        send_error(
-                            writer,
-                            pkt.seq,
-                            "Command not supported",
-                            b'1',
-                            0,
-                            0,
-                            CR,
-                            is_tcp,
-                        )
-                        .await?;
-                        if verbose {
-                            glog!(
-                                "Kermit server: G '{}' refused (unsupported)",
-                                action as char
-                            );
-                        }
-                        continue;
-                    }
-                }
-            }
+        let next = match pkt.kind {
+            TYPE_HOST => server.refuse_host_command(pkt.seq).await?,
+            TYPE_INIT => server.reinit(pkt.seq).await?,
+            TYPE_ERROR => server.peer_error(&pkt),
+            TYPE_EOT => server.end_of_session(pkt.seq).await?,
+            TYPE_GENERIC => server.generic(&pkt).await?,
             TYPE_SEND_INIT => {
-                // Peer wants to upload one or more files to us.  Hand
-                // the pre-read S off to the receiver state machine and
-                // accumulate whatever it returns; then loop back for
-                // the next command.  A read failure inside the receive
-                // (timeout, malformed packet, etc.) propagates up.
-                // Into the session's `remote cd` directory, which is where
-                // the caller saves -- and so where a resume's partial is.
-                let into = session_dir(base, &subdir);
-                // Each file is committed through the caller's hook at its
-                // own Z, before that Z is ACKed (see
-                // `kermit_receive_committing`): an error later in the batch
-                // cannot take back a file the sender was told was delivered.
-                //
-                // Stamped with the per-session subdir first, so the saver
-                // knows where to land it -- the receiver is subdir-oblivious,
-                // and without this a `remote cd assembly` followed by `put
-                // hello.txt` would silently land in the server's base.
-                //
-                // Then, unless the caller asked to retain it (`retain_data`,
-                // used only by the `#[cfg(test)]` `kermit_server` wrapper for
-                // round-trip assertions), the payload is freed: a long-lived
-                // server session (many uploads with no intervening
-                // Finish/BYE — the norm on the always-on serial and
-                // standalone-TCP Kermit servers, both reachable without auth)
-                // would otherwise hold every completed file in memory.  No
-                // production caller reads `.data` off the returned outcome.
-                let received = kermit_receive_committing(
-                    reader,
-                    writer,
-                    is_tcp,
-                    is_petscii,
-                    verbose,
-                    Some(pkt),
-                    &into,
-                    |rx| {
-                        rx.subdir = subdir.clone();
-                        on_file(rx);
-                        if !retain_data {
-                            rx.data = Vec::new();
-                        }
-                    },
-                )
-                .await?;
-                if verbose {
-                    glog!(
-                        "Kermit server: S-dispatch returned {} file(s)",
-                        received.len()
-                    );
-                }
+                let received = server.receive(pkt, &mut on_file, retain_data).await?;
                 all_received.extend(received);
-                continue;
+                Next::Idle
             }
-            TYPE_R => {
-                // Peer asks us to send a named file from the current folder
-                // (the base plus any `remote cd`).
-                // Decode + validate the filename, look the file up on
-                // disk, then hand off to the sender state machine
-                // starting at seq+1 (so its S follows our just-received
-                // R in the same monotonic stream).
-                //
-                // The filename arrives control-quoted on the wire — real
-                // C-Kermit calls `encstr` on the GET argument before
-                // transmission (see ckcfn2.c:2474 in the C-Kermit source).
-                // Without `decode_data` here, a filename containing `#`
-                // (the default QCTL) arrives doubled and the lookup
-                // fails as "File not found".  ASCII filenames without
-                // QCTL or control bytes are unaffected, which is why
-                // pre-2026-05 builds passed every interop test we ran.
-                let recv_q = Quoting {
-                    qctl: DEFAULT_QCTL,
-                    qbin: None,
-                    rept: None,
-                    locking_shifts: false,
-                };
-                let raw = decode_data(&pkt.payload, recv_q).unwrap_or_default();
-                let fname = String::from_utf8_lossy(&raw).into_owned();
-                if !is_safe_resume_filename(&fname) {
-                    send_error(
-                        writer,
-                        pkt.seq,
-                        "Invalid filename",
-                        b'1',
-                        0,
-                        0,
-                        CR,
-                        is_tcp,
-                    )
-                    .await?;
-                    if verbose {
-                        glog!("Kermit server: refused R '{}' (unsafe filename)", fname);
-                    }
-                    // Spec §6.7: stay idle for the next command.
-                    continue;
+            TYPE_R => server.get(&pkt, cfg.kermit_wait_for_receiver).await?,
+            b'K' => server.kermit_command(&pkt).await?,
+            _ => server.unexpected(&pkt).await?,
+        };
+        if next == Next::End {
+            return Ok(KermitServerOutcome { files: all_received, idle_timeout: false });
+        }
+    }
+}
+
+/// What the server does after answering a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Next {
+    /// Wait for the next command -- the spec's idle state (§6.7), which an
+    /// E-packet refusal returns to as well as a success.
+    Idle,
+    /// The peer ended the session (Finish, Logout, BYE, B, or its own E).
+    End,
+}
+
+/// The quoting a server *command* arrives under: session defaults, because
+/// a command is not part of any transfer and nothing has been negotiated for
+/// it.  G payloads, R filenames and K text are all control-quoted with `#`
+/// by a real C-Kermit (`encstr`, ckcfn2.c:2474).
+fn command_quoting() -> Quoting {
+    Quoting {
+        qctl: DEFAULT_QCTL,
+        qbin: None,
+        rept: None,
+        locking_shifts: false,
+    }
+}
+
+/// A G subcommand's single field-encoded argument (§6.7) as text; empty when
+/// it is absent.
+fn g_text_argument(arg: &[u8]) -> String {
+    parse_g_field_argument(arg)
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .unwrap_or_default()
+}
+
+/// One server session: the link, and the folder `remote cd` has moved it to.
+///
+/// Every command handler below is a method, so none of them takes the six
+/// values the loop used to thread into each arm -- and a seventh (the base
+/// folder was the last one added) is one field, not a dozen call sites.
+struct KermitServer<'a, R, W> {
+    reader: &'a mut R,
+    writer: &'a mut W,
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    /// The server's whole world: it starts here, `remote cd /` returns
+    /// here, and `remote cd ..` stops here.  Chosen by the caller and never
+    /// validated against the wire rule -- only what a peer sends is.
+    base: &'a std::path::Path,
+    /// Per-session working subdir under `base`, settled by G C (CWD).  All
+    /// R-pulls, S-receives, and G D / G $ replies resolve paths relative to
+    /// `base / subdir`.
+    subdir: String,
+    state: ReadState,
+}
+
+impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
+    /// The folder every file command resolves against.
+    fn dir(&self) -> std::path::PathBuf {
+        session_dir(self.base, &self.subdir)
+    }
+
+    async fn ack(&mut self, seq: u8) -> Result<(), String> {
+        send_ack(self.writer, seq, b'1', 0, 0, CR, self.is_tcp).await
+    }
+
+    /// Refuse a command with an E-packet.  Per spec §6.7 the server stays
+    /// idle afterwards, so a refusal is never session-fatal.
+    async fn refuse(&mut self, seq: u8, msg: &str) -> Result<(), String> {
+        send_error(self.writer, seq, msg, b'1', 0, 0, CR, self.is_tcp).await
+    }
+
+    /// Answer with text through the X-headed inverse transfer (§5.3) that
+    /// DIR, SPACE, KERMIT, HELP and TYPE all share.
+    async fn reply(&mut self, name: &str, body: &[u8]) -> Result<(), String> {
+        send_g_inverse_file_response(
+            self.reader,
+            self.writer,
+            name,
+            body,
+            self.is_tcp,
+            self.is_petscii,
+            self.verbose,
+        )
+        .await
+    }
+
+    /// Best effort: the peer may already be gone, and the session is ending
+    /// either way.
+    async fn say_idle_timeout(&mut self) {
+        let _ = self.refuse(0, "Server idle timeout").await;
+        // Flush so the E-packet hits the wire before the
+        // caller closes the transport.  Without this, a
+        // tokio write buffer can swallow the bytes when
+        // the underlying socket is shut down right after.
+        {
+            use tokio::io::AsyncWriteExt;
+            let _ = self.writer.flush().await;
+        }
+    }
+
+    /// C — a host command.
+    async fn refuse_host_command(&mut self, seq: u8) -> Result<Next, String> {
+        // Host commands are a remote-code-execution primitive
+        // by design.  Refuse with E-packet regardless of any
+        // future config opt-in — actually executing them is
+        // out of scope and will stay that way unless the
+        // operator explicitly wires in a sandboxed backend.
+        self.refuse(seq, "Host commands disabled").await?;
+        if self.verbose {
+            glog!("Kermit server: refused C-packet (host commands disabled)");
+        }
+        // Spec §6.7: E-packet reply keeps the server idle for
+        // the next command — refusal is not session-fatal.
+        Ok(Next::Idle)
+    }
+
+    /// I — re-init mid-session.
+    async fn reinit(&mut self, seq: u8) -> Result<Next, String> {
+        // Respond with Y-ACK whose payload
+        // is a fresh Send-Init advertising our current caps.
+        let our_caps = config_capabilities();
+        let ack_payload = build_send_init_payload(&our_caps);
+        send_ack_with_payload(self.writer, seq, &ack_payload, b'1', 0, 0, CR, self.is_tcp)
+            .await?;
+        if self.verbose {
+            glog!("Kermit server: handled I-packet (re-init)");
+        }
+        Ok(Next::Idle)
+    }
+
+    /// E — the peer aborted.
+    fn peer_error(&self, pkt: &Packet) -> Next {
+        // Log and exit without responding
+        // (per spec, E is fatal both ways; ACKing risks a loop).
+        if self.verbose {
+            let msg = decode_error_message(&pkt.payload, command_quoting());
+            glog!("Kermit server: peer E-packet: {}", msg);
+        }
+        Next::End
+    }
+
+    /// B — clean session end.
+    async fn end_of_session(&mut self, seq: u8) -> Result<Next, String> {
+        // ACK and exit.
+        self.ack(seq).await?;
+        if self.verbose {
+            glog!("Kermit server: B-packet → clean exit");
+        }
+        Ok(Next::End)
+    }
+
+    /// G — a generic command.
+    async fn generic(&mut self, pkt: &Packet) -> Result<Next, String> {
+        // Generic-command dispatch.  Per Frank da Cruz spec §6:
+        // F=Finish, L=Logout, B=BYE end the session;
+        // C=CWD updates per-session subdir;
+        // D=DIR / $=SPACE / K=KERMIT / H=HELP / ?=HELP drive an
+        // inverse file transfer (S → X → D…D → Z → B) carrying
+        // the text body — the X header marks it as text-for-
+        // display per Frank da Cruz §5.3.
+        // Anything else is refused with an E-packet (see `unsupported`).
+        let raw = decode_data(&pkt.payload, command_quoting()).unwrap_or_default();
+        let action = raw.first().copied().unwrap_or(0);
+        let arg = raw.get(1..).unwrap_or(&[]);
+        let seq = pkt.seq;
+        match action {
+            // F/L/B are spec-defined session-exit signals; I and
+            // X are what real C-Kermit emits for `remote logout`
+            // (`setgen('I',...)`) and `remote exit`
+            // (`setgen('X',...)`).  Treating them all as
+            // equivalent matches what the gateway actually
+            // supports — the connection lives at the telnet/SSH
+            // layer, so any of these just ends the protocol
+            // session.  Note: G `I` is distinct from the I-packet
+            // (TYPE_INIT, re-init) — different packet types
+            // entirely, just letter overlap.
+            b'F' | b'L' | b'B' | b'I' | b'X' => {
+                self.ack(seq).await?;
+                if self.verbose {
+                    glog!("Kermit server: G '{}' → exit", action as char);
                 }
-                let dir = session_dir(base, &subdir);
-                // Resolve case-insensitively: a CP/M peer that uppercases
-                // the name shouldn't fail against a lower-case on-disk file
-                // (or vice versa) and burn a retry re-requesting.
-                let path = match resolve_get_path(&dir, &fname).await {
-                    Some(p) => p,
-                    None => {
-                        send_error(
-                            writer,
-                            pkt.seq,
-                            "File not found",
-                            b'1',
-                            0,
-                            0,
-                            CR,
-                            is_tcp,
-                        )
-                        .await?;
-                        if verbose {
-                            glog!(
-                                "Kermit server: refused R '{}' (file not found)",
-                                fname
-                            );
-                        }
-                        // Stay idle for the next command per spec.
-                        continue;
-                    }
-                };
-                let bytes = match tokio::fs::read(&path).await {
-                    Ok(b) => b,
-                    Err(_) => {
-                        send_error(
-                            writer,
-                            pkt.seq,
-                            "File not found",
-                            b'1',
-                            0,
-                            0,
-                            CR,
-                            is_tcp,
-                        )
-                        .await?;
-                        if verbose {
-                            glog!(
-                                "Kermit server: refused R '{}' (read failed)",
-                                fname
-                            );
-                        }
-                        // Stay idle for the next command per spec.
-                        continue;
-                    }
-                };
-                if bytes.len() as u64 > MAX_FILE_SIZE {
-                    send_error(
-                        writer,
-                        pkt.seq,
-                        "File too large",
-                        b'1',
-                        0,
-                        0,
-                        CR,
-                        is_tcp,
-                    )
-                    .await?;
-                    // Stay idle for the next command per spec.
-                    continue;
-                }
-                let modtime = tokio::fs::metadata(&path)
-                    .await
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs());
-                let file = KermitSendFile {
-                    name: &fname,
-                    data: &bytes,
-                    modtime,
-                    mode: None,
-                };
-                // ACK the R-packet explicitly *before* starting the
-                // send.  C-Kermit (and per Frank da Cruz §6 the strict
-                // spec reading) expects every command packet to be
-                // acknowledged with a Y-packet before any new state
-                // machine takes over — sending S directly without the
-                // ACK first leaves the client retrying its R because
-                // it never saw confirmation that we received it.  Our
-                // own client (`kermit_client_get`) reads the ACK then
-                // the S so this convention works on both peers.
-                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                // Empirical: C-Kermit (and the spec's "each transfer
-                // is a fresh exchange" reading) expect the server's S
-                // to start at seq 0, NOT R.seq+1.  After the R-ACK
-                // we're between transfers; the upcoming S begins a
-                // new send-side conversation with its own seq counter.
-                let starting_seq = 0u8;
-                if verbose {
-                    glog!(
-                        "Kermit server: R '{}' → ACK'd, sending {} bytes (starting seq={})",
-                        fname,
-                        bytes.len(),
-                        starting_seq
-                    );
-                }
-                // Receiver-driven start: a Kermit GET client (kercpm3 on
-                // the SC126) pokes the sender with an initiating NAK to
-                // solicit the Send-Init.  Consume that poke *first* so our
-                // S is the reply to it.  Sending S unsolicited crosses the
-                // poke on the wire; we'd then read the NAK, treat it as a
-                // rejection, and resend S — delivering a duplicate the
-                // client tallies as a retry (observed: kercpm3 counting 2–3
-                // retries per download).  Waiting for the poke means we send
-                // S exactly once, into a receiver that's ready for it.
-                //
-                // Bounded well under the negotiation timeout (not the full
-                // window the interactive download uses) so a peer that never
-                // pokes isn't stalled: a strict sender-driven peer, or our
-                // own `kermit_client_get` in tests, just falls through after
-                // the short wait and gets an unprompted S as before.  Gated
-                // on `kermit_wait_for_receiver` (default on); reliable
-                // loopback peers can turn it off.
-                if cfg.kermit_wait_for_receiver {
-                    let poke_deadline = tokio::time::Instant::now()
-                        + tokio::time::Duration::from_millis(KERMIT_SERVER_POKE_WAIT_MS);
-                    let _ = wait_for_initiating_nak(
-                        reader,
-                        is_tcp,
-                        is_petscii,
-                        verbose,
-                        &mut state,
-                        poke_deadline,
-                    )
-                    .await;
-                }
-                kermit_send_with_starting_seq(
-                    reader,
-                    writer,
-                    &[file],
-                    is_tcp,
-                    is_petscii,
-                    verbose,
-                    starting_seq,
-                    false,
-                    false, // poke already consumed above; send S once, now
-                )
-                .await?;
-                continue;
+                return Ok(Next::End);
             }
-            b'K' => {
-                // `remote kermit <command>` ships a *top-level* K-packet
-                // (not a G-K subcommand — see ckcpro.w `k { ... vcmd='K';
-                // ... scmd('K', cmarg) }` and the XZKER handler at
-                // ckuus7.c:7898).  The payload is the literal text the
-                // user typed after `remote kermit` (e.g. "set file type
-                // binary"), encoded with the standard control-quote
-                // layer.  C-Kermit's own server treats unknown top-level
-                // packets via `<serve>.` (ckcpro.w:871) which replies
-                // "Unimplemented server function" — so even C-Kermit
-                // against C-Kermit gives no useful answer.
-                //
-                // We instead return the gateway's identity + version
-                // regardless of the requested command, surfaced via the
-                // same X+Z inverse-file-transfer pattern used by
-                // `remote help` / `remote dir` / `remote space`.  That
-                // gives the operator a deterministic "yes, I'm an
-                // Ethernet Gateway, here's my version" answer for any
-                // `remote kermit <anything>` invocation.  C-Kermit
-                // silently no-ops on `remote kermit` with *no*
-                // argument (ckuus7.c:7903), so the user must supply
-                // some text — `remote kermit version` is conventional.
-                let recv_q = Quoting {
-                    qctl: DEFAULT_QCTL,
-                    qbin: None,
-                    rept: None,
-                    locking_shifts: false,
-                };
-                let cmd = decode_data(&pkt.payload, recv_q).unwrap_or_default();
-                if verbose {
-                    glog!(
-                        "Kermit server: K-packet '{}' → identity reply",
-                        String::from_utf8_lossy(&cmd)
-                    );
-                }
-                let body = format!(
-                    "Ethernet Gateway Kermit {}",
-                    env!("CARGO_PKG_VERSION")
+            b'C' => self.cwd(seq, arg).await?,
+            b'D' => self.directory().await?,
+            b'U' | b'$' => self.space().await?,
+            b'K' => self.identity().await?,
+            b'H' | b'?' => self.help().await?,
+            b'E' => self.delete(seq, arg).await?,
+            b'R' => self.rename(seq, arg).await?,
+            b'T' => self.type_file(seq, arg).await?,
+            b'm' => self.mkdir(seq, arg).await?,
+            b'd' => self.rmdir(seq, arg).await?,
+            _ => self.unsupported(seq, action).await?,
+        }
+        Ok(Next::Idle)
+    }
+
+    /// G C — `remote cd`.
+    async fn cwd(&mut self, seq: u8, arg: &[u8]) -> Result<(), String> {
+        // Per Kermit Protocol Manual §6.7, the CWD argument
+        // is a *field-encoded* item — one length byte
+        // (tochar(N)) followed by N bytes of path.  Real
+        // C-Kermit (`remote cwd <path>`) sends exactly
+        // this on the wire.  A bare `C` with no length
+        // byte, or an explicit length of zero, means
+        // "reset to home" (we map that to the server's
+        // base folder).
+        let raw_arg = g_text_argument(arg);
+        // `remote cd` follows standard `cd` semantics,
+        // *relative to the current subdir*: `remote cd
+        // CPM` then `remote cd B` descends into `CPM/B`,
+        // matching a real C-Kermit / FTP server and a
+        // shell.  `..` pops one component — that's what
+        // `remote cdup` sends (`setgen('C', "..", ...)`,
+        // ckuus7.c:7762) — and popping stops at the base,
+        // so no argument can escape the sandbox.  A
+        // leading `/` resets to the base.  An empty
+        // argument is the spec's "reset to home" (§6.7)
+        // and returns to the base.
+        let new_subdir = if raw_arg.is_empty() {
+            String::new()
+        } else {
+            resolve_cwd_target(&self.subdir, &raw_arg)
+        };
+        if !is_safe_relative_subdir(&new_subdir) {
+            self.refuse(seq, "Invalid directory").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: G C '{}' refused (unsafe path)",
+                    new_subdir
                 );
-                let payload = ensure_crlf_terminator(body.as_bytes());
-                send_g_inverse_file_response(
-                    reader,
-                    writer,
-                    "KERMIT",
-                    &payload,
-                    is_tcp,
-                    is_petscii,
-                    verbose,
-                )
-                .await?;
-                continue;
             }
-            other => {
-                // Anything else — protocol error.  Per spec §6.7 we
-                // stay idle after sending E so a confused peer can
-                // recover by sending a valid command.  The per-command
-                // negotiation-timeout bounds inactivity if the peer
-                // just goes silent.
-                if verbose {
+            // Spec §6.7: keep the server idle so the
+            // peer can retry with a valid subdir.
+            return Ok(());
+        }
+        // Refuse non-existent directories so a typo'd
+        // `remote cd asembly` fails fast instead of
+        // silently ACKing and then dropping every
+        // subsequent upload into a directory that
+        // doesn't exist (the user's confused-bug
+        // report from 2026-05-01 was caused by exactly
+        // this footgun).  Empty subdir = the base, which
+        // the caller creates before starting the server
+        // (ensure_transfer_dir).  If it is removed while
+        // the session runs, nothing panics: DIR comes
+        // back empty and saves fail as write errors.
+        if !new_subdir.is_empty() && !session_dir(self.base, &new_subdir).is_dir() {
+            self.refuse(seq, "Directory not found").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: G C '{}' refused (no such dir)",
+                    new_subdir
+                );
+            }
+            return Ok(());
+        }
+        self.subdir = new_subdir;
+        self.ack(seq).await?;
+        if self.verbose {
+            glog!("Kermit server: G C → subdir='{}'", self.subdir);
+        }
+        Ok(())
+    }
+
+    /// G D — `remote dir`.
+    async fn directory(&mut self) -> Result<(), String> {
+        // No Y-ACK to the G — go straight to S.
+        // C-Kermit's <rgen>Y handler routes any Y the
+        // client receives in this state through
+        // rcv_shortreply(), which interprets the Y's
+        // payload as the *entire* response and ends
+        // the command.  An empty Y would therefore
+        // close the conversation before we ever drive
+        // the inverse transfer.  ckcpro.w protocol
+        // comment: "packet number stays at zero
+        // through I-G-S sequence" — there's no Y in
+        // between G and S for long replies.
+        let dir_path = self.dir();
+        // Directory enumeration is blocking (std::fs::read_dir
+        // + per-entry stat); offload it so a large transfer
+        // dir can't stall a runtime worker.
+        let listing = tokio::task::spawn_blocking(move || format_dir_listing(&dir_path))
+            .await
+            .unwrap_or_default();
+        // CRLF-encode so a hardware CP/M client (Kermit-80)
+        // sees proper line breaks instead of a staircase.
+        let listing = crlf_encode_text(listing.as_bytes());
+        self.reply("DIR", &listing).await
+    }
+
+    /// G U / G $ — `remote space`.
+    async fn space(&mut self) -> Result<(), String> {
+        // SPACE — Frank da Cruz's Generic Command Letter
+        // for "disk Usage" is 'U' (Kermit Protocol Manual
+        // §6 Table 6-2), and that's what real C-Kermit
+        // emits for `remote space` (ckuus7.c:7969 calls
+        // `setgen('U', ...)`, ckcpro.w:1383 dispatches
+        // <generic>U to REMOTE SPACE).  We additionally
+        // accept '$' for backward compatibility with our
+        // own `kermit_client_space` helper, which sent
+        // '$' before this server was taught the standard
+        // letter; any peer that follows the spec will hit
+        // the 'U' arm.
+        let body = match fs_free_bytes(&self.dir()) {
+            Some(b) => b.to_string(),
+            None => "unknown".to_string(),
+        };
+        let payload = ensure_crlf_terminator(body.as_bytes());
+        self.reply("SPACE", &payload).await
+    }
+
+    /// G K, and the top-level K packet: who we are.
+    async fn identity(&mut self) -> Result<(), String> {
+        let body = format!(
+            "Ethernet Gateway Kermit {}",
+            env!("CARGO_PKG_VERSION")
+        );
+        let payload = ensure_crlf_terminator(body.as_bytes());
+        self.reply("KERMIT", &payload).await
+    }
+
+    /// G H / G ? — `remote help`.
+    async fn help(&mut self) -> Result<(), String> {
+        // HELP — reply with the list of supported G
+        // subcommands.  C-Kermit's `remote help`
+        // sends G ?; some implementations use G H.
+        // We accept both.  CRLF-encode so a CP/M client
+        // (Kermit-80) renders the lines without staircasing.
+        let help = crlf_encode_text(kermit_g_help_text().as_bytes());
+        self.reply("HELP", &help).await
+    }
+
+    /// G E — `remote delete`.
+    async fn delete(&mut self, seq: u8, arg: &[u8]) -> Result<(), String> {
+        // DELETE — `remote delete <filename>`, spec §6.7.
+        // Field-encoded filename argument.  We refuse
+        // wildcards, traversal, and missing args — the
+        // file lookup is rooted under the per-session
+        // subdir (so deletes outside `<base>/<subdir>`
+        // are impossible by construction).
+        let fname = g_text_argument(arg);
+        if !is_safe_resume_filename(&fname) {
+            self.refuse(seq, "Invalid filename").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: G E '{}' refused (unsafe filename)",
+                    fname
+                );
+            }
+            return Ok(());
+        }
+        let path = self.dir().join(&fname);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {
+                self.ack(seq).await?;
+                if self.verbose {
+                    glog!("Kermit server: G E '{}' → deleted", fname);
+                }
+            }
+            Err(e) => {
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    "File not found"
+                } else {
+                    "Delete failed"
+                };
+                self.refuse(seq, msg).await?;
+                if self.verbose {
                     glog!(
-                        "Kermit server: unexpected type='{}' seq={}",
-                        other as char,
-                        pkt.seq
+                        "Kermit server: G E '{}' refused: {}",
+                        fname, e
                     );
                 }
-                send_error(
-                    writer,
-                    pkt.seq,
-                    "Unexpected packet type",
-                    b'1',
-                    0,
-                    0,
-                    CR,
-                    is_tcp,
-                )
-                .await?;
-                continue;
             }
         }
+        Ok(())
+    }
+
+    /// G R — `remote rename`.
+    async fn rename(&mut self, seq: u8, arg: &[u8]) -> Result<(), String> {
+        // RENAME — `remote rename <old> <new>`, spec §6.7.
+        // Two field-encoded args back-to-back.  Both
+        // names must pass `is_safe_resume_filename`;
+        // both are rooted at the per-session subdir.
+        let parsed = parse_g_field_argument_with_remainder(arg)
+            .and_then(|(old, rest)| {
+                parse_g_field_argument_with_remainder(rest)
+                    .map(|(new, _)| (old, new))
+            });
+        let Some((old_bytes, new_bytes)) = parsed else {
+            self.refuse(seq, "Rename needs two field-encoded names").await?;
+            if self.verbose {
+                glog!("Kermit server: G R refused (missing args)");
+            }
+            return Ok(());
+        };
+        let old_name = String::from_utf8_lossy(old_bytes).into_owned();
+        let new_name = String::from_utf8_lossy(new_bytes).into_owned();
+        if !is_safe_resume_filename(&old_name)
+            || !is_safe_resume_filename(&new_name)
+        {
+            self.refuse(seq, "Invalid filename").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: G R '{}' '{}' refused (unsafe)",
+                    old_name, new_name
+                );
+            }
+            return Ok(());
+        }
+        let dir = self.dir();
+        let old_path = dir.join(&old_name);
+        let new_path = dir.join(&new_name);
+        // Refuse rename-to-existing — would silently
+        // clobber an unrelated file.  Make the operator
+        // delete the target first if that's their intent.
+        if new_path.exists() {
+            self.refuse(seq, "Destination exists").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: G R '{}' → '{}' refused (target exists)",
+                    old_name, new_name
+                );
+            }
+            return Ok(());
+        }
+        match tokio::fs::rename(&old_path, &new_path).await {
+            Ok(()) => {
+                self.ack(seq).await?;
+                if self.verbose {
+                    glog!(
+                        "Kermit server: G R '{}' → '{}' renamed",
+                        old_name, new_name
+                    );
+                }
+            }
+            Err(e) => {
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    "Source not found"
+                } else {
+                    "Rename failed"
+                };
+                self.refuse(seq, msg).await?;
+                if self.verbose {
+                    glog!(
+                        "Kermit server: G R '{}' → '{}' refused: {}",
+                        old_name, new_name, e
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// G T — `remote type`.
+    async fn type_file(&mut self, seq: u8, arg: &[u8]) -> Result<(), String> {
+        // TYPE — `remote type <filename>`, spec §6.7.
+        // Server delivers the file's contents to the
+        // client via the same X-headed inverse transfer
+        // we use for DIR/SPACE/KERMIT — the difference
+        // is just where the bytes come from.  For binary
+        // files this dumps raw bytes to the client's
+        // screen; that's what real Kermit does too —
+        // matching `remote type` on a binary is the
+        // user's call.
+        let fname = g_text_argument(arg);
+        if !is_safe_resume_filename(&fname) {
+            self.refuse(seq, "Invalid filename").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: G T '{}' refused (unsafe filename)",
+                    fname
+                );
+            }
+            return Ok(());
+        }
+        let path = self.dir().join(&fname);
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    "File not found"
+                } else {
+                    "Read failed"
+                };
+                self.refuse(seq, msg).await?;
+                if self.verbose {
+                    glog!(
+                        "Kermit server: G T '{}' refused: {}",
+                        fname, e
+                    );
+                }
+                return Ok(());
+            }
+        };
+        if bytes.len() as u64 > MAX_FILE_SIZE {
+            return self.refuse(seq, "File too large").await;
+        }
+        self.reply(&fname, &bytes).await
+    }
+
+    /// G m — `remote mkdir`.
+    async fn mkdir(&mut self, seq: u8, arg: &[u8]) -> Result<(), String> {
+        // MKDIR — `remote mkdir <dirname>`.  C-Kermit
+        // ships this as wire letter `m` (lowercase) per
+        // ckuus7.c:8139 (`setgen('m', dirname, ...)`).
+        // Lowercase keeps it distinct from `M` (which
+        // C-Kermit reserves for `remote message`).
+        // Field-encoded directory name; rooted at the
+        // per-session subdir so we can't escape the
+        // sandbox.  Reuses `is_safe_resume_filename` —
+        // a single-component name with no traversal —
+        // because directory names are leaves, not paths.
+        let dname = g_text_argument(arg);
+        if !is_safe_resume_filename(&dname) {
+            self.refuse(seq, "Invalid directory name").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: G m '{}' refused (unsafe name)",
+                    dname
+                );
+            }
+            return Ok(());
+        }
+        let path = self.dir().join(&dname);
+        match tokio::fs::create_dir(&path).await {
+            Ok(()) => {
+                self.ack(seq).await?;
+                if self.verbose {
+                    glog!("Kermit server: G m '{}' → created", dname);
+                }
+            }
+            Err(e) => {
+                let msg = if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    "Directory already exists"
+                } else {
+                    "Mkdir failed"
+                };
+                self.refuse(seq, msg).await?;
+                if self.verbose {
+                    glog!(
+                        "Kermit server: G m '{}' refused: {}",
+                        dname, e
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// G d — `remote rmdir`.
+    async fn rmdir(&mut self, seq: u8, arg: &[u8]) -> Result<(), String> {
+        // RMDIR — `remote rmdir <dirname>`.  C-Kermit
+        // ships this as wire letter `d` (lowercase) per
+        // ckuus7.c:8139 (`setgen('d', dirname, ...)`).
+        // Lowercase keeps it distinct from `D` (which
+        // is the DIRECTORY listing command).  We use
+        // `std::fs::remove_dir`, which only removes
+        // *empty* directories — the operator must
+        // delete the contents first via `remote delete`.
+        // Refusing recursive delete by default avoids
+        // the worst footgun.
+        let dname = g_text_argument(arg);
+        if !is_safe_resume_filename(&dname) {
+            self.refuse(seq, "Invalid directory name").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: G d '{}' refused (unsafe name)",
+                    dname
+                );
+            }
+            return Ok(());
+        }
+        let path = self.dir().join(&dname);
+        match tokio::fs::remove_dir(&path).await {
+            Ok(()) => {
+                self.ack(seq).await?;
+                if self.verbose {
+                    glog!("Kermit server: G d '{}' → removed", dname);
+                }
+            }
+            Err(e) => {
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    "Directory not found"
+                } else {
+                    // ErrorKind::DirectoryNotEmpty is
+                    // unstable on stable Rust; let the
+                    // caller infer from the message.
+                    "Rmdir failed (directory not empty?)"
+                };
+                self.refuse(seq, msg).await?;
+                if self.verbose {
+                    glog!(
+                        "Kermit server: G d '{}' refused: {}",
+                        dname, e
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Any G subcommand not handled above.
+    async fn unsupported(&mut self, seq: u8, action: u8) -> Result<(), String> {
+        // Per spec §6, a server that doesn't implement a
+        // generic command should reply with E-packet —
+        // not silently ACK.  Silent-ACK leaves the peer
+        // believing the command succeeded (e.g.
+        // `remote delete foo` reports "ok" while nothing
+        // happened on disk).  An E-packet surfaces the
+        // refusal cleanly so the operator sees the right
+        // failure.  Pre-2026-05 builds silently ACKed.
+        self.refuse(seq, "Command not supported").await?;
+        if self.verbose {
+            glog!(
+                "Kermit server: G '{}' refused (unsupported)",
+                action as char
+            );
+        }
+        Ok(())
+    }
+
+    /// S — the peer uploads one or more files.
+    async fn receive(
+        &mut self,
+        pkt: Packet,
+        on_file: &mut impl FnMut(&KermitReceive),
+        retain_data: bool,
+    ) -> Result<Vec<KermitReceive>, String> {
+        // Hand
+        // the pre-read S off to the receiver state machine and
+        // accumulate whatever it returns; then loop back for
+        // the next command.  A read failure inside the receive
+        // (timeout, malformed packet, etc.) propagates up.
+        // Into the session's `remote cd` directory, which is where
+        // the caller saves -- and so where a resume's partial is.
+        let into = self.dir();
+        let subdir = self.subdir.clone();
+        // Each file is committed through the caller's hook at its
+        // own Z, before that Z is ACKed (see
+        // `kermit_receive_committing`): an error later in the batch
+        // cannot take back a file the sender was told was delivered.
+        //
+        // Stamped with the per-session subdir first, so the saver
+        // knows where to land it -- the receiver is subdir-oblivious,
+        // and without this a `remote cd assembly` followed by `put
+        // hello.txt` would silently land in the server's base.
+        //
+        // Then, unless the caller asked to retain it (`retain_data`,
+        // used only by the `#[cfg(test)]` `kermit_server` wrapper for
+        // round-trip assertions), the payload is freed: a long-lived
+        // server session (many uploads with no intervening
+        // Finish/BYE — the norm on the always-on serial and
+        // standalone-TCP Kermit servers, both reachable without auth)
+        // would otherwise hold every completed file in memory.  No
+        // production caller reads `.data` off the returned outcome.
+        let received = kermit_receive_committing(
+            self.reader,
+            self.writer,
+            self.is_tcp,
+            self.is_petscii,
+            self.verbose,
+            Some(pkt),
+            &into,
+            |rx| {
+                rx.subdir = subdir.clone();
+                on_file(rx);
+                if !retain_data {
+                    rx.data = Vec::new();
+                }
+            },
+        )
+        .await?;
+        if self.verbose {
+            glog!(
+                "Kermit server: S-dispatch returned {} file(s)",
+                received.len()
+            );
+        }
+        Ok(received)
+    }
+
+    /// R — the peer pulls a file (`get`).
+    async fn get(&mut self, pkt: &Packet, wait_for_receiver: bool) -> Result<Next, String> {
+        // Peer asks us to send a named file from the current folder
+        // (the base plus any `remote cd`).
+        // Decode + validate the filename, look the file up on
+        // disk, then hand off to the sender state machine
+        // starting at seq+1 (so its S follows our just-received
+        // R in the same monotonic stream).
+        //
+        // The filename arrives control-quoted on the wire — real
+        // C-Kermit calls `encstr` on the GET argument before
+        // transmission (see ckcfn2.c:2474 in the C-Kermit source).
+        // Without `decode_data` here, a filename containing `#`
+        // (the default QCTL) arrives doubled and the lookup
+        // fails as "File not found".  ASCII filenames without
+        // QCTL or control bytes are unaffected, which is why
+        // pre-2026-05 builds passed every interop test we ran.
+        let raw = decode_data(&pkt.payload, command_quoting()).unwrap_or_default();
+        let fname = String::from_utf8_lossy(&raw).into_owned();
+        if !is_safe_resume_filename(&fname) {
+            self.refuse(pkt.seq, "Invalid filename").await?;
+            if self.verbose {
+                glog!("Kermit server: refused R '{}' (unsafe filename)", fname);
+            }
+            // Spec §6.7: stay idle for the next command.
+            return Ok(Next::Idle);
+        }
+        let dir = self.dir();
+        // Resolve case-insensitively: a CP/M peer that uppercases
+        // the name shouldn't fail against a lower-case on-disk file
+        // (or vice versa) and burn a retry re-requesting.
+        let Some(path) = resolve_get_path(&dir, &fname).await else {
+            self.refuse(pkt.seq, "File not found").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: refused R '{}' (file not found)",
+                    fname
+                );
+            }
+            // Stay idle for the next command per spec.
+            return Ok(Next::Idle);
+        };
+        let Ok(bytes) = tokio::fs::read(&path).await else {
+            self.refuse(pkt.seq, "File not found").await?;
+            if self.verbose {
+                glog!(
+                    "Kermit server: refused R '{}' (read failed)",
+                    fname
+                );
+            }
+            // Stay idle for the next command per spec.
+            return Ok(Next::Idle);
+        };
+        if bytes.len() as u64 > MAX_FILE_SIZE {
+            self.refuse(pkt.seq, "File too large").await?;
+            // Stay idle for the next command per spec.
+            return Ok(Next::Idle);
+        }
+        let modtime = tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let file = KermitSendFile {
+            name: &fname,
+            data: &bytes,
+            modtime,
+            mode: None,
+        };
+        // ACK the R-packet explicitly *before* starting the
+        // send.  C-Kermit (and per Frank da Cruz §6 the strict
+        // spec reading) expects every command packet to be
+        // acknowledged with a Y-packet before any new state
+        // machine takes over — sending S directly without the
+        // ACK first leaves the client retrying its R because
+        // it never saw confirmation that we received it.  Our
+        // own client (`kermit_client_get`) reads the ACK then
+        // the S so this convention works on both peers.
+        self.ack(pkt.seq).await?;
+        // Empirical: C-Kermit (and the spec's "each transfer
+        // is a fresh exchange" reading) expect the server's S
+        // to start at seq 0, NOT R.seq+1.  After the R-ACK
+        // we're between transfers; the upcoming S begins a
+        // new send-side conversation with its own seq counter.
+        let starting_seq = 0u8;
+        if self.verbose {
+            glog!(
+                "Kermit server: R '{}' → ACK'd, sending {} bytes (starting seq={})",
+                fname,
+                bytes.len(),
+                starting_seq
+            );
+        }
+        // Receiver-driven start: a Kermit GET client (kercpm3 on
+        // the SC126) pokes the sender with an initiating NAK to
+        // solicit the Send-Init.  Consume that poke *first* so our
+        // S is the reply to it.  Sending S unsolicited crosses the
+        // poke on the wire; we'd then read the NAK, treat it as a
+        // rejection, and resend S — delivering a duplicate the
+        // client tallies as a retry (observed: kercpm3 counting 2–3
+        // retries per download).  Waiting for the poke means we send
+        // S exactly once, into a receiver that's ready for it.
+        //
+        // Bounded well under the negotiation timeout (not the full
+        // window the interactive download uses) so a peer that never
+        // pokes isn't stalled: a strict sender-driven peer, or our
+        // own `kermit_client_get` in tests, just falls through after
+        // the short wait and gets an unprompted S as before.  Gated
+        // on `kermit_wait_for_receiver` (default on); reliable
+        // loopback peers can turn it off.
+        if wait_for_receiver {
+            let poke_deadline = tokio::time::Instant::now()
+                + tokio::time::Duration::from_millis(KERMIT_SERVER_POKE_WAIT_MS);
+            let _ = wait_for_initiating_nak(
+                self.reader,
+                self.is_tcp,
+                self.is_petscii,
+                self.verbose,
+                &mut self.state,
+                poke_deadline,
+            )
+            .await;
+        }
+        kermit_send_with_starting_seq(
+            self.reader,
+            self.writer,
+            &[file],
+            self.is_tcp,
+            self.is_petscii,
+            self.verbose,
+            starting_seq,
+            false,
+            false, // poke already consumed above; send S once, now
+        )
+        .await?;
+        Ok(Next::Idle)
+    }
+
+    /// K — a top-level `remote kermit <command>`.
+    async fn kermit_command(&mut self, pkt: &Packet) -> Result<Next, String> {
+        // `remote kermit <command>` ships a *top-level* K-packet
+        // (not a G-K subcommand — see ckcpro.w `k { ... vcmd='K';
+        // ... scmd('K', cmarg) }` and the XZKER handler at
+        // ckuus7.c:7898).  The payload is the literal text the
+        // user typed after `remote kermit` (e.g. "set file type
+        // binary"), encoded with the standard control-quote
+        // layer.  C-Kermit's own server treats unknown top-level
+        // packets via `<serve>.` (ckcpro.w:871) which replies
+        // "Unimplemented server function" — so even C-Kermit
+        // against C-Kermit gives no useful answer.
+        //
+        // We instead return the gateway's identity + version
+        // regardless of the requested command, surfaced via the
+        // same X+Z inverse-file-transfer pattern used by
+        // `remote help` / `remote dir` / `remote space`.  That
+        // gives the operator a deterministic "yes, I'm an
+        // Ethernet Gateway, here's my version" answer for any
+        // `remote kermit <anything>` invocation.  C-Kermit
+        // silently no-ops on `remote kermit` with *no*
+        // argument (ckuus7.c:7903), so the user must supply
+        // some text — `remote kermit version` is conventional.
+        if self.verbose {
+            let cmd = decode_data(&pkt.payload, command_quoting()).unwrap_or_default();
+            glog!(
+                "Kermit server: K-packet '{}' → identity reply",
+                String::from_utf8_lossy(&cmd)
+            );
+        }
+        self.identity().await?;
+        Ok(Next::Idle)
+    }
+
+    /// Any packet type a server does not take as a command.
+    async fn unexpected(&mut self, pkt: &Packet) -> Result<Next, String> {
+        // Anything else — protocol error.  Per spec §6.7 we
+        // stay idle after sending E so a confused peer can
+        // recover by sending a valid command.  The per-command
+        // negotiation-timeout bounds inactivity if the peer
+        // just goes silent.
+        if self.verbose {
+            glog!(
+                "Kermit server: unexpected type='{}' seq={}",
+                pkt.kind as char,
+                pkt.seq
+            );
+        }
+        self.refuse(pkt.seq, "Unexpected packet type").await?;
+        Ok(Next::Idle)
     }
 }
 
@@ -8246,7 +8186,10 @@ mod tests {
         assert!(body.contains("&save_dir_str"), "the resume offset is computed in save_dir");
         assert!(body.contains("save_dir.join(&last.filename)"), "and the partial read from it");
         // And the server passes its `remote cd` directory.
-        assert!(src.contains("let into = session_dir(base, &subdir);"));
+        let recv = &src[src.find("    async fn receive(").expect("the server's S handler")..];
+        let recv = &recv[..recv.find("\n    }\n").expect("end of receive")];
+        assert!(recv.contains("let into = self.dir();"), "the server saves somewhere else");
+        assert!(src.contains("session_dir(self.base, &self.subdir)"), "dir() lost the subdir");
     }
 
     #[test]
