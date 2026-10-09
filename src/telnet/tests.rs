@@ -2693,7 +2693,6 @@ fn test_all_error_messages_fit_petscii() {
         "Access denied.",
         "Enter a number or Q.",
         "Press S, R, Q, or H.",
-        "Press E, S, B, P, D, F, H, or Q.",
         "No serial ports detected.",
         "Invalid port number.",
         "Connection timed out.",
@@ -2751,10 +2750,8 @@ fn test_all_error_messages_fit_petscii() {
         "Press T, P, S, O, R, H, or Q.",
         "Press a letter from the menu.",
         "Invalid port number.",
-        // Modem / console emulator menu
-        "Press E, S, B, P, F, H, or Q.",
-        "Press E, S, B, P, D, F, H, or Q.",
-        "Press E, S, B, P, D, F, I, H, or Q.",
+        // The port settings screen's hint is built, not listed here: see
+        // `test_the_port_settings_hint_names_exactly_the_keys_each_mode_answers`.
     ];
     for msg in &messages {
         // Error messages are displayed as "  {msg}" — 2-char indent
@@ -14594,4 +14591,20 @@ fn test_the_port_settings_arms_are_gated_only_by_the_key_set() {
         }
     }
     assert!(drawn >= 13, "read only {drawn} drawn keys -- this scan is not reading the screen");
+    // A key the screen draws only in some modes must be drawn from the key set,
+    // or it can appear where its arm refuses it: drawing `G` unconditionally
+    // would put it on the Kermit screen with a hint that does not name it, and
+    // every check above would still pass, because `g` is in the modem set.
+    // The arms never ask the set about one key (they are gated by `accepted`),
+    // so a `keys.contains(&'g')` can only be the draw site's condition.
+    let always: Vec<char> = "befhpqs".chars().collect();
+    for k in all.iter().filter(|k| !always.contains(k)) {
+        let cond = format!("keys.contains(&'{k}')");
+        assert!(body.contains(&cond), "{k} is drawn without asking the key set ({cond})");
+    }
+    // At the start of a line: `} else if console_mode {` picks the title,
+    // which is not a key row.
+    for stale in ["toggling_own_port", "ringing_own_port", "\n            if console_mode {", "\n            if !raw_mode {"] {
+        assert!(!body.contains(stale), "a row is drawn from `{stale}` instead of the key set");
+    }
 }

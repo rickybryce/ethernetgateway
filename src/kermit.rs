@@ -5477,7 +5477,7 @@ enum Next {
     /// Wait for the next command -- the spec's idle state (§6.7), which an
     /// E-packet refusal returns to as well as a success.
     Idle,
-    /// The peer ended the session (Finish, Logout, BYE, B, or its own E).
+    /// The peer ended the session (G F/L/B/I/X, a B packet, or its own E).
     End,
 }
 
@@ -5624,8 +5624,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
     async fn generic(&mut self, pkt: &Packet) -> Result<Next, String> {
         // Generic-command dispatch.  Per Frank da Cruz spec §6:
         // F=Finish, L=Logout, B=BYE end the session;
-        // C=CWD updates per-session subdir;
-        // D=DIR / $=SPACE / K=KERMIT / H=HELP / ?=HELP drive an
+        // (and I/X, see below); C=CWD updates per-session subdir;
+        // E=DELETE, R=RENAME, m=MKDIR, d=RMDIR act on the folder;
+        // D=DIR / U=$=SPACE / K=KERMIT / H=?=HELP / T=TYPE drive an
         // inverse file transfer (S → X → D…D → Z → B) carrying
         // the text body — the X header marks it as text-for-
         // display per Frank da Cruz §5.3.
@@ -6157,9 +6158,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
         // Peer asks us to send a named file from the current folder
         // (the base plus any `remote cd`).
         // Decode + validate the filename, look the file up on
-        // disk, then hand off to the sender state machine
-        // starting at seq+1 (so its S follows our just-received
-        // R in the same monotonic stream).
+        // disk, ACK the R, then hand off to the sender state
+        // machine as a fresh exchange starting at seq 0 (see
+        // `starting_seq` below).
         //
         // The filename arrives control-quoted on the wire — real
         // C-Kermit calls `encstr` on the GET argument before
@@ -8189,7 +8190,12 @@ mod tests {
         let recv = &src[src.find("    async fn receive(").expect("the server's S handler")..];
         let recv = &recv[..recv.find("\n    }\n").expect("end of receive")];
         assert!(recv.contains("let into = self.dir();"), "the server saves somewhere else");
-        assert!(src.contains("session_dir(self.base, &self.subdir)"), "dir() lost the subdir");
+        // Bounded to `dir()` itself: a whole-file `contains` would match this
+        // test's own literal and could never fail.
+        let prod = &src[..src.find("#[cfg(test)]\nmod tests").expect("test module")];
+        let dir_fn = &prod[prod.find("    fn dir(&self)").expect("dir()")..];
+        let dir_fn = &dir_fn[..dir_fn.find("\n    }\n").expect("end of dir()")];
+        assert!(dir_fn.contains("session_dir(self.base, &self.subdir)"), "dir() lost the subdir");
     }
 
     #[test]

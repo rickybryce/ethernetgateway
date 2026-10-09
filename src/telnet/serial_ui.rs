@@ -528,6 +528,12 @@ impl TelnetSession {
             // neither runs the Hayes AT emulator, so both hide the modem-
             // only surfaces (dialup mapping, ring, carrier, PETSCII xlate).
             let raw_mode = port.mode != "modem";
+            // Which keys this screen answers.  Every optional row below is
+            // drawn from this set and every key arm is gated by it, so a key
+            // cannot be drawn where it is refused, nor answered where it is
+            // not drawn, nor missing from the wrong-key hint.
+            let on_own_port = self.is_serial && self.serial_port_id == Some(id);
+            let keys = serial_menu_keys(&port.mode, on_own_port);
             let title = if kermit_mode {
                 format!("PORT {} - KERMIT SERVER", id.label())
             } else if console_mode {
@@ -650,7 +656,7 @@ impl TelnetSession {
             // control for the same reason. It is deliberately NOT under the
             // Hayes AT settings: Hayes answers "which byte is the erase key?"
             // with S5, on the AT command line, and this is the console wire.
-            if console_mode {
+            if keys.contains(&'k') {
                 let w = if self.terminal_type == TerminalType::Petscii { 24 } else { 58 };
                 self.send_line(&format!(
                     "  Erase key:  {}",
@@ -668,8 +674,7 @@ impl TelnetSession {
             // tear down their connection before they could confirm.
             // Hiding T for the OTHER port would be over-conservative:
             // restarting Port B from a Port A serial session is safe.
-            let toggling_own_port = self.is_serial && self.serial_port_id == Some(id);
-            if !toggling_own_port {
+            if keys.contains(&'t') {
                 self.send_line(&format!(
                     "  {}  Mode: Modem/Console/Kermit",
                     self.cyan("T")
@@ -681,7 +686,7 @@ impl TelnetSession {
             // erase key and PETSCII already share rows here.  Hidden with the
             // rest of the modem-only settings on a raw console/Kermit wire,
             // where no gateway session can arrive.
-            let gw = if raw_mode { None } else { Some(("G", "Gw PETSCII")) };
+            let gw = if keys.contains(&'g') { Some(("G", "Gw PETSCII")) } else { None };
             self.send_line(&self.serial_menu_row("S", "Select serial port", gw))
                 .await?;
             self.send_line(&format!(
@@ -695,47 +700,39 @@ impl TelnetSession {
             ))
             .await?;
             // X (PETSCII xlate) shares this row in modem mode to keep the
-            // menu within the 22-row PETSCII budget.
-            if raw_mode {
-                // The erase key shares this row rather than taking one: this
-                // screen is at the 22-row PETSCII budget.  Offered only in
-                // console mode, because that is the only mode it applies to --
-                // the Kermit server's wire carries 0x08 and 0x7F as packet data,
-                // where rewriting them would corrupt a transfer, and a setting
-                // that does nothing is worse than no setting.
-                let erase = if console_mode { Some(("K", "Erase key")) } else { None };
-                self.send_line(&self.serial_menu_row("F", "Set flow control", erase))
-                    .await?;
+            // menu within the 22-row PETSCII budget.  The erase key shares it
+            // in console mode for the same reason.  Offered only in console
+            // mode, because that is the only mode it applies to -- the Kermit
+            // server's wire carries 0x08 and 0x7F as packet data, where
+            // rewriting them would corrupt a transfer, and a setting that does
+            // nothing is worse than no setting.
+            let second = if keys.contains(&'x') {
+                Some(("X", "PETSCII"))
+            } else if keys.contains(&'k') {
+                Some(("K", "Erase key"))
             } else {
-                self.send_line(&self.serial_menu_row(
-                    "F",
-                    "Set flow control",
-                    Some(("X", "PETSCII")),
-                ))
+                None
+            };
+            self.send_line(&self.serial_menu_row("F", "Set flow control", second))
                 .await?;
-            }
             // Dialup mapping and ring emulator are modem-emulator
             // features only — they don't apply to a raw console bridge
             // or the Kermit server.
-            if !raw_mode {
-                self.send_line(&self.serial_menu_row(
-                    "D",
-                    "Dialup Mapping",
-                    Some(("C", "Carrier")),
+            if keys.contains(&'d') {
+                let carrier = if keys.contains(&'c') { Some(("C", "Carrier")) } else { None };
+                self.send_line(&self.serial_menu_row("D", "Dialup Mapping", carrier))
+                    .await?;
+            }
+            // Hide Ring on the port the caller is dialed in on
+            // (ringing yourself isn't useful) but allow it on the
+            // OTHER port — a Port-A serial session can ring Port B's
+            // wire if there's separate hardware listening over there.
+            if keys.contains(&'i') {
+                self.send_line(&format!(
+                    "  {}  Ring emulator",
+                    self.cyan("I")
                 ))
                 .await?;
-                // Hide Ring on the port the caller is dialed in on
-                // (ringing yourself isn't useful) but allow it on the
-                // OTHER port — a Port-A serial session can ring Port B's
-                // wire if there's separate hardware listening over there.
-                let ringing_own_port = self.is_serial && self.serial_port_id == Some(id);
-                if !ringing_own_port {
-                    self.send_line(&format!(
-                        "  {}  Ring emulator",
-                        self.cyan("I")
-                    ))
-                    .await?;
-                }
             }
             self.send_line("").await?;
             self.send_line(&format!(
@@ -766,8 +763,6 @@ impl TelnetSession {
 
             // The key set gates every arm below, so an arm cannot answer a key
             // the hint does not name, nor the hint name one no arm answers.
-            let on_own_port = self.is_serial && self.serial_port_id == Some(id);
-            let keys = serial_menu_keys(&port.mode, on_own_port);
             let accepted = matches!(input.as_bytes(), [b] if keys.contains(&(*b as char)));
             match if accepted { input.as_str() } else { "" } {
                 "e" => {

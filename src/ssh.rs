@@ -984,10 +984,17 @@ struct SshHandler {
     /// terminal is not asked to press BACKSPACE — the same shortcut telnet
     /// already takes from TTYPE.  `None` for a shell opened without a pty.
     pty_term: Option<String>,
-    /// Input pump into the duplex bridge to the TelnetSession -- see
-    /// [`spawn_input_pump`].  Set once a shell is opened; prevents duplicate
-    /// shell requests.
-    shell_input: Option<InputPump>,
+    /// The interactive shell's channel and its input pump into the duplex
+    /// bridge to the TelnetSession -- see [`spawn_input_pump`].  Set once a
+    /// shell is opened; prevents duplicate shell requests.
+    ///
+    /// **Keyed by its channel**, like the relay pumps.  It used to be "the
+    /// channel that is not a relay", so closing *any* other channel -- a
+    /// refused `exec` multiplexed onto the connection by an OpenSSH
+    /// ControlMaster, an `enroll-key`, the second of a relay's EOF/CLOSE pair
+    /// -- ended the user's shell, and a stray channel's bytes were typed into
+    /// it.
+    shell_input: Option<(russh::ChannelId, InputPump)>,
     /// Per-channel input pumps for master/slave **relay** channels
     /// (`exec "serial-relay <port>"`).  Keyed by channel so one SSH
     /// connection from a slave can carry several relay channels (Ports A
@@ -1195,7 +1202,9 @@ impl SshHandler {
         // Dropping a pump's sender is the EOF: the pump writes whatever is
         // still queued and then shuts the duplex down, so a peer's last bytes
         // are not overtaken by its own end-of-file.
-        if self.relay_inputs.remove(&channel).is_none() {
+        if self.relay_inputs.remove(&channel).is_none()
+            && self.shell_input.as_ref().is_some_and(|(c, _)| *c == channel)
+        {
             self.shell_input = None;
         }
     }
@@ -1212,7 +1221,9 @@ type InputPump = tokio::sync::mpsc::Sender<bytes::Bytes>;
 /// `data()`, whether or not the bytes were consumed.  The window is no
 /// backpressure at all; the only brake on a peer is the connection's loop not
 /// reading, and that is what a full queue does.  Keystrokes are one packet
-/// each, so sixteen is also sixteen keys typed ahead of the duplex's own 4 KB.
+/// each, so for typing this adds only sixteen keys to what the duplex already
+/// holds (4 KB for the shell, 64 KB for a relay); the gain is for pasted and
+/// bulk input.
 const INPUT_PUMP_PACKETS: usize = 16;
 
 /// Feed one channel's input into its duplex bridge from a task of its own.
@@ -1223,8 +1234,11 @@ const INPUT_PUMP_PACKETS: usize = 16;
 /// because `Handle::data` is a message to that same loop.  So a session busy
 /// writing more than the duplex and russh's event buffer hold, while its
 /// peer kept typing, waited on a loop that was waiting on it.  The queue
-/// moves that point from the duplex's 4 KB to [`INPUT_PUMP_PACKETS`] packets
-/// beyond it, and one channel's stall no longer blocks another's.
+/// **moves** that point -- from a full duplex to [`INPUT_PUMP_PACKETS`]
+/// packets beyond it -- and does not remove it: once a channel's queue is
+/// full, `data()` waits again and the whole connection waits with it.  That
+/// is the brake on a peer flooding a session that is not reading, and a
+/// queue without one would be unbounded memory instead.
 ///
 /// Dropping the sender is end-of-file: the pump writes what is queued, then
 /// shuts the duplex down.
@@ -1539,7 +1553,7 @@ impl russh::server::Handler for SshHandler {
         let (handler_read, handler_write) = tokio::io::split(handler_stream);
 
         // Store the handler-side pump so data() can forward SSH input.
-        self.shell_input = Some(spawn_input_pump(handler_write));
+        self.shell_input = Some((channel, spawn_input_pump(handler_write)));
 
         // Wrap the gateway write half as a SharedWriter for TelnetSession.
         let writer_box: Box<dyn tokio::io::AsyncWrite + Unpin + Send> =
@@ -1912,15 +1926,15 @@ impl russh::server::Handler for SshHandler {
         _session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
         // Route by channel: a relay channel's bytes go to its relay
-        // session; otherwise to the single interactive shell bridge.  A send
-        // waits only when that channel's queue is full -- see
+        // session, the shell's to the shell, and any other channel's
+        // nowhere.  A send waits only when that channel's queue is full -- see
         // `spawn_input_pump` for why waiting at all is the backpressure, and
         // why it no longer happens at the session's first pause.  A pump
         // that has gone (its session ended) refuses the bytes, which is the
         // same outcome the old write to a closed duplex had.
         let pump = match self.relay_inputs.get(&channel) {
             Some(p) => Some(p),
-            None => self.shell_input.as_ref(),
+            None => self.shell_input.as_ref().filter(|(c, _)| *c == channel).map(|(_, p)| p),
         };
         if let Some(pump) = pump {
             let _ = pump.send(bytes::Bytes::copy_from_slice(data)).await;
@@ -2545,6 +2559,114 @@ mod tests {
             .data(&b"\n"[..])
             .await
             .expect("could not write to the opened channel");
+
+        drop(session);
+        server.abort();
+    }
+
+    /// Closing another channel on the connection leaves the shell alone.
+    ///
+    /// The shell's pump was "whichever channel is not a relay", so a refused
+    /// `exec` -- what an OpenSSH ControlMaster user gets from `ssh host cmd`
+    /// on a connection already carrying their session -- tore the shell down
+    /// when it closed.  Driven over a real connection because russh's
+    /// `ChannelId` cannot be built outside the crate.
+    ///
+    /// The positive control is the end: the same observation that must see
+    /// nothing after the stranger closes **must** see the shell end once the
+    /// shell itself sends EOF, or a watch that cannot see a close would pass.
+    #[tokio::test]
+    async fn test_closing_another_channel_leaves_the_shell_running() {
+        use russh::ChannelMsg;
+        struct Client;
+        impl russh::client::Handler for Client {
+            type Error = russh::Error;
+            async fn check_server_key(
+                &mut self,
+                _key: &russh::keys::PublicKeyOrCertificate,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handler = loopback_handler(addr, None);
+        let config = loopback_config();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let running = russh::server::run_stream(config, stream, handler)
+                .await
+                .expect("server side failed to start");
+            let _ = running.await;
+        });
+        let session = russh::client::connect(
+            Arc::new(russh::client::Config::default()),
+            addr,
+            Client,
+        )
+        .await
+        .expect("client could not connect");
+        let mut session = session;
+        assert!(session.authenticate_password("admin", "secret").await.unwrap().success());
+
+        /// Wait up to `secs` for the shell to end; true if it did.
+        async fn ended_within(ch: &mut russh::Channel<russh::client::Msg>, secs: u64) -> bool {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+            loop {
+                match tokio::time::timeout_at(deadline, ch.wait()).await {
+                    Err(_) => return false,
+                    Ok(None) | Ok(Some(ChannelMsg::Eof)) | Ok(Some(ChannelMsg::Close)) => {
+                        return true
+                    }
+                    Ok(Some(_)) => continue,
+                }
+            }
+        }
+
+        let mut shell = session.channel_open_session().await.expect("shell channel");
+        shell.request_shell(true).await.expect("shell request");
+        // A key gets an answer from the session: it is up.  Generous, because
+        // terminal detection waits out its own few seconds before drawing.
+        shell.data(&b"\r"[..]).await.expect("shell write");
+        let greeted = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match shell.wait().await {
+                    Some(ChannelMsg::Data { .. }) => return true,
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => return false,
+                    Some(_) => continue,
+                }
+            }
+        })
+        .await;
+        assert_eq!(greeted, Ok(true), "the shell never started");
+
+        let mut stranger = session.channel_open_session().await.expect("second channel");
+        stranger.exec(true, "not-a-relay-command").await.expect("exec sent");
+        let refused = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match stranger.wait().await {
+                    Some(ChannelMsg::Failure) => return true,
+                    Some(ChannelMsg::Success) | None => return false,
+                    Some(_) => continue,
+                }
+            }
+        })
+        .await;
+        assert_eq!(refused, Ok(true), "the stray exec was not refused");
+        stranger.eof().await.expect("stranger eof");
+        stranger.close().await.expect("stranger close");
+
+        assert!(
+            !ended_within(&mut shell, 2).await,
+            "closing a refused exec channel ended the user's shell",
+        );
+
+        shell.eof().await.expect("shell eof");
+        assert!(
+            ended_within(&mut shell, 10).await,
+            "the shell did not end on its own EOF -- this watch cannot see a close",
+        );
 
         drop(session);
         server.abort();
