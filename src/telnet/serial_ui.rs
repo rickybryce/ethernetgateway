@@ -1570,7 +1570,8 @@ impl TelnetSession {
         // The timeout is its own outcome, not a port error: with no ring
         // ever sent, the serial side never took the request -- the line is
         // busy (a call parked by `+++`, or not in command mode; see
-        // `line_free_for_incoming`).  With rings, nobody answered.
+        // `line_free_for_incoming`) or no modem thread is running because
+        // the device will not open.  With rings, nobody answered.
         let mut timed_out = false;
         let mut rang = false;
         let timeout = tokio::time::sleep(std::time::Duration::from_secs(15));
@@ -1638,13 +1639,19 @@ impl TelnetSession {
                 self.red("Serial connection failed.")
             ))
             .await?;
+        } else if timed_out && rang {
+            self.send_line(&format!("  {}", self.yellow("No answer."))).await?;
         } else if timed_out {
-            let msg = if rang {
-                "No answer."
-            } else {
-                "Line busy: no ring was sent."
-            };
-            self.send_line(&format!("  {}", self.yellow(msg))).await?;
+            // Nobody took the request.  The screen cannot tell a held line
+            // from a port the manager is still trying to reopen (an adapter
+            // unplugged), so it names both rather than guessing.
+            self.send_line(&format!(
+                "  {}",
+                self.yellow("No ring was sent: the line is busy")
+            ))
+            .await?;
+            self.send_line(&format!("  {}", self.yellow("or the port is not open.")))
+                .await?;
         } else {
             self.send_line(&format!(
                 "  {}",

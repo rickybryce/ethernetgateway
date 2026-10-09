@@ -66,8 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queue of its own rather than straight from the connection's loop.
 - **Serial: an incoming ring or peer call no longer drops a parked call.**  A
   call parked with `+++` holds the line, as on a real modem: a peer caller
-  hears `BUSY` after three seconds, and the Ring Emulator says the line is
-  busy.  A call that never rings is `BUSY` in three seconds rather than
+  hears `BUSY` after three seconds, and the Ring Emulator says no ring was
+  sent.  A call that never rings is `BUSY` in three seconds rather than
   after the caller's whole `S7` wait.
 - **Serial port screen: the wrong-key hint names the keys each mode answers.**
   Kermit mode was told to press keys it ignores, `G` and `K` were never

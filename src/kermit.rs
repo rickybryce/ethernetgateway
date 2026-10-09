@@ -6232,7 +6232,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
             // Stay idle for the next command per spec.
             return Ok(Next::Idle);
         };
-        if !resolves_inside(self.base, &path) {
+        // `exists()` follows the link, so a dangling one falls through to
+        // the read below and is "File not found", as for TYPE.
+        if path.exists() && !resolves_inside(self.base, &path) {
             self.refuse(pkt.seq, "Access denied").await?;
             if self.verbose {
                 glog!("Kermit server: refused R '{}' (links outside the base)", fname);
