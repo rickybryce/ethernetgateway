@@ -14492,6 +14492,39 @@ async fn test_a_session_abandoned_on_the_welcome_page_still_says_goodbye() {
     );
 }
 
+/// Each mode's help page explains exactly the keys that mode's screen answers.
+/// The rows are `  K  text`; H and Q are the prompt line, not settings.  A key
+/// the screen answers and the page omits is a key nobody can learn, and one the
+/// page explains and the screen refuses is a promise broken -- K, G, X, C, D
+/// and I were all missing from these pages until 2026-10-08.
+#[test]
+fn test_each_serial_help_page_explains_exactly_its_screens_keys() {
+    for mode in ["modem", "console", "kermit"] {
+        for petscii in [true, false] {
+            let lines = match mode {
+                "modem" => TelnetSession::modem_help_lines(petscii),
+                "console" => TelnetSession::console_help_lines(petscii),
+                _ => TelnetSession::kermit_mode_help_lines(petscii),
+            };
+            let mut explained: Vec<char> = lines
+                .iter()
+                .filter_map(|l| match l.as_bytes() {
+                    [b' ', b' ', k, b' ', b' ', ..] if k.is_ascii_uppercase() => {
+                        Some(k.to_ascii_lowercase() as char)
+                    }
+                    _ => None,
+                })
+                .collect();
+            explained.sort_unstable();
+            let want: Vec<char> = serial_menu_keys(mode, false)
+                .into_iter()
+                .filter(|k| !matches!(k, 'h' | 'q'))
+                .collect();
+            assert_eq!(explained, want, "{mode} help (petscii={petscii})");
+        }
+    }
+}
+
 /// The port settings screen's wrong-key hint, for every mode it can be in.
 ///
 /// It was four hand-written strings keyed on `console_mode` alone, so a port in
