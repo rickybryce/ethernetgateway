@@ -641,7 +641,20 @@ async fn save_image_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io:
         Err(_) => None,
     };
     let tmp = saving_path(path);
-    if let Err(e) = tokio::fs::write(&tmp, bytes).await {
+    // Written *and synced* before the rename: `rename` is atomic for readers,
+    // but a power cut after it and before the page cache reached the card
+    // could leave the image's real name on a file whose bytes never arrived
+    // -- every disk the session had, replaced by nothing. The sync is what
+    // makes "the old image or the new one" hold across a crash and not only
+    // across a failed write.
+    let written = async {
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::File::create(&tmp).await?;
+        f.write_all(bytes).await?;
+        f.sync_all().await
+    }
+    .await;
+    if let Err(e) = written {
         // Otherwise a teardown that runs out of space leaves up to sixteen
         // part-written `.saving` files, invisible to every picker and with no
         // reclaim — the same debris the `.creating` path is careful about.
@@ -652,7 +665,17 @@ async fn save_image_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io:
         let _ = tokio::fs::set_permissions(&tmp, p).await;
     }
     match tokio::fs::rename(&tmp, path).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // And the rename itself, which lives in the folder. Not an error
+            // if it fails: the image is saved, only its durability is unknown.
+            let p = path.to_path_buf();
+            let synced =
+                tokio::task::spawn_blocking(move || crate::cpm::image::sync_dir_of(&p)).await;
+            if let Ok(Err(e)) = synced {
+                glog!("CP/M boot: saved {}, but could not sync its folder: {}", path.display(), e);
+            }
+            Ok(())
+        }
         Err(e) => {
             // Leaving the temporary behind would look like a second disk in
             // the images folder, so clear it up before reporting.

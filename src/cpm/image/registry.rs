@@ -134,6 +134,10 @@ pub fn all() -> Vec<Option<Mount>> {
 ///
 /// A drive that failed to come back from a boot stops being recorded as such
 /// the moment anything is mounted on it -- see [`note_unrestored`].
+///
+/// Tests only: the product publishes through [`mount_exclusive`], which also
+/// refuses an image that became busy while it was being opened.
+#[cfg(test)]
 pub fn mount(drive0: u8, mount: Mount) -> Result<(), String> {
     if drive0 >= NUM_DRIVES {
         return Err(format!("no such drive ({drive0})"));
@@ -142,6 +146,59 @@ pub fn mount(drive0: u8, mount: Mount) -> Result<(), String> {
     t[drive0 as usize] = Some(mount);
     drop(t);
     lock!(unrestored_table()).remove(&drive0);
+    Ok(())
+}
+
+/// Publish a mount only if its image is still free, deciding that and
+/// publishing under the same locks.
+///
+/// [`super::mount_image`] asks [`drive_holding`] and [`is_image_booted`] first,
+/// and then spends milliseconds identifying and opening the file before it
+/// publishes -- a check-then-act with the whole gap between. Two screens
+/// mounting one disk on two drives both passed the check and both published:
+/// two `ImageFs` over one file, the exact hazard the check exists for. A boot
+/// claiming the image inside that gap was the same race with a worse ending,
+/// the guest rewriting the file under a live mount. The early checks stay,
+/// because they answer before any work is done; this is the one that decides.
+///
+/// The locks are taken in [`lend_for_boot`]'s order (loans, then the table),
+/// and the boot claims last, so neither side can see the other half-done: a
+/// claim made before this publishes is refused here, and one made after finds
+/// the mount in the table when the boot plans its drives. `restoring` skips
+/// only the boot test, because a booted session giving back its own drive
+/// still holds its claim.
+pub fn mount_exclusive(drive0: u8, mount: Mount, restoring: bool) -> Result<(), String> {
+    if drive0 >= NUM_DRIVES {
+        return Err(format!("no such drive ({drive0})"));
+    }
+    let key = mount.path.canonicalize().unwrap_or_else(|_| mount.path.clone());
+    let lent = lock!(borrowed());
+    let mut t = table().write().unwrap_or_else(|e| e.into_inner());
+    let mut unrestored = lock!(unrestored_table());
+    let booted = lock!(booted_images());
+    let elsewhere = t
+        .iter()
+        .enumerate()
+        .filter_map(|(d, m)| m.as_ref().map(|m| (d as u8, &m.filename)))
+        .chain(lent.iter().map(|(d, n)| (*d, n)))
+        .chain(unrestored.iter().map(|(d, n)| (*d, n)))
+        .find(|(d, n)| *d != drive0 && **n == mount.filename)
+        .map(|(d, _)| d);
+    if let Some(other) = elsewhere {
+        return Err(format!(
+            "{} is already mounted on drive {}: - unmount it there first",
+            mount.filename,
+            (b'A' + other) as char
+        ));
+    }
+    if !restoring && booted.contains(&key) {
+        return Err(format!(
+            "{} is being run by a booted session - it cannot be mounted at the same time",
+            mount.filename
+        ));
+    }
+    t[drive0 as usize] = Some(mount);
+    unrestored.remove(&drive0);
     Ok(())
 }
 

@@ -30,6 +30,18 @@ pub trait Media: Send {
     /// Push any buffered writes to the host.
     fn flush(&mut self) -> std::io::Result<()>;
 
+    /// Push them through to the **medium** -- what a write must have reached
+    /// before anything is allowed to depend on it surviving a power cut.
+    ///
+    /// Separate from [`Media::flush`] because the two cost different amounts:
+    /// `flush` hands bytes to the host's page cache, which is all a read-back
+    /// needs, while this waits for the device and costs milliseconds on an SD
+    /// card. It is called where the *order* of two writes is what keeps a disk
+    /// sound, not after every write.
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.flush()
+    }
+
     /// True when the store holds no bytes at all.  Present only because a type
     /// with `len` and no `is_empty` is a lint; nothing calls it.
     #[allow(dead_code)]
@@ -148,6 +160,11 @@ impl Media for FileMedia {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.file.flush()
+    }
+
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.file.flush()?;
+        self.file.sync_data()
     }
 }
 

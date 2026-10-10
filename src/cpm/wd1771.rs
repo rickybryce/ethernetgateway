@@ -513,13 +513,27 @@ impl Wd1771 {
 
         // Force Interrupt is the one command accepted while busy, and its whole
         // job is to stop whatever is running.
+        //
+        // What it does to the *status* depends on whether anything was running,
+        // and the data sheet gives the two cases separately: with a command
+        // under execution "the Busy status bit is reset, and the rest of the
+        // status bits are unchanged"; with none, Busy is reset, the rest "are
+        // updated or cleared", and "Status reflects the Type I commands". So
+        // only an idle chip is retyped. Retyping unconditionally made a `D0h`
+        // that cut short a Read Sector answer with Type I bits -- Track 00 where
+        // the driver reads Lost Data, Index where it reads DRQ -- and erased the
+        // Record Not Found or Write Protect the interrupted command had already
+        // raised, so a driver checking why its transfer stopped was told it had
+        // not.
         if kind == Kind::Four {
-            self.cmd = cmd;
+            if !self.busy {
+                self.cmd = cmd;
+                self.error = 0;
+            }
             self.busy = false;
             self.drq = false;
             self.moving = Move::None;
             self.multi = false;
-            self.error = 0;
             // "i3 = 1, Immediate interrupt" — and with no condition bits set the
             // data sheet has it terminate without one.
             self.intrq = cmd & 0x08 != 0;
@@ -944,6 +958,32 @@ mod tests {
         c.write(reg::COMMAND, 0xA8);
         c.write(reg::COMMAND, 0x08);
         assert_eq!(c.track(), 0, "a Restore under a transfer is performed");
+    }
+
+    /// Force Interrupt types the status by whether it interrupted anything --
+    /// the data sheet's two cases. Under a running Read Sector "the rest of the
+    /// status bits are unchanged", so the status is still the read's: bit 2 is
+    /// Lost Data (clear), not Track 00, although the head *is* on track 0, which
+    /// is exactly the case where the two readings disagree. On an idle chip the
+    /// status "reflects the Type I commands", and there the same bit is Track 00.
+    #[test]
+    fn test_force_interrupt_keeps_an_interrupted_commands_status() {
+        let mut c = chip();
+        c.write(reg::SECTOR, 1);
+        c.write(reg::COMMAND, 0x8C); // read sector on track 0
+        c.sector_loaded(&[0xAA; SECTOR_LEN]);
+        assert!(c.busy());
+        c.write(reg::COMMAND, 0xD0);
+        for _ in 0..2 {
+            // Twice, because a Type I status would alternate bit 1 (Index).
+            let s = c.read(reg::COMMAND).0;
+            assert_eq!(s & type2::BUSY, 0, "Busy is reset");
+            assert_eq!(s & (type2::LOST_DATA | type2::DRQ), 0, "still typed as the read: {s:02x}");
+        }
+
+        // Nothing running now: a second `D0h` retypes the status as Type I.
+        c.write(reg::COMMAND, 0xD0);
+        assert_ne!(c.read(reg::COMMAND).0 & type1::TRACK_0, 0, "Track 00, the idle case");
     }
 
     /// A sector number that is not on the track is Record Not Found, rather than

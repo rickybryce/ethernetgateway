@@ -889,6 +889,17 @@ impl CpmFs {
         names
     }
 
+    /// The DPB and allocation vector of the image mounted on the current
+    /// drive, when it has one that fits -- see [`ImageFs::dpb`]. `None` for a
+    /// folder, whose geometry is the fixed virtual one.
+    ///
+    /// [`ImageFs::dpb`]: super::image::fs::ImageFs::dpb
+    pub fn current_image_disk_info(&self) -> Option<([u8; 15], Vec<u8>)> {
+        let mount = self.mounted(self.drive)?;
+        let img = mount.fs.lock().unwrap_or_else(|e| e.into_inner());
+        Some((img.dpb()?, img.alloc_vector()))
+    }
+
     /// Number of `block_size`-byte allocation blocks the CP/M-visible files on
     /// the current drive occupy — each file's byte length rounded up to a whole
     /// block (as CP/M allocates), summed.  Used to synthesize the allocation
@@ -1042,19 +1053,40 @@ impl CpmFs {
             .count()
     }
 
-    /// Build the directory-entry list for every file matching `fcb`, sorted
-    /// by name, one entry per 16 KB extent (so multi-extent files and file
-    /// sizes are represented the way `STAT`/`DIR` expect).
+    /// Build the directory-entry list BDOS Search First answers from: every
+    /// entry that matches `fcb` under CP/M 2.2's rules (see
+    /// [`Fcb::search_matches_entry`]), files sorted by name.
+    ///
+    /// A `?` in the drive byte is the other kind of search: "the auto disk
+    /// select function is disabled and the default disk is searched, with the
+    /// search function returning any matched entry, allocated or free,
+    /// belonging to any user number" -- in `func17`, a search of length zero,
+    /// which every directory slot matches. So it returns the **whole
+    /// directory**, empty slots included, as many entries as the DPB says the
+    /// directory holds. This used to resolve `?` as a drive number, find none,
+    /// and answer "no file" to every program that walks a directory that way.
     fn build_dir_entries(&self, fcb: &Fcb) -> Vec<DirEntry> {
+        let every_slot = fcb.drive == b'?';
+        // `?` searches the current drive; everything below looks a drive up
+        // through the FCB, so it is given one that names the current drive.
+        let mut lookup = fcb.clone();
+        if every_slot {
+            lookup.drive = 0;
+        }
         // A mounted image has a real CP/M directory, so its own entries are
         // returned rather than entries synthesized from file sizes — a program
         // that reads the allocation map or the extent numbering sees the truth.
-        if let Some(entries) = self.with_image(fcb, |img, user| img.dir_entries_matching(user, fcb))
-        {
+        if let Some(entries) = self.with_image(&lookup, |img, user| {
+            if every_slot {
+                img.raw_directory().unwrap_or_default()
+            } else {
+                img.dir_entries_matching(user, fcb)
+            }
+        }) {
             return entries;
         }
         let mut out = Vec::new();
-        let drive0 = match self.drive_index_for(fcb.drive) {
+        let drive0 = match self.drive_index_for(lookup.drive) {
             Some(d) => d,
             None => return out,
         };
@@ -1078,7 +1110,7 @@ impl CpmFs {
                 }
                 let fname = e.file_name().to_string_lossy().to_string();
                 if let Some((n, x)) = Self::split_host_name(&fname) {
-                    if fcb.matches(&n, &x) {
+                    if every_slot || fcb.matches(&n, &x) {
                         let md = e.metadata();
                         let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
                         let ro = md
@@ -1091,8 +1123,21 @@ impl CpmFs {
             }
         }
         files.sort_by(|a, b| a.host_name.cmp(&b.host_name));
+        // Numbered across the whole listing, not per file, so no two entries
+        // claim one block -- a directory checker sees a sound disk.
+        let mut next_block = super::VD_DIR_BLOCKS as u16;
         for f in files {
-            out.extend(dir_entries_for_file(&f.name, &f.ext, f.size, f.ro));
+            for e in dir_entries_for_file(&f.name, &f.ext, f.size, f.ro, &mut next_block) {
+                if every_slot || fcb.search_matches_entry(&e, super::VD_EXM) {
+                    out.push(e);
+                }
+            }
+        }
+        if every_slot {
+            let slots = super::VD_DRM as usize + 1;
+            if out.len() < slots {
+                out.resize(slots, [EMPTY_ENTRY; 32]);
+            }
         }
         out
     }
@@ -1194,25 +1239,45 @@ impl CpmFs {
     }
 }
 
-/// Build the CP/M directory entries for a single file: one 32-byte entry
-/// per 16 KB extent, carrying user 0, the 8.3 name, the extent number
-/// (EX/S2), and the record count (RC).  The allocation map is filled with
-/// distinct non-zero block numbers so a directory scanner treats the space
-/// as used.  An empty file still gets one entry (RC = 0).
+/// The byte that marks a free directory slot, in its user-number position.
+const EMPTY_ENTRY: u8 = 0xE5;
+
+/// Build the CP/M directory entries for a single file, laid out the way the
+/// DPB this drive reports (`build_dpb` in the parent module) says an entry is.
+///
+/// That DPB describes 4 KB blocks and 2048 of them, so block numbers are
+/// **16 bits** (DSM > 255) and an entry's map holds eight; eight 4 KB blocks
+/// are 32 KB, so one entry covers **two** logical extents (EXM = 1). EX is
+/// then the last logical extent the entry holds and RC the records in that
+/// one, which is what CP/M 2.2 writes and what a size calculation reads:
+/// `(EX & EXM) * 128 + RC` records in the entry. These used to be built for a
+/// different disk -- one entry per 16 KB, sixteen 8-bit 1 KB block numbers --
+/// so a program walking the map through the DPB it was given read pairs of
+/// those bytes as eight 4 KB blocks and saw 32 KB in every entry, and a
+/// search for extent 0 found the second half of a 20 KB file as a file of
+/// its own. An empty file still gets one entry (RC = 0, no blocks).
+///
+/// `next_block` numbers the blocks, distinct and in the data area; it wraps
+/// back to the first data block rather than run past DSM, which only a
+/// directory of more than 8 MB could make it do.
 ///
 /// `ro` sets the t1' attribute — the high bit of the first extension byte —
 /// which is how CP/M marks a file read-only, so a host-side `chmod -w` shows
 /// up as `R/O` in `STAT` and is refused by erase/rename in the guest.
-fn dir_entries_for_file(name: &[u8; 8], ext: &[u8; 3], size: u64, ro: bool) -> Vec<DirEntry> {
-    let records = size.div_ceil(128) as u32; // 128-byte records
-    let extents = if records == 0 {
-        1
-    } else {
-        records.div_ceil(128) // 128 records per 16 KB extent
-    };
+fn dir_entries_for_file(
+    name: &[u8; 8],
+    ext: &[u8; 3],
+    size: u64,
+    ro: bool,
+    next_block: &mut u16,
+) -> Vec<DirEntry> {
+    const EXTENTS_PER_ENTRY: u64 = super::VD_EXM as u64 + 1;
+    const RECORDS_PER_ENTRY: u64 = 128 * EXTENTS_PER_ENTRY;
+    let records_per_block = super::VD_BLS / 128;
+    let records = size.div_ceil(128);
+    let entries = records.div_ceil(RECORDS_PER_ENTRY).max(1);
     let mut out = Vec::new();
-    let mut block: u8 = 1;
-    for k in 0..extents {
+    for j in 0..entries {
         let mut e: DirEntry = [0u8; 32];
         e[0] = 0; // user number 0
         e[1..9].copy_from_slice(name);
@@ -1220,21 +1285,22 @@ fn dir_entries_for_file(name: &[u8; 8], ext: &[u8; 3], size: u64, ro: bool) -> V
         if ro {
             e[9] |= 0x80; // t1' = R/O
         }
-        e[12] = (k & 0x1F) as u8; // EX
-        e[14] = ((k >> 5) & 0x3F) as u8; // S2
-        let recs_this = if records == 0 {
-            0
-        } else if k == extents - 1 {
-            records - k * 128
-        } else {
-            128
-        };
-        e[15] = recs_this as u8; // RC (128 fits as 0x80)
-        // Allocation map: one 8-bit block per 8 records (1 KB blocks).
-        let blocks = (recs_this.div_ceil(8)).min(16) as usize;
-        for slot in e.iter_mut().skip(16).take(blocks) {
-            *slot = block;
-            block = block.wrapping_add(1).max(1);
+        let recs = records.saturating_sub(j * RECORDS_PER_ENTRY).min(RECORDS_PER_ENTRY);
+        // The last logical extent this entry holds, and its records: an entry
+        // holding exactly 128 records ends *in* its first extent, RC 128.
+        let within = recs.saturating_sub(1) / 128;
+        let extent = j * EXTENTS_PER_ENTRY + within;
+        e[12] = (extent & 0x1F) as u8; // EX
+        e[14] = ((extent >> 5) & 0x3F) as u8; // S2
+        e[15] = (recs - within * 128) as u8; // RC (128 fits as 0x80)
+        let blocks = recs.div_ceil(records_per_block) as usize;
+        for slot in e[16..].chunks_mut(2).take(blocks) {
+            slot.copy_from_slice(&next_block.to_le_bytes());
+            *next_block = if *next_block >= super::VD_DSM {
+                super::VD_DIR_BLOCKS as u16
+            } else {
+                *next_block + 1
+            };
         }
         out.push(e);
     }
@@ -1688,6 +1754,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Every entry from a search, first and next, for a test to look at.
+    fn search_all(fs: &mut CpmFs, fcb: &Fcb) -> Vec<DirEntry> {
+        let mut out = Vec::new();
+        let mut cur = fs.search_first(fcb);
+        while let Some(e) = cur {
+            out.push(e);
+            cur = fs.search_next();
+        }
+        out
+    }
+
+    /// A folder file's directory entries are laid out for the DPB the drive
+    /// reports -- EXM 1 and 16-bit block numbers -- so a program sizing the
+    /// file *from the DPB* gets the size the host has. 20000 bytes is 157
+    /// records: inside one 32 KB entry, so one entry, EX 1 (the second logical
+    /// extent, the one it ends in), RC 29, and five 4 KB blocks.
     #[test]
     fn test_search_multi_extent_file() {
         // `CpmFs::new` registers a session in the process-global image
@@ -1696,18 +1778,87 @@ mod tests {
         // what made a mount test fail about once in twenty runs.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = temp_base("multiext");
-        // 20000 bytes > 16 KB -> two extents.
         std::fs::write(base.join("A").join("BIG.DAT"), vec![0u8; 20000]).unwrap();
         let mut fs = CpmFs::new(base.clone());
-        let pat = fcb_named(1, "BIG", "DAT");
-        let e0 = fs.search_first(&pat).unwrap();
-        let e1 = fs.search_next().unwrap();
-        assert!(fs.search_next().is_none());
-        assert_eq!(e0[12], 0); // EX 0
-        assert_eq!(e0[15], 128); // first extent full (128 records)
-        assert_eq!(e1[12], 1); // EX 1
-        // 20000 bytes = 157 records total; second extent has 157-128 = 29.
-        assert_eq!(e1[15], 29);
+        let mut pat = fcb_named(1, "BIG", "DAT");
+        pat.ex = b'?';
+        let all = search_all(&mut fs, &pat);
+        assert_eq!(all.len(), 1, "157 records fit one entry under EXM 1");
+        let e = all[0];
+        assert_eq!((e[12], e[14], e[15]), (1, 0, 29), "EX 1, S2 0, RC 29");
+
+        // Read back through the DPB, the way a sizing program does.
+        let dpb = super::super::build_dpb();
+        let (bsh, exm, dsm) = (dpb[2], dpb[4], u16::from_le_bytes([dpb[5], dpb[6]]));
+        assert!(dsm > 255, "this DPB has 16-bit block numbers");
+        let records = (e[12] & exm) as u32 * 128 + e[15] as u32;
+        assert_eq!(records, 157, "the size the host has");
+        let blocks: Vec<u16> = e[16..]
+            .chunks(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .filter(|&b| b != 0)
+            .collect();
+        assert_eq!(blocks.len() as u32, 157u32.div_ceil(1 << bsh), "one pointer per 4 KB block");
+        assert!(
+            blocks.iter().all(|&b| b >= super::super::VD_DIR_BLOCKS as u16 && b <= dsm),
+            "blocks in the data area: {blocks:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// BDOS Search matches the extent byte, under the extent mask, the way
+    /// CP/M 2.2's `compext` does. A 40000-byte file is 313 records: two
+    /// entries, the first ending in logical extent 1 (RC 128) and the second in
+    /// extent 2 (RC 57). A search for extent 0 -- what a wildcard copy issues
+    /// -- must find the file **once**; a search for 2 or 3 finds the second
+    /// entry; `?` finds both. A search that ignored the byte returned both
+    /// entries to every caller, so a program collecting names saw the file
+    /// twice.
+    #[test]
+    fn test_search_matches_the_extent_under_the_mask() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let base = temp_base("search_ext");
+        std::fs::write(base.join("A").join("BIG.DAT"), vec![0u8; 40000]).unwrap();
+        std::fs::write(base.join("A").join("SMALL.DAT"), b"x").unwrap();
+        let mut fs = CpmFs::new(base.clone());
+
+        let mut pat = fcb_named(1, "????????", "DAT");
+        let ex = |e: &DirEntry| (entry_name(e), e[12], e[15]);
+        let first: Vec<_> = search_all(&mut fs, &pat).iter().map(ex).collect();
+        assert_eq!(
+            first,
+            vec![("BIG.DAT".to_string(), 1, 128), ("SMALL.DAT".to_string(), 0, 1)],
+            "extent 0 finds each file once"
+        );
+        for want in [2u8, 3] {
+            pat.ex = want;
+            let hits: Vec<_> = search_all(&mut fs, &pat).iter().map(ex).collect();
+            assert_eq!(hits, vec![("BIG.DAT".to_string(), 2, 57)], "extent {want}");
+        }
+        pat.ex = b'?';
+        assert_eq!(search_all(&mut fs, &pat).len(), 3, "? finds every entry");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `?` in the drive byte returns every directory slot on the current
+    /// drive, free ones included, matching on nothing: "any matched entry,
+    /// allocated or free, belonging to any user number". It used to be taken
+    /// for a drive number, and every such search answered "no file".
+    #[test]
+    fn test_a_question_mark_drive_returns_every_directory_slot() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let base = temp_base("search_qdrive");
+        std::fs::write(base.join("A").join("ONE.TXT"), b"1").unwrap();
+        std::fs::write(base.join("A").join("TWO.COM"), b"2").unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        // The name is deliberately one that matches neither file.
+        let mut pat = fcb_named(1, "NOPE", "XYZ");
+        pat.drive = b'?';
+        let all = search_all(&mut fs, &pat);
+        assert_eq!(all.len(), super::super::VD_DRM as usize + 1, "as many slots as the DPB says");
+        let live: Vec<String> = all.iter().filter(|e| e[0] != 0xE5).map(entry_name).collect();
+        assert_eq!(live, vec!["ONE.TXT", "TWO.COM"]);
+        assert!(all[2..].iter().all(|e| e.iter().all(|&b| b == 0xE5)), "the rest are free");
         let _ = std::fs::remove_dir_all(&base);
     }
 

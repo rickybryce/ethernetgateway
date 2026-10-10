@@ -191,6 +191,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Crashes fixed:** a YMODEM file with an absurd timestamp; a monitor ROM
   file with a non-ASCII line in its Intel HEX, or a raw image running past
   `FFFF`.  Files a ZMODEM receiver skips now count toward the batch limit.
+- **CP/M emulator: a directory search behaves as CP/M 2.2's does.**  BDOS
+  Search First/Next ignored the FCB's extent byte, so a program collecting
+  names with a wildcard (extent 0) saw a large file once per directory entry;
+  it now finds each file once, and a search for a given extent finds that
+  extent.  A `?` in the drive byte &mdash; "every directory entry" &mdash;
+  found nothing; it now returns the whole directory, free entries included.
+  A drive folder's directory entries are laid out for the disk parameters the
+  emulator reports (4 KB blocks, two extents to an entry), so a program that
+  sizes files from them gets the real size; a mounted image reports its own
+  disk parameters and allocation vector.
+- **Mounted disk images are written more safely.**  One image mounted on two
+  drives at once, or mounted while a booted session claimed it, is refused
+  even when both requests arrive together.  A write that allocates a new block
+  reaches the disk before the directory entry claiming it; a booted disk saved
+  on exit, and a newly created blank disk, are synced to the disk before they
+  replace the old file.  An erase, rename, attribute change or truncation that
+  fails partway puts back the entries it had changed.
+- **Disk controllers: Force Interrupt keeps the status of the command it
+  stopped.**  The Tarbell and Cromemco boards' WD1771/1793 now report, after
+  `D0h` stops a transfer, that transfer's status with Busy cleared, as the
+  datasheet specifies; only an idle chip switches to the seek-type status.
 
 ## [1.0.3] - 2026-10-05
 

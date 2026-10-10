@@ -951,11 +951,20 @@ pub fn disk_info_bdos(cpm: &mut Cpm, fs: &CpmFs, func: u8) -> Option<u16> {
         // now that BDOS 28 works, reporting the real bitmap is what keeps
         // 28 and 29 consistent with each other.
         29 => Some(fs.ro_vector()),
+        // An image drive answers with the disk's own geometry, because a search
+        // there returns the disk's own entries and the two must be read
+        // together (see `ImageFs::dpb`). A folder, or an image too big for the
+        // vector window, keeps the virtual geometry below.
         31 => {
-            cpm.write_block(DPB_ADDR, &build_dpb());
+            let dpb = fs.current_image_disk_info().map(|(d, _)| d).unwrap_or_else(build_dpb);
+            cpm.write_block(DPB_ADDR, &dpb);
             Some(DPB_ADDR)
         }
         27 => {
+            if let Some((_, vec)) = fs.current_image_disk_info() {
+                cpm.write_block(ALLOC_ADDR, &vec);
+                return Some(ALLOC_ADDR);
+            }
             // Allocation vector: a set bit marks a used block — the reserved
             // directory blocks plus the blocks this drive's files occupy — so
             // STAT's free count (zero bits × block size) reflects real usage.

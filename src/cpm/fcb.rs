@@ -132,6 +132,38 @@ impl Fcb {
         }
         true
     }
+
+    /// Does a 32-byte directory entry answer BDOS Search First/Next (17/18)
+    /// for this FCB, on a disk whose extent mask is `exm`?
+    ///
+    /// The name is only part of it. CP/M 2.2's `search` compares fifteen bytes
+    /// and the extent is one of them, through `compext`: the low `exm` bits are
+    /// masked off both sides, because one directory entry holds `exm + 1`
+    /// logical extents, and what is left must agree in its low five bits. So a
+    /// search for extent 0 finds the **first entry of each file** and not every
+    /// entry -- which is how a wildcard copy sees a 40 KB file once rather than
+    /// three times. `func17` also zeroes the module number (S2) unless EX is
+    /// `?` (`clrmodnum`), and S2 is then compared like a name byte, high bit
+    /// ignored. S1 (byte 13) is never compared. The drive byte is the caller's:
+    /// it selects the drive, and a `?` there disables matching altogether.
+    pub fn search_matches_entry(&self, entry: &[u8; 32], exm: u8) -> bool {
+        let mut name = [0u8; 8];
+        let mut ext = [0u8; 3];
+        for (slot, &b) in name.iter_mut().zip(&entry[1..9]) {
+            *slot = b & 0x7F;
+        }
+        for (slot, &b) in ext.iter_mut().zip(&entry[9..12]) {
+            *slot = b & 0x7F;
+        }
+        if !self.matches(&name, &ext) {
+            return false;
+        }
+        if self.ex != b'?' && (self.ex & !exm) & 0x1F != (entry[12] & !exm) & 0x1F {
+            return false;
+        }
+        let s2 = if self.ex == b'?' { self.s2 } else { 0 };
+        s2 == b'?' || s2.wrapping_sub(entry[14]) & 0x7F == 0
+    }
 }
 
 /// Is `c` a legal CP/M 8.3 filename character?  Printable ASCII excluding
@@ -318,6 +350,41 @@ mod tests {
             format!("{}.{}", n, e)
         })
         .unwrap()
+    }
+
+    /// The search comparison, field by field, as CP/M 2.2's `search` and
+    /// `compext` make it: the extent through the mask, S2 zeroed unless EX is
+    /// `?`, S1 ignored, attribute bits ignored on both sides.
+    #[test]
+    fn test_search_matches_entry_follows_bdos22() {
+        let entry = |ex: u8, s1: u8, s2: u8| -> [u8; 32] {
+            let mut e = [0u8; 32];
+            e[1..12].copy_from_slice(b"FILE    DAT");
+            e[9] |= 0x80; // R/O: an attribute, not part of the name
+            e[12] = ex;
+            e[13] = s1;
+            e[14] = s2;
+            e
+        };
+        let mut raw = [0u8; FCB_SIZE];
+        raw[1..12].copy_from_slice(b"FILE    DAT");
+        let fcb = |ex: u8, s2: u8| {
+            let mut r = raw;
+            r[12] = ex;
+            r[14] = s2;
+            Fcb::from_bytes(&r)
+        };
+        assert!(fcb(0, 0).search_matches_entry(&entry(1, 0, 0), 1), "EXM 1: 0 and 1 are one entry");
+        assert!(!fcb(0, 0).search_matches_entry(&entry(1, 0, 0), 0), "EXM 0: they are not");
+        assert!(!fcb(0, 0).search_matches_entry(&entry(2, 0, 0), 1));
+        assert!(fcb(0, 0).search_matches_entry(&entry(0, 0x55, 0), 0), "S1 is never compared");
+        assert!(!fcb(0, 0).search_matches_entry(&entry(0, 0, 1), 0), "S2 is, and is zeroed first");
+        assert!(fcb(0, 7).search_matches_entry(&entry(0, 0, 0), 0), "so the caller's S2 is ignored");
+        assert!(fcb(b'?', 1).search_matches_entry(&entry(9, 0, 1), 0), "unless EX is ?");
+        assert!(!fcb(b'?', 0).search_matches_entry(&entry(9, 0, 1), 0), "when S2 counts");
+        let mut other = entry(0, 0, 0);
+        other[1] = b'G';
+        assert!(!fcb(0, 0).search_matches_entry(&other, 0), "and the name still matters");
     }
 
     #[test]

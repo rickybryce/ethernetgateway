@@ -47,6 +47,10 @@ const E5: u8 = 0xE5;
 /// Records in one logical CP/M extent — fixed by the format at 16K.
 const RECORDS_PER_EXTENT: u32 = 128;
 
+/// Blocks an allocation vector may describe: the 256 bytes the emulator keeps
+/// for one below its BIOS table (`ALLOC_ADDR` in the parent module).
+pub const ALLOC_VECTOR_BITS: usize = 2048;
+
 /// One parsed directory entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirSlot {
@@ -623,6 +627,40 @@ impl ImageFs {
         Ok(())
     }
 
+    /// Write several directory entries as one change: all of them, or -- as
+    /// far as the medium allows -- none.
+    ///
+    /// Each entry is `(index, as it was, as it should be)`. Erase, rename,
+    /// set-attribute and truncate each touch every extent of a file, and they
+    /// used to write the extents one by one and stop at the first failure with
+    /// a `?` -- leaving a file half renamed (its first extents under the new
+    /// name, the rest under the old: two files sharing one file's blocks) and
+    /// the in-memory directory still describing the disk as it was before any
+    /// of it, so the next allocation was planned against a picture that was no
+    /// longer true. Now a failure puts back the entries already written, in
+    /// reverse, from the copies taken before the first write, and the
+    /// directory is re-read **whatever happened**, so memory never disagrees
+    /// with the medium. A medium that refuses the undo too is reported by the
+    /// original error; the re-read then describes whatever it did keep.
+    fn write_dir_entries(&mut self, changes: &[(u16, RawEntry, RawEntry)]) -> std::io::Result<()> {
+        let mut done = 0;
+        let mut result = Ok(());
+        for (index, _, new) in changes {
+            if let Err(e) = self.write_dir_entry(*index, new) {
+                result = Err(e);
+                break;
+            }
+            done += 1;
+        }
+        if result.is_err() {
+            for (index, old, _) in changes[..done].iter().rev() {
+                let _ = self.write_dir_entry(*index, old);
+            }
+        }
+        let reloaded = self.reload();
+        result.and(reloaded)
+    }
+
     /// Find a free directory slot, or `None` when the directory is full.
     ///
     /// Scans the on-disk directory rather than trusting the in-memory list: a
@@ -737,6 +775,7 @@ impl ImageFs {
         // Which block holds this record?  Reuse the allocated one, or claim a
         // new one.
         let mut blocks = decode_blocks(&raw, &self.params);
+        let mut fresh = false;
         let block = match blocks.get(slot).copied() {
             Some(b) if b != 0 => {
                 if b > self.params.max_block {
@@ -755,6 +794,7 @@ impl ImageFs {
                     ));
                 };
                 blocks[slot] = b;
+                fresh = true;
                 b
             }
             None => {
@@ -766,8 +806,22 @@ impl ImageFs {
         };
 
         // Rule 1: data first, and flushed, before anything claims the block.
+        //
+        // "Flushed" meant `File::flush`, which on a `File` does nothing at
+        // all -- so the order the rule is about held only until the host's
+        // page cache wrote the two back in whatever order it liked, and a
+        // power cut in between left a directory entry claiming a block whose
+        // bytes were still the previous file's. A block being *claimed* is the
+        // moment that matters, so that is when the data is synced to the
+        // medium; a record landing in a block the file already owns can only
+        // ever expose the file's own old bytes, and is not worth a device
+        // round trip per record.
         self.write_block_record(block, offset_in_block, data)?;
-        self.media.flush()?;
+        if fresh {
+            self.media.sync()?;
+        } else {
+            self.media.flush()?;
+        }
 
         // Now the directory: allocation map, then the extent/record count if
         // this write extended the file.
@@ -803,13 +857,17 @@ impl ImageFs {
             ));
         }
         let n = targets.len();
-        for (index, mut raw) in targets {
-            // CP/M erases by stamping the user byte only; the rest of the
-            // entry stays, which is what makes an undelete tool possible.
-            raw[0] = E5;
-            self.write_dir_entry(index, &raw)?;
-        }
-        self.reload()?;
+        let changes: Vec<(u16, RawEntry, RawEntry)> = targets
+            .into_iter()
+            .map(|(index, old)| {
+                // CP/M erases by stamping the user byte only; the rest of the
+                // entry stays, which is what makes an undelete tool possible.
+                let mut raw = old;
+                raw[0] = E5;
+                (index, old, raw)
+            })
+            .collect();
+        self.write_dir_entries(&changes)?;
         Ok(n)
     }
 
@@ -844,18 +902,21 @@ impl ImageFs {
                 "file is R/O",
             ));
         }
-        for (index, mut raw) in targets {
-            // Keep the attribute bits, which live in the high bits of the name
-            // and extension we are about to overwrite.
-            let attrs: Vec<u8> = raw[1..12].iter().map(|c| c & 0x80).collect();
-            raw[1..9].copy_from_slice(new_name);
-            raw[9..12].copy_from_slice(new_ext);
-            for (slot, a) in raw[1..12].iter_mut().zip(attrs) {
-                *slot |= a;
-            }
-            self.write_dir_entry(index, &raw)?;
-        }
-        self.reload()?;
+        let changes: Vec<(u16, RawEntry, RawEntry)> = targets
+            .into_iter()
+            .map(|(index, old)| {
+                // Keep the attribute bits, which live in the high bits of the
+                // name and extension we are about to overwrite.
+                let mut raw = old;
+                raw[1..9].copy_from_slice(new_name);
+                raw[9..12].copy_from_slice(new_ext);
+                for (slot, was) in raw[1..12].iter_mut().zip(&old[1..12]) {
+                    *slot |= was & 0x80;
+                }
+                (index, old, raw)
+            })
+            .collect();
+        self.write_dir_entries(&changes)?;
         Ok(true)
     }
 
@@ -877,15 +938,19 @@ impl ImageFs {
         if targets.is_empty() {
             return Ok(false);
         }
-        for (index, mut raw) in targets {
-            if ro {
-                raw[9] |= 0x80;
-            } else {
-                raw[9] &= 0x7F;
-            }
-            self.write_dir_entry(index, &raw)?;
-        }
-        self.reload()?;
+        let changes: Vec<(u16, RawEntry, RawEntry)> = targets
+            .into_iter()
+            .map(|(index, old)| {
+                let mut raw = old;
+                if ro {
+                    raw[9] |= 0x80;
+                } else {
+                    raw[9] &= 0x7F;
+                }
+                (index, old, raw)
+            })
+            .collect();
+        self.write_dir_entries(&changes)?;
         Ok(true)
     }
 
@@ -1005,10 +1070,13 @@ impl ImageFs {
     /// returns entries for the calling user and CP/M programs expect to see
     /// their own user number there.
     pub fn dir_entries_matching(&self, user: u8, fcb: &Fcb) -> Vec<RawEntry> {
+        // Matched under the disk's own EXM, which is the one its entries were
+        // written with and the one BDOS 31 reports for this drive.
+        let exm = self.params.exm as u8;
         let mut hits: Vec<&DirSlot> = self
             .dir
             .iter()
-            .filter(|e| e.user == user && fcb.matches(&e.name, &e.ext))
+            .filter(|e| e.user == user && fcb.search_matches_entry(&e.raw, exm))
             .collect();
         hits.sort_by_key(|e| (e.name, e.ext, e.extent));
         hits.iter()
@@ -1078,10 +1146,12 @@ impl ImageFs {
             .iter()
             .map(|e| (e.index, e.raw, self.extent_start(e), self.extent_count(e)))
             .collect();
-        for (index, mut raw, start, count) in targets {
+        let mut changes: Vec<(u16, RawEntry, RawEntry)> = Vec::new();
+        for (index, old, start, count) in targets {
+            let mut raw = old;
             if start >= records {
                 raw[0] = E5; // wholly past the new end
-                self.write_dir_entry(index, &raw)?;
+                changes.push((index, old, raw));
             } else if start + count > records {
                 let keep = records - start;
                 let last_logical = keep.saturating_sub(1) / RECORDS_PER_EXTENT;
@@ -1098,10 +1168,10 @@ impl ImageFs {
                     *slot = 0;
                 }
                 encode_blocks(&mut raw, &blocks, &self.params);
-                self.write_dir_entry(index, &raw)?;
+                changes.push((index, old, raw));
             }
         }
-        self.reload()?;
+        self.write_dir_entries(&changes)?;
         Ok(Some(records))
     }
 
@@ -1137,6 +1207,71 @@ impl ImageFs {
     /// Free blocks remaining.
     pub fn free_blocks(&self) -> u32 {
         self.used.iter().filter(|u| !**u).count() as u32
+    }
+
+    /// Every directory slot as the medium holds it, in directory order --
+    /// erased and other users' entries included, untouched.
+    ///
+    /// What BDOS Search First answers with a `?` in the drive byte: every
+    /// entry, matching on nothing. Read from the medium rather than from
+    /// `dir`, because `dir` keeps only live entries and an erased one still has
+    /// its name in it -- which is the whole interest of this search to an
+    /// unerase program.
+    pub fn raw_directory(&mut self) -> std::io::Result<Vec<RawEntry>> {
+        let mut out = Vec::with_capacity(self.fmt.maxdir as usize);
+        for rec in 0..self.params.dir_records {
+            let buf = Self::read_data_record(&mut *self.media, self.fmt, rec)?;
+            for raw in buf.chunks(ENTRY_SIZE) {
+                if out.len() < self.fmt.maxdir as usize {
+                    out.push(raw.try_into().expect("32-byte window of a 128-byte record"));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The disk's own Disk Parameter Block, as BDOS 31 hands it to a guest,
+    /// or `None` when its allocation vector would not fit the 2048 bits the
+    /// emulator keeps for one (see [`ImageFs::alloc_vector`]).
+    ///
+    /// A search on this drive returns the disk's real entries, written under
+    /// the disk's own EXM and block-number width; a program that reads them
+    /// through the virtual drive's DPB instead (EXM 1, 16-bit blocks) adds up
+    /// the wrong number of extents and blocks -- an Altair floppy, EXM 0 and
+    /// 8-bit blocks, would read every entry as twice its size. So the DPB is
+    /// the one the entries were written for.
+    pub fn dpb(&self) -> Option<[u8; 15]> {
+        let p = &self.params;
+        if p.max_block as usize >= ALLOC_VECTOR_BITS {
+            return None;
+        }
+        let bsh = p.records_per_block.max(1).trailing_zeros() as u8;
+        let dir_blocks = p.dir_records.div_ceil(p.records_per_block.max(1)).min(16);
+        let al: u16 = if dir_blocks == 0 { 0 } else { !(u16::MAX >> dir_blocks) };
+        let spt = self.fmt.sectrk;
+        let off = (self.fmt.reserved_records / (spt as u32).max(1)) as u16;
+        let mut d = [0u8; 15];
+        d[0..2].copy_from_slice(&spt.to_le_bytes());
+        d[2] = bsh;
+        d[3] = (p.records_per_block.saturating_sub(1)) as u8;
+        d[4] = p.exm as u8;
+        d[5..7].copy_from_slice(&p.max_block.to_le_bytes());
+        d[7..9].copy_from_slice(&self.fmt.maxdir.saturating_sub(1).to_le_bytes());
+        d[9..11].copy_from_slice(&al.to_be_bytes()); // AL0 then AL1, MSB first
+        // CKS 0: no directory checksums -- this medium does not change under
+        // the guest without the gateway knowing.
+        d[13..15].copy_from_slice(&off.to_le_bytes());
+        Some(d)
+    }
+
+    /// The allocation vector that goes with [`ImageFs::dpb`]: one bit per
+    /// block, MSB first, directory blocks set.
+    pub fn alloc_vector(&self) -> Vec<u8> {
+        let mut v = vec![0u8; self.used.len().div_ceil(8)];
+        for (b, _) in self.used.iter().enumerate().filter(|(_, u)| **u) {
+            v[b / 8] |= 0x80 >> (b % 8);
+        }
+        v
     }
 
 }
@@ -1671,6 +1806,201 @@ mod tests {
         assert!(!fs.exists(0, &n, &e));
         assert_eq!(fs.file_records(0, &nn, &ne), Some(201));
         assert_eq!(fs.read_record(0, &nn, &ne, 200).unwrap().unwrap(), [2; 128]);
+    }
+
+    /// A medium that records what it was asked to do and can be told to fail
+    /// one write, for the tests that are about *order* and *failure* rather
+    /// than about bytes. The bytes are shared so a test can remount them and
+    /// see what really reached the medium, not what memory believes.
+    struct ScriptedMedia {
+        bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        log: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+        /// Fail the write this many writes from now (0 = the next one) -- once,
+        /// or with `true`, that one and every write after it.
+        fail_in: std::sync::Arc<std::sync::Mutex<Option<(usize, bool)>>>,
+    }
+
+    impl Media for ScriptedMedia {
+        fn len(&self) -> u64 {
+            self.bytes.lock().unwrap().len() as u64
+        }
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            let b = self.bytes.lock().unwrap();
+            buf.copy_from_slice(&b[offset as usize..offset as usize + buf.len()]);
+            Ok(())
+        }
+        fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+            let mut fail = self.fail_in.lock().unwrap();
+            match *fail {
+                Some((0, sticky)) => {
+                    if !sticky {
+                        *fail = None;
+                    }
+                    return Err(std::io::Error::other("scripted write failure"));
+                }
+                Some((n, sticky)) => *fail = Some((n - 1, sticky)),
+                None => {}
+            }
+            self.log.lock().unwrap().push("write");
+            let mut b = self.bytes.lock().unwrap();
+            b[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+            Ok(())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.log.lock().unwrap().push("flush");
+            Ok(())
+        }
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.log.lock().unwrap().push("sync");
+            Ok(())
+        }
+    }
+
+    type Shared<T> = std::sync::Arc<std::sync::Mutex<T>>;
+
+    /// What [`scripted`] hands back: the filesystem, its bytes, its log, and
+    /// the failure switch.
+    type Scripted = (ImageFs, Shared<Vec<u8>>, Shared<Vec<&'static str>>, Shared<Option<(usize, bool)>>);
+
+    fn scripted(
+        img: Vec<u8>,
+        fmt: &'static Format,
+    ) -> Scripted {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(img));
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fail_in = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let media = ScriptedMedia { bytes: bytes.clone(), log: log.clone(), fail_in: fail_in.clone() };
+        (ImageFs::mount(Box::new(media), fmt, false).unwrap(), bytes, log, fail_in)
+    }
+
+    /// Rule 1 has to reach the medium: when a write claims a fresh block, the
+    /// data is **synced** before the directory entry that claims it is
+    /// written. `flush` on a host file is a no-op, so the rule as written held
+    /// only in the page cache, and a power cut could leave the claim without
+    /// the data. A record into a block the file already owns needs no sync.
+    #[test]
+    fn test_a_fresh_block_is_synced_before_the_directory_claims_it() {
+        let fmt = by_token("ibm3740").unwrap();
+        let (mut fs, _, log, _) = scripted(blank(fmt), fmt);
+        let (n, e) = name_of("ORDER.DAT");
+        fs.create(0, &n, &e).unwrap();
+
+        log.lock().unwrap().clear();
+        fs.write_record(0, &n, &e, 0, &[7; 128]).unwrap();
+        let first = log.lock().unwrap().clone();
+        assert_eq!(&first[..3], ["write", "sync", "write"], "data, sync, then the claim: {first:?}");
+
+        log.lock().unwrap().clear();
+        fs.write_record(0, &n, &e, 1, &[8; 128]).unwrap();
+        let second = log.lock().unwrap().clone();
+        assert!(!second.contains(&"sync"), "same block, no device round trip: {second:?}");
+    }
+
+    /// A rename that fails partway puts back what it had already changed, and
+    /// memory agrees with the medium afterwards. Before, the first extent kept
+    /// the new name and the second the old: one file's blocks under two names,
+    /// with the in-memory directory still showing neither change.
+    #[test]
+    fn test_a_failed_rename_leaves_the_file_whole() {
+        let fmt = by_token("ibm3740").unwrap();
+        let (mut fs, bytes, _, fail_in) = scripted(blank(fmt), fmt);
+        let (n, e) = name_of("OLD.DAT");
+        fs.create(0, &n, &e).unwrap();
+        fs.write_record(0, &n, &e, 0, &[1; 128]).unwrap();
+        fs.write_record(0, &n, &e, 200, &[2; 128]).unwrap();
+        assert_eq!(fs.extents_of(0, &n, &e).len(), 2);
+
+        // The first extent's entry is written, the second's fails.
+        *fail_in.lock().unwrap() = Some((1, false));
+        let (nn, ne) = name_of("NEW.DAT");
+        assert!(fs.rename(0, &n, &e, &nn, &ne).is_err());
+
+        for (what, view) in [
+            ("memory", &mut fs),
+            ("the medium", &mut mount(bytes.lock().unwrap().clone(), fmt)),
+        ] {
+            assert_eq!(view.extents_of(0, &n, &e).len(), 2, "{what}: both extents keep the old name");
+            assert!(!view.exists(0, &nn, &ne), "{what}: nothing under the new name");
+            assert_eq!(view.file_records(0, &n, &e), Some(201), "{what}");
+        }
+    }
+
+    /// When the medium refuses the undo as well, the disk is left half
+    /// changed and nothing here can help that -- but memory must say so, not
+    /// keep describing the disk as it was. The next allocation is planned from
+    /// memory, so a picture that disagrees with the medium is how a second
+    /// file gets laid over the first.
+    #[test]
+    fn test_a_half_done_change_is_what_memory_then_describes() {
+        let fmt = by_token("ibm3740").unwrap();
+        let (mut fs, bytes, _, fail_in) = scripted(blank(fmt), fmt);
+        let (n, e) = name_of("OLD.DAT");
+        fs.create(0, &n, &e).unwrap();
+        fs.write_record(0, &n, &e, 0, &[1; 128]).unwrap();
+        fs.write_record(0, &n, &e, 200, &[2; 128]).unwrap();
+
+        // The first entry lands; the second fails, and so does every undo.
+        *fail_in.lock().unwrap() = Some((1, true));
+        let (nn, ne) = name_of("NEW.DAT");
+        assert!(fs.rename(0, &n, &e, &nn, &ne).is_err());
+
+        let medium = mount(bytes.lock().unwrap().clone(), fmt);
+        assert_eq!(medium.extents_of(0, &nn, &ne).len(), 1, "the medium kept one renamed extent");
+        assert_eq!(fs.extents_of(0, &nn, &ne).len(), 1, "and memory says the same");
+        assert_eq!(fs.extents_of(0, &n, &e).len(), 1);
+    }
+
+    /// The disk's own DPB, for BDOS 31 on an image drive -- the published
+    /// IBM 3740 values (CKS aside: no media-change checking here) and the
+    /// Altair hard disk's, whose EXM 1 is what its entries are written under.
+    #[test]
+    fn test_an_image_reports_its_own_dpb() {
+        let ibm = mount(blank(by_token("ibm3740").unwrap()), by_token("ibm3740").unwrap());
+        let d = ibm.dpb().expect("fits");
+        assert_eq!(u16::from_le_bytes([d[0], d[1]]), 26, "SPT");
+        assert_eq!((d[2], d[3], d[4]), (3, 7, 0), "BSH BLM EXM");
+        assert_eq!(u16::from_le_bytes([d[5], d[6]]), 242, "DSM");
+        assert_eq!(u16::from_le_bytes([d[7], d[8]]), 63, "DRM");
+        assert_eq!((d[9], d[10]), (0xC0, 0x00), "AL0 AL1: two directory blocks");
+        assert_eq!(u16::from_le_bytes([d[13], d[14]]), 2, "OFF: two system tracks");
+        let v = ibm.alloc_vector();
+        assert_eq!(v.len(), 31, "243 blocks");
+        assert_eq!(v[0], 0xC0, "the directory blocks are in use, nothing else");
+
+        let hd_fmt = by_token("altairhd").unwrap();
+        let hd = mount(blank(hd_fmt), hd_fmt);
+        let d = hd.dpb().expect("fits");
+        let p = Params::derive(hd_fmt);
+        assert_eq!((d[2], d[3], d[4]), (5, 31, 1), "4 KB blocks, EXM 1");
+        assert_eq!(u16::from_le_bytes([d[5], d[6]]), p.max_block, "DSM");
+        assert_eq!(u16::from_le_bytes([d[7], d[8]]), hd_fmt.maxdir - 1, "DRM");
+    }
+
+    /// Search on an image matches the extent byte under the disk's own EXM,
+    /// and the `?`-drive form reads every slot -- an erased one included,
+    /// name and all, which is what an unerase program is looking for.
+    #[test]
+    fn test_image_search_matches_the_extent_and_lists_every_slot() {
+        let fmt = by_token("altairhd").unwrap(); // EXM 1
+        let mut img = blank(fmt);
+        put_entry(&mut img, fmt, 0, 0, "WIDE.BIN", 1, 128, &[3]);
+        put_entry(&mut img, fmt, 1, 0, "WIDE.BIN", 2, 4, &[4]);
+        put_entry(&mut img, fmt, 2, 0xE5, "GONE.TXT", 0, 1, &[5]);
+        let mut fs = mount(img, fmt);
+        let mut raw = [0u8; 36];
+        raw[1..9].copy_from_slice(b"WIDE    ");
+        raw[9..12].copy_from_slice(b"BIN");
+        let mut at = |fs: &ImageFs, ex: u8| -> Vec<u8> {
+            raw[12] = ex;
+            fs.dir_entries_matching(0, &Fcb::from_bytes(&raw)).iter().map(|e| e[12]).collect()
+        };
+        assert_eq!(at(&fs, 0), vec![1], "extent 0 is the first entry, which ends in 1");
+        assert_eq!(at(&fs, 3), vec![2], "3 masks to 2");
+        assert_eq!(at(&fs, b'?'), vec![1, 2]);
+
+        let every = fs.raw_directory().unwrap();
+        assert_eq!(every.len(), fmt.maxdir as usize);
+        assert_eq!(&every[2][..9], b"\xE5GONE    ", "the erased entry, as it lies");
     }
 
     #[test]

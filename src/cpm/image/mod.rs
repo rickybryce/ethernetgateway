@@ -71,6 +71,30 @@ pub fn images_dir(cpm_base: &Path) -> PathBuf {
     cpm_base.join(IMAGES_DIR)
 }
 
+/// Make a rename into `path`'s directory durable: sync the directory itself.
+///
+/// The second half of a staged write. Syncing the staged file before the
+/// rename makes its *bytes* durable; the rename is a change to the directory,
+/// and until the directory is synced a power cut can bring back the old name,
+/// or -- on a filesystem that orders metadata ahead of data -- the new name
+/// over a file of zeroes. Unix only: a directory cannot be opened as a file on
+/// Windows, where NTFS journals the rename itself.
+pub fn sync_dir_of(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// Formats that a blank image can be created in, as `(token, label)`.
 ///
 /// Not simply every entry in `FORMATS` — a format is offered only where we know
@@ -189,7 +213,10 @@ pub fn create_blank_image(
         use std::io::Write;
         let mut f = staged;
         f.write_all(&blank)?;
-        f.flush()?;
+        // On the medium before the rename publishes it: renamed first, a power
+        // cut can leave the real name on a file whose bytes never arrived --
+        // the 0-byte `.dsk` the staging exists to prevent, by another road.
+        f.sync_all()?;
         drop(f);
         // Re-check under the staging lock: `exists` above was before the long
         // write, and renaming over a disk somebody made meanwhile would destroy
@@ -205,6 +232,11 @@ pub fn create_blank_image(
     if let Err(e) = write {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("{filename}: {e}"));
+    }
+    // The disk exists either way; failing to make its *name* durable is a
+    // reason to log, not to tell the operator it was not created.
+    if let Err(e) = sync_dir_of(&path) {
+        crate::glog!("CP/M: created {filename}, but could not sync its folder: {e}");
     }
 
     Ok(format!(
@@ -278,7 +310,7 @@ pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String
             "{filename} is being run by a booted session - it cannot be mounted at the same time"
         ));
     }
-    mount_image_unchecked(cpm_base, drive0, filename)
+    mount_image_unchecked(cpm_base, drive0, filename, false)
 }
 
 /// Put back a mount a booted session borrowed.
@@ -290,10 +322,17 @@ pub fn mount_image(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String
 /// refuse the restore, the drive would end up neither mounted nor lent and
 /// would vanish from `cpm_mounts` on the next save from any screen.
 pub fn restore_mount(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String, String> {
-    mount_image_unchecked(cpm_base, drive0, filename)
+    mount_image_unchecked(cpm_base, drive0, filename, true)
 }
 
-fn mount_image_unchecked(cpm_base: &Path, drive0: u8, filename: &str) -> Result<String, String> {
+/// `restoring` is [`registry::mount_exclusive`]'s: a booted session's own drive
+/// coming back, past the claim that session still holds.
+fn mount_image_unchecked(
+    cpm_base: &Path,
+    drive0: u8,
+    filename: &str,
+    restoring: bool,
+) -> Result<String, String> {
     if !is_safe_image_name(filename) {
         return Err(format!("'{filename}' is not a valid image name"));
     }
@@ -372,7 +411,7 @@ fn mount_image_unchecked(cpm_base: &Path, drive0: u8, filename: &str) -> Result<
         host_read_only: host_ro,
         fs: std::sync::Arc::new(std::sync::Mutex::new(image)),
     };
-    registry::mount(drive0, mount)?;
+    registry::mount_exclusive(drive0, mount, restoring)?;
 
     let drive = (b'A' + drive0) as char;
     crate::glog!(
@@ -1343,6 +1382,109 @@ mod tests {
         mount_image(&base, 1, "altair8_running.dsk").expect("mounts once the boot ends");
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The publish re-decides what `mount_image`'s early checks decided.
+    ///
+    /// Those checks run before the file is identified and opened, so anything
+    /// that lands in between -- the same image mounted on another drive by a
+    /// second screen, or claimed by a boot -- used to be published over. This
+    /// drives the helper both checks precede, which is exactly the position a
+    /// mount is in when the race has gone against it.
+    #[test]
+    fn test_a_mount_that_lost_the_race_is_refused_at_publish() {
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join(format!("egw_mount_race_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let images = images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        let fmt = format::by_token("ibm3740").unwrap();
+        let name = "ibm3740_race.dsk";
+        std::fs::write(images.join(name), vec![0xE5u8; fmt.min_bytes() as usize]).unwrap();
+
+        // Another drive got there first.
+        mount_image(&base, 1, name).expect("the winner");
+        let err = mount_image_unchecked(&base, 2, name, false).unwrap_err();
+        assert!(err.contains("already mounted on drive B"), "{err}");
+        assert!(registry::get(2).is_none(), "and nothing was published");
+        unmount_drive(1).unwrap();
+
+        // A boot claimed it first.
+        let key = registry::claim_booted_image(&images.join(name)).expect("claim");
+        let err = mount_image_unchecked(&base, 2, name, false).unwrap_err();
+        assert!(err.contains("booted session"), "{err}");
+        assert!(registry::get(2).is_none());
+        // A boot handing its own drive back still holds its claim, and is let
+        // through.
+        mount_image_unchecked(&base, 2, name, true).expect("a restore");
+        registry::release_booted_image(&key);
+
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// BDOS 31 and 27 on an image drive answer with the disk's own geometry,
+    /// the one its directory entries were written under; a folder drive keeps
+    /// the virtual one. Sizing an IBM 3740 file through the 8 MB drive's EXM 1
+    /// read every entry as two extents.
+    #[test]
+    fn test_an_image_drive_reports_its_own_dpb() {
+        use crate::cpm::fs::CpmFs;
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join(format!("egw_image_dpb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(images_dir(&base)).unwrap();
+        let fmt = format::by_token("ibm3740").unwrap();
+        std::fs::write(
+            images_dir(&base).join("ibm3740_dpb.dsk"),
+            vec![0xE5u8; fmt.min_bytes() as usize],
+        )
+        .unwrap();
+        mount_image(&base, 1, "ibm3740_dpb.dsk").expect("mount");
+
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = crate::cpm::Cpm::new();
+        let folder_at = crate::cpm::disk_info_bdos(&mut cpm, &fs, 31).unwrap();
+        let folder = cpm.read_block(folder_at, 15);
+        assert_eq!(folder[4], 1, "the folder drive: EXM 1");
+        assert!(fs.select(1));
+        let dpb_at = crate::cpm::disk_info_bdos(&mut cpm, &fs, 31).unwrap();
+        let dpb = cpm.read_block(dpb_at, 15);
+        assert_eq!((dpb[2], dpb[4]), (3, 0), "the disk's own BSH and EXM");
+        assert_eq!(u16::from_le_bytes([dpb[5], dpb[6]]), 242, "and DSM");
+        let alloc_at = crate::cpm::disk_info_bdos(&mut cpm, &fs, 27).unwrap();
+        assert_eq!(cpm.read_block(alloc_at, 1)[0], 0xC0, "its own allocation vector");
+
+        drop(fs);
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Both staged image writes sync the staged file before the rename that
+    /// publishes it, and sync the folder after. Not observable without pulling
+    /// the power, so it is held by reading the two functions -- each body
+    /// bounded to itself, so one cannot pass on the other's lines.
+    #[test]
+    fn test_staged_image_writes_sync_before_they_rename() {
+        let body = |src: &str, start: &str| -> String {
+            let from = src.find(start).expect("function present");
+            let rest = &src[from + start.len()..];
+            let end = rest.find("\n}\n").expect("function end");
+            rest[..end].to_string()
+        };
+        let mine = include_str!("mod.rs").replace("\r\n", "\n");
+        let boot = include_str!("../../telnet/cpm_boot_ui.rs").replace("\r\n", "\n");
+        for (what, f) in [
+            ("create_blank_image", body(&mine, "pub fn create_blank_image(")),
+            ("save_image_atomically", body(&boot, "async fn save_image_atomically(")),
+        ] {
+            let sync = f.find("sync_all()").unwrap_or_else(|| panic!("{what}: no sync_all"));
+            let rename = f.find("rename(&tmp").unwrap_or_else(|| panic!("{what}: no rename"));
+            assert!(sync < rename, "{what}: the staged file is synced before it is renamed");
+            assert!(f[rename..].contains("sync_dir_of("), "{what}: and the folder after");
+        }
     }
 
     /// Disabling the emulator must not steal a loan from a running boot.
