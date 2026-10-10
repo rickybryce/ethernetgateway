@@ -353,6 +353,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   characters typed (a script's `ATH` after a one-second pause, say) were sent to
   the remote with the `+++` in front of them, and the modem stayed online.  The
   escape now counts, and those characters are read as the command they were.
+- **Modem: what `AT&W` saves survives the device dropping.**  A port whose
+  device disconnects and returns (a USB adapter re-plugged, a `socat` bridge
+  restarted) came back with the settings from the last configuration save,
+  ignoring any `AT&W` made since -- echo, quiet, verbose, the S-registers and
+  the stored numbers among them.  It now reloads the saved profile on every
+  reopen, as a modem does on power-up.
 - **Modem: a port saved quiet (`ATQ1`) stays quiet when it opens.**  The `OK`
   a port prints on opening ignored `ATQ1` and `ATV0`; it is now a result code
   like any other, so it is silent or `0` as the profile asks.

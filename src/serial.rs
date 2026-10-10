@@ -1544,6 +1544,14 @@ fn serial_manager(
                                 port.port,
                                 port.baud
                             );
+                            // The saved profile as it is *now*: an `AT&W` made
+                            // before the device dropped must hold when it
+                            // returns, as a modem's stored profile holds
+                            // across a power cycle.  `port` was read once,
+                            // above this loop, and kept every setting at its
+                            // value from the last configuration save.
+                            // Shadowed, so the stale copy is not in scope here.
+                            let port = with_saved_profile(&port, config::get_config().port(id));
                             let lost = serial_thread(
                                 id,
                                 &port,
@@ -3792,6 +3800,31 @@ fn serial_thread(
         glog!("Serial modem (Port {}): shutting down", id.label());
     }
     false
+}
+
+/// `port` with its saved modem profile -- exactly the settings `AT&W`
+/// writes -- taken from `saved`, the live configuration.
+///
+/// Used when the modem loop reopens a device that dropped.  Only the profile
+/// is refreshed: the port's identity (path, framing, mode, whether it is
+/// enabled) changes through a configuration save, which restarts the loop
+/// and re-reads everything, and taking it here would race that restart.
+/// `test_a_reopen_reloads_every_setting_at_w_saves` holds this list to the
+/// keys `AT&W` writes, so one cannot gain a setting the other drops.
+fn with_saved_profile(port: &SerialPortConfig, saved: &SerialPortConfig) -> SerialPortConfig {
+    SerialPortConfig {
+        echo: saved.echo,
+        verbose: saved.verbose,
+        quiet: saved.quiet,
+        s_regs: saved.s_regs.clone(),
+        x_code: saved.x_code,
+        dtr_mode: saved.dtr_mode,
+        flow_mode: saved.flow_mode,
+        dcd_mode: saved.dcd_mode,
+        stored_numbers: saved.stored_numbers.clone(),
+        petscii_translate: saved.petscii_translate,
+        ..port.clone()
+    }
 }
 
 /// The `OK` a port says when it opens, as a modem says one on power-up.
@@ -10989,6 +11022,85 @@ mod tests {
         let mut buf = [0u8; 16];
         let n = far.read(&mut buf).unwrap_or(0);
         assert_eq!(&buf[..n], b"", "tcp: the remote must receive none of it");
+    }
+
+    /// **A reopened device gets the profile `AT&W` saved, and only that.**
+    /// Every profile field comes from the live config and every identity field
+    /// (path, framing, mode) from the loop's own copy -- checked field by
+    /// field with values that all differ, so a field taken from the wrong side
+    /// cannot pass by coincidence.  Then the list is held to `AT&W` itself: each
+    /// key its arm writes must be copied, or a setting added to one and not the
+    /// other is saved and then lost at the next reopen, which is this defect.
+    #[test]
+    fn test_a_reopen_reloads_every_setting_at_w_saves() {
+        let base = SerialPortConfig {
+            enabled: true, mode: "modem".into(), port: "/dev/old".into(), baud: 2400,
+            databits: 8, parity: "none".into(), stopbits: 1, flowcontrol: "none".into(),
+            echo: true, verbose: true, quiet: false, s_regs: "1,2,3".into(), x_code: 4,
+            dtr_mode: 0, flow_mode: 0, dcd_mode: 1,
+            stored_numbers: ["a".into(), "b".into(), "c".into(), "d".into()],
+            petscii_translate: false, backspace: "passthrough".into(),
+            gateway_petscii: "default".into(), drive_carrier: false,
+        };
+        let saved = SerialPortConfig {
+            enabled: false, mode: "console".into(), port: "/dev/new".into(), baud: 9600,
+            databits: 7, parity: "even".into(), stopbits: 2, flowcontrol: "hardware".into(),
+            echo: false, verbose: false, quiet: true, s_regs: "9,9,9".into(), x_code: 1,
+            dtr_mode: 2, flow_mode: 3, dcd_mode: 0,
+            stored_numbers: ["w".into(), "x".into(), "y".into(), "z".into()],
+            petscii_translate: true, backspace: "rubout".into(),
+            gateway_petscii: "passthrough".into(), drive_carrier: true,
+        };
+        let got = with_saved_profile(&base, &saved);
+        // The saved profile.
+        assert_eq!(
+            (got.echo, got.verbose, got.quiet, got.s_regs.as_str(), got.x_code),
+            (false, false, true, "9,9,9", 1)
+        );
+        assert_eq!((got.dtr_mode, got.flow_mode, got.dcd_mode), (2, 3, 0));
+        assert_eq!(got.stored_numbers, saved.stored_numbers);
+        assert!(got.petscii_translate);
+        // The port's identity, untouched.
+        assert_eq!(
+            (got.enabled, got.mode.as_str(), got.port.as_str(), got.baud, got.databits),
+            (true, "modem", "/dev/old", 2400, 8)
+        );
+        assert_eq!(
+            (got.parity.as_str(), got.stopbits, got.flowcontrol.as_str()),
+            ("none", 1, "none")
+        );
+        assert_eq!((got.backspace.as_str(), got.gateway_petscii.as_str()), ("passthrough", "default"));
+        assert!(!got.drive_carrier);
+
+        // Every key AT&W writes is a field copied above.  Production source
+        // only, cut at the test module so this test's own text is not read.
+        let src = include_str!("serial.rs").replace('\r', "");
+        let prod = &src[..src.find(concat!("#[cfg(test)]\n", "mod tests")).unwrap()];
+        let arm = &prod[prod.find("AtResult::SaveConfig => {").unwrap()..];
+        let arm = &arm[..arm.find("pending_ok = true;").unwrap()];
+        let f = &prod[prod.find("fn with_saved_profile(").unwrap()..];
+        let f = &f[..f.find("\n}\n").unwrap()];
+        let mut keys = 0;
+        for (i, _) in arm.match_indices("serial_key(id, \"") {
+            let rest = &arm[i + "serial_key(id, \"".len()..];
+            let key = &rest[..rest.find('"').unwrap()];
+            let field = if key.starts_with("stored_") { "stored_numbers" } else { key };
+            assert!(f.contains(&format!("saved.{field}")), "AT&W saves {key} but a reopen drops it");
+            keys += 1;
+        }
+        assert_eq!(keys, 13, "the AT&W arm was read: eight settings, four numbers, PETSCII");
+
+        // And the reopen loop applies it: in the branch that opened the
+        // device, before the `serial_thread` it hands the settings to.
+        let call = prod.find("let lost = serial_thread(").expect("the reopen loop's call");
+        let open = prod[..call].rfind("Ok(p) => {").expect("the branch that opened the port");
+        let end = call + prod[call..].find(");").unwrap();
+        let branch = &prod[open..end];
+        assert!(
+            branch.contains("let port = with_saved_profile(&port, config::get_config().port(id));"),
+            "the reopen loop no longer reloads the saved profile"
+        );
+        assert!(branch[branch.find("let lost").unwrap()..].contains("&port,"), "{branch}");
     }
 
     /// The port-open `OK` is a result code: `ATQ1` silences it and `ATV0`
