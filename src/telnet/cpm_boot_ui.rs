@@ -1236,6 +1236,17 @@ impl TelnetSession {
 
         self.send_line("").await?;
         self.send_line(&format!("  {}", self.dim("Returned to the gateway."))).await?;
+        // The printouts this visit made, named now that the guest no longer
+        // owns the screen -- and held there, because the main menu clears it
+        // the moment this returns and a line shown for one frame is a line
+        // nobody read.
+        if !self.held_print_notices.is_empty() {
+            self.show_held_print_notices().await?;
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            self.wait_for_key().await?;
+        }
         self.send_line("").await?;
         result
     }
@@ -1312,45 +1323,25 @@ impl TelnetSession {
         result
     }
 
-    /// Write a finished booted-disk print job out and name it on screen.
+    /// Write a finished booted-disk print job out; its notice is shown when
+    /// the operator leaves the disk.
     ///
-    /// Deliberately not shared with the emulator's `cpmemu_spool_close`: that
-    /// one reports through the emulator's own coloured-notice style at a point
-    /// where the guest is stopped, while this one interrupts a live serial
-    /// console mid-session and has to leave the guest's own display alone. The
-    /// spool and document logic *is* shared, in `crate::cpm::printer` — which is
-    /// the part that would actually hurt to have twice.
+    /// The emulator's [`Self::cpmemu_spool_close`] does the work: the two used
+    /// to differ only in when they wrote the notice, and now neither writes it
+    /// while a guest owns the screen -- a booted disk owns it for the whole
+    /// session, so a line injected mid-session landed in whatever it was
+    /// drawing.  `None` is the printer switched off, and drops the job.
     async fn cpm_boot_spool_close(
         &mut self,
         spool: &mut Option<crate::cpm::printer::SpoolJob>,
         format: Option<crate::cpm::printer::Format>,
         transfer_dir: &str,
     ) -> Result<(), std::io::Error> {
-        let Some(job) = spool.take() else { return Ok(()) };
-        let Some(format) = format else { return Ok(()) };
-        if job.is_empty() {
+        let Some(format) = format else {
+            spool.take();
             return Ok(());
-        }
-        let bytes = job.len();
-        match job.write(transfer_dir, format) {
-            Ok(name) => {
-                self.send_raw(b"\r\n").await?;
-                self.send_line(&format!(
-                    "  {}",
-                    self.green(&format!("[printed {bytes} bytes to {name}]"))
-                ))
-                .await?;
-                self.flush().await?;
-            }
-            Err(e) => {
-                glog!("CP/M printer: could not write the spool file: {e}");
-                self.send_raw(b"\r\n").await?;
-                self.send_line(&format!("  {}", self.red(&format!("[printer: {e}]"))))
-                    .await?;
-                self.flush().await?;
-            }
-        }
-        Ok(())
+        };
+        self.cpmemu_spool_close(spool, format, transfer_dir).await
     }
 
     /// The run loop: step the CPU, move console bytes both ways — and printer
@@ -1716,6 +1707,33 @@ mod tests {
         let src = &src[..src.find("#[cfg(test)]\nmod tests").expect("the test module")];
         assert!(src.contains("let socket_backed = self.speaks_telnet();"), "the transport is not what decides");
         assert!(src.contains("key_budget(\n                    machine.key_room(),\n                    socket_backed,"), "the pump does not use key_budget");
+    }
+
+    /// **A booted visit's printouts are named where they can be read.**  The
+    /// guest owns the screen until the operator leaves, so the `[printed ...]`
+    /// lines are held until then -- and the main menu clears the screen the
+    /// moment `cpm_boot_session` returns, so they must come after "Returned
+    /// to the gateway." and before a key is waited for.  Shown inside the run
+    /// wrapper instead, they lasted one frame.  Nothing here drives a whole
+    /// boot session, so the order is read from the source.
+    #[test]
+    fn test_a_booted_printout_is_named_behind_a_keypress() {
+        let src = include_str!("cpm_boot_ui.rs").replace("\r\n", "\n");
+        let src = &src[..src.find("#[cfg(test)]\nmod tests").expect("the test module")];
+        let body = |name: &str| -> &str {
+            let at = src.find(&format!("async fn {name}(")).unwrap_or_else(|| panic!("{name}"));
+            let end = at + 1 + src[at + 1..].find("\n    }\n").expect("fn end");
+            &src[at..end]
+        };
+        let session = body("cpm_boot_session");
+        let back = session.find("Returned to the gateway.").expect("the parting line");
+        let show = session.find("self.show_held_print_notices()").expect("the notices are never shown");
+        let key = show + session[show..].find("self.wait_for_key()").expect("no key is waited for");
+        assert!(back < show && show < key, "parting line, notices, then a key");
+        assert!(
+            !body("cpm_boot_run").contains("show_held_print_notices"),
+            "shown inside the run, the main menu wipes them"
+        );
     }
 
     /// **The monitor-ROM warning fits a C64 and says what to do about it.**

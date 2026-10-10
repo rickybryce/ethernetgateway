@@ -1441,6 +1441,12 @@ pub(crate) struct TelnetSession {
     /// Outcome of the last transfer, drawn once by `render_file_transfer`
     /// and cleared -- see `TransferNote`.
     pub(in crate::telnet) last_transfer_note: Option<TransferNote>,
+    /// `[printed ...]` notices for documents written while a CP/M guest owned
+    /// the screen, shown once the gateway owns it again -- see
+    /// `cpm::printer` and the two `*_spool_close` functions.  Writing one
+    /// into a full-screen program or a half-typed line was a mark on the
+    /// guest's display that the guest did not put there.
+    pub(in crate::telnet) held_print_notices: Vec<String>,
     /// Ignore input for a moment on the next menu prompt.
     ///
     /// **A protocol's teardown keeps arriving after the transfer prompt has
@@ -1648,6 +1654,7 @@ impl TelnetSession {
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
+            held_print_notices: Vec::new(),
             arm_next_prompt: false,
             web_lines: Vec::new(),
             web_scroll: 0,
@@ -1733,6 +1740,7 @@ impl TelnetSession {
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
+            held_print_notices: Vec::new(),
             arm_next_prompt: false,
             web_lines: Vec::new(),
             web_scroll: 0,
@@ -1838,6 +1846,7 @@ impl TelnetSession {
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
+            held_print_notices: Vec::new(),
             arm_next_prompt: false,
             web_lines: Vec::new(),
             web_scroll: 0,
@@ -2720,6 +2729,7 @@ pub fn start_server(
                                     // still lets the user override per-session.
                                     xmodem_iac: false,
                                     last_transfer_note: None,
+                                    held_print_notices: Vec::new(),
             arm_next_prompt: false,
                                     web_lines: Vec::new(),
                                     web_scroll: 0,

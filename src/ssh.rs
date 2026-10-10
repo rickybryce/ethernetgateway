@@ -1136,6 +1136,30 @@ impl Drop for SshHandler {
     }
 }
 
+/// How long a slave whose `serial-register` label was refused goes unlogged
+/// after the first line.  A slave retries on its own backoff for as long as it
+/// runs, and one line per retry is the log-flood shape `SshServer::admit`
+/// exists to remove -- a misconfigured slave would push everything else out
+/// of the rolling log.  Only an authenticated peer reaches this.
+const LABEL_REFUSAL_QUIET: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Whether a refused label from `ip` at `now` should be logged: the first time,
+/// and again once [`LABEL_REFUSAL_QUIET`] has passed.  Entries older than the
+/// window are dropped on every call, so the table holds only slaves refused
+/// recently.
+fn label_refusal_is_news(ip: std::net::IpAddr, now: std::time::Instant) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static SAID: OnceLock<Mutex<HashMap<std::net::IpAddr, std::time::Instant>>> = OnceLock::new();
+    let mut said = SAID.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    said.retain(|_, at| now.saturating_duration_since(*at) < LABEL_REFUSAL_QUIET);
+    if said.contains_key(&ip) {
+        return false;
+    }
+    said.insert(ip, now);
+    true
+}
+
 impl SshHandler {
     /// Register a remote slave port (`serial-register <port>`, §9 #12).
     /// Gated like the relay path (master + accept_relays + a known peer IP)
@@ -1179,10 +1203,14 @@ impl SshHandler {
         // Empty is also what `parse_register_args` returns for a label with a
         // control byte in it or one too long to draw -- see `wire_token`.
         if label.is_empty() {
-            glog!(
-                "SSH: serial-register from {} refused (no usable port label)",
-                slave_ip
-            );
+            if label_refusal_is_news(slave_ip, std::time::Instant::now()) {
+                glog!(
+                    "SSH: serial-register from {} refused (no usable port label; \
+                     said once per {} min per slave)",
+                    slave_ip,
+                    LABEL_REFUSAL_QUIET.as_secs() / 60
+                );
+            }
             session.channel_failure(channel)?;
             return Ok(());
         }
@@ -2071,6 +2099,24 @@ mod tests {
         .expect("the pump delivers and then closes")
         .expect("read");
         assert_eq!(got, sent);
+    }
+
+    /// **A refused port label is logged once per slave per quiet window.**
+    /// The slave retries on its own backoff indefinitely, so a line per retry
+    /// filled the rolling log.  A second slave is still news, and the first is
+    /// news again once the window has passed.
+    #[test]
+    fn test_a_refused_port_label_is_logged_once_per_window() {
+        let a: std::net::IpAddr = "198.51.100.41".parse().unwrap();
+        let b: std::net::IpAddr = "198.51.100.42".parse().unwrap();
+        let t0 = std::time::Instant::now();
+        assert!(label_refusal_is_news(a, t0), "the first refusal is logged");
+        assert!(!label_refusal_is_news(a, t0 + std::time::Duration::from_secs(30)), "a retry is not");
+        assert!(label_refusal_is_news(b, t0 + std::time::Duration::from_secs(31)), "another slave is");
+        assert!(
+            label_refusal_is_news(a, t0 + LABEL_REFUSAL_QUIET + std::time::Duration::from_secs(1)),
+            "the window ends"
+        );
     }
 
     /// A session that has ended makes the pump refuse further input rather

@@ -842,14 +842,19 @@ impl TelnetSession {
         Ok(())
     }
 
-    /// Write a finished job out and say where it went.
+    /// Write a finished job out, and hold the line that says where it went.
     ///
     /// The notice matters: a print that leaves no mark on the screen is
     /// indistinguishable from a print that did not happen, and the operator has
-    /// no other way to learn the file name. Failure is reported to the session
-    /// *and* the log, because this is the one part of printing the user cannot
-    /// see for themselves.
-    async fn cpmemu_spool_close(
+    /// no other way to learn the file name. But this runs while the program
+    /// still owns the screen -- a job closes when it goes quiet, which is often
+    /// while the program sits at its own prompt -- and a line written then
+    /// lands in the middle of a full-screen menu or a half-typed answer. So the
+    /// **document** is written now and logged, and the **notice** waits for
+    /// [`Self::show_held_print_notices`], when the program has ended. Failure
+    /// is reported the same way, *and* to the log, because this is the one
+    /// part of printing the user cannot see for themselves.
+    pub(in crate::telnet) async fn cpmemu_spool_close(
         &mut self,
         spool: &mut Option<crate::cpm::printer::SpoolJob>,
         format: crate::cpm::printer::Format,
@@ -860,23 +865,32 @@ impl TelnetSession {
             return Ok(());
         }
         let bytes = job.len();
-        match job.write(transfer_dir, format) {
+        let notice = match job.write(transfer_dir, format) {
             Ok(name) => {
-                self.send_line("").await?;
-                self.send_line(&format!(
-                    "  {}",
-                    self.green(&format!("[printed {bytes} bytes to {name}]"))
-                ))
-                .await?;
+                glog!("CP/M printer: printed {bytes} bytes to {name}");
+                self.green(&format!("[printed {bytes} bytes to {name}]"))
             }
             Err(e) => {
                 glog!("CP/M printer: could not write the spool file: {e}");
-                self.send_line("").await?;
-                self.send_line(&format!("  {}", self.red(&format!("[printer: {e}]"))))
-                    .await?;
+                self.red(&format!("[printer: {e}]"))
             }
-        }
+        };
+        self.held_print_notices.push(notice);
         Ok(())
+    }
+
+    /// Show the print notices held while a guest owned the screen.  Called by
+    /// both CP/M machines once the gateway owns the screen again: the emulator
+    /// when a program ends, a booted disk when the operator leaves it.
+    pub(in crate::telnet) async fn show_held_print_notices(&mut self) -> Result<(), std::io::Error> {
+        if self.held_print_notices.is_empty() {
+            return Ok(());
+        }
+        self.send_line("").await?;
+        for notice in std::mem::take(&mut self.held_print_notices) {
+            self.send_line(&format!("  {notice}")).await?;
+        }
+        self.flush().await
     }
 
     /// The disk `cpm_boot_image` names, if it names one that is really there.
@@ -1721,6 +1735,8 @@ impl TelnetSession {
         if let Some(format) = print_format {
             let _ = self.cpmemu_spool_close(&mut spool, format, &transfer_dir).await;
         }
+        // The program has ended, so the screen is ours to write on.
+        let _ = self.show_held_print_notices().await;
         result
     }
 
@@ -2716,12 +2732,15 @@ mod repl_tests {
         let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
         let (mut peer_rd, mut peer_wr) = tokio::io::split(peer);
         let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
             let mut buf = [0u8; 256];
             while let Ok(n) = peer_rd.read(&mut buf).await {
                 if n == 0 {
                     break;
                 }
+                out.extend_from_slice(&buf[..n]);
             }
+            String::from_utf8_lossy(&out).into_owned()
         });
 
         let mut job = Some(crate::cpm::printer::SpoolJob::new());
@@ -2757,8 +2776,14 @@ mod repl_tests {
         assert!(typed, "the document never appeared while the program waited");
         assert!(matches!(key.unwrap(), ConIn::Byte(b'k')), "the key must still reach the guest");
         assert!(job.is_none(), "the job was closed, not left to be written again");
+        // The program still owns the screen: the notice is held, not written
+        // into whatever it is drawing, and comes out once it has ended.
+        assert_eq!(sess.held_print_notices.len(), 1, "the notice was not held");
+        sess.show_held_print_notices().await.unwrap();
+        assert!(sess.held_print_notices.is_empty(), "a shown notice is shown once");
         drop(sess);
-        collector.abort();
+        let out = collector.await.unwrap();
+        assert_eq!(out.matches("[printed").count(), 1, "the notice, once: {out:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

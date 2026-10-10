@@ -175,6 +175,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the disk turns past it.
 - **Printer: a printout never replaces another**; past 99 in the same second
   it kept writing over the last one.
+- **CP/M printer: the line naming a printout no longer lands in the middle of
+  the guest's screen.**  A job that went quiet while a program sat at its menu,
+  or anywhere in a booted disk's session, printed `[printed ... bytes to ...]`
+  into whatever the guest was drawing.  The document is still written at once
+  and logged; the line is shown when the program ends or the disk is left.
+- **Relay: a slave whose port name is refused is logged once per ten
+  minutes**, not on every retry.
 - **The speed setting is shown by what it means.**  The desktop showed the
   period speed for `off`, `none` and `0`, which run unlimited; and the web
   page selected `auto` for any spelling its list did not carry (`off`, `2.0`,
