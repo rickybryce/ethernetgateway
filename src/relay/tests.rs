@@ -2498,3 +2498,88 @@ fn test_only_a_dial_or_a_peer_waits_on_a_far_end() {
     let reg = &reg[..reg.find("\n}\n").expect("its end")];
     assert!(reg.contains("Answerer::Master,"), "a registration must not wait on a far end");
 }
+
+/// **A refused key offer is retried, an accepted one is not, and a refusal is
+/// said once.**  The latch used to be set on a refusal too, so a master that
+/// had relays off for one minute retired enrolment for the life of the slave's
+/// process -- the exact failure the comment on the early latch called wrong.
+#[test]
+fn test_a_refused_key_offer_is_retried_later_and_logged_once() {
+    use super::{EnrolLatch, ENROL_RETRY_AFTER};
+    let t0 = std::time::Instant::now();
+    let mut latch = EnrolLatch::default();
+    assert!(latch.should_offer(t0), "a fresh slave offers its key");
+
+    // Refused: not on the next connection, but again once the wait is up.
+    assert!(latch.refused(t0), "the first refusal is logged");
+    assert!(!latch.should_offer(t0 + Duration::from_secs(1)), "not hammered");
+    assert!(
+        latch.should_offer(t0 + ENROL_RETRY_AFTER),
+        "a refusal must not retire enrolment for the life of the process"
+    );
+
+    // Refused again: the wait restarts from the new refusal, silently.
+    let t1 = t0 + ENROL_RETRY_AFTER;
+    assert!(!latch.refused(t1), "a master that always refuses is reported once");
+    assert!(!latch.should_offer(t1 + Duration::from_secs(1)));
+    assert!(latch.should_offer(t1 + ENROL_RETRY_AFTER));
+
+    // Accepted: final, however long passes.
+    latch.accepted();
+    assert!(!latch.should_offer(t1 + ENROL_RETRY_AFTER * 100), "an enrolled key is not re-offered");
+}
+
+/// A relay `exec` that could not be **sent** is a network fault.  A master's
+/// refusal never reaches that error -- russh resolves `exec()` `Ok` on a
+/// `channel_failure`, which is why the hello exists -- so classifying the send
+/// failure as `Refused` held a slave off for the hard backoff after every
+/// dropped link.
+#[test]
+fn test_an_exec_that_could_not_be_sent_is_a_network_fault() {
+    assert!(matches!(
+        super::exec_send_failed("channel closed"),
+        super::RelayConnectError::Network(_)
+    ));
+    // And the relay connect actually uses it, rather than a closure of its own.
+    let src = include_str!("../relay.rs").replace("\r\n", "\n");
+    let prod = &src[..src.find("#[cfg(test)]\nmod tests").expect("test module")];
+    let at = prod.find(".exec(true, exec_command.as_bytes())").expect("the relay exec");
+    let tail = &prod[at..at + 120];
+    assert!(tail.contains(".map_err(exec_send_failed)?"), "the relay exec is classified elsewhere: {tail}");
+}
+
+/// **The `serial-register` tokens are remote input a master draws**, on the
+/// picker, the web and desktop screens and the log.  A token carrying a
+/// control byte, an `ESC`, or more than [`super::WIRE_TOKEN_MAX`] characters
+/// is refused whole: an unusable label comes back empty (which the SSH handler
+/// refuses) and an unusable mode or erase key reads as "not told" -- never a
+/// cleaned spelling, which could name a port the slave never offered.
+#[test]
+fn test_register_tokens_with_control_bytes_or_too_long_are_refused() {
+    // Positive control: the real tokens survive untouched.
+    let (label, facts) = super::parse_register_args("CPM emulator passthrough");
+    assert_eq!(label, "CPM");
+    assert_eq!(facts.mode.as_deref(), Some("emulator"));
+    assert_eq!(facts.erase.as_deref(), Some("passthrough"));
+
+    // A label that would clear a master user's screen.
+    let (label, facts) = super::parse_register_args("A\x1b[2J console rubout");
+    assert_eq!(label, "", "an ESC in the label must refuse it, not clean it to `A2J`");
+    assert_eq!(facts.mode.as_deref(), Some("console"), "the other tokens stand alone");
+
+    // Control bytes in the facts.
+    let (label, facts) = super::parse_register_args("B mo\x07dem rub\x1bout");
+    assert_eq!(label, "B");
+    assert_eq!(facts, RemotePortFacts::default());
+
+    // Length: the bound itself passes, one over does not.
+    let at = "x".repeat(super::WIRE_TOKEN_MAX);
+    let over = "x".repeat(super::WIRE_TOKEN_MAX + 1);
+    assert_eq!(super::parse_register_args(&at).0, at);
+    assert_eq!(super::parse_register_args(&over).0, "");
+    let (_, facts) = super::parse_register_args(&format!("A {over} {over}"));
+    assert_eq!(facts, RemotePortFacts::default());
+
+    // Non-ASCII is refused too: on a C64 a byte is a column, a char is not.
+    assert_eq!(super::parse_register_args("\u{c4}").0, "");
+}

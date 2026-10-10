@@ -10,7 +10,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use russh::server::Server as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::config;
@@ -193,45 +192,15 @@ pub fn start_ssh_server(
                     break;
                 }
             };
-            let mut handler = server.new_client(Some(peer));
-            if handler.rate_limited {
-                // `new_client` has logged it.  Dropped unanswered, as the
-                // telnet accept loop does: a scanner is not reading.
+            let (rate_max, rate_window) = config::get_conn_rate();
+            let Some((handler, pre)) =
+                server.admit(&pending, peer, rate_max, rate_window, &mut full_said)
+            else {
+                // Dropped unanswered, as the telnet accept loop does: a
+                // scanner is not reading.
                 drop(tcp);
                 continue;
-            }
-            let pre = match PreLogin::claim(
-                &pending,
-                peer.ip(),
-                MAX_PRE_LOGIN,
-                MAX_PRE_LOGIN_PER_ADDRESS,
-            ) {
-                Ok(pre) => pre,
-                Err(why) => {
-                    if !full_said {
-                        let limit = match why {
-                            PreLoginFull::Everyone => format!(
-                                "{} connections are already waiting to log in",
-                                MAX_PRE_LOGIN
-                            ),
-                            PreLoginFull::ThisAddress => format!(
-                                "this address already has {} waiting to log in",
-                                MAX_PRE_LOGIN_PER_ADDRESS
-                            ),
-                        };
-                        glog!(
-                            "SSH: refusing {} -- {}; further refusals are not logged \
-                             until one is accepted again",
-                            peer, limit
-                        );
-                        full_said = true;
-                    }
-                    drop(tcp);
-                    continue;
-                }
             };
-            full_said = false;
-            handler.pre_login = Some(pre.clone());
             let stream = PreLoginStream::new(tcp, pre, telnet::PRE_LOGIN_DEADLINE);
             let config = config.clone();
             tokio::spawn(async move {
@@ -390,14 +359,6 @@ fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey, String> {
     Ok(key)
 }
 
-/// Load or (on first use) generate the gateway's outgoing-SSH client
-/// keypair used for public-key authentication against remote servers.
-///
-/// Mirrors `load_or_generate_host_key`: Ed25519, OpenSSH-format PEM at
-/// `GATEWAY_CLIENT_KEY_FILE`, chmod 0o600 on Unix.  The file mode is
-/// the only at-rest protection; the private key itself has no
-/// passphrase because the gateway process needs to use it without user
-/// interaction.
 /// The keys listed in [`RELAY_AUTHORIZED_KEYS_FILE`], ignoring blanks and `#`.
 ///
 /// A line that will not parse is **named in the log and skipped**, never taken
@@ -436,14 +397,6 @@ pub(crate) fn load_relay_authorized_keys() -> Vec<russh::keys::PublicKey> {
 /// any real deployment and small enough to read.
 pub(crate) const MAX_AUTHORIZED_KEYS: usize = 64;
 
-/// Record a slave's public key so it can stop storing the master's password.
-///
-/// Called only for a peer that has **already authenticated**, so this grants no
-/// access the caller did not just demonstrate it has -- what it changes is that
-/// the access survives a password change, which is why the entry is written to
-/// be identifiable and removable by hand.
-///
-/// Returns the message to log, or an error to refuse with.
 /// Enrolment is a read-modify-write of one file, so it is serialised.
 ///
 /// Two slaves reconnecting at the same moment -- the normal case when a master
@@ -453,6 +406,14 @@ pub(crate) const MAX_AUTHORIZED_KEYS: usize = 64;
 /// makes the *write* atomic; it does nothing for the read that preceded it.
 static ENROL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Record a slave's public key so it can stop storing the master's password.
+///
+/// Called only for a peer that has **already authenticated**, so this grants no
+/// access the caller did not just demonstrate it has -- what it changes is that
+/// the access survives a password change, which is why the entry is written to
+/// be identifiable and removable by hand.
+///
+/// Returns the message to log, or an error to refuse with.
 pub(crate) fn enroll_relay_key(
     line: &str,
     peer: Option<std::net::IpAddr>,
@@ -484,10 +445,12 @@ pub(crate) fn enroll_relay_key(
     // choosing.  Reduced to a short run of harmless characters rather than
     // escaped, because it is a convenience for a human reading the file and
     // nothing depends on its exact content.
+    // Cleaned rather than refused, unlike the `serial-register` tokens: this
+    // label names nothing, so trimming it cannot make it name the wrong thing.
     let safe: String = label
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.' || *c == '_')
-        .take(32)
+        .filter(|c| crate::relay::is_wire_token_char(*c))
+        .take(crate::relay::WIRE_TOKEN_MAX)
         .collect();
     let who = if safe.is_empty() { "slave".to_string() } else { safe };
     let from = peer.map(|i| i.to_string()).unwrap_or_else(|| "unknown".into());
@@ -553,6 +516,14 @@ pub(crate) fn key_is_authorized(
     authorized.iter().any(|k| k.key_data() == key.key_data())
 }
 
+/// Load or (on first use) generate the gateway's outgoing-SSH client
+/// keypair used for public-key authentication against remote servers.
+///
+/// Mirrors `load_or_generate_host_key`: Ed25519, OpenSSH-format PEM at
+/// `GATEWAY_CLIENT_KEY_FILE`, chmod 0o600 on Unix.  The file mode is
+/// the only at-rest protection; the private key itself has no
+/// passphrase because the gateway process needs to use it without user
+/// interaction.
 pub(crate) fn load_or_generate_client_key() -> Result<russh::keys::PrivateKey, String> {
     use russh::keys::ssh_key::LineEnding;
 
@@ -880,56 +851,109 @@ struct SshServer {
     conn_rates: telnet::ConnRateMap,
 }
 
-impl russh::server::Server for SshServer {
-    type Handler = SshHandler;
+impl SshServer {
+    /// Is `peer` over the per-IP connection rate limit?  Counts this
+    /// connection, and logs **once per flood**, never once per connection --
+    /// see `ConnRate`.  `glog!` is a blocking write inline here and the log
+    /// rolls, so an unconditional line would push out the evidence it exists
+    /// to record.
+    ///
+    /// The limit is a parameter rather than read from the config here so a
+    /// test can drive the accept path without depending on the process-wide
+    /// config another test may have set.
+    fn over_rate_limit(
+        &self,
+        peer: SocketAddr,
+        rate_max: u32,
+        rate_window: std::time::Duration,
+    ) -> bool {
+        if rate_max == 0 {
+            return false;
+        }
+        let (count, first) =
+            telnet::note_connection(&self.conn_rates, peer.ip(), rate_max, rate_window);
+        let limited = count > rate_max;
+        if limited && first {
+            glog!(
+                "SSH: connection from {} over rate limit ({} in {}s); further \
+                 refusals from this address are not logged until it is under \
+                 the limit again",
+                peer, rate_max, rate_window.as_secs()
+            );
+        }
+        limited
+    }
 
-    fn new_client(&mut self, peer_addr: Option<SocketAddr>) -> SshHandler {
+    /// One accepted TCP connection: refuse it, or build its handler.
+    ///
+    /// **Every refusal is decided before a handler exists**, and that is the
+    /// point of the order.  Building the handler is what logs "connection
+    /// from", reads `relay_authorized_keys` off the disk, and -- on drop --
+    /// logs "disconnected".  Built first and then refused, a rate-limited
+    /// connection cost one blocking log line and a pre-login-full one cost
+    /// two plus a file read, each, which is the amplifier both "not logged
+    /// until" promises exist to remove.  A refused connection now produces
+    /// nothing beyond the once-per-flood line.
+    fn admit(
+        &mut self,
+        pending: &SharedPreLoginPool,
+        peer: SocketAddr,
+        rate_max: u32,
+        rate_window: std::time::Duration,
+        full_said: &mut bool,
+    ) -> Option<(SshHandler, Arc<PreLogin>)> {
+        if self.over_rate_limit(peer, rate_max, rate_window) {
+            return None;
+        }
+        let pre = match PreLogin::claim(
+            pending,
+            peer.ip(),
+            MAX_PRE_LOGIN,
+            MAX_PRE_LOGIN_PER_ADDRESS,
+        ) {
+            Ok(pre) => pre,
+            Err(why) => {
+                if !*full_said {
+                    let limit = match why {
+                        PreLoginFull::Everyone => format!(
+                            "{} connections are already waiting to log in",
+                            MAX_PRE_LOGIN
+                        ),
+                        PreLoginFull::ThisAddress => format!(
+                            "this address already has {} waiting to log in",
+                            MAX_PRE_LOGIN_PER_ADDRESS
+                        ),
+                    };
+                    glog!(
+                        "SSH: refusing {} -- {}; further refusals are not logged \
+                         until one is accepted again",
+                        peer, limit
+                    );
+                    *full_said = true;
+                }
+                return None;
+            }
+        };
+        *full_said = false;
+        let mut handler = self.build_handler(Some(peer), false);
+        handler.pre_login = Some(pre.clone());
+        Some((handler, pre))
+    }
+
+    /// The handler for one connection.  Logs it and loads the relay keys
+    /// **only when it is not refused** -- a refused handler exists only on
+    /// the `new_client` path, which the accept loop does not take.
+    fn build_handler(&self, peer_addr: Option<SocketAddr>, rate_limited: bool) -> SshHandler {
         let cfg = config::get_config();
-        // Do NOT consume a session slot here.  new_client fires for every
-        // inbound TCP connection, before any authentication, so counting at
-        // connect time let an unauthenticated peer that opens many transport
+        // Do NOT consume a session slot here.  This runs for every inbound
+        // TCP connection, before any authentication, so counting at connect
+        // time let an unauthenticated peer that opens many transport
         // handshakes and stalls exhaust `max_sessions` and lock out real
         // users.  The slot is claimed in auth_password on a successful login
         // (atomic fetch_add + rollback, the same pattern the telnet accept
         // loop uses).
-        // Per-IP connection rate limit.  The verdict is recorded here and
-        // the accept loop in `start_ssh_server` drops a rate-limited
-        // connection before russh sees a byte.  Both auth paths still refuse
-        // while it is set -- unreachable through that loop, and kept so a
-        // handler built any other way (the tests do) cannot log in past it.
-        let (rate_max, rate_window) = config::get_conn_rate();
-        let (rate_limited, rate_say_so) = match peer_addr {
-            Some(a) if rate_max > 0 => {
-                let (count, first) =
-                    telnet::note_connection(&self.conn_rates, a.ip(), rate_max, rate_window);
-                (count > rate_max, first)
-            }
-            _ => (false, false),
-        };
-        if let Some(addr) = peer_addr {
-            // Once per flood, not once per connection -- see `ConnRate`.
-            // `glog!` is a blocking write inline here and the log rolls, so
-            // an unconditional line would push out the evidence it exists to
-            // record.
-            // **Nested, not `&&`.**  With `rate_limited && rate_say_so` the
-            // second and later connections of a flood fall into the `else`
-            // and are logged as ordinary accepted connections -- one blocking
-            // write each, which is the amplifier this exists to remove, and
-            // mislabelled besides: an operator reading the log during a flood
-            // would see thousands of "connection from X" lines and one
-            // refusal.  A refused connection is never a normal one.
-            if rate_limited {
-                if rate_say_so {
-                    glog!(
-                        "SSH: connection from {} over rate limit ({} in {}s); further \
-                         refusals from this address are not logged until it is under \
-                         the limit again",
-                        addr, rate_max, rate_window.as_secs()
-                    );
-                }
-            } else {
-                glog!("SSH: connection from {}", addr);
-            }
+        if let (Some(addr), false) = (peer_addr, rate_limited) {
+            glog!("SSH: connection from {}", addr);
         }
         SshHandler {
             shutdown: self.shutdown.clone(),
@@ -954,14 +978,37 @@ impl russh::server::Server for SshServer {
             lockouts: self.lockouts.clone(),
             // Read once per connection: off the auth path, and enrolling a
             // slave then takes effect on its next reconnect rather than on a
-            // restart of the master.
-            authorized_keys: load_relay_authorized_keys(),
+            // restart of the master.  Not read for a refused one, which can
+            // never authenticate.
+            authorized_keys: if rate_limited {
+                Vec::new()
+            } else {
+                load_relay_authorized_keys()
+            },
             key_authed: false,
             counted: false,
             rate_limited,
             // Filled in by the accept loop, which owns the connection.
             pre_login: None,
         }
+    }
+}
+
+impl russh::server::Server for SshServer {
+    type Handler = SshHandler;
+
+    /// Not the production path -- the accept loop calls [`SshServer::admit`],
+    /// which refuses before building anything.  Kept for anything that drives
+    /// the trait directly: the rate verdict is still taken, and both auth
+    /// paths refuse while it is set, so a handler built this way cannot log
+    /// in past it.
+    fn new_client(&mut self, peer_addr: Option<SocketAddr>) -> SshHandler {
+        let (rate_max, rate_window) = config::get_conn_rate();
+        let rate_limited = match peer_addr {
+            Some(a) => self.over_rate_limit(a, rate_max, rate_window),
+            None => false,
+        };
+        self.build_handler(peer_addr, rate_limited)
     }
 }
 
@@ -1013,9 +1060,12 @@ struct SshHandler {
     /// Shared brute-force lockout map (telnet + SSH).
     lockouts: telnet::LockoutMap,
     /// Set at connect time when this IP is over the per-IP connection rate
-    /// limit; every auth path refuses while it is set.  Decided once in
-    /// `new_client` rather than per attempt, so one connection is one unit of
-    /// rate however many auth methods it tries.
+    /// limit; every auth path refuses while it is set.  Decided once at
+    /// connect rather than per attempt, so one connection is one unit of
+    /// rate however many auth methods it tries.  Always `false` on the
+    /// production path, which refuses before building a handler (see
+    /// [`SshServer::admit`]); also what keeps a refused handler's `Drop`
+    /// silent.
     rate_limited: bool,
     /// The connection's place among those not yet logged in, given back the
     /// moment a login succeeds -- see [`PreLogin`].  `None` for a handler not
@@ -1077,7 +1127,10 @@ impl Drop for SshHandler {
             }
             self.session_count.fetch_sub(1, Ordering::SeqCst);
         }
-        if let Some(addr) = self.peer_addr {
+        // Only a connection that was logged arriving is logged leaving: a
+        // refused one said nothing on the way in, and a line per refusal on
+        // the way out is the amplifier `SshServer::admit` exists to remove.
+        if let (Some(addr), false) = (self.peer_addr, self.rate_limited) {
             glog!("SSH: {} disconnected", addr);
         }
     }
@@ -1123,7 +1176,13 @@ impl SshHandler {
             session.channel_failure(channel)?;
             return Ok(());
         };
+        // Empty is also what `parse_register_args` returns for a label with a
+        // control byte in it or one too long to draw -- see `wire_token`.
         if label.is_empty() {
+            glog!(
+                "SSH: serial-register from {} refused (no usable port label)",
+                slave_ip
+            );
             session.channel_failure(channel)?;
             return Ok(());
         }
@@ -1610,10 +1669,13 @@ impl russh::server::Handler for SshHandler {
     /// channel into a master-side relay session (the full menu / transfer
     /// / dial-out machinery) rather than an interactive shell.
     ///
-    /// Auth already happened in `auth_password` (the slave logs in with
-    /// the master's unified credentials — review finding 2), so the only
-    /// extra gates here are: the command must be `serial-relay`, this
-    /// gateway must be a `master`, and `master_accept_relays` must be on.
+    /// Auth already happened, by one of two routes: `auth_password` (the
+    /// slave logs in with the master's unified credentials — review finding
+    /// 2) or `auth_publickey` with a key enrolled in `relay_authorized_keys`
+    /// (which is why a key login reaches `exec` but never a shell -- see
+    /// `key_authed`).  So the only extra gates here are: the command must be
+    /// one this handler knows, this gateway must be a `master`, and
+    /// `master_accept_relays` must be on.
     /// Any other `exec` is refused — this is not a general command shell.
     async fn exec_request(
         &mut self,
@@ -2308,14 +2370,23 @@ mod tests {
         let start = code.find("let pending: SharedPreLoginPool = Default::default();").expect("accept loop");
         let lp = &code[start..start + code[start..].find("\n    });").expect("end of the loop")];
         for needle in [
-            "if handler.rate_limited",
-            "MAX_PRE_LOGIN_PER_ADDRESS",
+            "server.admit(&pending, peer, rate_max, rate_window, &mut full_said)",
             "if shutdown.load(Ordering::SeqCst)",
-            "handler.pre_login = Some(pre.clone());",
             "PreLoginStream::new(tcp, pre, telnet::PRE_LOGIN_DEADLINE)",
             "russh::server::run_stream(config, stream, handler)",
         ] {
             assert!(lp.contains(needle), "the accept loop no longer does `{needle}`");
+        }
+        // The loop builds no handler of its own: `admit` is the one place, and
+        // it refuses first -- see `test_a_refused_ssh_connection_logs_nothing`.
+        assert!(!lp.contains("new_client("), "the accept loop builds a handler before refusing");
+        let a = code.find("    fn admit(").expect("admit");
+        let admit = &code[a..a + code[a..].find("\n    }\n").expect("end of admit")];
+        for needle in [
+            "MAX_PRE_LOGIN_PER_ADDRESS",
+            "handler.pre_login = Some(pre.clone());",
+        ] {
+            assert!(admit.contains(needle), "`admit` no longer does `{needle}`");
         }
         // Split with `concat!` so this test's own text is not what it finds.
         assert!(!code.contains(concat!("run_on", "_socket(")), "russh's accept loop is back");
@@ -2324,6 +2395,108 @@ mod tests {
         let mark = concat!("self.mark_logged", "_in();");
         assert_eq!(code.matches(set).count(), 1, "one place sets `counted`");
         assert_eq!(code.matches(mark).count(), 2, "both auth paths use it");
+    }
+
+    fn test_server() -> SshServer {
+        SshServer {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            restart: Arc::new(AtomicBool::new(false)),
+            session_count: Arc::new(AtomicUsize::new(0)),
+            max_sessions: 4,
+            session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            conn_rates: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// **A refused connection says nothing of its own** -- only the
+    /// once-per-flood line.  The handler used to be built before either
+    /// refusal was decided, so a rate-limited connection logged "disconnected"
+    /// as it was dropped, and a pre-login-full one logged "connection from" and
+    /// then "disconnected" -- two blocking writes per refusal, under the very
+    /// line promising "further refusals are not logged".
+    ///
+    /// Counted in the shared log ring by an address no other test uses, and
+    /// each negative count has a **positive control** beside it: the accepted
+    /// connections must log both lines, or a count of zero would only prove
+    /// the ring had rotated.
+    #[test]
+    fn test_a_refused_ssh_connection_logs_nothing() {
+        crate::logger::init();
+        let count = |needle: &str| {
+            crate::logger::snapshot(2000).iter().filter(|l| l.contains(needle)).count()
+        };
+        // An arrival line ends with the address; the rate-limit line begins
+        // with the same words and must not be counted as one.
+        let arrivals = |peer: &str| {
+            let line = format!("SSH: connection from {peer}");
+            crate::logger::snapshot(2000).iter().filter(|l| l.ends_with(&line)).count()
+        };
+        let window = std::time::Duration::from_secs(60);
+        let mut server = test_server();
+
+        // The rate limit: one connection a minute from this address.
+        let pending: SharedPreLoginPool = Default::default();
+        let mut full_said = false;
+        let rated: SocketAddr = "203.0.113.71:40001".parse().unwrap();
+        let first = server.admit(&pending, rated, 1, window, &mut full_said);
+        assert!(first.is_some(), "the first connection is under the limit");
+        for _ in 0..5 {
+            assert!(server.admit(&pending, rated, 1, window, &mut full_said).is_none());
+        }
+        assert_eq!(arrivals("203.0.113.71:40001"), 1, "only the admitted one arrives");
+        assert_eq!(count("from 203.0.113.71:40001 over rate limit"), 1, "one line per flood");
+        assert_eq!(count("SSH: 203.0.113.71 disconnected"), 0, "a refusal left silently");
+        drop(first);
+        assert_eq!(count("SSH: 203.0.113.71 disconnected"), 1, "positive control: the admitted one");
+
+        // The pre-login bound: this address may hold eight places.
+        let pending: SharedPreLoginPool = Default::default();
+        let mut full_said = false;
+        let crowd: SocketAddr = "203.0.113.72:40002".parse().unwrap();
+        let held: Vec<_> = (0..MAX_PRE_LOGIN_PER_ADDRESS)
+            .map(|_| server.admit(&pending, crowd, 0, window, &mut full_said).expect("room"))
+            .collect();
+        for _ in 0..5 {
+            assert!(server.admit(&pending, crowd, 0, window, &mut full_said).is_none());
+        }
+        assert_eq!(
+            arrivals("203.0.113.72:40002"),
+            MAX_PRE_LOGIN_PER_ADDRESS,
+            "a refused connection must not be logged as arriving"
+        );
+        assert_eq!(count("SSH: refusing 203.0.113.72:40002"), 1, "one line per flood");
+        assert_eq!(count("SSH: 203.0.113.72 disconnected"), 0, "a refusal left silently");
+        drop(held);
+        assert_eq!(
+            count("SSH: 203.0.113.72 disconnected"),
+            MAX_PRE_LOGIN_PER_ADDRESS,
+            "positive control: every admitted one"
+        );
+    }
+
+    /// A handler built through the trait while over the limit is silent at
+    /// both ends too, and never reads the keys file it could not use.
+    #[test]
+    fn test_a_rate_limited_handler_is_silent_and_holds_no_keys() {
+        crate::logger::init();
+        let server = test_server();
+        let peer: SocketAddr = "203.0.113.73:40003".parse().unwrap();
+        let h = server.build_handler(Some(peer), true);
+        assert!(h.authorized_keys.is_empty());
+        drop(h);
+        let n = crate::logger::snapshot(2000)
+            .iter()
+            .filter(|l| l.contains("203.0.113.73"))
+            .count();
+        assert_eq!(n, 0, "a refused handler logged");
+        // Positive control: the same address, not refused, logs both lines.
+        drop(server.build_handler(Some(peer), false));
+        let n = crate::logger::snapshot(2000)
+            .iter()
+            .filter(|l| l.contains("203.0.113.73"))
+            .count();
+        assert_eq!(n, 2, "an admitted handler logs arriving and leaving");
     }
 
     fn loopback_handler(addr: SocketAddr, pre_login: Option<Arc<PreLogin>>) -> SshHandler {

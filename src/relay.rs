@@ -178,6 +178,19 @@ where
 /// the telnet Serial Gateway picker's peer-call wait.
 pub const RELAY_PEER_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// May this master serve its Kermit server to a slave port?
+///
+/// **One predicate, because the answer is needed in two places and the
+/// *order* is what went wrong.** The refusal has to be decided in `ssh.rs`
+/// *before* [`RELAY_HELLO`] goes out -- a hello is the master saying "accepted",
+/// and a gate evaluated after it turns a refusal into a slave that reports
+/// success and reconnects once a second for ever. [`run_master_relay_kermit`]
+/// keeps asking too, as a backstop for any caller that is not the SSH exec
+/// path; both read this, so the two cannot drift apart on what the rule is.
+pub fn kermit_relay_allowed(cfg: &crate::config::Config) -> bool {
+    cfg.allow_relay_kermit
+}
+
 /// Master-side **Kermit server** for a slave's Kermit-server-mode port.
 ///
 /// The slave pipes its UART to this channel and serves nothing itself, so the
@@ -193,19 +206,6 @@ pub const RELAY_PEER_ANSWER_WAIT: std::time::Duration = std::time::Duration::fro
 /// that authenticated to this master over SSH, and `master_accept_relays` is
 /// already required), but it still hands a remote wire unauthenticated read and
 /// write access to the transfer directory, so the operator opts in.
-/// May this master serve its Kermit server to a slave port?
-///
-/// **One predicate, because the answer is needed in two places and the
-/// *order* is what went wrong.** The refusal has to be decided in `ssh.rs`
-/// *before* [`RELAY_HELLO`] goes out -- a hello is the master saying "accepted",
-/// and a gate evaluated after it turns a refusal into a slave that reports
-/// success and reconnects once a second for ever. [`run_master_relay_kermit`]
-/// keeps asking too, as a backstop for any caller that is not the SSH exec
-/// path; both read this, so the two cannot drift apart on what the rule is.
-pub fn kermit_relay_allowed(cfg: &crate::config::Config) -> bool {
-    cfg.allow_relay_kermit
-}
-
 pub async fn run_master_relay_kermit<S>(mut relay: S, port_label: String, peer: Option<IpAddr>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -439,12 +439,6 @@ pub struct ParsedRelay {
     pub kermit: bool,
 }
 
-/// Parse a `serial-relay …` exec command.  Returns `None` for anything
-/// that isn't a well-formed relay command (the master refuses it — this
-/// is not a general command-exec shell).  Grammar:
-///   `serial-relay <port> menu`
-///   `serial-relay <port> dial <host>:<port>`
-///   `serial-relay <port> peer <Port>@<host>`
 /// Split a dial target into `(host, port)`, accepting both `host:port` and
 /// the bracketed IPv6 form `[2001:db8::1]:6400`, and returning the host as a
 /// *bare* literal (brackets stripped) that `TcpStream::connect((host, port))`
@@ -477,6 +471,12 @@ pub fn split_dial_host_port(s: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
+/// Parse a `serial-relay …` exec command.  Returns `None` for anything
+/// that isn't a well-formed relay command (the master refuses it — this
+/// is not a general command-exec shell).  Grammar:
+///   `serial-relay <port> menu`
+///   `serial-relay <port> dial <host>:<port>`
+///   `serial-relay <port> peer <Port>@<host>`
 pub fn parse_relay_command(command: &str) -> Option<ParsedRelay> {
     let mut toks = command.split_whitespace();
     if toks.next()? != "serial-relay" {
@@ -765,15 +765,82 @@ pub fn master_password_state(configured: &str) -> MasterPasswordState {
     MasterPasswordState::Missing
 }
 
-/// Enrolment happens **once per process**, not once per connection: a slave
-/// opens several relay connections (port A, port B, the CP/M endpoint) and they
-/// would otherwise each offer the same key.
+/// Whether, and when, to offer this slave's key to the master again.
+///
+/// A slave opens several relay connections (port A, port B, the CP/M endpoint)
+/// and they would otherwise each offer the same key, so the outcome is
+/// remembered for the process.  **What it remembers depends on the answer**:
+///
+/// * **Accepted** ends it for good -- the next connection logs in by key, and
+///   that login is the evidence acted on (see `forget_master_password`).
+/// * **Refused** is *not* final.  A master answers `channel_failure` when it
+///   is too old to know the command -- which will never change -- but also
+///   when it is briefly not a master or has relays switched off, which an
+///   operator fixes in a minute.  Latching on a refusal retired enrolment for
+///   the life of a headless daemon on the strength of that one bad minute,
+///   which is exactly what the comment on the early latch already called
+///   wrong.  So a refusal is **retried after [`ENROL_RETRY_AFTER`]**, and only
+///   the first refusal is logged: an old master is asked again a few times an
+///   hour, silently, and the log says once what it would say every time.
+/// * **No answer** (a channel that would not open, a timeout) is retried on
+///   the next connection, as before.
 ///
 /// The wipe deliberately has no such latch -- see [`forget_master_password`],
 /// where one was a bug.  The difference is that an offer has nothing to test
 /// itself against, while the wipe can simply ask whether the password is still
 /// there.
-static KEY_OFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[derive(Debug, Default)]
+pub(crate) struct EnrolLatch {
+    accepted: bool,
+    /// When the master last refused.
+    refused_at: Option<std::time::Instant>,
+    /// Whether a refusal has been logged yet -- once per process.
+    refusal_logged: bool,
+}
+
+/// How long a refused key offer waits before being made again.
+///
+/// Long enough that an old master which will always refuse costs a few
+/// channel opens an hour, on connections that exist anyway; short enough that
+/// a master whose relays were off for a minute enrols this slave the same
+/// session rather than at its next restart.
+pub(crate) const ENROL_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+impl EnrolLatch {
+    /// Should this connection offer the key?
+    pub(crate) fn should_offer(&self, now: std::time::Instant) -> bool {
+        if self.accepted {
+            return false;
+        }
+        match self.refused_at {
+            Some(t) => now.saturating_duration_since(t) >= ENROL_RETRY_AFTER,
+            None => true,
+        }
+    }
+
+    /// The master accepted the key: never offer it again.
+    pub(crate) fn accepted(&mut self) {
+        self.accepted = true;
+    }
+
+    /// The master refused.  Returns whether to log it -- true only the first
+    /// time, so a master that always refuses is reported once, not hourly.
+    pub(crate) fn refused(&mut self, now: std::time::Instant) -> bool {
+        self.refused_at = Some(now);
+        !std::mem::replace(&mut self.refusal_logged, true)
+    }
+}
+
+static ENROL_LATCH: std::sync::Mutex<EnrolLatch> = std::sync::Mutex::new(EnrolLatch {
+    accepted: false,
+    refused_at: None,
+    refusal_logged: false,
+});
+
+fn enrol_latch() -> std::sync::MutexGuard<'static, EnrolLatch> {
+    ENROL_LATCH.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// How long to wait for the master's answer to a key offer.
 ///
 /// Short on purpose: this runs inside the relay connect's own budget, and a
@@ -790,12 +857,12 @@ const ENROL_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// `channel_failure`, which is exactly the "not supported" signal we want and
 /// needs no protocol version bump.
 async fn offer_key_for_enrolment_once(session: &russh::client::Handle<SlaveRelayHandler>) {
-    use std::sync::atomic::Ordering;
-    // **Latched only on a definite answer.**  Setting it here, before the
-    // attempt, meant one bad moment -- a master briefly not accepting relays, a
-    // channel that would not open, a lost race with another slave -- retired
-    // enrolment for the life of the process, on a headless daemon, silently.
-    if KEY_OFFERED.load(Ordering::SeqCst) {
+    // **Latched only on a definite answer, and only an acceptance is final.**
+    // Setting it here, before the attempt, meant one bad moment -- a master
+    // briefly not accepting relays, a channel that would not open, a lost race
+    // with another slave -- retired enrolment for the life of the process, on
+    // a headless daemon, silently.  See `EnrolLatch` for the refusal case.
+    if !enrol_latch().should_offer(std::time::Instant::now()) {
         return;
     }
     let line = match crate::ssh::client_public_key_line() {
@@ -842,17 +909,23 @@ async fn offer_key_for_enrolment_once(session: &russh::client::Handle<SlaveRelay
     .await;
     match answer {
         Ok(Some(true)) => {
-            KEY_OFFERED.store(true, Ordering::SeqCst);
+            enrol_latch().accepted();
             glog!("Relay: the master accepted this slave's key for enrolment ({})", label);
         }
         Ok(Some(false)) => {
             // A master that does not know the command, is not a master, or has
-            // relays off answers exactly this.  Not retried: the answer will be
-            // the same next time, and the password keeps working.
-            KEY_OFFERED.store(true, Ordering::SeqCst);
-            glog!(
-                "Relay: this master did not accept key enrolment; keeping the stored password"
-            );
+            // relays off answers exactly this.  The first will never change and
+            // the other two are an operator's minute, and nothing here can tell
+            // them apart -- so it is retried after a wait, and said once.  The
+            // password keeps working meanwhile.
+            let say = enrol_latch().refused(std::time::Instant::now());
+            if say {
+                glog!(
+                    "Relay: this master did not accept key enrolment; keeping the stored \
+                     password (asking again every {} minutes, without logging it)",
+                    ENROL_RETRY_AFTER.as_secs() / 60
+                );
+            }
         }
         _ => glog!("Relay: no answer to the key offer; will retry on the next connection"),
     }
@@ -1180,6 +1253,19 @@ pub enum RelayConnectError {
     Refused(String),
 }
 
+/// Classify a relay `exec` request that could not be sent.
+///
+/// **`Network`, not `Refused`.**  It was `Refused` -- a hard 60-second backoff
+/// -- on the belief that a master's `channel_failure` surfaced as an `exec`
+/// error.  It does not: russh resolves `exec()` `Ok` on a refusal, which is
+/// the whole reason [`RELAY_HELLO`] exists.  The only thing that reaches this
+/// is a send that failed because the connection went away, and treating a
+/// dropped link as a configuration refusal held a slave off its master for a
+/// minute after every blip.
+fn exec_send_failed(e: impl std::fmt::Display) -> RelayConnectError {
+    RelayConnectError::Network(format!("could not send the relay request: {}", e))
+}
+
 impl RelayConnectError {
     /// The human-readable detail message.
     pub fn message(&self) -> &str {
@@ -1280,16 +1366,51 @@ pub async fn connect_master_register(
 /// A missing token is `None` rather than a default: "we were not told" and "it
 /// is set to pass-through" are different answers, and only the first should keep
 /// a screen quiet about something it cannot see.
+///
+/// **Every token is remote input that a master stores and draws.** It lands in
+/// [`REMOTE_PORTS`] and from there on the Serial Gateway picker, the web and
+/// desktop screens and the log -- so an `ESC` in a label is a cursor movement
+/// on a master user's terminal, and a 4 KB label is a menu row nobody can read.
+/// Each token must be a [`wire_token`]; one that is not is treated as **not
+/// sent** rather than cleaned, because a cleaned `"A\x1b[2J"` would become
+/// `"A2J"` and quietly name a port the slave never offered. So an unusable
+/// label comes back empty, which the SSH handler refuses, and an unusable mode
+/// or erase key comes back `None`, which every screen already renders as "we
+/// were not told".
 pub fn parse_register_args(rest: &str) -> (String, RemotePortFacts) {
     let mut toks = rest.split_whitespace();
-    let label = toks.next().unwrap_or("").to_string();
+    let label = toks.next().and_then(wire_token).unwrap_or_default();
     (
         label,
         RemotePortFacts {
-            mode: toks.next().map(str::to_string),
-            erase: toks.next().map(str::to_string),
+            mode: toks.next().and_then(wire_token),
+            erase: toks.next().and_then(wire_token),
         },
     )
+}
+
+/// The longest token a master stores from a slave's `serial-register`, and
+/// the longest label `enroll_relay_key` writes beside a key.
+///
+/// Every real token is a word -- `A`, `CPM`, `console`, `passthrough` -- so
+/// this is far past anything legitimate and short enough for a menu row.
+pub(crate) const WIRE_TOKEN_MAX: usize = 32;
+
+/// May a remote peer put `c` in a token this gateway stores and later shows?
+///
+/// One rule for both places a slave's words are kept: the `serial-register`
+/// tokens here, and the label `ssh::enroll_relay_key` writes into
+/// `relay_authorized_keys`.  Letters, digits, `-`, `.` and `_`: no control
+/// byte, no `ESC`, no space, no newline.
+pub(crate) fn is_wire_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')
+}
+
+/// `t` if it is a usable token from the wire, else `None` -- refused whole,
+/// never trimmed into something else.  See [`parse_register_args`].
+pub(crate) fn wire_token(t: &str) -> Option<String> {
+    (!t.is_empty() && t.len() <= WIRE_TOKEN_MAX && t.chars().all(is_wire_token_char))
+        .then(|| t.to_string())
 }
 
 /// Shared connect+auth+channel+exec, bounded so a wedged master can't freeze
@@ -1614,13 +1735,16 @@ async fn connect_master_relay_inner(
         .channel_open_session()
         .await
         .map_err(|e| RelayConnectError::Network(format!("channel open failed: {}", e)))?;
-    // The master sends channel_failure to a non-master / relays-off / older
-    // build, surfacing here as an exec error — that's a *refusal* (config),
-    // not a transient network fault, so back off hard rather than hammer.
+    // **A refusal does not surface here.**  `exec()` only queues the request
+    // and resolves `Ok` even when the master answers `channel_failure` (see
+    // [`RELAY_HELLO`]); a refusal is detected below, by the hello never
+    // arriving.  So an `Err` from this call is the request failing to *send*
+    // -- the transport died between the channel opening and now -- which is
+    // a network fault, and retrying briskly is right.  See `exec_send_failed`.
     channel
         .exec(true, exec_command.as_bytes())
         .await
-        .map_err(|e| RelayConnectError::Refused(format!("relay declined by master: {}", e)))?;
+        .map_err(exec_send_failed)?;
 
     // The key verified and the channel opened, so any pinned-key problem for
     // this master no longer applies. Withdrawing it here rather than leaving it
@@ -1822,14 +1946,13 @@ where
 pub const RELAY_ANSWER_WAIT: std::time::Duration =
     RELAY_PEER_ANSWER_WAIT.saturating_add(std::time::Duration::from_secs(5));
 
-/// A registered remote console port: the master's end of the idle SSH
-/// registration channel, paired with the generation stamped when it was
-/// registered (see [`REMOTE_PORTS`] for why the generation matters).
-/// A registered remote port: the master's end of the channel, the generation
-/// stamp that guards a re-register race, and the mode the slave reported.
+/// A registered remote port: the master's end of the idle SSH registration
+/// channel, the generation stamped when it was registered (see
+/// [`REMOTE_PORTS`] for why the generation matters), and the
+/// [`RemotePortFacts`] the slave reported about it.
 ///
-/// The mode is `None` for a slave too old to send one -- see
-/// [`register_remote_port`].
+/// Each fact is `None` for a slave too old to send it -- see
+/// [`RemotePortFacts`].
 type RegisteredPort = (tokio::io::DuplexStream, u64, RemotePortFacts);
 
 /// What the wire told us about a registered port, beyond where it is.
@@ -2040,8 +2163,6 @@ pub async fn claim_remote_peer(ip: IpAddr, label: &str) -> PeerClaim {
     }
 }
 
-/// List the currently-registered remote console ports, sorted stably so
-/// the picker order doesn't jump around between redraws.
 /// How many distinct **slaves** are registered with this master right now.
 ///
 /// Counted by address, not by port: the registry is keyed by
@@ -2055,6 +2176,8 @@ pub fn connected_slave_count() -> usize {
     ips.len()
 }
 
+/// List the currently-registered remote console ports, sorted stably so
+/// the picker order doesn't jump around between redraws.
 pub fn list_remote_ports() -> Vec<RemotePort> {
     let g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
     let mut v: Vec<RemotePort> = g
@@ -2248,7 +2371,6 @@ pub fn slave_relay_status() -> SlaveRelayStatus {
     SlaveRelayStatus::Idle
 }
 
-/// Read a slave port's current link state.
 /// True while this gateway is the one announcing its CP/M emulator to the
 /// master as the dialable `CPM` endpoint.  Set by the announcer task; read for
 /// the slave-link summary so the log shows the emulator alongside the ports.
@@ -2326,6 +2448,7 @@ pub fn log_slave_link_summary(host: &str, port: u16) {
     }
 }
 
+/// Read a slave port's current link state.
 pub fn slave_link_state(port_index: usize) -> SlaveLinkState {
     SLAVE_LINK
         .get(port_index)

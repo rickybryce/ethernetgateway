@@ -552,6 +552,8 @@ fn main() {
                 // result kept from the last cycle would redden a port that was
                 // never tested.
                 portcheck::reset();
+                // A host-key entry for a master no longer configured can never clear.
+                resolve::withdraw_stale();
                 telnet::start_server(
                     shutdown_rt.clone(),
                     restart_rt.clone(),

@@ -94,6 +94,24 @@ impl Problem {
         }
     }
 
+    /// Does this problem still describe the configuration in force?
+    ///
+    /// A host-key entry is about **the master this slave is configured to
+    /// reach**. Once the operator points `slave_master_host`/`_port`
+    /// elsewhere, or the gateway stops being a slave, no relay will ever
+    /// connect to that master again -- and a successful connect is the only
+    /// thing that withdrew the entry, so it stayed listed for ever, an offer
+    /// to fix a machine nobody uses.
+    pub fn still_applies(&self, cfg: &crate::config::Config) -> bool {
+        match self {
+            Problem::MasterHostKeyChanged { host, port } => {
+                cfg.gateway_role == "slave"
+                    && cfg.slave_master_host == *host
+                    && cfg.slave_master_port == *port
+            }
+        }
+    }
+
     /// What the remedy does, in the imperative, for a button or a menu row.
     pub fn action(&self) -> String {
         match self {
@@ -169,6 +187,38 @@ pub fn clear(id: &str) {
     }
 }
 
+/// Withdraw every entry that no longer describes `cfg`, returning their ids.
+///
+/// The pure half of [`withdraw_stale`], separate so a test can drive it with a
+/// configuration of its own rather than the process-wide one.
+fn retain_applicable(pending: &mut Vec<Problem>, cfg: &crate::config::Config) -> Vec<String> {
+    let mut gone = Vec::new();
+    pending.retain(|p| {
+        let keep = p.still_applies(cfg);
+        if !keep {
+            gone.push(p.id());
+        }
+        keep
+    });
+    gone
+}
+
+/// Withdraw entries the current configuration has made irrelevant.
+///
+/// **Called at the start of every server cycle**, which is where a Save and
+/// Restart lands: `PENDING` is process-global and survives the restart, and
+/// [`clear`] runs only when a relay reaches the *same* master, which a changed
+/// host or role guarantees will never happen. An entry that cannot be cleared
+/// is the failure the [`clear`] doc warns about -- the operator learns to
+/// ignore the screen.
+pub fn withdraw_stale() {
+    let cfg = crate::config::get_config();
+    let gone = retain_applicable(&mut lock(), &cfg);
+    for id in gone {
+        crate::glog!("Resolvable problem withdrawn (no longer configured): {}", id);
+    }
+}
+
 /// Everything currently pending, in the order it appeared.
 pub fn list() -> Vec<Problem> {
     lock().clone()
@@ -234,6 +284,46 @@ mod tests {
         // And the port is part of the identity — one host can be two masters.
         let c = Problem::MasterHostKeyChanged { host: "10.1.1.1".to_string(), port: 2223 };
         assert_ne!(a.id(), c.id());
+    }
+
+    /// An entry is withdrawn when the configuration stops pointing at it: a
+    /// different master host, a different port, or a gateway that is no longer
+    /// a slave. Before, only a successful connect to that same master cleared
+    /// it, which none of those three can ever produce. A positive control
+    /// keeps the entry for the master still configured, so a `retain` that
+    /// dropped everything cannot pass.
+    #[test]
+    fn test_an_entry_for_a_master_no_longer_configured_is_withdrawn() {
+        let slave = |host: &str, port: u16| crate::config::Config {
+            gateway_role: "slave".to_string(),
+            slave_master_host: host.to_string(),
+            slave_master_port: port,
+            ..Default::default()
+        };
+        let p = Problem::MasterHostKeyChanged { host: "10.7.7.7".to_string(), port: 2222 };
+
+        // Still the configured master: kept.
+        let mut pending = vec![p.clone()];
+        assert!(retain_applicable(&mut pending, &slave("10.7.7.7", 2222)).is_empty());
+        assert_eq!(pending, vec![p.clone()], "the configured master's entry must stay");
+
+        // Pointed at another host, another port, or not a slave at all: gone.
+        let standalone = crate::config::Config {
+            gateway_role: "standalone".to_string(),
+            ..slave("10.7.7.7", 2222)
+        };
+        for cfg in [slave("10.7.7.8", 2222), slave("10.7.7.7", 2223), standalone] {
+            let mut pending = vec![p.clone()];
+            assert_eq!(retain_applicable(&mut pending, &cfg), vec![p.id()]);
+            assert!(pending.is_empty(), "stale entry kept for {}:{} role {}",
+                cfg.slave_master_host, cfg.slave_master_port, cfg.gateway_role);
+        }
+
+        // Order of what survives is untouched.
+        let q = Problem::MasterHostKeyChanged { host: "10.7.7.9".to_string(), port: 2222 };
+        let mut pending = vec![q.clone(), p.clone()];
+        retain_applicable(&mut pending, &slave("10.7.7.7", 2222));
+        assert_eq!(pending, vec![p]);
     }
 
     /// Resolving something that is not listed is an error, not a silent success:
