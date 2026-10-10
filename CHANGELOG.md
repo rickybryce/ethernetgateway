@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-10-10
+
 ### Security
 
 - **Telnet checks the login lockout before every password guess.**  It was
@@ -84,6 +86,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0`; it read as `auto` before.
 
 ### Fixed
+- **Modem: a lone `+` reaches the remote.**  One or two `+` typed after a
+  pause were held in case they began `+++`, and released only by the next
+  keystroke, so a `+` with nothing after it never arrived.  They are now sent
+  once guard time (S12) passes without a third.  As on a Hayes modem, the three
+  characters of `+++` must each come within guard time of the one before.
+  The CP/M emulator's virtual modem had the same hold and is fixed the same
+  way, for both the emulator and a booted disk; there `S12=0` still means any
+  `+++` escapes, so a held `+` is then flushed by the next byte as before.
+- **Modem: an escape is not lost to the next keystroke.**  When `+++` and its
+  trailing guard time were complete but the modem had not yet checked, the next
+  characters typed (a script's `ATH` after a one-second pause, say) were sent to
+  the remote with the `+++` in front of them, and the modem stayed online.  The
+  escape now counts, and those characters are read as the command they were.
+- **Modem: what `AT&W` saves survives the device dropping.**  A port whose
+  device disconnects and returns (a USB adapter re-plugged, a `socat` bridge
+  restarted) came back with the settings from the last configuration save,
+  ignoring any `AT&W` made since -- echo, quiet, verbose, the S-registers and
+  the stored numbers among them.  It now reloads the saved profile on every
+  reopen, as a modem does on power-up.
+- **Modem: a port saved quiet (`ATQ1`) stays quiet when it opens.**  The `OK`
+  a port prints on opening ignored `ATQ1` and `ATV0`; it is now a result code
+  like any other, so it is silent or `0` as the profile asks.
 - ZMODEM: a sender that hangs up while the receiver is still negotiating
   ends the receive at once. A closed connection was treated as line noise,
   so the receiver resent ZRINIT in a tight loop and spun a core for the whole
@@ -340,28 +364,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Modem: a lone `+` reaches the remote.**  One or two `+` typed after a
-  pause were held in case they began `+++`, and released only by the next
-  keystroke, so a `+` with nothing after it never arrived.  They are now sent
-  once guard time (S12) passes without a third.  As on a Hayes modem, the three
-  characters of `+++` must each come within guard time of the one before.
-  The CP/M emulator's virtual modem had the same hold and is fixed the same
-  way, for both the emulator and a booted disk; there `S12=0` still means any
-  `+++` escapes, so a held `+` is then flushed by the next byte as before.
-- **Modem: an escape is not lost to the next keystroke.**  When `+++` and its
-  trailing guard time were complete but the modem had not yet checked, the next
-  characters typed (a script's `ATH` after a one-second pause, say) were sent to
-  the remote with the `+++` in front of them, and the modem stayed online.  The
-  escape now counts, and those characters are read as the command they were.
-- **Modem: what `AT&W` saves survives the device dropping.**  A port whose
-  device disconnects and returns (a USB adapter re-plugged, a `socat` bridge
-  restarted) came back with the settings from the last configuration save,
-  ignoring any `AT&W` made since -- echo, quiet, verbose, the S-registers and
-  the stored numbers among them.  It now reloads the saved profile on every
-  reopen, as a modem does on power-up.
-- **Modem: a port saved quiet (`ATQ1`) stays quiet when it opens.**  The `OK`
-  a port prints on opening ignored `ATQ1` and `ATV0`; it is now a result code
-  like any other, so it is silent or `0` as the profile asks.
 - **Kermit.**  One lost packet or ACK no longer ends a transfer: each retry
   gets its own timeout.  Sliding windows past 22 packets no longer stall.  A
   receiver no longer answers a stale packet for ever.  Kermit server mode from
@@ -8106,7 +8108,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.4
 [1.0.3]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.3
 [1.0.2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.2
 [1.0.1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.1
