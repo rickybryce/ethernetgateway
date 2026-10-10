@@ -1427,7 +1427,7 @@ impl russh::server::Handler for SshHandler {
         let user_ok =
             telnet::constant_time_eq(user.as_bytes(), self.username.as_bytes());
         let pass_ok =
-            crate::credential::verify(&self.password, password);
+            crate::credential::verify_off_runtime(&self.password, password).await;
         if user_ok && pass_ok {
             // Valid credentials reset any failure lockout for this IP.
             if let Some(ip) = self.peer_addr {
@@ -1789,14 +1789,27 @@ impl russh::server::Handler for SshHandler {
             return Ok(());
         }
 
-        let Some(parsed) = crate::relay::parse_relay_command(command) else {
-            glog!(
-                "SSH: refused exec {:?} from {:?} (only serial-relay is allowed)",
-                command,
-                self.peer_addr
-            );
-            session.channel_failure(channel)?;
-            return Ok(());
+        let parsed = match crate::relay::parse_relay_command(command) {
+            Ok(p) => p,
+            Err(why) => {
+                // A refused label is retried on the slave's backoff for ever,
+                // so it is said once per window, exactly as `serial-register`'s
+                // is; every other refusal is a one-off and is always said.
+                let news = why != crate::relay::RelayRefusal::BadLabel
+                    || self
+                        .peer_addr
+                        .is_none_or(|ip| label_refusal_is_news(ip, std::time::Instant::now()));
+                if news {
+                    glog!(
+                        "SSH: refused exec {:?} from {:?} ({})",
+                        command,
+                        self.peer_addr,
+                        why.reason()
+                    );
+                }
+                session.channel_failure(channel)?;
+                return Ok(());
+            }
         };
         let port_label = parsed.port_label;
         let dial_target = parsed.dial;
@@ -1975,8 +1988,8 @@ impl russh::server::Handler for SshHandler {
             }
             match (dial_target, peer_target) {
                 (Some((host, port)), _) => {
-                    // Pass the WHOLE (unsplit) duplex so copy_bidirectional
-                    // can half-close each direction without dropping the
+                    // Pass the WHOLE (unsplit) duplex so the bridge can
+                    // finish each direction without dropping the
                     // peer's final bytes.
                     crate::relay::run_master_relay_dial(gateway_stream, host, port).await;
                 }

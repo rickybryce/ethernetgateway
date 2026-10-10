@@ -757,6 +757,128 @@ fn main() {
     }
 
     glog!("Server stopped.");
+    // Releases a console-close handler that is holding the process open for
+    // this shutdown to finish (Windows only; nothing waits on it elsewhere).
+    console_close::PROCESS_DONE.store(true, Ordering::SeqCst);
+}
+
+/// **Closing the console window is a stop, on Windows as everywhere else.**
+///
+/// The C runtime turns Ctrl-C into `SIGINT`, which `register_signal_handlers`
+/// already catches. It turns the console's close button (`CTRL_CLOSE_EVENT`)
+/// into nothing at all, and the default for an unhandled one is to terminate
+/// the process -- so closing the window that a double-clicked `.exe` opens
+/// skipped the goodbye broadcast, the serial join and the staged image write,
+/// the three things the shutdown path exists to do (the same loss the systemd
+/// SIGHUP entry in CLAUDE.md describes, by a Windows road). A booted disk
+/// written in place is the expensive one.
+///
+/// `SetConsoleCtrlHandler` gets the event on a thread of its own, and **the
+/// process is terminated the moment the handler returns** -- so it trips the
+/// same `stop` + `shutdown` pair SIGTERM does (in the same order, for
+/// `reset_for_next_cycle`) and then *waits* for `main` to finish. Windows
+/// allows about five seconds after a close before killing the process anyway,
+/// which is why the wait is bounded at [`console_close::GRACE`] rather than
+/// left open: overrunning it changes nothing except that the handler, not
+/// Windows, decides when.
+///
+/// The decision and the wait are plain functions over plain values so they
+/// are tested on every platform; only the registration is `cfg(windows)`.
+mod console_close {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// Set by `main` as its last act, so a waiting handler can return early.
+    pub(crate) static PROCESS_DONE: AtomicBool = AtomicBool::new(false);
+
+    /// How long a close may hold the process for the shutdown to finish.
+    ///
+    /// Under Windows' own ~5 s (`HungAppTimeout`) so the handler returns before
+    /// the system gives up on it. The healthy path -- goodbye, 500 ms for it
+    /// to land, the serial join, the runtime's 2 s cap -- is normally well
+    /// inside this; a straggler past it would be cut off by Windows regardless.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) const GRACE: Duration = Duration::from_millis(4500);
+
+    // wincon.h's values, named here rather than imported so the decision below
+    // is testable on a platform with no windows-sys.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const CTRL_C_EVENT: u32 = 0;
+    pub(crate) const CTRL_BREAK_EVENT: u32 = 1;
+    pub(crate) const CTRL_CLOSE_EVENT: u32 = 2;
+    pub(crate) const CTRL_LOGOFF_EVENT: u32 = 5;
+    pub(crate) const CTRL_SHUTDOWN_EVENT: u32 = 6;
+
+    /// Is this console event ours to turn into a graceful stop?
+    ///
+    /// **Not Ctrl-C**: the C runtime already raises `SIGINT` for it and
+    /// signal-hook already stops us, so the handler declines it and the next
+    /// handler in the chain runs as before. Ctrl-Break raises `SIGBREAK`,
+    /// which nothing here catches and whose default is termination, so it is
+    /// taken. Logoff and shutdown are delivered only to processes without a
+    /// window, which this is when run headless, and mean what a close means.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn is_a_stop(event: u32) -> bool {
+        matches!(event, CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT)
+    }
+
+    /// Ask the process to end, exactly as SIGINT/SIGTERM do: `stop` **before**
+    /// `shutdown`, for the reason `register_signal_handlers` gives.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn request_stop(stop: &AtomicBool, shutdown: &AtomicBool) {
+        stop.store(true, Ordering::SeqCst);
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// Wait for `done`, at most `budget`. `true` if it was set in time.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn wait_for(done: &AtomicBool, budget: Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        while !done.load(Ordering::SeqCst) {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        true
+    }
+
+    #[cfg(windows)]
+    static FLAGS: std::sync::OnceLock<(std::sync::Arc<AtomicBool>, std::sync::Arc<AtomicBool>)> =
+        std::sync::OnceLock::new();
+
+    /// Register the handler. Once per process: the flags outlive every cycle.
+    #[cfg(windows)]
+    pub(crate) fn install(stop: std::sync::Arc<AtomicBool>, shutdown: std::sync::Arc<AtomicBool>) {
+        if FLAGS.set((stop, shutdown)).is_err() {
+            return;
+        }
+        // SAFETY: `handler` is a plain `extern "system"` function with the
+        // signature `PHANDLER_ROUTINE` names, and it touches only statics.
+        let ok = unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(handler), 1) };
+        if ok == 0 {
+            crate::logger::glog!(
+                "Warning: could not register the console close handler; closing the \
+                 console window will end the gateway without a clean shutdown."
+            );
+        }
+    }
+
+    /// The console control handler itself. Runs on a thread Windows creates.
+    #[cfg(windows)]
+    unsafe extern "system" fn handler(event: u32) -> windows_sys::core::BOOL {
+        if !is_a_stop(event) {
+            // Not handled: pass it down the chain (Ctrl-C -> SIGINT).
+            return 0;
+        }
+        if let Some((stop, shutdown)) = FLAGS.get() {
+            request_stop(stop, shutdown);
+        }
+        // The signal watcher sees `shutdown` within 100 ms and does the rest:
+        // the notify, and the close command for the desktop window.
+        wait_for(&PROCESS_DONE, GRACE);
+        1
+    }
 }
 
 /// Whether a SIGHUP that has just been observed should arm the restart path.
@@ -860,6 +982,12 @@ fn register_signal_handlers(
         signal_hook::flag::register(SIGHUP, sighup.clone())
             .expect("Failed to register SIGHUP handler");
     }
+
+    // Windows: the console's close button is a stop too -- see `console_close`.
+    // Installed here, beside the signals, so every way of asking this process
+    // to end is registered in one place and trips the same two flags.
+    #[cfg(windows)]
+    console_close::install(stop.clone(), shutdown.clone());
 
     // Spawn a thread that watches the flags and fires the Notify.
     // Loops to survive server restarts (flag resets to false between cycles).
@@ -1044,6 +1172,52 @@ mod tests {
         let reset = body.find("shutdown.store(false").expect("the reset");
         let check = body.find("stop.load(").expect("the re-read");
         assert!(reset < check, "`stop` is read before `shutdown` is reset -- a SIGTERM between them is lost");
+    }
+
+    /// **Closing the Windows console is a graceful stop.**  The decision, the
+    /// flags and the wait are tested here on every platform; the registration
+    /// is held by a scan, since nothing but Windows can deliver the event.
+    #[test]
+    fn test_closing_the_windows_console_stops_the_gateway_gracefully() {
+        use console_close::*;
+        // The close button and its relatives are ours; Ctrl-C is not -- it is
+        // already SIGINT, and taking it here would bypass signal-hook.
+        for event in [CTRL_CLOSE_EVENT, CTRL_BREAK_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT] {
+            assert!(is_a_stop(event), "console event {event} would kill the process outright");
+        }
+        assert!(!is_a_stop(CTRL_C_EVENT), "Ctrl-C must stay on the SIGINT path");
+
+        // A stop, not a reload: both flags, and the main loop must end.
+        let (stop, shutdown) = (AtomicBool::new(false), AtomicBool::new(false));
+        request_stop(&stop, &shutdown);
+        assert!(stop.load(Ordering::SeqCst) && shutdown.load(Ordering::SeqCst));
+        assert!(!should_run_another_cycle(true, stop.load(Ordering::SeqCst)));
+
+        // The handler holds the process open until `main` is done, and no longer.
+        let done = std::sync::Arc::new(AtomicBool::new(false));
+        let setter = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                done.store(true, Ordering::SeqCst);
+            })
+        };
+        let t = std::time::Instant::now();
+        assert!(wait_for(&done, std::time::Duration::from_secs(10)), "the wait missed the finish");
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "the wait outlived the shutdown");
+        setter.join().unwrap();
+        // ...and gives up inside Windows' own limit if the shutdown hangs.
+        assert!(!wait_for(&AtomicBool::new(false), std::time::Duration::from_millis(50)));
+        assert!(GRACE < std::time::Duration::from_secs(5), "past ~5 s Windows kills us first");
+
+        // Registered, the stop requested before the wait, and released by main.
+        let src = main_source();
+        let reg = &src[src.find("fn register_signal_handlers(").expect("fn")..];
+        assert!(reg.contains("console_close::install(stop.clone(), shutdown.clone());"));
+        let h = &src[src.find("unsafe extern \"system\" fn handler(").expect("handler")..];
+        let (req, wait) = (h.find("request_stop(").expect("request"), h.find("wait_for(").expect("wait"));
+        assert!(req < wait, "the handler waits before asking anything to stop");
+        assert!(src.contains("console_close::PROCESS_DONE.store(true"), "nothing releases the handler");
     }
 
     /// A copy that found the lock held reads the config and **does not write

@@ -2647,9 +2647,14 @@ impl TelnetSession {
                     self.send_line("").await?;
                     self.send_line(&format!("  {}", self.dim("Testing. This takes a moment."))).await?;
                     self.flush().await?;
-                    let blocked = tokio::task::spawn_blocking(crate::portcheck::run_check)
-                        .await
-                        .unwrap_or(0);
+                    // The cycle is taken before the hand-off: a restart that
+                    // lands mid-probe must not have this check's answers.
+                    let cycle = crate::portcheck::cycle();
+                    let blocked = tokio::task::spawn_blocking(move || {
+                        crate::portcheck::run_check_for_cycle(cycle)
+                    })
+                    .await
+                    .unwrap_or(0);
                     self.send_line("").await?;
                     if blocked == 0 {
                         // Not "all ports are open": a self-connection skips the

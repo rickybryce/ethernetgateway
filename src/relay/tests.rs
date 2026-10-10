@@ -336,7 +336,7 @@ fn test_relay_command_round_trip() {
     let cmd = RelayTarget::Menu.exec_command("A");
     assert_eq!(cmd, "serial-relay A menu");
     assert_eq!(
-        parse_relay_command(&cmd),
+        parse_relay_command(&cmd).ok(),
         Some(ParsedRelay {
             port_label: "A".into(),
             dial: None,
@@ -353,7 +353,7 @@ fn test_relay_command_round_trip() {
     let cmd = target.exec_command("B");
     assert_eq!(cmd, "serial-relay B dial bbs.example.com:6400");
     assert_eq!(
-        parse_relay_command(&cmd),
+        parse_relay_command(&cmd).ok(),
         Some(ParsedRelay {
             port_label: "B".into(),
             dial: Some(("bbs.example.com".into(), 6400)),
@@ -367,7 +367,7 @@ fn test_relay_command_round_trip() {
     let cmd = target.exec_command("A");
     assert_eq!(cmd, "serial-relay A peer B@192.168.1.50");
     assert_eq!(
-        parse_relay_command(&cmd),
+        parse_relay_command(&cmd).ok(),
         Some(ParsedRelay {
             port_label: "A".into(),
             dial: None,
@@ -412,17 +412,17 @@ fn test_relay_command_round_trip() {
 /// it is not a general command-exec shell.
 #[test]
 fn test_parse_relay_command_rejects_garbage() {
-    assert_eq!(parse_relay_command(""), None);
-    assert_eq!(parse_relay_command("rm -rf /"), None);
-    assert_eq!(parse_relay_command("serial-relay A bogus"), None);
-    assert_eq!(parse_relay_command("serial-relay A dial nohostport"), None);
-    assert_eq!(parse_relay_command("serial-relay A dial host:0"), None);
-    assert_eq!(parse_relay_command("serial-relay A dial host:notaport"), None);
+    assert!(parse_relay_command("").is_err());
+    assert!(parse_relay_command("rm -rf /").is_err());
+    assert!(parse_relay_command("serial-relay A bogus").is_err());
+    assert!(parse_relay_command("serial-relay A dial nohostport").is_err());
+    assert!(parse_relay_command("serial-relay A dial host:0").is_err());
+    assert!(parse_relay_command("serial-relay A dial host:notaport").is_err());
     // `peer` with no address is malformed.
-    assert_eq!(parse_relay_command("serial-relay A peer"), None);
+    assert!(parse_relay_command("serial-relay A peer").is_err());
     // Missing port label defaults to "?" but is still a valid menu relay.
     assert_eq!(
-        parse_relay_command("serial-relay"),
+        parse_relay_command("serial-relay").ok(),
         Some(ParsedRelay {
             port_label: "?".into(),
             dial: None,
@@ -430,6 +430,43 @@ fn test_parse_relay_command_rejects_garbage() {
             kermit: false,
         })
     );
+}
+
+/// **A relay's port label is held to `serial-register`'s rule**, and refused
+/// with a reason of its own rather than "only serial-relay is allowed".
+///
+/// Every label a slave of ours sends must still pass, for every target, or
+/// the check would cut off working pairs.
+#[test]
+fn test_a_relay_port_label_must_be_a_wire_token() {
+    use super::RelayRefusal;
+    for label in ["A", "B", "CPM"] {
+        for target in [
+            RelayTarget::Menu,
+            RelayTarget::Kermit,
+            RelayTarget::Dial { host: "bbs.example.com".into(), port: 23 },
+            RelayTarget::Peer { addr: "B@192.168.1.50".into() },
+        ] {
+            let cmd = target.exec_command(label);
+            assert_eq!(parse_relay_command(&cmd).map(|p| p.port_label), Ok(label.into()), "{cmd}");
+        }
+    }
+    let long = "A".repeat(super::WIRE_TOKEN_MAX + 1);
+    for bad in ["A\x1b[2J", "A\x07", "B;", "A/B", long.as_str()] {
+        assert_eq!(
+            parse_relay_command(&format!("serial-relay {bad} menu")),
+            Err(RelayRefusal::BadLabel),
+            "label {bad:?} was accepted"
+        );
+    }
+    // The longest legal label is still a label, and serial-register agrees.
+    let max = "A".repeat(super::WIRE_TOKEN_MAX);
+    assert!(parse_relay_command(&format!("serial-relay {max} menu")).is_ok());
+    assert_eq!(super::parse_register_args(&max).0, max);
+    // The other refusals keep their own reasons.
+    assert_eq!(parse_relay_command("rm -rf /"), Err(RelayRefusal::NotRelay));
+    assert_eq!(parse_relay_command("serial-relay A bogus"), Err(RelayRefusal::Malformed));
+    assert_ne!(RelayRefusal::BadLabel.reason(), RelayRefusal::NotRelay.reason());
 }
 
 /// Serializes the tests that flip `allow_relay_kermit` + `transfer_dir`.
@@ -613,7 +650,7 @@ fn test_kermit_relay_target_round_trips_through_the_grammar() {
     let cmd = RelayTarget::Kermit.exec_command("B");
     assert_eq!(cmd, "serial-relay B kermit");
     assert_eq!(
-        parse_relay_command(&cmd),
+        parse_relay_command(&cmd).ok(),
         Some(ParsedRelay {
             port_label: "B".into(),
             dial: None,
@@ -1476,7 +1513,7 @@ async fn test_master_relay_dial_pipes_both_ways() {
     });
 
     // The relay channel, modeled as a duplex: master end ↔ device end.
-    // run_master_relay_dial takes the WHOLE stream (copy_bidirectional).
+    // run_master_relay_dial takes the WHOLE stream.
     let (master_end, device_end) = tokio::io::duplex(8192);
     let (mut d_read, mut d_write) = tokio::io::split(device_end);
 
@@ -1647,7 +1684,7 @@ async fn test_a_dial_that_fails_sends_no_hello() {
 // (Model B) path** — `device ↔ slave ↔ master ↔ BBS` — end to end: a real
 // XMODEM / YMODEM / ZMODEM transfer runs between a simulated slave-attached
 // device and a simulated external BBS, with every byte crossing
-// `run_master_relay_dial`'s `copy_bidirectional`.  This is the exact code
+// `run_master_relay_dial`'s bridge.  This is the exact code
 // path an `ATDT host:port` from a relayed device takes to reach a file
 // server on the master's network, and it needs no menu, no disk, and no
 // global config, so it runs in CI.
@@ -1699,7 +1736,7 @@ fn adversarial_payload() -> Vec<u8> {
 /// real transfer protocol runs over: the **device** end (what a slave-
 /// attached machine drives) and the **BBS** end (the external host the
 /// master dialed).  Every byte between them traverses
-/// `run_master_relay_dial`'s `copy_bidirectional`.  The returned join
+/// `run_master_relay_dial`'s bridge.  The returned join
 /// handle is the master dialer task (await it to confirm clean teardown).
 /// The `PeerDialGuard` is returned (last) so the caller keeps onward-dial
 /// enabled — and holds the serialization lock — for the whole test; dropping
@@ -2584,4 +2621,123 @@ fn test_register_tokens_with_control_bytes_or_too_long_are_refused() {
 
     // Non-ASCII is refused too: on a C64 a byte is a column, a char is not.
     assert_eq!(super::parse_register_args("\u{c4}").0, "");
+}
+
+/// **A slave hanging up ends the onward call, even when the BBS ignores the
+/// half-close.**
+///
+/// The fake BBS here reads to EOF and then simply *holds the socket open*,
+/// which is what a BBS may well do with a FIN. Under `copy_bidirectional` the
+/// master then waited for the BBS to close too, so the dial task -- with the
+/// onward TCP connection and, in `ssh.rs`, the slave's session-cap slot --
+/// lived as long as the BBS did. Now the call ends within the drain, and the
+/// BBS sees the connection go.
+#[tokio::test]
+async fn test_a_slave_hangup_ends_the_onward_call_when_the_bbs_ignores_eof() {
+    let _peer_dial = enable_peer_dial().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (bbs_saw_close_tx, bbs_saw_close) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let Ok((mut sock, _)) = listener.accept().await else { return };
+        let mut buf = [0u8; 256];
+        // Read until the master passes the hang-up on as a FIN...
+        while let Ok(n) = sock.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+        }
+        // ...and then do nothing about it. The only way this socket learns
+        // the call is over is the master dropping it, which a write notices.
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if sock.write_all(b"still here\r\n").await.is_err() {
+                let _ = bbs_saw_close_tx.send(());
+                return;
+            }
+        }
+    });
+
+    let (master_end, device_end) = tokio::io::duplex(8192);
+    let (mut d_read, mut d_write) = tokio::io::split(device_end);
+    let dialer = tokio::spawn(run_master_relay_dial(master_end, "127.0.0.1".into(), addr.port()));
+    let hello = tokio::time::timeout(
+        Duration::from_secs(5),
+        super::read_relay_hello(&mut d_read, super::RELAY_HELLO_TIMEOUT),
+    )
+    .await;
+    assert!(matches!(hello, Ok(Ok(()))), "the call never came up: {hello:?}");
+
+    // The slave hangs up: its write side ends. Its read side is kept open and
+    // drained, so nothing but the bridge's own rule can end the call.
+    d_write.shutdown().await.unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 256];
+        while let Ok(n) = d_read.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+        }
+    });
+
+    let budget = super::RELAY_HALF_CLOSE_DRAIN + Duration::from_secs(3);
+    assert!(
+        tokio::time::timeout(budget, dialer).await.is_ok(),
+        "the onward dial outlived the slave's hang-up -- a half-close left the call open"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), bbs_saw_close).await.is_ok(),
+        "the BBS was never disconnected"
+    );
+}
+
+/// **The side that closed first has delivered every byte, and the survivor
+/// is cut at the drain even while it is still talking.**
+///
+/// The second half is the leak's other shape: a far end that keeps sending (a
+/// clock, a chat feed) after the caller hung up would hold the call open for
+/// ever under any rule that waits for it to finish or go quiet.
+#[tokio::test(start_paused = true)]
+async fn test_a_hangup_delivers_its_last_bytes_and_ends_a_chattering_survivor() {
+    let (x_peer, mut x) = tokio::io::duplex(1024);
+    let (mut y_peer, mut y) = tokio::io::duplex(1024);
+    let drain = Duration::from_secs(2);
+    let bridge = tokio::spawn(async move {
+        super::bridge_until_either_closes(&mut x, &mut y, drain).await;
+    });
+
+    // X sends its last words and closes: they must all reach Y, then EOF.
+    let (mut x_read, mut x_write) = tokio::io::split(x_peer);
+    x_write.write_all(b"BYE").await.unwrap();
+    x_write.shutdown().await.unwrap();
+    let mut at_y = Vec::new();
+    let mut buf = [0u8; 64];
+    loop {
+        let n = y_peer.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        at_y.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(at_y, b"BYE", "the side that closed lost its final bytes");
+
+    // What Y had in flight still arrives...
+    y_peer.write_all(b"ok").await.unwrap();
+    let n = x_read.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"ok", "the survivor's in-flight bytes were dropped");
+
+    // ...but Y talking for ever does not keep the call.
+    let chatter = tokio::spawn(async move {
+        loop {
+            if y_peer.write_all(b".").await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+    assert!(
+        tokio::time::timeout(drain + Duration::from_secs(1), bridge).await.is_ok(),
+        "a survivor that keeps talking held the bridge open"
+    );
+    chatter.abort();
 }

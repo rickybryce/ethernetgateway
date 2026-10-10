@@ -287,9 +287,30 @@ pub fn cycle() -> u64 {
     with(|s| s.cycle)
 }
 
-/// [`run_check`], discarding the result if the server restarted meanwhile.
+/// Check every bound listener, and remember what was found -- unless the
+/// server restarted after `cycle` was taken, in which case the answers belong
+/// to listeners that no longer exist and are thrown away.
+///
+/// **There is no version of this that does not name its cycle.** There was:
+/// `run_check()`, which the web page and the telnet `F` key called, and which
+/// stored unconditionally. Both run the probes on a blocking thread that a
+/// restart does not stop -- the web page's `POST /save` is itself a
+/// `spawn_blocking`, and a Save and Restart from another surface can land
+/// while it is still inside four connect timeouts -- so their check could
+/// store the old cycle's answers (refused, because those listeners had just
+/// closed) over the new cycle's cleared table, and redden ports the new cycle
+/// never tested. The guard existed for the desktop and the startup check and
+/// was not used by the other two; taking the unguarded entry point away is
+/// what stops a fifth caller repeating that.
+///
+/// Take `cycle` **before** handing the work to another thread, so the window
+/// it guards includes the hand-off.
+///
+/// Blocking, and meant to be: callers run it off their event loop. Returns the
+/// number found blocked, so a caller can say something without re-reading the
+/// table.
 pub fn run_check_for_cycle(cycle: u64) -> usize {
-    run_check_inner(Some(cycle))
+    run_check_inner(cycle)
 }
 
 /// Run a check once the listeners have settled, in the background.
@@ -364,13 +385,11 @@ pub fn probe_addr(addr: SocketAddr, timeout: Duration) -> Reach {
 /// again, and a leftover entry would tell them it had not worked. Every surface
 /// reads `is_blocked` straight from this table, so clearing here is what turns
 /// the labels and the More button back to their ordinary colour.
-/// Refuses to write if `cycle` is `Some` and is not the current one.
-fn store_for(found: Vec<(String, u16, Reach)>, cycle: Option<u64>) -> usize {
+/// Refuses to write if `cycle` is not the current one.
+fn store_for(found: Vec<(String, u16, Reach)>, cycle: u64) -> usize {
     let blocked = found.iter().filter(|(_, _, r)| r.is_blocked()).count();
     with(|s| {
-        if let Some(c) = cycle
-            && c != s.cycle
-        {
+        if cycle != s.cycle {
             // The server restarted while this check was in flight.  Its ports
             // belong to a machine that no longer exists.
             return;
@@ -382,16 +401,7 @@ fn store_for(found: Vec<(String, u16, Reach)>, cycle: Option<u64>) -> usize {
     blocked
 }
 
-/// Check every bound listener, and remember what was found.
-///
-/// Blocking, and meant to be: callers run it off their event loop. Returns the
-/// number found blocked, so a caller can say something without re-reading the
-/// table.
-pub fn run_check() -> usize {
-    run_check_inner(None)
-}
-
-fn run_check_inner(cycle: Option<u64>) -> usize {
+fn run_check_inner(cycle: u64) -> usize {
     let host = crate::serial::primary_local_ip();
     let listeners = bound_listeners();
     // **Loopback is not an address we can learn anything from.**
@@ -424,7 +434,7 @@ fn run_check_inner(cycle: Option<u64>) -> usize {
     }
     if listeners.is_empty() {
         with(|s| {
-            if cycle.is_some_and(|c| c != s.cycle) {
+            if cycle != s.cycle {
                 return;
             }
             s.results.clear();
@@ -616,7 +626,7 @@ mod tests {
             store_for(vec![
                 ("telnet".into(), 2323, Reach::Blocked { refused: false }),
                 ("web".into(), 8080, Reach::Answered),
-            ], None),
+            ], cycle()),
             1
         );
         assert!(result_of("telnet").unwrap().1.is_blocked());
@@ -630,7 +640,7 @@ mod tests {
                     ("telnet".into(), 2323, Reach::Answered),
                     ("web".into(), 8080, Reach::Answered),
                 ],
-                None,
+                cycle(),
             ),
             0
         );
@@ -638,7 +648,7 @@ mod tests {
         assert_eq!(results().iter().filter(|(_, _, r)| r.is_blocked()).count(), 0);
 
         // A listener that has gone away leaves no trace either.
-        store_for(vec![("web".into(), 8080, Reach::Answered)], None);
+        store_for(vec![("web".into(), 8080, Reach::Answered)], cycle());
         assert!(result_of("telnet").is_none(), "a listener that is gone is gone");
 
         // And a reset puts it back to "nobody has looked", which is a third
@@ -660,11 +670,11 @@ mod tests {
         reset();
         let old = cycle();
         reset(); // the restart
-        store_for(vec![("telnet".into(), 2323, Reach::Blocked { refused: true })], Some(old));
+        store_for(vec![("telnet".into(), 2323, Reach::Blocked { refused: true })], old);
         assert!(result_of("telnet").is_none(), "a stale answer reached the new cycle");
         assert!(!has_run(), "and the new cycle still reads as unchecked");
         // Positive control: the current cycle's answer is stored.
-        store_for(vec![("telnet".into(), 2323, Reach::Answered)], Some(cycle()));
+        store_for(vec![("telnet".into(), 2323, Reach::Answered)], cycle());
         assert!(result_of("telnet").is_some());
         reset();
 
@@ -673,6 +683,46 @@ mod tests {
         let body = &body[..body.find("\n}\n").unwrap()];
         assert!(body.contains("let mine = cycle();"), "the startup check takes its cycle up front");
         assert!(body.contains("run_check_for_cycle(mine)"), "and checks against it");
+    }
+
+    /// **Every caller names the cycle its check belongs to** -- the web page
+    /// and the telnet `F` key did not, and could store a dead cycle's answers
+    /// over a fresh table. The unguarded entry point is gone, so the compiler
+    /// holds most of this; the scan holds the rest: that the telnet key takes
+    /// its cycle *before* the hand-off to the blocking pool, which is the
+    /// window it exists to cover.
+    #[test]
+    fn test_every_port_check_caller_names_its_cycle() {
+        let callers = [
+            ("gui.rs", include_str!("gui.rs")),
+            ("webserver.rs", include_str!("webserver.rs")),
+            ("telnet/config_ui.rs", include_str!("telnet/config_ui.rs")),
+        ];
+        let needle = ["portcheck::", "run_check"].concat();
+        for (name, src) in callers {
+            let calls: Vec<&str> = src.match_indices(needle.as_str()).map(|(i, _)| &src[i..]).collect();
+            assert!(!calls.is_empty(), "{name} no longer runs a port check -- update this list");
+            for call in calls {
+                assert!(
+                    call[needle.len()..].starts_with("_for_cycle("),
+                    "{name}: a port check that does not name its cycle: {:?}",
+                    &call[..call.len().min(60)]
+                );
+            }
+        }
+        let telnet = include_str!("telnet/config_ui.rs").replace('\r', "");
+        let at = telnet.find(&needle).unwrap();
+        let before = &telnet[telnet[..at].rfind("\"f\" => {").unwrap()..at];
+        assert!(
+            before.contains("let cycle = crate::portcheck::cycle();")
+                && before.find("let cycle").unwrap() < before.find("spawn_blocking").unwrap(),
+            "the telnet check must take its cycle before the blocking hand-off"
+        );
+        // ...and hand *that* cycle over, not one read again on the far side.
+        assert!(
+            telnet[at + needle.len()..].starts_with("_for_cycle(cycle)"),
+            "the telnet check reads its cycle after the hand-off"
+        );
     }
 
     /// Serialises the tests that touch the process-wide table.

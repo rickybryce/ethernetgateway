@@ -105,6 +105,13 @@ iz80 = "0.5.1"
 # the tree via x11rb, so this adds **no new crate**.
 [target.'cfg(windows)'.dependencies]
 gethostname = "1.1"
+# `SetConsoleCtrlHandler`, so closing the console window runs the same graceful
+# shutdown a SIGTERM does -- see `main::console_close`.  The C runtime maps
+# Ctrl-C to SIGINT (which signal-hook already catches) but maps the close
+# button to nothing, so without this the process was simply terminated.
+# 0.61 is already in the tree (via tokio, mio, socket2 and others), so this
+# adds **no new crate**; only the two feature modules are new.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
 proptest = "1"

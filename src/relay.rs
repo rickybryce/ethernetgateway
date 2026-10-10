@@ -162,12 +162,11 @@ where
     // The hello goes out HERE, not at accept: it is what the slave turns into
     // CONNECT, and until this line there was no call.
 
-    // `copy_bidirectional` pipes both directions and handles half-close
-    // correctly: when one side hits EOF it shuts down the other's write
-    // and keeps draining until both ends close — so the final burst from
-    // a BBS (or device) that closes its send side isn't dropped (the
+    // The bridge delivers the final burst of whichever side closes first (the
     // earlier `select!` cancelled the losing direction mid-copy and could
-    // truncate the last bytes of a relayed transfer).
+    // truncate the last bytes of a relayed transfer) and then ends the call
+    // -- see `bridge_until_either_closes` for why it no longer waits for the
+    // other side to close as well.
     answer_and_bridge(&mut relay, &mut tcp).await;
     let _ = relay.shutdown().await;
 }
@@ -471,37 +470,72 @@ pub fn split_dial_host_port(s: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
-/// Parse a `serial-relay …` exec command.  Returns `None` for anything
-/// that isn't a well-formed relay command (the master refuses it — this
-/// is not a general command-exec shell).  Grammar:
+/// Why the master refused a relay `exec` -- see [`parse_relay_command`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayRefusal {
+    /// Not a `serial-relay` command at all; this is not a command shell.
+    NotRelay,
+    /// The port label is not a [`wire_token`] -- a control byte, an `ESC`,
+    /// or longer than [`WIRE_TOKEN_MAX`].
+    BadLabel,
+    /// A `serial-relay` whose target is unknown or whose address is unusable.
+    Malformed,
+}
+
+impl RelayRefusal {
+    /// The reason, for the master's log.
+    pub fn reason(self) -> &'static str {
+        match self {
+            RelayRefusal::NotRelay => "only serial-relay is allowed",
+            RelayRefusal::BadLabel => "the port label is not a short plain word",
+            RelayRefusal::Malformed => "unknown target or unusable address",
+        }
+    }
+}
+
+/// Parse a `serial-relay …` exec command.  Refuses anything that isn't a
+/// well-formed relay command (the master refuses it — this is not a general
+/// command-exec shell).  Grammar:
 ///   `serial-relay <port> menu`
 ///   `serial-relay <port> dial <host>:<port>`
 ///   `serial-relay <port> peer <Port>@<host>`
-pub fn parse_relay_command(command: &str) -> Option<ParsedRelay> {
+///
+/// **The port label is held to `serial-register`'s rule** ([`wire_token`]),
+/// because it goes to the same places: every "accepted serial relay" log line,
+/// the log served at `/logs`, and the Kermit relay's own messages. It was
+/// taken verbatim, so an `ESC` in it was a cursor movement on whoever read the
+/// log in a terminal and a 4 KB label was a log line nobody could read --
+/// while the register command beside it already refused both. Refused whole,
+/// never cleaned, for `wire_token`'s reason: a cleaned label names a port the
+/// slave never offered. Every label a slave of ours sends (`A`, `B`, `CPM`)
+/// passes. An **absent** label is still `?`, which is ours rather than the
+/// slave's, so it is exempt.
+pub fn parse_relay_command(command: &str) -> Result<ParsedRelay, RelayRefusal> {
     let mut toks = command.split_whitespace();
-    if toks.next()? != "serial-relay" {
-        return None;
+    if toks.next() != Some("serial-relay") {
+        return Err(RelayRefusal::NotRelay);
     }
-    let port_label = toks.next().unwrap_or("?").to_string();
+    let port_label = match toks.next() {
+        None => "?".to_string(),
+        Some(t) => wire_token(t).ok_or(RelayRefusal::BadLabel)?,
+    };
     let mut dial = None;
     let mut peer = None;
     let mut kermit = false;
     match toks.next().unwrap_or("menu") {
         "menu" => {}
         "dial" => {
-            dial = Some(split_dial_host_port(toks.next()?)?);
+            let addr = toks.next().ok_or(RelayRefusal::Malformed)?;
+            dial = Some(split_dial_host_port(addr).ok_or(RelayRefusal::Malformed)?);
         }
         "peer" => {
-            let addr = toks.next()?;
-            if addr.is_empty() {
-                return None;
-            }
+            let addr = toks.next().ok_or(RelayRefusal::Malformed)?;
             peer = Some(addr.to_string());
         }
         "kermit" => kermit = true,
-        _ => return None,
+        _ => return Err(RelayRefusal::Malformed),
     }
-    Some(ParsedRelay { port_label, dial, peer, kermit })
+    Ok(ParsedRelay { port_label, dial, peer, kermit })
 }
 
 /// SSH client handler for the slave→master relay connection.  The
@@ -1209,7 +1243,81 @@ where
     if relay.write_all(&RELAY_HELLO).await.is_err() || relay.flush().await.is_err() {
         return;
     }
-    let _ = tokio::io::copy_bidirectional(relay, other).await;
+    bridge_until_either_closes(relay, other, RELAY_HALF_CLOSE_DRAIN).await;
+}
+
+/// How long the surviving direction of a relayed call may run on after the
+/// other one has ended, before the whole bridge is torn down.
+///
+/// Long enough for bytes already in flight to arrive -- a final ACK, the tail
+/// of a screen -- and short against anything a human would notice.
+pub(crate) const RELAY_HALF_CLOSE_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Pipe two streams both ways until **either** side ends, then end both.
+///
+/// **A relayed call is a phone call, not a pair of pipes.** This was
+/// `copy_bidirectional`, whose half-close semantics are exactly right for a
+/// proxy and exactly wrong here: when one side reached EOF it shut the other's
+/// write and then kept waiting for the *other* side to close too. A slave
+/// hanging up (device dropped DTR, `ATH`) sent its channel EOF, the master
+/// passed a FIN to the BBS -- and a BBS that ignores a half-close kept the
+/// call open with nobody on it. The task, the onward TCP connection and the
+/// slave's **session-cap slot** (`SlotGuard` in `ssh.rs`) were held for as
+/// long as the BBS stayed up, so a long-lived slave that hangs up often could
+/// walk the master to `max_sessions`.
+///
+/// What the old comment wanted from `copy_bidirectional` is kept: the
+/// direction that reached EOF has delivered **everything** before it ends
+/// (each write is flushed before the next read), so a far end that sends its
+/// last burst and closes still lands all of it. The surviving direction is
+/// then given [`RELAY_HALF_CLOSE_DRAIN`] **in total** -- not of quiet: a BBS
+/// that keeps printing a clock or a chat feed would otherwise hold a call
+/// nobody is on open for ever, which is the leak again -- and then both are
+/// dropped. An error on either side ends the call at once, as it always did.
+pub(crate) async fn bridge_until_either_closes<A, B>(a: &mut A, b: &mut B, drain: std::time::Duration)
+where
+    A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (mut a_read, mut a_write) = tokio::io::split(a);
+    let (mut b_read, mut b_write) = tokio::io::split(b);
+    let a_to_b = relay_pump(&mut a_read, &mut b_write);
+    let b_to_a = relay_pump(&mut b_read, &mut a_write);
+    tokio::pin!(a_to_b, b_to_a);
+
+    let survivor_is_b_to_a = tokio::select! {
+        clean = &mut a_to_b => if clean { true } else { return },
+        clean = &mut b_to_a => if clean { false } else { return },
+    };
+    if survivor_is_b_to_a {
+        let _ = tokio::time::timeout(drain, &mut b_to_a).await;
+    } else {
+        let _ = tokio::time::timeout(drain, &mut a_to_b).await;
+    }
+}
+
+/// One direction of [`bridge_until_either_closes`]: copy until EOF, then pass
+/// the EOF on. `true` for a clean end-of-file, `false` for an error -- which
+/// ends the call without a drain, since there is nothing left to wait for.
+async fn relay_pump<R, W>(read: &mut R, write: &mut W) -> bool
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match read.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if write.write_all(&buf[..n]).await.is_err() || write.flush().await.is_err() {
+            return false;
+        }
+    }
+    let _ = write.shutdown().await;
+    true
 }
 
 /// A live slave→master relay: the SSH client session (kept alive for the

@@ -322,7 +322,7 @@ async fn handle_connection(
     };
 
     if live_security {
-        if is_authorized(&request) {
+        if is_authorized(&request).await {
             // Successful auth clears the lockout entry so a legitimate
             // user who fat-fingered once or twice isn't stuck waiting
             // out the 5-minute window after typing the right password.
@@ -946,7 +946,11 @@ fn request_presented_credential(req: &HttpRequest) -> bool {
 
 /// Verify Basic auth against the live telnet `username` / `password`.
 /// Returns true when auth is provided AND matches.
-fn is_authorized(req: &HttpRequest) -> bool {
+///
+/// Async because a cache miss runs the KDF, and that goes to the blocking
+/// pool rather than holding this connection's worker for a quarter of a
+/// second -- see `credential::verify_cached_off_runtime`.
+async fn is_authorized(req: &HttpRequest) -> bool {
     let cfg = config::get_config();
     let Some(header) = req.headers.get("authorization") else {
         return false;
@@ -965,7 +969,7 @@ fn is_authorized(req: &HttpRequest) -> bool {
     // wrong username can't be distinguished from a wrong password by response
     // time.  Mirrors the telnet/SSH auth paths.
     let user_ok = telnet::constant_time_eq(user.as_bytes(), cfg.username.as_bytes());
-    let pass_ok = crate::credential::verify_cached(&cfg.password, pass);
+    let pass_ok = crate::credential::verify_cached_off_runtime(&cfg.password, pass).await;
     user_ok && pass_ok
 }
 
@@ -1227,7 +1231,9 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // would leave the operator refreshing to guess whether it ran.  Four
     // connect timeouts is the worst case, which is well inside a page load.
     if fields.get("action").map(String::as_str) == Some("portcheck") {
-        let blocked = crate::portcheck::run_check();
+        // Its cycle taken here: a Save and Restart from another surface can
+        // land while this is still probing -- see `run_check_for_cycle`.
+        let blocked = crate::portcheck::run_check_for_cycle(crate::portcheck::cycle());
         let msg = if blocked == 0 {
             // Never "all ports are open".  A self-connection rides loopback on
             // Linux (accepted by the usual firewalls) and skips the firewall on
@@ -6304,6 +6310,15 @@ mod tests {
         assert!(same_origin_ok(&req(&[("origin", "http://whatever")])));
     }
 
+    /// `is_authorized`, driven to completion for a synchronous test.
+    fn is_authorized_now(req: &HttpRequest) -> bool {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(is_authorized(req))
+    }
+
     /// Construct a minimal HttpRequest with just the headers we need
     /// for is_authorized() to make a decision.  Lets the tests below
     /// drive the auth path without going through the network parser.
@@ -6410,7 +6425,7 @@ mod tests {
     #[test]
     fn test_is_authorized_missing_header_fails() {
         // No Authorization header at all → auth fails.
-        assert!(!is_authorized(&req_with_auth(None)));
+        assert!(!is_authorized_now(&req_with_auth(None)));
     }
 
     #[test]
@@ -6707,23 +6722,23 @@ mod tests {
     fn test_is_authorized_non_basic_scheme_fails() {
         // Bearer / Digest / arbitrary scheme prefixes all fail; we
         // only accept Basic.
-        assert!(!is_authorized(&req_with_auth(Some("Bearer abcdef"))));
-        assert!(!is_authorized(&req_with_auth(Some("Digest realm=x"))));
-        assert!(!is_authorized(&req_with_auth(Some("nonsense"))));
+        assert!(!is_authorized_now(&req_with_auth(Some("Bearer abcdef"))));
+        assert!(!is_authorized_now(&req_with_auth(Some("Digest realm=x"))));
+        assert!(!is_authorized_now(&req_with_auth(Some("nonsense"))));
     }
 
     #[test]
     fn test_is_authorized_malformed_base64_fails() {
         // Base64 with non-base64 characters yields an empty decode,
         // which means no `:` separator, which means auth fails.
-        assert!(!is_authorized(&req_with_auth(Some("Basic @@@"))));
+        assert!(!is_authorized_now(&req_with_auth(Some("Basic @@@"))));
     }
 
     #[test]
     fn test_is_authorized_no_colon_fails() {
         // Properly base64 but no `:` separator between user and pass.
         // "noseparator" → "bm9zZXBhcmF0b3I="
-        assert!(!is_authorized(&req_with_auth(Some("Basic bm9zZXBhcmF0b3I="))));
+        assert!(!is_authorized_now(&req_with_auth(Some("Basic bm9zZXBhcmF0b3I="))));
     }
 
     #[test]
@@ -6738,7 +6753,7 @@ mod tests {
         // the global CONFIG is loaded from the cwd.  Just verify the
         // parse didn't short-circuit; behavior beyond that is covered
         // by the smoke test.
-        let _ = is_authorized(&req);
+        let _ = is_authorized_now(&req);
     }
 
     fn empty_form() -> HashMap<String, String> {

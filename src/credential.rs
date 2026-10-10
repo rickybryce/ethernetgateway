@@ -242,6 +242,11 @@ pub(crate) fn verify(stored: &str, supplied: &str) -> bool {
         return false;
     }
     if is_hashed(stored) {
+        #[cfg(test)]
+        DERIVED_ON
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((supplied.to_owned(), std::thread::current().id()));
         // Parameters (including the iteration count) come from the stored
         // string, not from `PBKDF2_ROUNDS`, so raising that constant later
         // leaves every existing credential working.
@@ -309,10 +314,12 @@ pub(crate) fn hash_if_cleartext(stored: &mut String) {
 /// joystick beat as fast as every 100 ms and a `/logs` refresh every 2 s.
 /// That is ~6.7 checked requests a second, so the KDF alone would ask for
 /// **more than one core on a desktop** and rather more than a Raspberry Pi
-/// has -- and because `is_authorized` is synchronous inside an async task,
-/// each one occupies a tokio worker, the same runtime that drives the serial
-/// pumps and the CP/M boot session's speed governor. The screen a booted disk
-/// is watched on would have been paying for itself in emulator stutter.
+/// has -- and each one occupied a tokio worker, the same runtime that drives
+/// the serial pumps and the CP/M boot session's speed governor. The screen a
+/// booted disk is watched on would have been paying for itself in emulator
+/// stutter. (A miss now derives on the blocking pool instead -- see
+/// [`verify_cached_off_runtime`] -- but the cache is still what keeps the
+/// *rate* down: a thread hop is cheaper than a KDF, not free.)
 ///
 /// So security gates the way *in*, and a session already inside stays inside:
 /// the first request pays the KDF, and every later one presenting the same
@@ -346,6 +353,12 @@ static AUTH_CACHE: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 #[cfg(test)]
 static DERIVATIONS: AtomicU64 = AtomicU64::new(0);
 
+/// Which thread each hashed verification ran on, keyed by the supplied
+/// password, so a test can prove the KDF left the runtime worker without
+/// timing anything.
+#[cfg(test)]
+static DERIVED_ON: Mutex<Vec<(String, std::thread::ThreadId)>> = Mutex::new(Vec::new());
+
 /// Bind the stored credential and the supplied one into one cache key.
 ///
 /// The stored value carries a random salt, so this is not a fast hash of the
@@ -360,26 +373,29 @@ fn cache_key(stored: &str, supplied: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Is `key` the one remembered success?
+fn cache_hit(key: &[u8; 32]) -> bool {
+    let guard = AUTH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    // Constant-time even here: the comparands are digests rather than
+    // secrets, but a fast path that leaks by timing is a habit worth not
+    // forming.
+    guard.as_ref().is_some_and(|cached| crate::telnet::constant_time_eq(cached, key))
+}
+
 /// `verify`, for a caller that is handed the credential on every request.
 ///
 /// Use this from the web server only. Telnet and SSH authenticate once per
-/// session, where the KDF's cost is a feature rather than a bill.
+/// session, where the KDF's cost is a feature rather than a bill. An async
+/// caller wants [`verify_cached_off_runtime`], which is this with the
+/// derivation moved off the worker.
 pub(crate) fn verify_cached(stored: &str, supplied: &str) -> bool {
     // Nothing to save, and nothing we would want to remember.
     if !is_hashed(stored) {
         return verify(stored, supplied);
     }
     let key = cache_key(stored, supplied);
-    {
-        let guard = AUTH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        // Constant-time even here: the comparands are digests rather than
-        // secrets, but a fast path that leaks by timing is a habit worth not
-        // forming.
-        if let Some(cached) = guard.as_ref() {
-            if crate::telnet::constant_time_eq(cached, &key) {
-                return true;
-            }
-        }
+    if cache_hit(&key) {
+        return true;
     }
     #[cfg(test)]
     DERIVATIONS.fetch_add(1, Ordering::Relaxed);
@@ -390,6 +406,53 @@ pub(crate) fn verify_cached(stored: &str, supplied: &str) -> bool {
     } else {
         false
     }
+}
+
+/// **The KDF never runs on a runtime worker.**
+///
+/// Every authenticating caller is an async task -- the telnet login, russh's
+/// `auth_password`, the web server's per-request gate -- and a derivation is
+/// 237 ms in release and seconds on a Pi or in a debug build. Run inline, that
+/// whole time is a tokio worker doing nothing else, and the same workers drive
+/// the serial pumps and the CP/M speed governor: a burst of logins (or of
+/// guesses, which always pay) would stall a booted guest and a modem's online
+/// loop for as long as the guesses kept coming. `spawn_blocking` moves the
+/// derivation to the blocking pool, which exists for exactly this.
+///
+/// Only the expensive case moves. A cleartext credential is a constant-time
+/// byte compare and an empty one is refused outright, so neither is worth a
+/// thread hop. If the blocking pool cannot run the task (the runtime is
+/// shutting down) the answer is **no** -- a login refused during shutdown
+/// costs nothing, while a panic in the auth path would cost the listener.
+pub(crate) async fn verify_off_runtime(stored: &str, supplied: &str) -> bool {
+    if !is_hashed(stored) {
+        return verify(stored, supplied);
+    }
+    let (stored, supplied) = (stored.to_owned(), supplied.to_owned());
+    tokio::task::spawn_blocking(move || verify(&stored, &supplied))
+        .await
+        .unwrap_or(false)
+}
+
+/// [`verify_cached`], with the derivation moved off the runtime the same way.
+///
+/// The cache is consulted **here, on the worker**, because a hit is a digest
+/// compare and the point of the cache is that the polls behind the gate cost
+/// nothing -- a thread hop per `/vdm/frame` would be a new cost of its own.
+/// Only a miss goes to the blocking pool, and it goes through `verify_cached`
+/// itself, so what is remembered (successes only, keyed on the stored
+/// credential) is still decided in exactly one place.
+pub(crate) async fn verify_cached_off_runtime(stored: &str, supplied: &str) -> bool {
+    if !is_hashed(stored) {
+        return verify(stored, supplied);
+    }
+    if cache_hit(&cache_key(stored, supplied)) {
+        return true;
+    }
+    let (stored, supplied) = (stored.to_owned(), supplied.to_owned());
+    tokio::task::spawn_blocking(move || verify_cached(&stored, &supplied))
+        .await
+        .unwrap_or(false)
 }
 
 /// Set while a test wants cheap hashing; 0 means "use `PBKDF2_ROUNDS`".
@@ -626,6 +689,61 @@ mod tests {
             // And the empty-credential guard still holds on this path.
             assert!(!verify_cached("", ""));
         });
+    }
+
+    /// The threads a given supplied password was derived on.
+    fn derived_on(supplied: &str) -> Vec<std::thread::ThreadId> {
+        DERIVED_ON
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(s, _)| s == supplied)
+            .map(|(_, t)| *t)
+            .collect()
+    }
+
+    /// **The KDF leaves the runtime worker** -- for the per-session path
+    /// (telnet, SSH) and for the web gate's cache miss alike.
+    ///
+    /// The runtime is current-thread, so the test's own thread *is* the only
+    /// worker: a derivation recorded on it is one that blocked
+    /// every task on the runtime. The thread is asserted rather than a
+    /// stopwatch, because the cheap test hash is too fast to time and the
+    /// production one too slow to wait for.
+    #[test]
+    fn test_the_kdf_runs_off_the_runtime_worker() {
+        // Built here rather than by `#[tokio::test]` so the cache lock can be
+        // held around the whole run without being held across an `.await`.
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        with_clean_cache(|| rt.block_on(kdf_off_worker_body()));
+    }
+
+    async fn kdf_off_worker_body() {
+        let worker = std::thread::current().id();
+        let h = cheap("off-worker-a");
+        assert!(verify_off_runtime(&h, "off-worker-a").await);
+        assert!(!verify_off_runtime(&h, "off-worker-wrong-a").await);
+        for supplied in ["off-worker-a", "off-worker-wrong-a"] {
+            let threads = derived_on(supplied);
+            assert_eq!(threads.len(), 1, "{supplied}: expected exactly one derivation");
+            assert_ne!(threads[0], worker, "{supplied}: the KDF ran on the runtime worker");
+        }
+
+        // The web gate: a miss derives off the worker, a hit derives nothing.
+        let h = cheap("off-worker-b");
+        assert!(verify_cached_off_runtime(&h, "off-worker-b").await);
+        assert!(verify_cached_off_runtime(&h, "off-worker-b").await);
+        assert!(!verify_cached_off_runtime(&h, "off-worker-wrong-b").await);
+        assert!(!verify_cached_off_runtime(&h, "off-worker-wrong-b").await);
+        let hits = derived_on("off-worker-b");
+        assert_eq!(hits.len(), 1, "a cached success must not derive again");
+        assert_ne!(hits[0], worker, "the web gate's miss ran the KDF on the worker");
+        let misses = derived_on("off-worker-wrong-b");
+        assert_eq!(misses.len(), 2, "a wrong password must pay every time");
+        assert!(misses.iter().all(|t| *t != worker), "a wrong guess ran the KDF on the worker");
+        // Cleartext and empty stay inline and keep their answers.
+        assert!(verify_cached_off_runtime("changeme", "changeme").await);
+        assert!(!verify_off_runtime("", "").await);
     }
 
     #[test]

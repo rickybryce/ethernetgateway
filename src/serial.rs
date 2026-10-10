@@ -2369,7 +2369,14 @@ fn modem_slave_announce_tick(
                                     // and anything written after it is the
                                     // device's own data.
                                     crate::relay::send_peer_answer(&mut stream, Ok(())).await;
-                                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
+                                    // A call, not two pipes: either side hanging up ends it
+                                    // (`relay::bridge_until_either_closes`).
+                                    crate::relay::bridge_until_either_closes(
+                                        &mut stream,
+                                        &mut caller,
+                                        crate::relay::RELAY_HALF_CLOSE_DRAIN,
+                                    )
+                                    .await;
                                 }
                                 Err(o) => {
                                     // **The reason the answer byte exists.**
@@ -2686,7 +2693,14 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>, _exit: AnnouncerExit) {
                                 match request_cpm_call(crate::relay::RELAY_PEER_ANSWER_WAIT).await {
                                     Ok(mut caller) => {
                                         crate::relay::send_peer_answer(&mut stream, Ok(())).await;
-                                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
+                                        // A call, not two pipes: either side hanging up ends it
+                                        // (`relay::bridge_until_either_closes`).
+                                        crate::relay::bridge_until_either_closes(
+                                            &mut stream,
+                                            &mut caller,
+                                            crate::relay::RELAY_HALF_CLOSE_DRAIN,
+                                        )
+                                        .await;
                                     }
                                     Err(o) => {
                                         glog!(
@@ -5671,8 +5685,8 @@ fn bridge_local_console_peer(state: &mut ModemState, target: SerialPortId) {
 /// `idle_timeout_secs`, so an ATO issued after the master session has
 /// idled out returns NO CARRIER (the device can simply redial).  An
 /// onward `RelayTarget::Dial` has no such timeout (it rides
-/// `copy_bidirectional`).  A clean hangup or master-side disconnect
-/// yields NO CARRIER.
+/// `relay::bridge_until_either_closes`).  A clean hangup or master-side
+/// disconnect yields NO CARRIER.
 fn dial_master_relay(
     state: &mut ModemState,
     target: crate::relay::RelayTarget,

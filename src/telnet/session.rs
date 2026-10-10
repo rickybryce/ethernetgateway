@@ -927,7 +927,8 @@ impl TelnetSession {
             // the username was valid.  Mirrors `ssh::auth_password`.
             let user_ok = constant_time_eq(username.as_bytes(), cfg.username.as_bytes());
             // Accepts a PBKDF2 hash or legacy cleartext -- see src/credential.rs.
-            let pass_ok = crate::credential::verify(&cfg.password, &password);
+            // Off the runtime worker: the KDF is seconds on a Pi.
+            let pass_ok = crate::credential::verify_off_runtime(&cfg.password, &password).await;
             if user_ok && pass_ok {
                 if let Some(ip) = self.peer_addr {
                     clear_lockout(&self.lockouts, ip);

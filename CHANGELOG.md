@@ -31,7 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log.  It is now refused before any of that, with one line per flood.
 - **Relay: what a slave sends to name its ports is checked.**  The port name,
   mode and erase key are refused unless they are short plain words, so a
-  slave cannot draw escape sequences on the master's screens.
+  slave cannot draw escape sequences on the master's screens.  The same rule
+  now covers the port name in a relay call (`serial-relay`), which was taken
+  verbatim and written to the log; a refusal names its reason.
+- **A login no longer stalls the rest of the gateway.**  Checking a hashed
+  password takes a quarter of a second on a desktop and seconds on a Pi, and
+  it ran on the threads that also drive the serial ports and a booted disk's
+  speed governor, so a burst of logins or guesses on telnet, SSH or the web
+  page could stutter both.  It runs on a thread of its own now.  The web
+  page's remembered login and the lockout are unchanged.
 
 ### Changed
 
@@ -76,6 +84,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the receiver resent ZRINIT in a tight loop and spun a core for the whole
   negotiation timeout (45 s by default).
 
+- **Relay: hanging up ends the call at both ends.**  When a slave's device
+  hung up on an onward dial, the master passed the hang-up to the far host
+  and then waited for that host to hang up too, which many never do; the call,
+  its connection and one of the master's session slots stayed held for as
+  long as the host stayed up.  Either side hanging up now ends the call, after
+  two seconds for anything still in flight.  The same applies to a call rung
+  through to a slave's own port.
+- **Windows: closing the console window shuts down cleanly.**  It ended the
+  process outright, skipping the goodbye to connected sessions and the
+  write-back of a booted disk.  It now runs the same shutdown as Ctrl-C.
+- **The router address is found even when `route` hangs.**  On macOS, BSD
+  and Windows a `route` command that never answered stopped the router from
+  ever being detected for the rest of the run.  It is now given five seconds.
+- **A port test cannot mark the wrong ports after a restart.**  A test
+  started from the web page or the telnet `F` key could finish after a Save
+  and Restart and mark the new listeners with the old ones' results.
 - **Web: the master-password panel broke the settings form.**  The panel was a
   form nested inside the main one, so while it was showing, every setting
   below it was outside the form: their Save buttons did nothing, the panel's

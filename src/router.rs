@@ -223,20 +223,91 @@ fn detect_platform() -> Vec<IpAddr> {
     Vec::new()
 }
 
-/// Run a system command and return its stdout, or `None` if it can't be run or
-/// fails.  Only ever called from the probe thread.  No shell is involved (the
-/// program and arguments are passed directly, and both are compile-time
-/// constants here), so there is nothing for an environment or a filename to
-/// inject into.
+/// How long `route` may take to answer before the probe gives up on it.
+///
+/// A routing-table query answers in milliseconds; one that has not answered in
+/// five seconds is not going to say anything worth waiting for. Measured
+/// against nothing more than that -- the number only has to be far above a
+/// healthy answer and far below "for ever".
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+const ROUTE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run a system command and return its stdout, or `None` if it can't be run,
+/// fails, or does not answer within [`ROUTE_TIMEOUT`].  Only ever called from
+/// the probe thread.  No shell is involved (the program and arguments are
+/// passed directly, and both are compile-time constants here), so there is
+/// nothing for an environment or a filename to inject into.
 #[cfg(not(target_os = "linux"))]
 fn run(program: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(program).args(args).output().ok()?;
-    if !out.status.success() {
+    run_within(program, args, ROUTE_TIMEOUT)
+}
+
+/// [`run`] with the budget injected, so the timeout is tested in milliseconds
+/// rather than by sitting through the real one (the shape of `power.rs`'s
+/// `*_within`).
+///
+/// **Bounded because an unbounded one never refills the cache.** `output()`
+/// waits as long as the child does, and `route` can hang -- a wedged
+/// `routed`/`configd`, a resolver stall on a build that ignores `-n`, a
+/// security product holding the process. The probe thread then never returns,
+/// `in_flight` stays set, and [`probe_in_background`] refuses every later
+/// probe: the router address is never learned, and the `.1` fallback stays in
+/// force for the life of the process with nothing in the log to say why.
+///
+/// On expiry the child is **killed and reaped**, not abandoned: an abandoned
+/// one is a process per stale-cache refresh, every five minutes, for ever.
+/// stdout is drained on its own thread while we wait, because a child that
+/// fills the pipe blocks on the write and would read as a hang. That thread is
+/// detached rather than joined on the timeout path, since a grandchild holding
+/// the pipe open could keep it reading after the kill.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn run_within(program: &str, args: &[&str], budget: Duration) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let deadline = Instant::now() + budget;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Out of time, or the wait itself failed: either way nothing we
+            // could read now is trustworthy.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                glog!(
+                    "Router address: `{program} {}` did not answer in {}s and was stopped.",
+                    args.join(" "),
+                    budget.as_secs()
+                );
+                return None;
+            }
+        }
+    };
+    if !status.success() {
         return None;
     }
+    // The child has exited, so its end of the pipe is closed and the reader
+    // finishes promptly -- bounded anyway, for the grandchild case above.
+    let out = rx.recv_timeout(budget).ok()?;
     // Route tables are ASCII; anything else is a sign we're not reading what we
     // think we are, so lossy conversion is fine and cannot panic.
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 // ── Parsers (pure, and tested on every platform) ───────────────
@@ -625,6 +696,32 @@ Active Routes:
             IpAddr::V6("fe80::1".parse().unwrap()),
         ];
         assert_eq!(join(&two), "192.168.1.1, fe80::1");
+    }
+
+    /// **A command that never answers is stopped, and the probe returns.**
+    /// Without the bound the probe thread waited on `route` for ever, its
+    /// `in_flight` flag was never cleared, and no later probe could start --
+    /// so the router was never learned and the `.1` fallback was permanent.
+    /// Exercised through `sleep` because it exists on every Unix this runs
+    /// on; the real call site is macOS/BSD and Windows only.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_command_that_never_answers_is_stopped() {
+        let started = Instant::now();
+        let got = run_within("sleep", &["30"], Duration::from_millis(200));
+        assert_eq!(got, None, "a hung command produced an answer");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the probe waited {:?} on a hung command",
+            started.elapsed()
+        );
+        // Positive control: a command that answers in time is read.
+        assert_eq!(
+            run_within("echo", &["gateway: 192.168.1.254"], Duration::from_secs(10)).as_deref(),
+            Some("gateway: 192.168.1.254\n")
+        );
+        // And a failing one is still refused, so a parser never sees an error.
+        assert_eq!(run_within("false", &[], Duration::from_secs(10)), None);
     }
 
     /// The real probe must be safe to call anywhere: it may find nothing (a
