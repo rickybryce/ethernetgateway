@@ -20,7 +20,7 @@
 //!   CR-NUL stuffing); ZDLE escaping layers above.
 //!
 //! Public surface (used by `telnet.rs`):
-//! - [`zmodem_receive`] — receive one or more files from the peer
+//! - [`zmodem_receive_keeping`] — receive one or more files from the peer
 //! - [`zmodem_send`] — send one or more files to the peer
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -970,7 +970,7 @@ where
     }
 }
 
-/// [`zmodem_receive`], keeping every file confirmed before a failure -- a
+/// `zmodem_receive`, keeping every file confirmed before a failure -- a
 /// file is confirmed when its ZEOF is answered with ZRINIT, after which the
 /// sender counts it delivered.  See [`crate::xmodem::BatchReceipt`].
 pub(crate) async fn zmodem_receive_keeping<F>(
@@ -1215,7 +1215,15 @@ where
                 // timeout: a peer that omits OO (or already exited) just times
                 // out harmlessly.  (Emitting our *own* OO here would be a role
                 // inversion — the send path is the OO initiator, §8.4.)
-                send_zfin(writer, is_tcp, verbose).await?;
+                //
+                // A ZFIN reply that cannot be written fails nothing: the
+                // sender's ZFIN *is* the end of the batch, every file in it
+                // was already confirmed, and reporting the batch as stopped
+                // would say files are missing when none are.
+                if let Err(e) = send_zfin(writer, is_tcp, verbose).await {
+                    glog!("ZMODEM recv: the batch is complete; the ZFIN reply was not sent ({e})");
+                    break;
+                }
                 let drained = drain_oo_trailer(reader, is_tcp, &mut state).await;
                 if verbose {
                     glog!("ZMODEM recv: drained {} byte(s) of sender 'OO' trailer", drained);
@@ -3594,6 +3602,58 @@ mod tests {
         assert_eq!(got.files[0].data, data_a);
     }
 
+    /// **A batch the sender ended with ZFIN is complete even if the reply
+    /// cannot be written.**  Every file was confirmed by then; a write error
+    /// on our ZFIN used to fail the receive, and the Upload menu reported
+    /// "stopped" with every file saved.
+    #[tokio::test]
+    async fn test_a_failed_zfin_reply_does_not_fail_a_finished_batch() {
+        struct FailsOnZfin;
+        impl tokio::io::AsyncWrite for FailsOnZfin {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buf: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                let zfin = build_hex_header(ZFIN, [0, 0, 0, 0]);
+                if buf.windows(zfin.len()).any(|w| w == zfin.as_slice()) {
+                    return std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+                }
+                std::task::Poll::Ready(Ok(buf.len()))
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let data_a = b"the only file in the batch";
+        let mut wire = Vec::new();
+        wire.extend(build_bin16_header(ZFILE, [0, 0, 0, 0]));
+        wire.extend(build_subpacket(format!("a.txt\0{}", data_a.len()).as_bytes(), ZCRCW));
+        wire.extend(build_bin16_header(ZDATA, [0, 0, 0, 0]));
+        wire.extend(build_subpacket(data_a, ZCRCE));
+        wire.extend(build_hex_header(ZEOF, (data_a.len() as u32).to_le_bytes()));
+        wire.extend(build_hex_header(ZFIN, [0, 0, 0, 0]));
+        let (mut inbound_writer, mut inbound_reader) = tokio::io::duplex(wire.len() + 1024);
+        inbound_writer.write_all(&wire).await.unwrap();
+        drop(inbound_writer);
+        let got = zmodem_receive_keeping(
+            &mut inbound_reader, &mut FailsOnZfin, false, false, |_, _, _| true,
+        )
+        .await;
+        assert!(got.error.is_none(), "a finished batch is not stopped: {:?}", got.error);
+        assert_eq!(got.files.len(), 1);
+        assert_eq!(got.files[0].data, data_a);
+    }
+
     // ─── Header sync on a run of ZPADs ───────────────────────
 
     /// **Any run of ZPADs is sync, not just one or two.**  lrzsz's
@@ -3633,6 +3693,9 @@ mod tests {
     async fn test_an_endless_zpad_run_still_loses_sync() {
         let (mut w, mut r) = tokio::io::duplex(1 << 16);
         w.write_all(&[ZPAD; 8192]).await.unwrap();
+        // Closed behind the run, so a read loop that ignores the budget
+        // ends in EOF -- a failure with a message -- rather than a hang.
+        drop(w);
         let mut st = ReadState::default();
         let err = read_header(&mut r, false, &mut st, false).await.unwrap_err();
         assert!(err.contains("sync lost"), "got: {err}");

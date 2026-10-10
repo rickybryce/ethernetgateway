@@ -160,17 +160,27 @@ pub const MAX_NAP: Duration = Duration::from_secs(1);
 /// counting the difference -- see [`Governor::behind`].
 pub const MAX_ARREARS: Duration = Duration::from_millis(50);
 
+/// The row of [`SPEED_CHOICES`] a setting *means*, if the list carries it.
+///
+/// Every surface that marks or cycles the current choice goes through this, so
+/// `off`, `0` and `2.0` sit on the row that runs the guest the same way rather
+/// than on no row at all -- matching by spelling sent the telnet key back to
+/// `auto` from `off` and left the desktop combo highlighting nothing.
+pub fn choice_index(setting: &str) -> Option<usize> {
+    let speed = parse(setting);
+    SPEED_CHOICES.iter().position(|(value, _)| parse(value) == speed)
+}
+
 /// The label for a setting, for a screen that shows the current value.
 ///
 /// From [`parse`], like [`mhz_for`], so the label always describes the clock
 /// the guest is actually held to.  A listed choice is found by what it
 /// *means*, so `2.0` shows the `2` row's label.
 pub fn label_for(setting: &str) -> String {
-    let speed = parse(setting);
-    if let Some((_, label)) = SPEED_CHOICES.iter().find(|(value, _)| parse(value) == speed) {
-        return (*label).to_string();
+    if let Some(i) = choice_index(setting) {
+        return SPEED_CHOICES[i].1.to_string();
     }
-    match speed {
+    match parse(setting) {
         // A number the list does not carry is still a valid setting.
         Speed::Mhz(m) => format!("{m} MHz"),
         // Both are listed, so this is unreachable while the list holds them;
@@ -395,6 +405,24 @@ mod tests {
         // Every other choice already says what it is, so it is left alone.
         for (value, label) in &SPEED_CHOICES[1..] {
             assert_eq!(&choice_label(value, label, "z80"), label, "{value}");
+        }
+    }
+
+    /// **A setting finds its row by meaning.**  The telnet key cycled from
+    /// the row whose *spelling* matched, so `off` went back to `auto` instead
+    /// of on from `unlimited`, and the desktop combo highlighted no row for an
+    /// empty setting.  A number the list does not carry has no row.
+    #[test]
+    fn test_a_setting_finds_its_row_by_meaning() {
+        let row = |v: &str| SPEED_CHOICES.iter().position(|(c, _)| *c == v);
+        assert_eq!(choice_index("off"), row("unlimited"));
+        assert_eq!(choice_index("0"), row("unlimited"));
+        assert_eq!(choice_index("2.0"), row("2"));
+        assert_eq!(choice_index(""), row("auto"));
+        assert_eq!(choice_index(" AUTO "), row("auto"));
+        assert_eq!(choice_index("3"), None);
+        for (i, (value, _)) in SPEED_CHOICES.iter().enumerate() {
+            assert_eq!(choice_index(value), Some(i), "{value}");
         }
     }
 

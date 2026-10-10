@@ -2544,7 +2544,9 @@ fn test_an_exec_that_could_not_be_sent_is_a_network_fault() {
     let src = include_str!("../relay.rs").replace("\r\n", "\n");
     let prod = &src[..src.find("#[cfg(test)]\nmod tests").expect("test module")];
     let at = prod.find(".exec(true, exec_command.as_bytes())").expect("the relay exec");
-    let tail = &prod[at..at + 120];
+    // By characters, not bytes: a byte slice panics instead of failing if
+    // non-ASCII text ever lands at the cut.
+    let tail: String = prod[at..].chars().take(120).collect();
     assert!(tail.contains(".map_err(exec_send_failed)?"), "the relay exec is classified elsewhere: {tail}");
 }
 

@@ -1809,13 +1809,24 @@ pub(crate) async fn xmodem_send(
         // CAN that nothing follows is answered as it always was, as an
         // acceptance: refusing it would report a send the receiver may well
         // have finished as failed.  And the pair must arrive in *this*
-        // attempt -- one stray CAN per resent EOT is not a cancel.
+        // attempt -- one stray CAN per resent EOT is not a cancel.  The
+        // second CAN gets only `EOT_CAN_PAIR_MS`, not the whole block
+        // timeout: a cancelling receiver sends its CANs back to back, and a
+        // lone one used to be accepted at once, so waiting the full block
+        // timeout on it would put a stall in front of every such success.
+        // A line that drops after the lone CAN is accepted the same way.
         state.pending_can = false;
         let eot_deadline = tokio::time::Instant::now()
             + std::time::Duration::from_secs(block_timeout);
         let mut lone_can = false;
         let reply = loop {
-            let remaining = eot_deadline.saturating_duration_since(tokio::time::Instant::now());
+            let deadline = if lone_can {
+                eot_deadline.min(tokio::time::Instant::now()
+                    + std::time::Duration::from_millis(EOT_CAN_PAIR_MS))
+            } else {
+                eot_deadline
+            };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let got = tokio::time::timeout(remaining, nvt_read_byte(reader, is_tcp, state)).await;
             match got {
                 Ok(Ok(byte)) if is_can_abort(byte, state) => {
@@ -1827,7 +1838,7 @@ pub(crate) async fn xmodem_send(
                     lone_can = true;
                     continue;
                 }
-                Err(_) if lone_can => break Ok(Ok(CAN)),
+                Err(_) | Ok(Err(_)) if lone_can => break Ok(Ok(CAN)),
                 other => break other,
             }
         };
@@ -1847,6 +1858,7 @@ pub(crate) async fn xmodem_send(
                         block_timeout,
                         verbose,
                         state,
+                        false,
                     )
                     .await?;
                 }
@@ -1857,7 +1869,10 @@ pub(crate) async fn xmodem_send(
                 if verbose { glog!("XMODEM send: unexpected EOT response 0x{:02X}, treating as ACK", b); }
                 if ymodem.is_some() {
                     // Best-effort: attempt the end-of-batch handshake
-                    // but don't hard-fail the transfer if it flakes.
+                    // but don't hard-fail the transfer if it flakes.  A
+                    // `'C'` read here *is* that handshake's prompt (a
+                    // receiver that skipped the ACK, or one after a lone
+                    // CAN), so it must not be waited for a second time.
                     let _ = send_ymodem_end_of_batch(
                         reader,
                         writer,
@@ -1865,6 +1880,7 @@ pub(crate) async fn xmodem_send(
                         block_timeout,
                         verbose,
                         state,
+                        b == CRC_REQUEST,
                     )
                     .await;
                 }
@@ -1997,6 +2013,11 @@ async fn send_ymodem_block_zero(
 /// the budget contract is visible to tests — the user-visible stall
 /// after a failed EOT must stay bounded by these constants.
 pub(crate) const EOB_TIMEOUT_SECS: u64 = 3;
+
+/// How long a lone CAN in answer to an EOT waits for a second one before it
+/// is read as line noise and the EOT as accepted.  A cancelling receiver
+/// sends its CANs back to back (lrzsz sends eight), so a second is ample.
+const EOT_CAN_PAIR_MS: u64 = 1000;
 const EOB_MAX_RETRIES: usize = 2;
 
 /// After the last data EOT is ACKed, the YMODEM receiver sends one more
@@ -2020,21 +2041,27 @@ async fn send_ymodem_end_of_batch(
     block_timeout: u64,
     verbose: bool,
     state: &mut ReadState,
+    prompted: bool,
 ) -> Result<(), String> {
-    // Wait for the receiver's final 'C'.  Some lax receivers skip this
-    // step; don't hard-fail if it never arrives.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(block_timeout),
-        nvt_read_byte(reader, is_tcp, state),
-    )
-    .await
-    {
-        Ok(Ok(b)) if b == CRC_REQUEST => {
-            if verbose { glog!("XMODEM send: got end-of-batch 'C'"); }
-        }
-        other => {
-            if verbose { glog!("XMODEM send: no end-of-batch 'C' ({:?}); skipping empty block 0", other); }
-            return Ok(());
+    // Wait for the receiver's final 'C' -- unless the caller already read
+    // it.  Some lax receivers skip this step; don't hard-fail if it never
+    // arrives.
+    if prompted {
+        if verbose { glog!("XMODEM send: end-of-batch 'C' already received"); }
+    } else {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(block_timeout),
+            nvt_read_byte(reader, is_tcp, state),
+        )
+        .await
+        {
+            Ok(Ok(b)) if b == CRC_REQUEST => {
+                if verbose { glog!("XMODEM send: got end-of-batch 'C'"); }
+            }
+            other => {
+                if verbose { glog!("XMODEM send: no end-of-batch 'C' ({:?}); skipping empty block 0", other); }
+                return Ok(());
+            }
         }
     }
 
@@ -6918,6 +6945,92 @@ mod tests {
         send_with_eot_reply(&[CAN])
             .await
             .expect("a lone CAN then silence is taken as acceptance, as it always was");
+    }
+
+    /// **A lone CAN at EOT is answered within the pair window, not the block
+    /// timeout.**  It was accepted at once before the CAN×2 rule; waiting the
+    /// whole `xmodem_block_timeout` for a second CAN that a cancelling
+    /// receiver would have sent back to back put a stall in front of every
+    /// such success.  A line that drops after the lone CAN is acceptance too,
+    /// as it was.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_lone_can_at_eot_is_accepted_without_the_block_timeout() {
+        let started = tokio::time::Instant::now();
+        send_with_eot_reply(&[CAN]).await.expect("a lone CAN is acceptance");
+        let waited = started.elapsed();
+        assert!(
+            waited < std::time::Duration::from_millis(EOT_CAN_PAIR_MS + 500),
+            "a lone CAN waited {waited:?}"
+        );
+        send_with_eot_reply_then_hang_up(&[CAN])
+            .await
+            .expect("a lone CAN then a dropped line is acceptance, as it always was");
+    }
+
+    /// `send_with_eot_reply`, but the receiver closes the line after its reply.
+    async fn send_with_eot_reply_then_hang_up(eot_reply: &[u8]) -> Result<(), String> {
+        let (sender_half, peer_half) = tokio::io::duplex(64 * 1024);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let reply = eot_reply.to_vec();
+        let peer = tokio::spawn(async move {
+            let (mut peer_read, mut peer_write) = tokio::io::split(peer_half);
+            peer_write.write_all(&[CRC_REQUEST]).await.unwrap();
+            let mut block = [0u8; 3 + XMODEM_BLOCK_SIZE + 2];
+            peer_read.read_exact(&mut block).await.unwrap();
+            peer_write.write_all(&[ACK]).await.unwrap();
+            let mut eot = [0u8; 1];
+            peer_read.read_exact(&mut eot).await.unwrap();
+            assert_eq!(eot[0], EOT);
+            peer_write.write_all(&reply).await.unwrap();
+            // Both halves dropped here: the sender reads EOF next.
+        });
+        let result =
+            xmodem_send(&mut send_read, &mut send_write, b"short", false, false, false, false, None)
+                .await;
+        peer.await.unwrap();
+        result
+    }
+
+    /// **A `'C'` read as the EOT reply is the end-of-batch prompt, and is not
+    /// waited for twice.**  After a lone CAN (or from a receiver that skips
+    /// the ACK) the YMODEM receiver's `'C'` arrived where the EOT reply was
+    /// being read; the end-of-batch handshake then waited a whole block
+    /// timeout for a `'C'` already consumed and never sent the empty block 0
+    /// that tells the receiver the batch is over.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_c_read_as_the_eot_reply_still_ends_the_ymodem_batch() {
+        let (sender_half, peer_half) = tokio::io::duplex(64 * 1024);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let peer = tokio::spawn(async move {
+            let (mut peer_read, mut peer_write) = tokio::io::split(peer_half);
+            let mut block = [0u8; 3 + XMODEM_BLOCK_SIZE + 2];
+            // Block 0 (the header), then the data block, each prompted by 'C'.
+            peer_write.write_all(&[CRC_REQUEST]).await.unwrap();
+            peer_read.read_exact(&mut block).await.unwrap();
+            assert_eq!((block[0], block[1]), (SOH, 0));
+            peer_write.write_all(&[ACK, CRC_REQUEST]).await.unwrap();
+            peer_read.read_exact(&mut block).await.unwrap();
+            assert_eq!((block[0], block[1]), (SOH, 1));
+            peer_write.write_all(&[ACK]).await.unwrap();
+            let mut eot = [0u8; 1];
+            peer_read.read_exact(&mut eot).await.unwrap();
+            assert_eq!(eot[0], EOT);
+            peer_write.write_all(&[CAN, CRC_REQUEST]).await.unwrap();
+            // The empty block 0 must follow, well inside a block timeout.
+            tokio::time::timeout(std::time::Duration::from_secs(2), peer_read.read_exact(&mut block))
+                .await
+                .expect("the end-of-batch block 0 arrived")
+                .unwrap();
+            assert_eq!((block[0], block[1], block[2]), (SOH, 0, 0xFF));
+            assert!(block[3..3 + XMODEM_BLOCK_SIZE].iter().all(|&b| b == 0));
+            peer_write.write_all(&[ACK]).await.unwrap();
+        });
+        let header = YmodemHeader { filename: "A.TXT".into(), size: 5, modtime: None, mode: None };
+        let result =
+            xmodem_send(&mut send_read, &mut send_write, b"short", false, false, false, false, Some(header))
+                .await;
+        peer.await.unwrap();
+        result.expect("the send completes");
     }
 
     /// **A declared size is compared as the `u64` it was parsed as.**  The

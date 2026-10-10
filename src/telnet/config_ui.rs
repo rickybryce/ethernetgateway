@@ -1787,13 +1787,13 @@ impl TelnetSession {
                 "z" => {
                     // The clock the guest is held to.  Cycled through the same
                     // list the web UI and the desktop offer, so the three
-                    // surfaces cannot drift.  A hand-edited number that is not
-                    // in the list lands on the first choice next, which is
-                    // `auto` -- the safe end, not `unlimited`.
+                    // surfaces cannot drift, and the current row found by what
+                    // the setting means (`off` is the `unlimited` row).  A
+                    // hand-edited number that is not in the list lands on the
+                    // first choice next, which is `auto` -- the safe end, not
+                    // `unlimited`.
                     let choices = crate::cpm::speed::SPEED_CHOICES;
-                    let idx = choices
-                        .iter()
-                        .position(|(v, _)| *v == cfg.cpm_boot_speed.trim().to_ascii_lowercase())
+                    let idx = crate::cpm::speed::choice_index(&cfg.cpm_boot_speed)
                         .map(|i| (i + 1) % choices.len())
                         .unwrap_or(0);
                     let next = choices[idx].0.to_string();

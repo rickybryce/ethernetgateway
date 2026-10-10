@@ -156,11 +156,18 @@ pub fn unmount(drive0: u8) -> Option<Mount> {
 }
 
 /// Drop every mount.  Used when the emulator is disabled.
+///
+/// The record of drives that did not come back from a boot goes too: with
+/// every mount gone it would leave those drives the only ones the screens
+/// still show, and re-enabling remounts from `cpm_mounts`, which retries them
+/// anyway.
 pub fn clear_all() {
     let mut t = table().write().unwrap_or_else(|e| e.into_inner());
     for slot in t.iter_mut() {
         *slot = None;
     }
+    drop(t);
+    lock!(unrestored_table()).clear();
 }
 
 // ---- who is using what --------------------------------------------------
@@ -385,14 +392,22 @@ pub fn lend_for_boot(drive0: u8) -> Option<Mount> {
 /// Mounting one file twice gives two independent `ImageFs` objects over it,
 /// each with its own cached directory and allocation bitmap, and a write
 /// through either leaves the other stale.  A lent drive counts: it is still the
-/// operator's mount, just out of service.
+/// operator's mount, just out of service.  So does a drive that did not come
+/// back from a boot ([`unrestored`]): it stays in `cpm_mounts`, so mounting its
+/// image on a second drive wrote one image on two drives into the config, made
+/// the first drive's "Save to retry" fail for ever, and at the next start the
+/// first drive won and the operator's working mount moved to its letter.
 pub fn drive_holding(filename: &str) -> Option<u8> {
     let t = table().read().unwrap_or_else(|e| e.into_inner());
     if let Some(i) = t.iter().position(|m| m.as_ref().is_some_and(|m| m.filename == filename)) {
         return Some(i as u8);
     }
     drop(t);
-    boot_loans().into_iter().find(|(_, n)| n == filename).map(|(d, _)| d)
+    boot_loans()
+        .into_iter()
+        .chain(unrestored())
+        .find(|(_, n)| n == filename)
+        .map(|(d, _)| d)
 }
 
 /// The booted images that are **not** already on a mount list.

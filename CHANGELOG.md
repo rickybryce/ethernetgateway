@@ -134,10 +134,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal that starts the ZMODEM upload itself.
 - **An XMODEM download that the receiver cancels at the end is a failure**,
   not a success: `CAN CAN` in answer to the final EOT was taken as an ACK.
+  A single `CAN` there is still line noise and is answered within a second.
+- **A YMODEM download whose receiver skips the final ACK still ends the
+  batch**: its `C` was read in place of the ACK and then waited for again,
+  so the "no more files" block was never sent.
+- **A ZMODEM upload the sender finished is not reported as stopped** when our
+  closing reply cannot be written; every file had already been confirmed.
 - **ZMODEM finds a header behind any number of `*` bytes**, as lrzsz does;
   three or more cost a retry.
 - **A second copy of the gateway no longer rewrites `egateway.conf`** before
-  it backs off, which could undo a change the running copy had just saved.
+  it backs off, which could undo a change the running copy had just saved --
+  neither when it starts nor while its "already running" window is open
+  (that window saved its own size and position).
 - **A stop signal that arrives during a restart is no longer lost**, which
   left systemd to kill the process 90 seconds later.
 - **Relay: a refused key enrolment is retried later** rather than never again
@@ -157,7 +165,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not its format was named; naming it let one file's `SAVE` overwrite
   another's data.
 - **A mounted image the boot could not put back stays in `cpm_mounts`**
-  rather than silently dropping out at the next save.  Image names containing
+  rather than silently dropping out at the next save, and cannot be mounted
+  on a second drive meanwhile (the two would have swapped letters at the
+  next start).  Image names containing
   `:` are refused (on Windows they could name a file outside the images
   folder).
 - **88-DCDD: a sector the guest finished writing always reaches the disk**,
@@ -168,7 +178,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The speed setting is shown by what it means.**  The desktop showed the
   period speed for `off`, `none` and `0`, which run unlimited; and the web
   page selected `auto` for any spelling its list did not carry (`off`, `2.0`,
-  `3.5`), so a Save of any other setting rewrote the speed to `auto`.
+  `3.5`), so a Save of any other setting rewrote the speed to `auto`.  The
+  telnet key now steps on from the row the setting means, and the desktop
+  list highlights it.
 - **Crashes fixed:** a YMODEM file with an absurd timestamp; a monitor ROM
   file with a non-ASCII line in its Intel HEX, or a raw image running past
   `FFFF`.  Files a ZMODEM receiver skips now count toward the batch limit.

@@ -591,8 +591,9 @@ impl Drop for RemountOnDrop {
             // from any screen dropped it from `cpm_mounts` -- realistic, since
             // the guest may have rewritten the directory into something
             // identification refuses.  It goes in the registry's unrestored
-            // table instead, which keeps it in the configuration and blocks
-            // nothing (a kept *loan* would hold the drive until a restart).
+            // table instead, which keeps it in the configuration and does not
+            // hold the drive (a kept *loan* would until a restart) -- only its
+            // image, which may not go on a second drive meanwhile.
             let restored = crate::cpm::image::restore_mount(&self.base, drive, &name);
             if let Err(e) = &restored {
                 crate::cpm::image::registry::note_unrestored(drive, &name);
@@ -2351,6 +2352,16 @@ mod tests {
         let (_, errors) = apply_mount_selection(&base, &[]);
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(current_mounts_value(), "", "choosing the drive folder did not remove it");
+
+        // An unrestored drive still holds its image: mounting it on another
+        // drive would put one image on two drives in `cpm_mounts`.
+        registry::note_unrestored(1, "altair8_gone.dsk");
+        let err = mount_image(&base, 2, "altair8_gone.dsk").expect_err("one image, two drives");
+        assert!(err.contains("drive B:"), "got: {err}");
+        assert_eq!(current_mounts_value(), "B=altair8_gone.dsk");
+        // ...and disabling the emulator forgets it with every other mount.
+        registry::clear_all();
+        assert!(registry::unrestored().is_empty(), "clear_all left the unrestored drive");
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
     }

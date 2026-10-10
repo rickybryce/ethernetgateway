@@ -2566,20 +2566,25 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("Booted-disk speed:");
             let cpu = self.cfg.cpm_cpu.clone();
-            let current = crate::cpm::speed::choice_label(
-                &self.cfg.cpm_boot_speed,
-                &crate::cpm::speed::label_for(&self.cfg.cpm_boot_speed),
-                &cpu,
-            );
+            // The current row by meaning, as the web select and the telnet
+            // key find it: an empty or hand-spelled `auto` is the `auto` row,
+            // with its resolved clock, not an unlabelled phrase on no row.
+            let at = crate::cpm::speed::choice_index(&self.cfg.cpm_boot_speed);
+            let current = match at {
+                Some(i) => {
+                    let (value, label) = crate::cpm::speed::SPEED_CHOICES[i];
+                    crate::cpm::speed::choice_label(value, label, &cpu)
+                }
+                None => crate::cpm::speed::label_for(&self.cfg.cpm_boot_speed),
+            };
             egui::ComboBox::from_id_salt("cpm_boot_speed")
                 .selected_text(current)
                 .show_ui(ui, |ui| {
-                    for (value, label) in crate::cpm::speed::SPEED_CHOICES {
-                        ui.selectable_value(
-                            &mut self.cfg.cpm_boot_speed,
-                            (*value).to_string(),
-                            crate::cpm::speed::choice_label(value, label, &cpu),
-                        );
+                    for (i, (value, label)) in crate::cpm::speed::SPEED_CHOICES.iter().enumerate() {
+                        let text = crate::cpm::speed::choice_label(value, label, &cpu);
+                        if ui.selectable_label(at == Some(i), text).clicked() {
+                            self.cfg.cpm_boot_speed = (*value).to_string();
+                        }
                     }
                 });
         })
@@ -5589,8 +5594,13 @@ impl eframe::App for App {
         // settings for a server that will not be started. There is no server
         // behind this window at all -- `main` started none -- so this screen
         // and the two buttons on it are the only things drawn.
+        //
+        // Nor is the window's geometry saved from here, though every other
+        // screen saves it: that save rewrites `egateway.conf` from *this*
+        // copy's `Config`, which is the rewrite a backing-off second copy
+        // must never do -- an older binary would drop every key it does not
+        // know, and a missing file would be created.
         if self.handover.is_some() {
-            self.track_window_geometry(ui.ctx());
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
             egui::Frame::NONE
                 .inner_margin(egui::Margin::symmetric(WIZARD_MARGIN, 0))
@@ -7382,6 +7392,37 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The handover ask writes no config.**  It is drawn by a second copy
+    /// that may be about to back off, and every config write here rewrites
+    /// `egateway.conf` from that copy's own `Config` -- the window-geometry
+    /// save did, 1.5 s after the window settled, so reading the question was
+    /// enough to drop every key an older binary does not know.  Scans the
+    /// branch and `draw_handover` itself, comments skipped so this prose does
+    /// not trip it.
+    #[test]
+    fn test_the_handover_ask_writes_no_config() {
+        // Normalised: a Windows checkout is CRLF, and an anchor spanning a
+        // line break would match nothing there.
+        let src = include_str!("gui.rs").replace("\r\n", "\n");
+        let src = src.as_str();
+        let code = |slice: &str| -> String {
+            slice
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let start = src.find("        if self.handover.is_some() {\n").expect("handover branch");
+        let end = start + src[start..].find("return;").expect("branch end");
+        let fn_start = src.find("    fn draw_handover(").expect("draw_handover");
+        let fn_end = fn_start + 1 + src[fn_start + 1..].find("\n    fn ").expect("next fn");
+        for (what, body) in [("branch", code(&src[start..end])), ("draw_handover", code(&src[fn_start..fn_end]))] {
+            for write in ["track_window_geometry", "update_config_value", "persist_config", "save_config"] {
+                assert!(!body.contains(write), "the handover {what} calls {write}");
+            }
+        }
+    }
 
     /// Each column of the Serial Port popup is at least as wide as the rows it
     /// has to hold.
