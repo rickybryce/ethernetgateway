@@ -52,8 +52,11 @@ pub(in crate::telnet) struct CpmModem {
     /// The live connection while online.
     conn: Option<Box<dyn ModemStream>>,
     echo: bool,
-    /// Consecutive `+` count for the `+++` escape.
+    /// Consecutive `+` count for the `+++` escape: the characters held back.
     plus_run: u8,
+    /// When the most recent held `+` arrived, so a run that stops short of
+    /// three can be released once guard time passes (`release_stale_plus`).
+    plus_at: Option<Instant>,
     /// Time of the last byte the guest sent while online, for the `+++`
     /// escape guard time (S12): the first `+` only starts an escape run if it
     /// was preceded by an idle gap, so a `+++` embedded in a data stream
@@ -120,6 +123,7 @@ impl CpmModem {
             conn: None,
             echo: true,
             plus_run: 0,
+            plus_at: None,
             last_online_at: None,
             incoming: None,
             ring_at: None,
@@ -275,6 +279,12 @@ impl CpmModem {
         // has already put in `out` (an echo, `CONNECT`), or the caller's
         // `queue_rx` truncates the tail and peer bytes that should have stayed
         // in the socket are lost.
+        // A `+` or two left held with no third: once guard time has passed
+        // they were data.  Checked every cycle, because a guest that types one
+        // `+` and then waits sends no byte that would flush it.
+        if self.mode == Mode::Online {
+            self.release_stale_plus(Instant::now(), &mut out).await;
+        }
         if self.mode == Mode::Online {
             let budget = rx_budget.saturating_sub(out.len());
             self.poll_connection(&mut out, budget, guest_has_rx).await;
@@ -606,14 +616,24 @@ impl CpmModem {
 
     /// Online mode: forward one byte to the peer, tracking the (simplified)
     /// `+++` escape — three consecutive `+` returns to command mode with the
-    /// call held.  Bytes are forwarded as they arrive (including `+`), so data
-    /// containing a stray `+` isn't dropped.  The first `+` only starts an
-    /// escape run if it was preceded by at least the S12 guard time of idle
-    /// (default 1 s), so a `+++` inside a continuous data stream (e.g. a binary
-    /// file transfer) is treated as data, not the escape.  (The trailing guard
-    /// and holding the `+++` back from the peer are not modelled.)
+    /// call held.  A `+` that may begin the escape is **held back**, and
+    /// released in order if the run turns out not to be one: when a different
+    /// byte arrives, or when guard time passes with no third `+`
+    /// ([`Self::release_stale_plus`]) -- so data containing a stray `+` is
+    /// delayed, never dropped.  The first `+` only starts an escape run if it
+    /// was preceded by at least the S12 guard time of idle (default 1 s), so a
+    /// `+++` inside a continuous data stream (e.g. a binary file transfer) is
+    /// treated as data, not the escape.  (The trailing guard is not modelled:
+    /// the third `+` escapes at once.)
     async fn feed_online_byte(&mut self, b: u8, out: &mut Vec<u8>) {
         let now = Instant::now();
+        // A `+` held for longer than guard time is data, whatever comes next:
+        // without this, a slow second `+` would continue the run and the
+        // three need not be anywhere near each other.
+        self.release_stale_plus(now, out).await;
+        if self.mode != Mode::Online {
+            return; // the release found the peer gone
+        }
         if b == b'+' {
             // A candidate first '+' needs a preceding idle gap (the S12
             // guard); once a run has started, the rest continue it.
@@ -633,6 +653,7 @@ impl CpmModem {
                 // characters are flushed below in order, so nothing is lost;
                 // only delayed by the byte that breaks the run.
                 self.plus_run += 1;
+                self.plus_at = Some(now);
                 if self.plus_run >= 3 {
                     self.plus_run = 0;
                     self.mode = Mode::Command;
@@ -653,6 +674,34 @@ impl CpmModem {
             }
         }
         self.last_online_at = Some(now);
+    }
+
+    /// Release a `+` or two held for an escape that never completed, once
+    /// guard time has passed since the last of them.  Without it a lone `+`
+    /// typed at a remote's prompt sat here until the next keystroke, and if
+    /// none came it never reached the remote at all.
+    ///
+    /// Not with `S12=0`: there "no guard" means any `+++` escapes however it
+    /// is paced, and a zero timeout would release a held `+` between two
+    /// pump cycles, before the guest's next `+` could arrive.  A held `+` is
+    /// then flushed only by the byte after it, as before.
+    async fn release_stale_plus(&mut self, now: Instant, out: &mut Vec<u8>) {
+        let guard = self.escape_guard();
+        if self.plus_run == 0 || guard.is_zero() {
+            return;
+        }
+        let Some(at) = self.plus_at else { return };
+        if now.saturating_duration_since(at) < guard {
+            return;
+        }
+        let held = std::mem::replace(&mut self.plus_run, 0) as usize;
+        // They were data, and the last of them is the last data byte.
+        self.last_online_at = Some(at);
+        if let Some(conn) = self.conn.as_mut()
+            && conn.write_all(&vec![b'+'; held]).await.is_err()
+        {
+            self.hangup(out, true);
+        }
     }
 
     /// The `+++` escape guard time from S12 (in 1/50-second units; default
@@ -1357,6 +1406,79 @@ mod tests {
             .expect("peer should receive the flushed run")
             .unwrap();
         assert_eq!(&buf[..n], b"++x", "held characters must flush in order");
+    }
+
+    /// A modem answered online, with its peer's end to read from.
+    async fn online_modem() -> (CpmModem, tokio::io::DuplexStream) {
+        let (near, far) = tokio::io::duplex(1024);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let mut m = CpmModem::new(true);
+        m.accept_incoming(CpmIncomingCall { bridge: far, progress: tx });
+        let _ = m.service(vec![], 65536, false).await; // ring
+        let _ = m.service(b"ATA\r".to_vec(), 65536, false).await; // online
+        (m, near)
+    }
+
+    /// Whatever the peer has been sent, waiting briefly for it.
+    async fn peer_got(near: &mut tokio::io::DuplexStream) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 16];
+        let n = tokio::time::timeout(Duration::from_millis(50), near.read(&mut buf))
+            .await
+            .map(|r| r.unwrap_or(0))
+            .unwrap_or(0);
+        buf[..n].to_vec()
+    }
+
+    /// **A `+` or two with no third reaches the peer once guard time passes.**
+    /// It used to be held until the guest's next byte, so a lone `+` typed at
+    /// a remote's prompt never arrived.  The clock is moved by back-dating the
+    /// held character rather than by sleeping through a guard time.
+    #[tokio::test]
+    async fn test_a_held_plus_is_released_after_guard_time() {
+        for held in [1usize, 2] {
+            let (mut m, mut near) = online_modem().await;
+            let pluses = vec![b'+'; held];
+            let _ = m.service(pluses.clone(), 65536, false).await;
+            // Control: inside guard time it is still held.
+            let _ = m.service(vec![], 65536, false).await;
+            assert_eq!(peer_got(&mut near).await, b"", "released before guard time");
+            m.plus_at = Some(Instant::now() - m.escape_guard());
+            let out = m.service(vec![], 65536, false).await;
+            assert_eq!(peer_got(&mut near).await, pluses, "the held characters, once");
+            assert!(!String::from_utf8_lossy(&out).contains("OK"), "still online");
+            let _ = m.service(vec![], 65536, false).await;
+            assert_eq!(peer_got(&mut near).await, b"", "released twice");
+        }
+    }
+
+    /// **The three must come within guard time of each other.**  A `+` held
+    /// past guard time is data, so the next two start a new run rather than
+    /// completing an escape the guest never typed.
+    #[tokio::test]
+    async fn test_a_slow_plus_does_not_continue_the_run() {
+        let (mut m, mut near) = online_modem().await;
+        let _ = m.service(b"+".to_vec(), 65536, false).await;
+        m.plus_at = Some(Instant::now() - m.escape_guard());
+        // In the same batch, so only the per-byte check can catch it.
+        let out = m.service(b"++".to_vec(), 65536, false).await;
+        assert!(!String::from_utf8_lossy(&out).contains("OK"), "a slow +, + + escaped");
+        assert_eq!(peer_got(&mut near).await, b"+", "the stale + went out as data");
+        assert_eq!(m.plus_run, 2, "the two quick ones are a fresh run");
+    }
+
+    /// With `S12=0` nothing is released by time: a zero timeout would let a
+    /// held `+` go between two pump cycles and `+++` could never escape.
+    #[tokio::test]
+    async fn test_no_timed_release_without_a_guard_time() {
+        let (mut m, mut near) = online_modem().await;
+        m.s_regs[12] = 0;
+        let _ = m.service(b"+".to_vec(), 65536, false).await;
+        m.plus_at = Some(Instant::now() - Duration::from_secs(5));
+        let _ = m.service(vec![], 65536, false).await;
+        assert_eq!(peer_got(&mut near).await, b"");
+        let out = m.service(b"++".to_vec(), 65536, false).await;
+        assert!(String::from_utf8_lossy(&out).contains("OK"), "+++ under S12=0 escapes");
     }
 
     #[tokio::test]
