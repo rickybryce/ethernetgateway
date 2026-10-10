@@ -531,9 +531,17 @@ async fn read_header(
         if b != ZPAD {
             continue;
         }
-        // Consume additional ZPAD if present (hex header has two).
+        // Consume the rest of a ZPAD run.  A hex header has two, but a run
+        // of any length is valid sync -- lrzsz's `zgethdr` loops on ZPAD --
+        // and taking only one more lost the header behind `* * * ZDLE B`.
+        // Each extra ZPAD is charged to the same budget as junk, so an
+        // endless run of them still ends in "sync lost".
         let mut next = nvt_read_byte(reader, is_tcp, state).await?;
-        if next == ZPAD {
+        while next == ZPAD {
+            if junk_budget == 0 {
+                return Err("ZMODEM: header sync lost".into());
+            }
+            junk_budget -= 1;
             next = nvt_read_byte(reader, is_tcp, state).await?;
         }
         if next != ZDLE {
@@ -939,13 +947,56 @@ pub(crate) struct ZfileInfo {
 /// the sender sent, including files we skipped, so callers can
 /// implement "accept file 0, validate files 1.." without maintaining
 /// their own counter.
+///
+/// All or nothing: a failure after file 1 was confirmed drops file 1 too.
+/// The Upload menu calls [`zmodem_receive_keeping`], which does not.
 pub(crate) async fn zmodem_receive<F>(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     is_tcp: bool,
     verbose: bool,
-    mut decide: F,
+    decide: F,
 ) -> Result<Vec<ZmodemReceive>, String>
+where
+    F: FnMut(usize, &str, Option<u64>) -> bool,
+{
+    let got = zmodem_receive_keeping(reader, writer, is_tcp, verbose, decide).await;
+    match got.error {
+        Some(e) => Err(e),
+        None => Ok(got.files),
+    }
+}
+
+/// [`zmodem_receive`], keeping every file confirmed before a failure -- a
+/// file is confirmed when its ZEOF is answered with ZRINIT, after which the
+/// sender counts it delivered.  See [`crate::xmodem::BatchReceipt`].
+pub(crate) async fn zmodem_receive_keeping<F>(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    verbose: bool,
+    decide: F,
+) -> crate::xmodem::BatchReceipt<ZmodemReceive>
+where
+    F: FnMut(usize, &str, Option<u64>) -> bool,
+{
+    let mut files = Vec::new();
+    let error = receive_into(reader, writer, is_tcp, verbose, decide, &mut files)
+        .await
+        .err();
+    crate::xmodem::BatchReceipt { files, error }
+}
+
+/// The receive itself.  Completed files go into `files` as each is
+/// confirmed, so whatever this returns, the caller still holds them.
+async fn receive_into<F>(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    verbose: bool,
+    mut decide: F,
+    files: &mut Vec<ZmodemReceive>,
+) -> Result<(), String>
 where
     F: FnMut(usize, &str, Option<u64>) -> bool,
 {
@@ -972,7 +1023,6 @@ where
     raw_write_bytes(writer, b"rz\r", is_tcp).await?;
     send_zrinit(writer, is_tcp, verbose).await?;
 
-    let mut files: Vec<ZmodemReceive> = Vec::new();
     // Count of ZFILE headers the sender sent (accepted + skipped), so
     // the decide callback sees a stable file index and so we can
     // distinguish "no files arrived" (real error) from "all files
@@ -1136,18 +1186,19 @@ where
                     &mut decide,
                 )
                 .await?;
-                let accepted = decision.is_some();
-                if let Some(rx) = decision {
-                    files.push(rx);
-                }
                 // Per Forsberg §7.4.1 the receiver sends ZRINIT after a
                 // file *completes* (post-ZEOF) to signal "ready for
                 // next file or ZFIN".  After a ZSKIP the sender already
                 // has its "move on" signal — sending a redundant ZRINIT
                 // leaves a stray frame in the sender's read buffer that
                 // can confuse the next ZFILE or the Phase 5 ZFIN wait.
-                if accepted {
+                //
+                // The file is kept only once that ZRINIT is out: it is the
+                // confirmation, and a file the sender was never told had
+                // arrived is not one a later failure should leave saved.
+                if let Some(rx) = decision {
                     send_zrinit(writer, is_tcp, verbose).await?;
+                    files.push(rx);
                 }
                 continue;
             }
@@ -1340,7 +1391,7 @@ where
             zfile_seen
         );
     }
-    Ok(files)
+    Ok(())
 }
 
 /// Receiver error-recovery step, Forsberg receiver model (rz): count one
@@ -3499,6 +3550,89 @@ mod tests {
             Err(e) => assert!(is_peer_cancel(&e), "expected peer-cancel, got {:?}", e),
             Ok(_) => panic!("expected cancel error, receiver returned Ok"),
         }
+    }
+
+    /// **A file answered with ZRINIT survives a later file's failure.**  File
+    /// 1 runs to ZEOF and is confirmed; file 2 is cancelled mid-data.  The
+    /// receive still fails, and says why, but file 1 comes back with the error
+    /// rather than being dropped with it; the file in flight does not.
+    #[tokio::test]
+    async fn test_zmodem_batch_keeps_confirmed_files_when_a_later_file_fails() {
+        let data_a = b"confirmed before the failure";
+        let mut wire = Vec::new();
+        wire.extend(build_bin16_header(ZFILE, [0, 0, 0, 0]));
+        wire.extend(build_subpacket(format!("a.txt\0{}", data_a.len()).as_bytes(), ZCRCW));
+        wire.extend(build_bin16_header(ZDATA, [0, 0, 0, 0]));
+        wire.extend(build_subpacket(data_a, ZCRCE));
+        wire.extend(build_hex_header(ZEOF, (data_a.len() as u32).to_le_bytes()));
+        wire.extend(build_bin16_header(ZFILE, [0, 0, 0, 0]));
+        wire.extend(build_subpacket(b"b.txt\x00300", ZCRCW));
+        wire.extend(build_bin16_header(ZDATA, [0, 0, 0, 0]));
+        wire.extend(build_subpacket(&[0x42; 64], ZCRCG));
+        wire.extend([ZDLE; 8]); // the sender cancels, file 2 half sent
+
+        let (mut inbound_writer, mut inbound_reader) = tokio::io::duplex(wire.len() + 1024);
+        inbound_writer.write_all(&wire).await.unwrap();
+        drop(inbound_writer);
+        let (mut discard_reader, mut outbound_writer) = tokio::io::duplex(1 << 16);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while discard_reader.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+        let got = zmodem_receive_keeping(
+            &mut inbound_reader, &mut outbound_writer, false, false, |_, _, _| true,
+        )
+        .await;
+
+        let error = got.error.as_deref().expect("the batch failed, and must say so");
+        assert!(is_peer_cancel(error), "the cancel is the reason, got: {error}");
+        assert_eq!(got.files.len(), 1, "file 1 kept, file 2 (unconfirmed) not");
+        assert_eq!(got.files[0].filename, "a.txt");
+        assert_eq!(got.files[0].data, data_a);
+    }
+
+    // ─── Header sync on a run of ZPADs ───────────────────────
+
+    /// **Any run of ZPADs is sync, not just one or two.**  lrzsz's
+    /// `zgethdr` loops on ZPAD; ours took one extra and then wanted ZDLE, so
+    /// a third `*` -- a sender's padding, or a stray `*` ahead of a hex
+    /// header -- lost the header and cost a retry.
+    #[tokio::test]
+    async fn test_a_header_behind_a_long_zpad_run_parses() {
+        for extra in [1usize, 3] {
+            // A hex header carries two ZPADs of its own: 3 and 5 in all.
+            let mut wire = vec![ZPAD; extra];
+            wire.extend(build_hex_header(ZRPOS, [7, 0, 0, 0]));
+            let (mut w, mut r) = tokio::io::duplex(256);
+            w.write_all(&wire).await.unwrap();
+            drop(w);
+            let mut st = ReadState::default();
+            let hdr = read_header(&mut r, false, &mut st, false)
+                .await
+                .unwrap_or_else(|e| panic!("{} ZPADs: {e}", extra + 2));
+            assert_eq!(hdr.frame, ZRPOS);
+            assert_eq!(hdr.data, [7, 0, 0, 0]);
+        }
+        // A binary header's single ZPAD, run long the same way.
+        let mut wire = vec![ZPAD; 4];
+        wire.extend(build_bin16_header(ZDATA, [9, 0, 0, 0]));
+        let (mut w, mut r) = tokio::io::duplex(256);
+        w.write_all(&wire).await.unwrap();
+        drop(w);
+        let mut st = ReadState::default();
+        let hdr = read_header(&mut r, false, &mut st, false).await.expect("5 ZPADs, bin16");
+        assert_eq!(hdr.frame, ZDATA);
+    }
+
+    /// The run is bounded by the junk budget, so a peer that sends nothing
+    /// but `*` still ends in "sync lost" rather than holding the read.
+    #[tokio::test]
+    async fn test_an_endless_zpad_run_still_loses_sync() {
+        let (mut w, mut r) = tokio::io::duplex(1 << 16);
+        w.write_all(&[ZPAD; 8192]).await.unwrap();
+        let mut st = ReadState::default();
+        let err = read_header(&mut r, false, &mut st, false).await.unwrap_err();
+        assert!(err.contains("sync lost"), "got: {err}");
     }
 
     // ─── ZCHALLENGE (sender echoes the value) ────────────────

@@ -1091,8 +1091,13 @@ impl TelnetSession {
         // partial included, and they must replace that partial -- which the
         // never-overwrite save would refuse as "already exists".
         let mut kermit_resumed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // A YMODEM or ZMODEM batch that failed after confirming some files:
+        // those files are saved below, and this is said after them.  The
+        // sender counted them delivered, so dropping them on a later file's
+        // failure lost work both ends had agreed was done.
+        let mut batch_error: Option<String> = None;
         let result: Result<Received, String> = match protocol {
-            UploadProtocol::Zmodem => crate::zmodem::zmodem_receive(
+            UploadProtocol::Zmodem => crate::zmodem::zmodem_receive_keeping(
                 &mut self.reader,
                 &mut *writer_guard,
                 self.xmodem_iac,
@@ -1100,7 +1105,9 @@ impl TelnetSession {
                 decide,
             )
             .await
-            .map(|rxs| {
+            .into_parts()
+            .map(|(rxs, error)| {
+                batch_error = error;
                 rxs.into_iter()
                     .map(|rx| {
                         // ZFILE info per Forsberg §11 carries length / mtime
@@ -1119,7 +1126,7 @@ impl TelnetSession {
                     })
                     .collect()
             }),
-            UploadProtocol::XmodemYmodem | UploadProtocol::Ymodem => crate::xmodem::xmodem_receive_batch(
+            UploadProtocol::XmodemYmodem | UploadProtocol::Ymodem => crate::xmodem::xmodem_receive_batch_keeping(
                 &mut self.reader,
                 &mut *writer_guard,
                 self.xmodem_iac,
@@ -1127,13 +1134,15 @@ impl TelnetSession {
                 verbose,
             )
             .await
+            .into_parts()
             // A YMODEM batch yields multiple files.  Under `Y` every file
             // keeps its block-0 name, converted as ZMODEM's are; under `X`
             // the first takes the name the user typed and 2..N the sender's,
             // converted the same way.  A file with no name -- plain
             // XMODEM sent under `Y`, or a non-UTF-8 block 0 -- is given a
             // generated one by the save path.
-            .map(|files| {
+            .map(|(files, error)| {
+                batch_error = error;
                 files
                     .into_iter()
                     .enumerate()
@@ -1400,7 +1409,7 @@ impl TelnetSession {
         // The one-file summary only when one file was *saved*: a ZMODEM
         // upload's only file can now be declined or fail, and "Upload
         // complete!  0 bytes" said neither -- the list below says why.
-        if saved.len() == 1 && skipped.is_empty() {
+        if saved.len() == 1 && skipped.is_empty() && batch_error.is_none() {
             let bytes = saved.first().map(|(_, n)| *n).unwrap_or(0);
             let blocks = bytes.div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE);
             self.send_line(&format!(
@@ -1428,17 +1437,23 @@ impl TelnetSession {
         } else {
             // Not green, and not "ok", when nothing was saved: every file
             // declined or failed is an upload that did not happen, whatever
-            // the reasons listed under it.
+            // the reasons listed under it.  Nor when a batch failed partway:
+            // what it saved first is kept, but files are missing.
             let line = format!(
-                "Upload complete: {} saved, {} skipped, {:.1}s",
+                "Upload {}: {} saved, {} skipped, {:.1}s",
+                if batch_error.is_some() { "stopped" } else { "complete" },
                 saved.len(),
                 skipped.len(),
                 elapsed.as_secs_f64()
             );
-            let line = if saved.is_empty() { self.yellow(&line) } else { self.green(&line) };
+            let line = if saved.is_empty() || batch_error.is_some() {
+                self.yellow(&line)
+            } else {
+                self.green(&line)
+            };
             self.send_line(&format!("  {}", line)).await?;
             self.last_transfer_note = Some(TransferNote {
-                ok: !saved.is_empty(),
+                ok: !saved.is_empty() && batch_error.is_none(),
                 text: format!(
                     "Rcvd {} file(s), {} skipped",
                     saved.len(),
@@ -1460,6 +1475,13 @@ impl TelnetSession {
                     self.yellow("-"),
                     name,
                     reason
+                ))
+                .await?;
+            }
+            if let Some(e) = &batch_error {
+                self.send_line(&format!(
+                    "  {}",
+                    self.red(&format!("Transfer failed: {}", e))
                 ))
                 .await?;
             }

@@ -132,13 +132,12 @@ fn finalize_received_file(
 ) -> Vec<u8> {
     let reported_size = meta.as_ref().and_then(|m| m.size);
     let truncated_by_size = if let Some(size) = reported_size {
-        let target = size as usize;
-        if target <= data.len() {
+        if let Some(target) = size_truncation_target(size, data.len()) {
             data.truncate(target);
             if verbose { glog!("XMODEM recv: truncated to YMODEM size {} bytes", target); }
             true
         } else {
-            if verbose { glog!("XMODEM recv: reported size {} > received {}, falling back to SUB strip", target, data.len()); }
+            if verbose { glog!("XMODEM recv: reported size {} > received {}, falling back to SUB strip", size, data.len()); }
             false
         }
     } else {
@@ -150,6 +149,16 @@ fn finalize_received_file(
         }
     }
     data
+}
+
+/// The length to cut a received file to, if block 0's declared size is one
+/// the data reaches.  Converted **before** comparing: `size as usize` on a
+/// 32-bit host (the ARMv6 Pi build) wraps a declared 4 GiB + 10 to 10, and a
+/// 300-byte file would be cut to 10 bytes by a size that had nothing to do
+/// with it.  A size no `usize` can hold is simply larger than anything we
+/// received.
+fn size_truncation_target(size: u64, received: usize) -> Option<usize> {
+    usize::try_from(size).ok().filter(|&target| target <= received)
 }
 
 /// Single-file wrapper around `xmodem_receive_batch` — returns the first (and,
@@ -173,6 +182,10 @@ pub(crate) async fn xmodem_receive(
     Ok((first.data, first.meta))
 }
 
+/// The all-or-nothing shape of the batch receive, for the tests that drive
+/// it: any error is the whole answer, and files it confirmed are dropped.
+/// Production calls [`xmodem_receive_batch_keeping`], which does not.
+#[cfg(test)]
 pub(crate) async fn xmodem_receive_batch(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -180,6 +193,69 @@ pub(crate) async fn xmodem_receive_batch(
     is_petscii: bool,
     verbose: bool,
 ) -> Result<Vec<XmodemReceivedFile>, String> {
+    let got = xmodem_receive_batch_keeping(reader, writer, is_tcp, is_petscii, verbose).await;
+    match got.error {
+        Some(e) => Err(e),
+        None => Ok(got.files),
+    }
+}
+
+/// What a batch receive hands back: every file the **sender was told had
+/// arrived**, and -- when the session then failed -- why.  Shared by YMODEM
+/// and ZMODEM.
+///
+/// Both halves, because a batch can succeed and fail at once.  A YMODEM file
+/// is confirmed when we ACK its EOT and a ZMODEM one when we answer its ZEOF
+/// with ZRINIT; from then on the sender counts it delivered and moves on.
+/// Returning only `Err` for a later failure -- a cancel, a corrupt file 3 --
+/// threw away files 1 and 2 that both ends had agreed were done, while a
+/// sender that merely went *quiet* between files kept them: the same batch
+/// saved or lost depending on how it ended.  The file in flight at the
+/// failure was never confirmed and is not in `files`.
+#[derive(Debug)]
+pub(crate) struct BatchReceipt<T> {
+    pub files: Vec<T>,
+    pub error: Option<String>,
+}
+
+impl<T> BatchReceipt<T> {
+    /// Split for a caller that saves what it can: `Err` only when the batch
+    /// failed with nothing to save, else the files and any error to report
+    /// after saving them.
+    pub(crate) fn into_parts(self) -> Result<(Vec<T>, Option<String>), String> {
+        match self.error {
+            Some(e) if self.files.is_empty() => Err(e),
+            error => Ok((self.files, error)),
+        }
+    }
+}
+
+/// Receive an XMODEM / YMODEM upload (a YMODEM batch yields one entry per
+/// file).  Never loses a confirmed file to a later error: see [`BatchReceipt`].
+pub(crate) async fn xmodem_receive_batch_keeping(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+) -> BatchReceipt<XmodemReceivedFile> {
+    let mut files = Vec::new();
+    let error = receive_batch_into(reader, writer, is_tcp, is_petscii, verbose, &mut files)
+        .await
+        .err();
+    BatchReceipt { files, error }
+}
+
+/// The receive itself.  Completed files go into `files` as each is
+/// confirmed, so whatever this returns, the caller still holds them.
+async fn receive_batch_into(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    files: &mut Vec<XmodemReceivedFile>,
+) -> Result<(), String> {
     let cfg = config::get_config();
     let negotiation_timeout = cfg.xmodem_negotiation_timeout;
     let block_timeout = cfg.xmodem_block_timeout;
@@ -199,10 +275,9 @@ pub(crate) async fn xmodem_receive_batch(
     // bytes.  Modtime and mode are returned to the caller for fs-attribute
     // application after save; we don't apply them ourselves.
     let mut ymodem_meta: Option<YmodemReceiveMeta> = None;
-    // Completed files, and the filename of the file currently being received
-    // (from its YMODEM block 0).  For a YMODEM batch these accumulate one
-    // entry per file; plain XMODEM / single-file YMODEM push exactly one.
-    let mut files: Vec<XmodemReceivedFile> = Vec::new();
+    // The filename of the file currently being received (from its YMODEM
+    // block 0).  Completed files go to the caller's `files`: one entry per
+    // file of a YMODEM batch, exactly one for plain XMODEM / single YMODEM.
     let mut current_filename: Option<String> = None;
     let negotiation_deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(negotiation_timeout);
@@ -450,7 +525,7 @@ pub(crate) async fn xmodem_receive_batch(
                         data: std::mem::take(&mut file_data),
                         meta: ymodem_meta.take(),
                     });
-                    return Ok(files);
+                    return Ok(());
                 }
                 // CAN handled above by is_can_abort + single-CAN continue.
                 if byte == CRC_REQUEST || byte == NAK {
@@ -874,8 +949,8 @@ pub(crate) async fn xmodem_receive_batch(
     }
 
     // Every completed file was finalized (size-truncated / SUB-stripped) and
-    // pushed at its EOT; nothing to do here but hand back the batch.
-    Ok(files)
+    // pushed into `files` at its EOT; nothing left to hand back.
+    Ok(())
 }
 
 /// Most a purge drains: two of the largest blocks (STX + 2 + 1024 + 2 CRC).
@@ -1725,12 +1800,30 @@ pub(crate) async fn xmodem_send(
     let eot_attempts = max_retries.max(2);
     for _ in 0..eot_attempts {
         raw_write_byte(writer, EOT, is_tcp).await?;
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(block_timeout),
-            nvt_read_byte(reader, is_tcp, state),
-        )
-        .await
-        {
+        // **A cancel is not an ACK.**  Every byte but NAK used to end the
+        // transfer as a success, which is right for the stray bytes a
+        // vintage receiver can leave here and wrong for CAN CAN: the
+        // receiver discarding the file was reported as a completed send.
+        // Same CAN×2 rule as the data blocks -- one CAN is line noise and
+        // the wait goes on for the byte after it, under one deadline.
+        let eot_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(block_timeout);
+        let reply = loop {
+            let remaining = eot_deadline.saturating_duration_since(tokio::time::Instant::now());
+            let got = tokio::time::timeout(remaining, nvt_read_byte(reader, is_tcp, state)).await;
+            match got {
+                Ok(Ok(byte)) if is_can_abort(byte, state) => {
+                    if verbose { glog!("XMODEM send: CAN×2 in answer to EOT"); }
+                    return Err("Transfer cancelled by receiver".into());
+                }
+                Ok(Ok(CAN)) => {
+                    if verbose { glog!("XMODEM send: single CAN at EOT treated as line noise"); }
+                    continue;
+                }
+                other => break other,
+            }
+        };
+        match reply {
             Ok(Ok(ACK)) => {
                 if verbose { glog!(
                     "XMODEM send: EOT ACKed — complete, {} block(s), {} bytes",
@@ -6704,6 +6797,130 @@ mod tests {
         assert_eq!(files.len(), 1, "file 1 must survive a corrupt inter-file block 0");
         assert_eq!(files[0].filename.as_deref(), Some("a.txt"));
         assert_eq!(files[0].data, data_a);
+    }
+
+    /// **A file the sender was told had arrived survives a later file's
+    /// failure.**  File 1 is ACKed at its EOT -- from there the sender counts
+    /// it delivered -- and file 2 is cancelled mid-data.  The receive still
+    /// fails, and says why, but file 1 comes back with the error rather than
+    /// being dropped with it; the file in flight does not.
+    #[tokio::test]
+    async fn test_ymodem_batch_keeps_confirmed_files_when_a_later_file_fails() {
+        let data_a = b"confirmed before the failure".to_vec();
+        let mut wire = build_ymodem_batch_wire(&[("a.txt", &data_a)]);
+        // Drop the end-of-batch block 0 the builder appended: file 2 follows.
+        wire.truncate(wire.len() - (3 + XMODEM_BLOCK_SIZE + 2));
+        wire.extend(ymodem_frame(0, &ymodem_block0_payload("b.txt", 300)));
+        wire.extend(ymodem_frame(1, &[0x42; XMODEM_BLOCK_SIZE]));
+        wire.extend([CAN, CAN]);
+
+        let (mut inbound_writer, mut inbound_reader) = tokio::io::duplex(wire.len() + 8192);
+        inbound_writer.write_all(&wire).await.expect("prefill inbound");
+        drop(inbound_writer);
+        let (mut discard_reader, mut outbound_writer) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while discard_reader.read(&mut buf).await.unwrap_or(0) > 0 {}
+        });
+        let got = xmodem_receive_batch_keeping(
+            &mut inbound_reader, &mut outbound_writer, false, false, false,
+        )
+        .await;
+
+        let error = got.error.as_deref().expect("the batch failed, and must say so");
+        assert!(error.contains("cancelled"), "the cancel is the reason, got: {error}");
+        assert_eq!(got.files.len(), 1, "file 1 kept, file 2 (unconfirmed) not");
+        assert_eq!(got.files[0].filename.as_deref(), Some("a.txt"));
+        assert_eq!(got.files[0].data, data_a);
+
+        // And the caller's split: files to save, then the error to report.
+        let (files, error) = got.into_parts().expect("there is something to save");
+        assert_eq!(files.len(), 1);
+        assert!(error.is_some());
+    }
+
+    /// `into_parts` is an `Err` only when a failed batch saved nothing, so
+    /// the Upload menu's ordinary failure path is unchanged for that case.
+    #[test]
+    fn test_batch_receipt_into_parts() {
+        let failed: BatchReceipt<u8> = BatchReceipt { files: vec![], error: Some("x".into()) };
+        assert_eq!(failed.into_parts().unwrap_err(), "x");
+        let partial = BatchReceipt { files: vec![1u8], error: Some("x".into()) };
+        assert_eq!(partial.into_parts().unwrap(), (vec![1], Some("x".to_string())));
+        let clean = BatchReceipt { files: vec![1u8], error: None };
+        assert_eq!(clean.into_parts().unwrap(), (vec![1], None));
+    }
+
+    /// Drive `xmodem_send` (one 128-byte block) against a lock-step receiver:
+    /// `C`, ACK the block, and answer the sender's EOT with `eot_reply`.
+    /// Lock-step rather than prefilled, because the sender purges whatever
+    /// is waiting before its first block and would eat a scripted reply.
+    async fn send_with_eot_reply(eot_reply: &[u8]) -> Result<(), String> {
+        let (sender_half, peer_half) = tokio::io::duplex(64 * 1024);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut peer_read, mut peer_write) = tokio::io::split(peer_half);
+        let reply = eot_reply.to_vec();
+        let peer = tokio::spawn(async move {
+            peer_write.write_all(&[CRC_REQUEST]).await.unwrap();
+            let mut block = [0u8; 3 + XMODEM_BLOCK_SIZE + 2];
+            peer_read.read_exact(&mut block).await.unwrap();
+            assert_eq!(block[0], SOH);
+            peer_write.write_all(&[ACK]).await.unwrap();
+            let mut eot = [0u8; 1];
+            peer_read.read_exact(&mut eot).await.unwrap();
+            assert_eq!(eot[0], EOT);
+            peer_write.write_all(&reply).await.unwrap();
+            // Hold the line open: a sender still waiting must time out on
+            // its own clock, not see an EOF it would report instead.
+            let mut rest = [0u8; 64];
+            while peer_read.read(&mut rest).await.unwrap_or(0) > 0 {}
+        });
+        let result =
+            xmodem_send(&mut send_read, &mut send_write, b"short", false, false, false, false, None)
+                .await;
+        drop(send_write);
+        peer.abort();
+        result
+    }
+
+    /// **A receiver cancelling at EOT has not accepted the file.**  Any byte
+    /// but NAK used to read as an ACK there, CAN CAN included, so a receiver
+    /// that discarded the file was reported as a completed send.
+    #[tokio::test(start_paused = true)]
+    async fn test_xmodem_send_fails_when_eot_is_answered_with_can_can() {
+        let result = send_with_eot_reply(&[CAN, CAN]).await;
+        let err = result.expect_err("CAN CAN at EOT is a cancel, not an ACK");
+        assert!(err.contains("cancelled"), "got: {err}");
+    }
+
+    /// The tolerance it replaced still holds: a single CAN is line noise and
+    /// the ACK after it completes the send, and a stray byte from a vintage
+    /// receiver still counts as acceptance.
+    #[tokio::test(start_paused = true)]
+    async fn test_xmodem_send_eot_still_tolerates_noise_and_stray_bytes() {
+        send_with_eot_reply(&[CAN, ACK])
+            .await
+            .expect("one CAN then ACK is a completed send");
+        send_with_eot_reply(&[0x55])
+            .await
+            .expect("a stray byte at EOT is still taken as acceptance");
+    }
+
+    /// **A declared size is compared as the `u64` it was parsed as.**  The
+    /// old `size as usize` wraps 4 GiB + 10 to 10 on a 32-bit build, and a
+    /// 300-byte file would be cut to its first 10 bytes.  A 64-bit host
+    /// cannot wrap, so this pins the helper's answer: past the data, no
+    /// truncation at all.
+    #[test]
+    fn test_a_size_past_4_gib_never_truncates_a_short_file() {
+        assert_eq!(size_truncation_target(4_294_967_306, 300), None);
+        assert_eq!(size_truncation_target(10, 300), Some(10));
+        assert_eq!(size_truncation_target(300, 300), Some(300));
+        assert_eq!(size_truncation_target(301, 300), None);
+        let meta = Some(YmodemReceiveMeta { size: Some(4_294_967_306), ..Default::default() });
+        let mut data = vec![0x41u8; 300];
+        data.push(SUB);
+        assert_eq!(finalize_received_file(data, &meta, false), vec![0x41u8; 300]);
     }
 
     /// Capture the wire bytes a real `sx` emits for a plain-XMODEM
