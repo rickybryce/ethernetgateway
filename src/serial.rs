@@ -795,6 +795,12 @@ struct ModemState {
     quiet: bool,
     /// The `+++` escape detector for the current call.
     escape: PlusEscape,
+    /// Bytes read from the port that belong to the *next* mode, served by
+    /// [`read_port`] before the UART.  Filled when an escape is found to have
+    /// completed before a read returned: what that read carried was typed
+    /// after the escape, so it is command-mode input (`ATH`, say), not data
+    /// for the remote.
+    pending_input: std::collections::VecDeque<u8>,
     cmd_buffer: String,
     /// What a menu session dialled from this port inherits, **held across
     /// dials**.
@@ -3699,6 +3705,7 @@ fn serial_thread(
         verbose: port_cfg.verbose,
         quiet: port_cfg.quiet,
         escape: PlusEscape::new(now),
+        pending_input: std::collections::VecDeque::new(),
         cmd_buffer: String::new(),
         prev_cmd_byte: 0,
         handle,
@@ -3860,7 +3867,7 @@ fn command_mode_tick(state: &mut ModemState) -> bool {
     drain_serial_broadcasts(state);
 
     let mut buf = [0u8; 1];
-    match state.port.read(&mut buf) {
+    match read_port(state, &mut buf) {
         Ok(1) => {
             let byte = buf[0];
             // Folded once here so the accumulation branch below is a plain
@@ -6236,7 +6243,8 @@ where
         }
 
         // Serial → duplex
-        match state.port.read(&mut serial_buf) {
+        let from_wire = state.pending_input.is_empty();
+        match read_port(state, &mut serial_buf) {
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
                 // The wire-side trace.  `cpmkey WIRE` is logged where the
@@ -6254,14 +6262,16 @@ where
                 // per call instead would leave a session that started before
                 // the toggle silently untraceable -- which reads as "the byte
                 // never arrived", the very wrong answer this exists to stop.
-                if modem_trace_enabled() {
+                if from_wire && modem_trace_enabled() {
                     if wire_trace_worth_logging(n) {
                         glog!("cpmkey PORT {} bytes: {}", n, wire_preview(&serial_buf[..n]));
                     } else {
                         glog!("cpmkey PORT {} bytes (bulk)", n);
                     }
                 }
-                let mut forward = Vec::with_capacity(n);
+                let Some(mut forward) = escape_before_read(state, &serial_buf[..n]) else {
+                    return OnlineExit::Escaped;
+                };
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
                 if dials_a_host && state.petscii_translate {
                     forward = link.for_host(&forward);
@@ -6507,7 +6517,8 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
         }
 
         // Serial → TCP
-        match state.port.read(&mut serial_buf) {
+        let from_wire = state.pending_input.is_empty();
+        match read_port(state, &mut serial_buf) {
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
                 // The wire-side trace.  `cpmkey WIRE` is logged where the
@@ -6525,14 +6536,16 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
                 // per call instead would leave a session that started before
                 // the toggle silently untraceable -- which reads as "the byte
                 // never arrived", the very wrong answer this exists to stop.
-                if modem_trace_enabled() {
+                if from_wire && modem_trace_enabled() {
                     if wire_trace_worth_logging(n) {
                         glog!("cpmkey PORT {} bytes: {}", n, wire_preview(&serial_buf[..n]));
                     } else {
                         glog!("cpmkey PORT {} bytes (bulk)", n);
                     }
                 }
-                let mut forward = Vec::with_capacity(n);
+                let Some(mut forward) = escape_before_read(state, &serial_buf[..n]) else {
+                    return OnlineExit::Escaped;
+                };
                 process_online_bytes(state, &serial_buf[..n], &mut forward);
                 if state.petscii_translate {
                     forward = link.for_host(&forward);
@@ -6811,6 +6824,46 @@ fn poll_plus_escape(state: &mut ModemState) -> PlusPoll {
     state.escape.poll(esc, guard, Instant::now(), trace)
 }
 
+/// Settle the detector **before** a read's bytes are fed to it.
+///
+/// The online loops read before they poll, and a read returns as soon as a
+/// byte arrives -- so after `+++` the next keystroke can come back just after
+/// the trailing guard ran out but before that iteration's poll.  Fed as data,
+/// it broke the run, all four bytes went to the remote and the escape the
+/// user had completed was lost (a script sending `+++`, a one-second sleep
+/// and `ATH` met exactly that).  Asked first, the detector says the escape
+/// already happened: `None`, and `data` is queued for command mode.
+/// Otherwise the forward buffer to fill, holding any `+` that turned out to
+/// be data, so it goes out ahead of `data` and in order.
+fn escape_before_read(state: &mut ModemState, data: &[u8]) -> Option<Vec<u8>> {
+    let mut forward = Vec::with_capacity(data.len() + 2);
+    match poll_plus_escape(state) {
+        PlusPoll::Idle => {}
+        PlusPoll::Escape => {
+            state.pending_input.extend(data);
+            return None;
+        }
+        PlusPoll::Release(held) => forward.extend(held),
+    }
+    Some(forward)
+}
+
+/// Read from the serial port, serving [`ModemState::pending_input`] first.
+///
+/// Every read of the port goes through here -- command mode, both online
+/// loops and the ring loop -- so bytes held over from one mode reach the
+/// next in order, and none can be read around.
+fn read_port(state: &mut ModemState, buf: &mut [u8]) -> std::io::Result<usize> {
+    if state.pending_input.is_empty() {
+        return state.port.read(buf);
+    }
+    let n = buf.len().min(state.pending_input.len());
+    for (slot, byte) in buf.iter_mut().zip(state.pending_input.drain(..n)) {
+        *slot = byte;
+    }
+    Ok(n)
+}
+
 // ─── Ring emulator ────────────────────────────────────────
 
 /// Take a pending ring request from `id`'s slot, if any.
@@ -6877,7 +6930,7 @@ fn ring_loop(state: &mut ModemState, progress: &tokio::sync::mpsc::Sender<u8>) -
             }
             // Check serial port for ATA (manual answer)
             let mut buf = [0u8; 1];
-            if let Ok(1) = state.port.read(&mut buf) {
+            if let Ok(1) = read_port(state, &mut buf) {
                 let byte = buf[0];
                 // Folded once here so the accumulation branch below is a plain
                 // condition: a Commodore's shifted letters become ASCII, and
@@ -10751,16 +10804,36 @@ mod tests {
 
     // ─── A ModemState on a mock port ─────────────────────
 
-    /// A serial port that records what is written to it and never has
-    /// anything to read, so the real `ModemState` functions can be driven
-    /// without hardware.  Every modem-line call succeeds and does nothing.
+    /// A serial port that records what is written to it, so the real
+    /// `ModemState` functions can be driven without hardware.  Every
+    /// modem-line call succeeds and does nothing.  Reads follow `script`: each
+    /// entry is a wait and then the bytes that arrive, an empty entry is the
+    /// device closing, and an empty script is a line that stays silent.
     struct MockPort {
         written: Arc<std::sync::Mutex<Vec<u8>>>,
+        script: ReadScript,
+    }
+
+    /// What a [`MockPort`] will read: a wait, then the bytes that arrive.
+    type ReadScript = Arc<std::sync::Mutex<std::collections::VecDeque<(Duration, Vec<u8>)>>>;
+
+    impl MockPort {
+        fn new(written: Arc<std::sync::Mutex<Vec<u8>>>) -> Self {
+            MockPort { written, script: Default::default() }
+        }
     }
 
     impl std::io::Read for MockPort {
-        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "mock"))
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let next = self.script.lock().unwrap().pop_front();
+            let Some((wait, bytes)) = next else {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "mock"));
+            };
+            std::thread::sleep(wait);
+            // A test's chunks are small; one that did not fit would be a bug in it.
+            assert!(bytes.len() <= buf.len(), "scripted read larger than the buffer");
+            buf[..bytes.len()].copy_from_slice(&bytes);
+            Ok(bytes.len())
         }
     }
 
@@ -10798,7 +10871,7 @@ mod tests {
         fn bytes_to_write(&self) -> serialport::Result<u32> { Ok(0) }
         fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> { Ok(()) }
         fn try_clone(&self) -> serialport::Result<Box<dyn serialport::SerialPort>> {
-            Ok(Box::new(MockPort { written: self.written.clone() }))
+            Ok(Box::new(MockPort { written: self.written.clone(), script: self.script.clone() }))
         }
         fn set_break(&self) -> serialport::Result<()> { Ok(()) }
         fn clear_break(&self) -> serialport::Result<()> { Ok(()) }
@@ -10815,12 +10888,13 @@ mod tests {
         let state = ModemState {
             dialled: crate::telnet::Inherited::fresh(true, None),
             port_id: id,
-            port: Box::new(MockPort { written: written.clone() }),
+            port: Box::new(MockPort::new(written.clone())),
             mode: ModemMode::Command,
             echo: true,
             verbose: true,
             quiet: false,
             escape: PlusEscape::new(now),
+            pending_input: std::collections::VecDeque::new(),
             cmd_buffer: String::new(),
             prev_cmd_byte: 0,
             handle,
@@ -10841,6 +10915,80 @@ mod tests {
             bc_rx: serial_broadcast().subscribe(),
         };
         (state, written)
+    }
+
+    /// A modem on a port scripted to send `+++`, then `ATH` after the
+    /// trailing guard (S12 = 10, 200 ms) but inside the loop's next poll.
+    ///
+    /// The margins are wide on purpose: the loop's other half waits 10 ms, so
+    /// its poll lands ~190 ms inside the guard and only a stall that long on
+    /// a loaded runner could let it see the escape first; the `ATH` read
+    /// sleeps 250 ms, so it can never come back inside the guard.
+    fn modem_racing_its_escape(rt: &tokio::runtime::Runtime) -> ModemState {
+        let (mut state, written) = mock_modem_state(SerialPortId::A, rt.handle().clone());
+        state.s_regs[12] = 10; // 200 ms guard
+        let script = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+            (Duration::from_millis(250), b"+++".to_vec()),
+            (Duration::from_millis(250), b"ATH\r".to_vec()),
+            // Only reached if the escape was missed: hang up, so the test ends.
+            (Duration::ZERO, Vec::new()),
+        ])));
+        state.port = Box::new(MockPort { written, script });
+        state
+    }
+
+    /// **An escape completed before a read returned is not lost to it.**  The
+    /// real online loops, on a scripted port: `+++`, then `ATH` arriving after
+    /// the trailing guard but before the loop's next poll.  It used to be fed
+    /// as data -- the run broken, `+++ATH` sent to the remote, the modem
+    /// still online.  Now the loop escapes and `ATH` is waiting for command
+    /// mode.  A short guard keeps the test well under a second per loop; see
+    /// [`modem_racing_its_escape`] for the timing.  Both loops, since each
+    /// calls the check on its own.
+    #[test]
+    fn test_an_escape_is_not_lost_to_the_read_that_follows_it() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // The relayed / bridged call.
+        let mut state = modem_racing_its_escape(&rt);
+        let (mut remote, gateway_side) = tokio::io::duplex(1024);
+        let (mut read, mut write) = tokio::io::split(gateway_side);
+        let exit = online_mode_duplex(&mut state, &mut read, &mut write, false);
+        assert!(matches!(exit, OnlineExit::Escaped), "duplex: the escape was missed");
+        assert_eq!(state.pending_input, b"ATH\r".to_vec(), "duplex: ATH is command-mode input");
+        let sent = rt.block_on(async {
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 16];
+            tokio::time::timeout(Duration::from_millis(50), remote.read(&mut buf))
+                .await
+                .map(|r| buf[..r.unwrap_or(0)].to_vec())
+                .unwrap_or_default()
+        });
+        assert_eq!(sent, b"", "duplex: the remote must receive none of it");
+
+        // And command mode reads it before the UART, in order.
+        let mut buf = [0u8; 2];
+        assert_eq!(read_port(&mut state, &mut buf).unwrap(), 2);
+        assert_eq!(&buf, b"AT");
+        assert_eq!(state.pending_input, b"H\r".to_vec());
+
+        // The direct `ATDT <host>` call, over a loopback socket.
+        let mut state = modem_racing_its_escape(&rt);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut tcp = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        // 10 ms, as the duplex loop's: with the dial's 100 ms the iteration's
+        // own poll lands first and finds the escape, so the read that races
+        // it -- the case under test -- never happens.  The window is the same
+        // whatever the timeout; only its width changes.
+        tcp.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
+        let (mut far, _) = listener.accept().unwrap();
+        let exit = online_mode_tcp(&mut state, &mut tcp);
+        assert!(matches!(exit, OnlineExit::Escaped), "tcp: the escape was missed");
+        assert_eq!(state.pending_input, b"ATH\r".to_vec(), "tcp: ATH is command-mode input");
+        far.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let mut buf = [0u8; 16];
+        let n = far.read(&mut buf).unwrap_or(0);
+        assert_eq!(&buf[..n], b"", "tcp: the remote must receive none of it");
     }
 
     /// The port-open `OK` is a result code: `ATQ1` silences it and `ATV0`

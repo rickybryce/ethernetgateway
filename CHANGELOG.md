@@ -348,6 +348,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The CP/M emulator's virtual modem had the same hold and is fixed the same
   way, for both the emulator and a booted disk; there `S12=0` still means any
   `+++` escapes, so a held `+` is then flushed by the next byte as before.
+- **Modem: an escape is not lost to the next keystroke.**  When `+++` and its
+  trailing guard time were complete but the modem had not yet checked, the next
+  characters typed (a script's `ATH` after a one-second pause, say) were sent to
+  the remote with the `+++` in front of them, and the modem stayed online.  The
+  escape now counts, and those characters are read as the command they were.
 - **Modem: a port saved quiet (`ATQ1`) stays quiet when it opens.**  The `OK`
   a port prints on opening ignored `ATQ1` and `ATV0`; it is now a result code
   like any other, so it is silent or `0` as the profile asks.
