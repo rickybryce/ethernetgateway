@@ -2158,8 +2158,10 @@ function vdmRefreshList() {
         sel.selectedIndex = 0;
       }
       vdmCurrent = sel.value ? parseInt(sel.value, 10) : null;
-      /* Say so where the joystick and keyboard notes are, as a pick does. */
-      if (vdmChoosing) { joyNote(); vdmKbNote(); }
+      /* The notes follow whatever is now watched -- a wait for a choice, or
+         the session picked for the operator on the first list. */
+      joyNote();
+      vdmKbNote();
     }
     if (data.screens.length === 0) {
       vdmCurrent = null;
@@ -2424,6 +2426,7 @@ document.getElementById('vdm-id').addEventListener('change', function() {
   vdmChoosing = vdmCurrent === null;
   JOY_SEEN = false;
   joyNote();
+  vdmKbNote();
   vdmPoll();
 });
 vdmRefreshList();
@@ -6510,6 +6513,23 @@ mod tests {
             "the first session is picked automatically while the operator is choosing"
         );
         assert!(VDM_SCRIPT.contains("vdmChoosing = vdmCurrent === null;"), "a pick does not end the wait");
+    }
+
+    /// **The screen page's notes follow the session being watched.**  A first
+    /// version refreshed them only while waiting for a choice, so an ordinary
+    /// page load -- notes drawn before the list arrives, then a session picked
+    /// for the operator -- kept saying "choose a session" over a live screen.
+    /// Checked under Node against a fake page; this pins the shape.
+    #[test]
+    fn test_the_screen_notes_follow_the_watched_session() {
+        let rebuilt = VDM_SCRIPT.find("vdmCurrent = sel.value ? parseInt(sel.value, 10) : null;").expect("the list's pick");
+        let after = &VDM_SCRIPT[rebuilt..rebuilt + 300];
+        let close = after.find("\n    }").expect("the end of the rebuild block");
+        let block = &after[..close];
+        assert!(block.contains("\n      joyNote();") && block.contains("\n      vdmKbNote();"),
+            "the notes are not redrawn whenever the list changes the session");
+        let change = VDM_SCRIPT.find("getElementById('vdm-id').addEventListener('change'").expect("the change handler");
+        assert!(VDM_SCRIPT[change..].contains("vdmKbNote();"), "a pick does not redraw the keyboard note");
     }
 
     /// **Enter in a text box presses Save and Restart, whatever is drawn
