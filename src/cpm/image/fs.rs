@@ -232,8 +232,16 @@ impl ImageFs {
     /// shared block is how a backup gets destroyed.  We report, refuse to
     /// write, and leave the disk exactly as it was found so the operator can
     /// take it somewhere that can look properly.
+    ///
+    /// **A block claimed twice is damage whoever claims it** -- two files, two
+    /// extents of one file, or one name in two user areas.  This used to let a
+    /// block repeat when the *name* matched, and the name left the user byte
+    /// out, so `0:A.DAT` and `3:A.DAT` could share a block and the disk was
+    /// written to; so could two extents of one file, which then read each
+    /// other's records.  `identify::directory_is_consistent` refuses every
+    /// repeat, and the two must agree on what a sound disk is.
     fn inconsistency(&self) -> Option<String> {
-        let mut owner: Vec<Option<[u8; 11]>> = vec![None; self.params.max_block as usize + 1];
+        let mut owner: Vec<Option<(u8, [u8; 11])>> = vec![None; self.params.max_block as usize + 1];
         let dir_blocks = self.params.dir_records.div_ceil(self.params.records_per_block);
         // Bytes of the 16-byte map past the slots this format's EXM uses.
         let used_bytes = self.params.map_slots * if self.params.wide_blocks { 2 } else { 1 };
@@ -270,15 +278,32 @@ impl ImageFs {
                         String::from_utf8_lossy(&who).trim_end()
                     ));
                 }
+                // `A.DAT`, not the padded `A       DAT` the 11 bytes spell.
+                let name = |n: &[u8; 11]| {
+                    let base = String::from_utf8_lossy(&n[..8]).trim_end().to_string();
+                    let ext = String::from_utf8_lossy(&n[8..]).trim_end().to_string();
+                    if ext.is_empty() { base } else { format!("{base}.{ext}") }
+                };
                 match owner[b as usize] {
-                    Some(prev) if prev != who => {
+                    Some((pu, prev)) if (pu, prev) == (e.user, who) => {
+                        return Some(format!("block {b} is claimed twice by {}", name(&who)));
+                    }
+                    Some((pu, prev)) if pu != e.user => {
                         return Some(format!(
-                            "block {b} is claimed by both {} and {}",
-                            String::from_utf8_lossy(&prev).trim_end(),
-                            String::from_utf8_lossy(&who).trim_end()
+                            "block {b} is claimed by both {} in user {pu} and {} in user {}",
+                            name(&prev),
+                            name(&who),
+                            e.user
                         ));
                     }
-                    _ => owner[b as usize] = Some(who),
+                    Some((_, prev)) => {
+                        return Some(format!(
+                            "block {b} is claimed by both {} and {}",
+                            name(&prev),
+                            name(&who)
+                        ));
+                    }
+                    None => owner[b as usize] = Some((e.user, who)),
                 }
             }
         }
@@ -1714,6 +1739,44 @@ mod tests {
         put_entry(&mut img, fmt, 1, 0, "B.DAT", 0, 8, &[7]);
         let fs = ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap();
         assert!(fs.is_read_only(), "a cross-linked disk must not be written to");
+    }
+
+    /// **A repeated block is damage even when the name matches.**  The check
+    /// let a block repeat for the same 8.3 name and left the user number out
+    /// of it, so a block shared by one name in two user areas, or by two
+    /// extents of one file, mounted writable.  Each case also pins its
+    /// message, so the operator is told which of the two it is.
+    #[test]
+    fn test_a_block_shared_under_one_name_is_still_damage() {
+        let fmt = by_token("ibm3740").unwrap();
+
+        // One name, two user areas.
+        let mut img = blank(fmt);
+        put_entry(&mut img, fmt, 0, 0, "A.DAT", 0, 8, &[7]);
+        put_entry(&mut img, fmt, 1, 3, "A.DAT", 0, 8, &[7]);
+        let fs = ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap();
+        assert!(fs.is_read_only(), "two user areas sharing a block must not be written to");
+        assert_eq!(
+            fs.inconsistency().as_deref(),
+            Some("block 7 is claimed by both A.DAT in user 0 and A.DAT in user 3")
+        );
+
+        // One file, two extents.
+        let mut img = blank(fmt);
+        let full: Vec<u8> = (2..18).collect();
+        put_entry(&mut img, fmt, 0, 0, "B.DAT", 0, 128, &full);
+        put_entry(&mut img, fmt, 1, 0, "B.DAT", 1, 8, &[17]);
+        let fs = ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap();
+        assert!(fs.is_read_only(), "two extents sharing a block must not be written to");
+        assert_eq!(fs.inconsistency().as_deref(), Some("block 17 is claimed twice by B.DAT"));
+
+        // Positive control: the same two extents on separate blocks are sound.
+        let mut img = blank(fmt);
+        put_entry(&mut img, fmt, 0, 0, "B.DAT", 0, 128, &full);
+        put_entry(&mut img, fmt, 1, 0, "B.DAT", 1, 8, &[18]);
+        let fs = ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap();
+        assert!(!fs.is_read_only());
+        assert!(fs.inconsistency().is_none());
     }
 
     #[test]

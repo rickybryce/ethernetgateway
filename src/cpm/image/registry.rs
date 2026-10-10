@@ -131,12 +131,17 @@ pub fn all() -> Vec<Option<Mount>> {
 ///
 /// The caller has already opened and identified the image; this only publishes
 /// it.  Refuses a drive letter past P:.
+///
+/// A drive that failed to come back from a boot stops being recorded as such
+/// the moment anything is mounted on it -- see [`note_unrestored`].
 pub fn mount(drive0: u8, mount: Mount) -> Result<(), String> {
     if drive0 >= NUM_DRIVES {
         return Err(format!("no such drive ({drive0})"));
     }
     let mut t = table().write().unwrap_or_else(|e| e.into_inner());
     t[drive0 as usize] = Some(mount);
+    drop(t);
+    lock!(unrestored_table()).remove(&drive0);
     Ok(())
 }
 
@@ -283,6 +288,7 @@ pub fn tests_reset() {
     // will end it itself.  Disabling the emulator mid-boot must not make a lent
     // drive look folder-backed again to a session still inside it.
     lock!(borrowed()).clear();
+    lock!(unrestored_table()).clear();
     lock!(booted_images()).clear();
 }
 
@@ -439,6 +445,51 @@ pub fn note_loan_for_tests(drive0: u8, filename: &str) {
 /// Stop recording a drive as lent.  The caller mounts it again itself.
 pub fn end_boot_loan(drive0: u8) -> Option<String> {
     lock!(borrowed()).remove(&drive0)
+}
+
+/// Drives a booted session lent and could not have back, as `drive -> filename`.
+///
+/// A loan ends when the session does, and the mount is restored first.  The
+/// restore can fail -- realistically, because the guest rewrote the image's
+/// directory into something identification now refuses -- and ending the loan
+/// anyway left the drive in **neither** table, so the next save from any screen
+/// wrote `cpm_mounts` without it: the operator's configuration lost a drive
+/// because a guest scribbled on a disk.  [`restore_mount`] says the opposite
+/// must hold, so the failure is recorded here and
+/// [`current_mounts_value`] keeps listing the drive.
+///
+/// **Deliberately not a loan.**  A loan makes the drive unavailable
+/// (`check_can_change` refuses it, `CpmFs` reports it pulled out) until the
+/// session that holds it ends -- and that session already has, so a kept loan
+/// would block the drive until a restart.  This table blocks nothing: the drive
+/// reads as empty, mounting anything on it clears the entry
+/// ([`mount`]), and unmounting it removes the entry from the configuration
+/// ([`super::unmount_drive`]).  Next start, `cpm_mounts` still names it, and the
+/// mount is retried and its failure reported like any other.
+///
+/// [`restore_mount`]: super::restore_mount
+/// [`current_mounts_value`]: super::current_mounts_value
+fn unrestored_table() -> &'static Mutex<std::collections::HashMap<u8, String>> {
+    static U: OnceLock<Mutex<std::collections::HashMap<u8, String>>> = OnceLock::new();
+    U.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Record that a lent drive could not be given back.  See [`unrestored_table`].
+pub fn note_unrestored(drive0: u8, filename: &str) {
+    lock!(unrestored_table()).insert(drive0, filename.to_string());
+}
+
+/// Stop recording a drive as unrestored, returning the image it named.
+pub fn forget_unrestored(drive0: u8) -> Option<String> {
+    lock!(unrestored_table()).remove(&drive0)
+}
+
+/// Drives that did not come back from a boot, as `(drive, filename)`.
+pub fn unrestored() -> Vec<(u8, String)> {
+    let mut v: Vec<(u8, String)> =
+        lock!(unrestored_table()).iter().map(|(d, n)| (*d, n.clone())).collect();
+    v.sort_by_key(|(d, _)| *d);
+    v
 }
 
 /// Drives currently lent to booted sessions, as `(drive, filename)`.

@@ -508,6 +508,46 @@ enum LineRead {
     Disconnect,
 }
 
+/// The printer's half of a blocking console read: what [`cpmemu_conin`]
+/// needs to close a job that has gone quiet **while it waits for a key**.
+///
+/// The run loop checks the spool's idle close once per pass, but a pass that
+/// ends in a blocking read -- BDOS 1, BDOS 6 `E=FFh`, BDOS 10, BIOS CONIN --
+/// does not come back until the operator types.  A program that prints a
+/// report and then sits at a menu is exactly the case that check was written
+/// for, and its document was held until the next keystroke.
+///
+/// `due` is the idle test, a parameter only so the test can hand in an
+/// already-expired one rather than sleeping out `IDLE_CLOSE`; production
+/// always passes [`crate::cpm::printer::SpoolJob::idle_expired`].
+///
+/// [`cpmemu_conin`]: TelnetSession::cpmemu_conin
+struct ConinSpool<'a> {
+    job: &'a mut Option<crate::cpm::printer::SpoolJob>,
+    format: Option<crate::cpm::printer::Format>,
+    transfer_dir: &'a str,
+    due: fn(&crate::cpm::printer::SpoolJob) -> bool,
+}
+
+impl<'a> ConinSpool<'a> {
+    fn new(
+        job: &'a mut Option<crate::cpm::printer::SpoolJob>,
+        format: Option<crate::cpm::printer::Format>,
+        transfer_dir: &'a str,
+    ) -> Self {
+        ConinSpool { job, format, transfer_dir, due: crate::cpm::printer::SpoolJob::idle_expired }
+    }
+
+    /// Is there a job whose idle close the read must keep an eye on?
+    fn watching(&self) -> bool {
+        self.format.is_some() && self.job.as_ref().is_some_and(|j| !j.is_empty())
+    }
+}
+
+/// How often a console read wakes to look at a pending print job.  Only
+/// while one is pending; with nothing spooled the read is the plain one.
+const CONIN_SPOOL_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// RAII registration of the CP/M emulator as the dialable `CPM@<ip>` peer
 /// endpoint: registered while a modem-enabled shell is active, unregistered
 /// (dropping any unclaimed call) on every exit path.  On a slave gateway it
@@ -1817,7 +1857,14 @@ impl TelnetSession {
                     match func {
                         1 => {
                             // Console input WITH echo.
-                            match self.cpmemu_conin(&mut pending_input, &mut last_esc).await? {
+                            match self
+                                .cpmemu_conin(
+                                    &mut pending_input,
+                                    &mut last_esc,
+                                    &mut ConinSpool::new(spool, print_format, transfer_dir),
+                                )
+                                .await?
+                            {
                                 ConIn::Byte(b) => {
                                     self.cpmemu_emit(&mut term, &[b]).await?;
                                     cpm.bdos_return(b);
@@ -1863,7 +1910,14 @@ impl TelnetSession {
                                 // status call or BDOS 11 CONST, both non-blocking
                                 // below).  Break-out + disconnect handled as for
                                 // BDOS 1.
-                                0xFF => match self.cpmemu_conin(&mut pending_input, &mut last_esc).await? {
+                                0xFF => match self
+                                    .cpmemu_conin(
+                                        &mut pending_input,
+                                        &mut last_esc,
+                                        &mut ConinSpool::new(spool, print_format, transfer_dir),
+                                    )
+                                    .await?
+                                {
                                     ConIn::Byte(b) => cpm.bdos_return(b),
                                     ConIn::BreakOut => {
                                         self.cpmemu_break_notice().await?;
@@ -1895,7 +1949,13 @@ impl TelnetSession {
                             let de = cpm.arg_de();
                             let max = cpm.read_buffer_max(de);
                             match self
-                                .cpmemu_read_line(&mut term, &mut pending_input, &mut last_esc, max)
+                                .cpmemu_read_line(
+                                    &mut term,
+                                    &mut pending_input,
+                                    &mut last_esc,
+                                    &mut ConinSpool::new(spool, print_format, transfer_dir),
+                                    max,
+                                )
                                 .await?
                             {
                                 LineRead::Line(bytes) => {
@@ -1982,7 +2042,14 @@ impl TelnetSession {
                             cpm.bios_return(if pending_input.is_empty() { 0x00 } else { 0xFF })
                         }
                         // CONIN: blocking keyboard read (no echo).
-                        3 => match self.cpmemu_conin(&mut pending_input, &mut last_esc).await? {
+                        3 => match self
+                            .cpmemu_conin(
+                                &mut pending_input,
+                                &mut last_esc,
+                                &mut ConinSpool::new(spool, print_format, transfer_dir),
+                            )
+                            .await?
+                        {
                             ConIn::Byte(b) => cpm.bios_return(b),
                             ConIn::BreakOut => {
                                 self.cpmemu_break_notice().await?;
@@ -2024,8 +2091,10 @@ impl TelnetSession {
                         // LISTST: list device always ready.
                         15 => cpm.bios_return(0xFF),
                         // BOOT/HOME/SELDSK/SETTRK/SETSEC/SETDMA/READ/WRITE/
-                        // SECTRAN: no raw-sector disk emulation — stub to 0.
-                        _ => cpm.bios_return(0),
+                        // SECTRAN: no raw-sector disk emulation.  SELDSK says
+                        // "no such drive" in a whole HL and SECTRAN answers the
+                        // identity; see `Cpm::bios_disk_stub`.
+                        _ => cpm.bios_disk_stub(vector),
                     }
                 }
                 Stop::Hbios(func) => {
@@ -2223,11 +2292,12 @@ impl TelnetSession {
         term: &mut Adm3a,
         pending: &mut VecDeque<u8>,
         last_esc: &mut bool,
+        spool: &mut ConinSpool<'_>,
         max: usize,
     ) -> Result<LineRead, std::io::Error> {
         let mut buf: Vec<u8> = Vec::new();
         loop {
-            match self.cpmemu_conin(pending, last_esc).await? {
+            match self.cpmemu_conin(pending, last_esc, spool).await? {
                 ConIn::BreakOut => return Ok(LineRead::BreakOut),
                 ConIn::Disconnect => return Ok(LineRead::Disconnect),
                 ConIn::Byte(b) => match b {
@@ -2286,10 +2356,14 @@ impl TelnetSession {
     ///   ADM-3A code.  A lone `ESC` (an editor command) has no fast follower,
     ///   so the peek times out and the `ESC` is delivered to the guest; a
     ///   second `ESC` on the next read is the break-out (unchanged behavior).
+    ///
+    /// While it waits it also keeps the printer's idle close running -- see
+    /// [`ConinSpool`] and [`Self::cpmemu_read_printing`].
     async fn cpmemu_conin(
         &mut self,
         pending: &mut VecDeque<u8>,
         last_esc: &mut bool,
+        spool: &mut ConinSpool<'_>,
     ) -> Result<ConIn, std::io::Error> {
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         // Bytes the out-of-band drain already read (while the program was
@@ -2310,7 +2384,7 @@ impl TelnetSession {
             return Ok(ConIn::Byte(code));
         }
         loop {
-            let b = match self.read_byte_filtered().await {
+            let b = match self.cpmemu_read_printing(spool).await {
                 Ok(Some(b)) => b,
                 Ok(None) => return Ok(ConIn::Disconnect),
                 // An idle timeout ends the program (and the session).
@@ -2497,6 +2571,39 @@ impl TelnetSession {
     /// Read one byte with a short timeout, for CSI-arrow lookahead — fast
     /// terminal-generated sequences arrive back-to-back, while a human's lone
     /// `ESC` has no follower and times out.
+    /// [`Self::read_byte_filtered`], but a print job that goes quiet while
+    /// the program waits for a key is closed and delivered then, not at the
+    /// next keystroke.
+    ///
+    /// With no job pending this *is* the plain read.  With one, the read is
+    /// taken in [`CONIN_SPOOL_POLL`] slices, each abandoned slice being the
+    /// same cancellation `cpmemu_peek_byte` already performs on every `ESC`
+    /// (the reader keeps a mid-IAC resume point for it).  The session's idle
+    /// timeout restarts with each slice, so it is suspended while a job is
+    /// pending -- for at most `IDLE_CLOSE` plus one slice, after which the job
+    /// is closed and the plain read, timeout and all, takes over.  Keys are
+    /// read through the very same call either way, so nothing about ESC,
+    /// ESC-ESC or the arrow peek changes.
+    async fn cpmemu_read_printing(
+        &mut self,
+        spool: &mut ConinSpool<'_>,
+    ) -> Result<Option<u8>, std::io::Error> {
+        loop {
+            if !spool.watching() {
+                return self.read_byte_filtered().await;
+            }
+            if let Some(format) = spool.format
+                && spool.job.as_ref().is_some_and(spool.due)
+            {
+                self.cpmemu_spool_close(spool.job, format, spool.transfer_dir).await?;
+                continue;
+            }
+            if let Ok(r) = tokio::time::timeout(CONIN_SPOOL_POLL, self.read_byte_filtered()).await {
+                return r;
+            }
+        }
+    }
+
     async fn cpmemu_peek_byte(&mut self) -> Result<Option<u8>, std::io::Error> {
         match tokio::time::timeout(
             std::time::Duration::from_millis(50),
@@ -2585,6 +2692,74 @@ mod repl_tests {
     use crate::telnet::tests::make_test_session_with_peer;
     use crate::telnet::TerminalType;
     use tokio::io::AsyncReadExt;
+
+    /// **A print job that goes quiet while the program waits for a key is
+    /// delivered then, not at the next keystroke.**  A program that prints a
+    /// report and sits at a menu blocks in a console read, and the run loop's
+    /// idle check never ran again until the operator typed -- so the document
+    /// the loop's own comment promised was held hostage by the keyboard.
+    ///
+    /// The job is handed in already due (`due` returns `true`) rather than
+    /// sleeping out `IDLE_CLOSE`.  The key is typed **only once the document
+    /// exists**: unfixed, the read never wakes to write it, no key ever
+    /// arrives, and the timeout fails the test instead of hanging the suite.
+    #[tokio::test]
+    async fn test_a_quiet_print_job_is_delivered_while_waiting_for_a_key() {
+        use tokio::io::AsyncWriteExt;
+        let dir = std::env::temp_dir().join(format!("xmodem_conin_spool_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tdir = dir.to_string_lossy().to_string();
+        let printed = dir.join(crate::cpm::printer::SPOOL_DIR);
+
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        let (mut peer_rd, mut peer_wr) = tokio::io::split(peer);
+        let collector = tokio::spawn(async move {
+            let mut buf = [0u8; 256];
+            while let Ok(n) = peer_rd.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+            }
+        });
+
+        let mut job = Some(crate::cpm::printer::SpoolJob::new());
+        for &b in b"REPORT\r\n" {
+            job.as_mut().unwrap().push(b);
+        }
+        let mut spool = ConinSpool {
+            job: &mut job,
+            format: Some(crate::cpm::printer::Format::Text),
+            transfer_dir: &tdir,
+            due: |_| true,
+        };
+        let mut pending = VecDeque::new();
+        let mut last_esc = false;
+        let typist = async {
+            for _ in 0..100 {
+                let there = std::fs::read_dir(&printed)
+                    .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".txt")))
+                    .unwrap_or(false);
+                if there {
+                    peer_wr.write_all(b"k").await.unwrap();
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            false
+        };
+        let (key, typed) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(sess.cpmemu_conin(&mut pending, &mut last_esc, &mut spool), typist)
+        })
+        .await
+        .expect("the console read never delivered the document, so no key was typed");
+        assert!(typed, "the document never appeared while the program waited");
+        assert!(matches!(key.unwrap(), ConIn::Byte(b'k')), "the key must still reach the guest");
+        assert!(job.is_none(), "the job was closed, not left to be written again");
+        drop(sess);
+        collector.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A scratch `CPM/` container with drive A: created, plus a `CpmFs` on it.
     fn scratch_fs(tag: &str) -> (std::path::PathBuf, CpmFs) {
@@ -3428,7 +3603,13 @@ mod repl_tests {
         let mut last_esc = false;
         let line = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            sess.cpmemu_read_line(&mut term, &mut pending, &mut last_esc, 128),
+            sess.cpmemu_read_line(
+                &mut term,
+                &mut pending,
+                &mut last_esc,
+                &mut ConinSpool::new(&mut None, None, ""),
+                128,
+            ),
         )
         .await
         .expect("the line reader hung")

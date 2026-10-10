@@ -585,11 +585,20 @@ impl Drop for RemountOnDrop {
             // second session to mount elsewhere.  Being briefly in *both*
             // tables is harmless by comparison: reads consult the image before
             // the folder, and `current_mounts_value` de-duplicates by drive.
+            //
+            // **A failed restore is recorded, not forgotten.**  Ending the loan
+            // regardless took the drive out of both tables, and the next save
+            // from any screen dropped it from `cpm_mounts` -- realistic, since
+            // the guest may have rewritten the directory into something
+            // identification refuses.  It goes in the registry's unrestored
+            // table instead, which keeps it in the configuration and blocks
+            // nothing (a kept *loan* would hold the drive until a restart).
             let restored = crate::cpm::image::restore_mount(&self.base, drive, &name);
-            crate::cpm::image::registry::end_boot_loan(drive);
-            if let Err(e) = restored {
+            if let Err(e) = &restored {
+                crate::cpm::image::registry::note_unrestored(drive, &name);
                 glog!("CP/M boot: could not restore {} on drive {}: {}", name, drive, e);
             }
+            crate::cpm::image::registry::end_boot_loan(drive);
         }
     }
 }
@@ -2270,6 +2279,53 @@ mod tests {
             "C: must come back"
         );
         assert!(registry::boot_loans().is_empty(), "no loan may outlive the session");
+        registry::tests_reset();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **A drive whose restore fails stays in `cpm_mounts`.**  The guest can
+    /// leave an image that no longer identifies; ending the loan regardless
+    /// dropped the drive from both tables, and the next save from any screen
+    /// wrote the configuration without it.  It must also not stay *blocked*:
+    /// the session that held it is gone, so the drive can be unmounted (which
+    /// is what takes it out of the configuration) and mounted over.
+    #[test]
+    fn test_a_drive_that_cannot_be_restored_keeps_its_place_in_cpm_mounts() {
+        use crate::cpm::image::{current_mounts_value, mount_image, registry, unmount_drive};
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        // `current_mounts_value` reports the config verbatim when the emulator
+        // is off, which would make this pass for the wrong reason.
+        assert!(crate::config::get_config().cpm_emu_enabled, "needs the emulator enabled");
+
+        let base = std::env::temp_dir().join("egw_boot_remount_fails");
+        let _ = std::fs::remove_dir_all(&base);
+        let images = crate::cpm::image::images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        blank_image_at(&images.join("altair8_gone.dsk"));
+        blank_image_at(&images.join("altair8_other.dsk"));
+        mount_image(&base, 1, "altair8_gone.dsk").unwrap();
+        {
+            let mut remounts = RemountOnDrop { base: base.clone(), taken: Vec::new() };
+            let m = registry::lend_for_boot(1).expect("taken for the guest");
+            remounts.taken.push((1, m.filename.clone()));
+            // What the guest left behind no longer mounts.
+            std::fs::write(images.join("altair8_gone.dsk"), b"not a disk").unwrap();
+        }
+        assert!(registry::get(1).is_none(), "the restore failed");
+        assert!(registry::boot_loans().is_empty(), "the loan still ends");
+        assert_eq!(current_mounts_value(), "B=altair8_gone.dsk", "the drive left cpm_mounts");
+
+        // Not blocked: mounting over it works and replaces the entry...
+        mount_image(&base, 1, "altair8_other.dsk").expect("the drive must not stay held");
+        assert_eq!(current_mounts_value(), "B=altair8_other.dsk");
+        assert!(registry::unrestored().is_empty());
+
+        // ...and unmounting an unrestored drive takes it out of the config.
+        unmount_drive(1).unwrap();
+        registry::note_unrestored(1, "altair8_gone.dsk");
+        unmount_drive(1).expect("an unrestored drive can be unmounted");
+        assert_eq!(current_mounts_value(), "");
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
     }

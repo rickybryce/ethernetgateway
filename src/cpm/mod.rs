@@ -85,7 +85,6 @@ const IOBYTE_ADDR: u16 = 0x0003;
 /// story file — without it, a game run from B: looks on A:, fails to
 /// open its data, and hangs).
 const CDISK_ADDR: u16 = 0x0004;
-/// Transient Program Area base — where a `.COM` is loaded and starts.
 /// The host clock as RomWBW's six-byte date/time buffer: year, month, day,
 /// hour, minute, second — **each BCD encoded**, per the published HBIOS
 /// interface (`RomWBW/Source/Doc/SystemGuide.md`, "Each byte is BCD encoded").
@@ -182,6 +181,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Transient Program Area base — where a `.COM` is loaded and starts.
 pub const TPA_BASE: u16 = 0x0100;
 /// Top of the usable TPA in our layout; the stack starts here and grows
 /// down, leaving the region above for the (pretend, for now) BDOS/BIOS.
@@ -479,6 +479,41 @@ impl Cpm {
     pub fn bios_return(&mut self, value: u8) {
         self.cpu.registers().set8(Reg8::A, value);
         self.cpu.registers().set8(Reg8::L, value);
+        let sp = self.cpu.registers().get16(Reg16::SP);
+        let ret = self.mem.peek16(sp);
+        self.cpu.registers().set16(Reg16::SP, sp.wrapping_add(2));
+        self.cpu.registers().set_pc(ret);
+    }
+
+    /// Answer one of the raw-disk BIOS vectors -- BOOT (0), HOME (8), SELDSK
+    /// (9), SETTRK (10), SETSEC (11), SETDMA (12), READ (13), WRITE (14) and
+    /// SECTRAN (16) -- for the emulator, which has no sector-level disk: its
+    /// file I/O is the BDOS FCB path and nothing underneath it.
+    ///
+    /// Two of these return a **word in `HL`**, and [`Cpm::bios_return`] sets
+    /// only `A` and `L`, so answering them through it left `H` as whatever
+    /// the guest happened to have there:
+    ///
+    /// * **SELDSK** returns the drive's DPH address, `HL = 0000h` meaning "no
+    ///   such drive".  That is the honest answer for every drive here, since
+    ///   none has a sector-level form, and it is how a raw-disk utility is
+    ///   told to stop before it calls READ.  A stray `H` turned it into a DPH
+    ///   pointer at garbage, which such a utility would then walk.
+    /// * **SECTRAN** returns the physical sector for the logical one in `BC`.
+    ///   With no DPH there is no skew table to apply, and a BIOS whose DPH
+    ///   names none (`XLT = 0`) answers `HL = BC` -- the identity -- so that
+    ///   is what this answers too, rather than a zero that would send every
+    ///   sector to sector 0.
+    ///
+    /// The rest pass `A = 0` exactly as before.
+    pub fn bios_disk_stub(&mut self, vector: u8) {
+        let hl = match vector {
+            9 => 0x0000,
+            16 => self.cpu.registers().get16(Reg16::BC),
+            _ => return self.bios_return(0),
+        };
+        self.cpu.registers().set16(Reg16::HL, hl);
+        self.cpu.registers().set8(Reg8::A, hl as u8);
         let sp = self.cpu.registers().get16(Reg16::SP);
         let ret = self.mem.peek16(sp);
         self.cpu.registers().set16(Reg16::SP, sp.wrapping_add(2));
@@ -947,8 +982,18 @@ pub fn disk_info_bdos(cpm: &mut Cpm, fs: &CpmFs, func: u8) -> Option<u16> {
 /// session, and lets both the driver and the end-to-end roundtrip test
 /// exercise the *same* code.
 pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> {
-    // Read the FCB at DE, run `op` on it, and (if `op` returns a code)
-    // persist the possibly-updated position fields back to guest memory.
+    // Read the FCB at DE, run `op` on it, and persist the position fields it
+    // may have changed back to guest memory.
+    //
+    // **Only those four bytes are written** -- EX (12), S2 (14), RC (15) and
+    // CR (32), the ones `Fcb::store_position` owns.  This used to write all 36
+    // bytes it had read back over the FCB, which is not the guest's to give:
+    // CP/M 2.2 asks a sequential caller for 33 bytes only (R0..R2 are
+    // optional), so a program declaring `FCB: DS 33` with its DMA buffer right
+    // behind it had each record's first three bytes -- just written there by
+    // BDOS 20 -- replaced by the stale snapshot.  Nothing in this group changes
+    // R0..R2 (BDOS 35/36 write them themselves), and nothing else in 0..32
+    // either, so writing more than this can only ever be writing stale bytes.
     fn with_fcb(
         cpm: &mut Cpm,
         op: impl FnOnce(&mut Cpm, &mut Fcb) -> u8,
@@ -958,7 +1003,9 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
         let mut fcb = Fcb::from_bytes(&raw);
         let code = op(cpm, &mut fcb);
         fcb.store_position(&mut raw);
-        cpm.write_block(de, &raw);
+        for off in [12u16, 14, 15, 32] {
+            cpm.write_block(de.wrapping_add(off), &[raw[off as usize]]);
+        }
         code
     }
 
@@ -1931,6 +1978,45 @@ mod tests {
         assert_eq!(cpm.mem.peek(0x0120), b'X');
     }
 
+    /// **SELDSK answers `HL = 0` whole, and SECTRAN the identity.**  Both
+    /// return a word in `HL`; answering them through `bios_return` set only
+    /// `L`, so a guest that came in with `HL = BEEFh` was told its drive's DPH
+    /// lived at `BE00h`.
+    #[test]
+    fn test_bios_seldsk_and_sectran_return_a_whole_hl() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let abort = AtomicBool::new(false);
+        // 0100: 21 EF BE   LD HL,0BEEFh
+        // 0103: 0E 01      LD C,1          (drive B:)
+        // 0105: CD 1B FF   CALL SELDSK (table slot 9)
+        // 0108: 22 20 01   LD (0120h),HL
+        // 010B: C3 00 00   JP 0
+        let prog = [0x21, 0xEF, 0xBE, 0x0E, 0x01, 0xCD, 0x1B, 0xFF, 0x22, 0x20, 0x01, 0xC3, 0x00, 0x00];
+        let mut cpm = Cpm::new();
+        cpm.load_com(&prog);
+        assert_eq!(cpm.run(100, &abort), Stop::Bios(9));
+        cpm.bios_disk_stub(9);
+        assert_eq!(cpm.run(100, &abort), Stop::WarmBoot);
+        assert_eq!(cpm.mem.peek16(0x0120), 0x0000, "SELDSK must answer HL=0, not just L=0");
+
+        // 0100: 21 EF BE   LD HL,0BEEFh
+        // 0103: 01 05 01   LD BC,0105h
+        // 0106: 11 00 00   LD DE,0         (no translate table)
+        // 0109: CD 30 FF   CALL SECTRAN (table slot 16)
+        // 010C: 22 20 01   LD (0120h),HL
+        // 010F: C3 00 00   JP 0
+        let prog = [
+            0x21, 0xEF, 0xBE, 0x01, 0x05, 0x01, 0x11, 0x00, 0x00, 0xCD, 0x30, 0xFF, 0x22, 0x20, 0x01, 0xC3,
+            0x00, 0x00,
+        ];
+        let mut cpm = Cpm::new();
+        cpm.load_com(&prog);
+        assert_eq!(cpm.run(100, &abort), Stop::Bios(16));
+        cpm.bios_disk_stub(16);
+        assert_eq!(cpm.run(100, &abort), Stop::WarmBoot);
+        assert_eq!(cpm.mem.peek16(0x0120), 0x0105, "SECTRAN with no skew is the identity");
+    }
+
     #[test]
     fn test_bios_conout_arg_in_c() {
         // Constructing a CP/M machine registers a session in the
@@ -2589,6 +2675,43 @@ mod tests {
         service_disk_bdos(&mut cpm, &mut fs, 13);
         assert_eq!(cpm.read_block(CDISK_ADDR, 1)[0], 0x50);
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **A sequential read leaves the bytes after a 33-byte FCB alone.**  CP/M
+    /// 2.2 needs only 33 bytes of FCB for sequential access, so a program may
+    /// put its DMA buffer straight after them; the record BDOS 20 writes there
+    /// must survive the FCB write-back.  Writing all 36 bytes back replaced
+    /// the record's first three bytes with what was there before the read.
+    #[test]
+    fn test_sequential_read_does_not_clobber_bytes_after_a_33_byte_fcb() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let base = std::env::temp_dir().join("xmodem_cpm_fcb33");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        let record: Vec<u8> = (0..128u32).map(|i| (i as u8) ^ 0xA5).collect();
+        std::fs::write(base.join("A").join("SEQ.DAT"), &record).unwrap();
+        let mut fs = CpmFs::new(base.clone());
+        let mut cpm = Cpm::new();
+
+        const FCB: u16 = 0x0200;
+        const DMA: u16 = FCB + 33;
+        let mut fcb = [0u8; 33];
+        fcb[1..9].copy_from_slice(b"SEQ     ");
+        fcb[9..12].copy_from_slice(b"DAT");
+        cpm.write_block(FCB, &fcb);
+        // Whatever the program had there before: not the record.
+        cpm.write_block(DMA, &[0xEE; 128]);
+        cpm.set_reg16(Reg16::DE, FCB);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 15), Some(0));
+        cpm.set_reg16(Reg16::DE, DMA);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 26), Some(0));
+        cpm.set_reg16(Reg16::DE, FCB);
+        assert_eq!(service_disk_bdos(&mut cpm, &mut fs, 20), Some(0));
+
+        assert_eq!(cpm.read_block(DMA, 128), record, "the record was overwritten");
+        // And the position still advanced.
+        assert_eq!(cpm.read_block(FCB + 32, 1)[0], 1);
         let _ = std::fs::remove_dir_all(&base);
     }
 

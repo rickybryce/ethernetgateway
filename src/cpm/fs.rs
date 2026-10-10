@@ -520,9 +520,14 @@ impl CpmFs {
     }
 
     /// Find an existing regular file in `dir` whose name equals `filename`
-    /// case-insensitively (the exact-case name first, then a scan).  Skips
-    /// symlinks (via `DirEntry::file_type`, which does not follow them), so a
-    /// planted link is never resolved — matching the enumeration paths.
+    /// case-insensitively (the exact-case name first, then a scan).
+    ///
+    /// **Only the scan skips symlinks** (via `DirEntry::file_type`, which does
+    /// not follow them).  The exact-case probe is `Path::is_file`, which
+    /// *does* follow a link, so a planted link under the exact name is
+    /// returned here.  Containment does not rest on this function: `resolve_name`
+    /// canonicalizes whatever comes back and refuses a target outside the
+    /// container, so such a link resolves only if it points inside the jail.
     /// Returns `None` for a to-be-created file so the caller uses the
     /// canonical uppercased name.
     fn existing_ci(dir: &Path, filename: &str) -> Option<PathBuf> {

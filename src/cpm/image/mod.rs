@@ -47,12 +47,21 @@ pub const IMAGES_DIR: &str = "images";
 /// nothing hidden.  A mount name arrives from a config file or a web form, so
 /// it is the one input here that an attacker could shape, and joining an
 /// unvalidated one onto the images folder is a path traversal.
+///
+/// **`:` is refused on every platform**, because on Windows it is a path
+/// component of its own: `join("C:x.dsk")` is a drive-relative path that
+/// leaves the images folder entirely, and `name.dsk:stream` opens an NTFS
+/// alternate data stream behind the operator's back.  Refused everywhere
+/// rather than under `cfg(windows)`, so a config written on Linux names
+/// nothing a Windows install would refuse -- and no image name we ship or
+/// create has one.
 pub fn is_safe_image_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 255
         && !name.starts_with('.')
         && !name.contains('/')
         && !name.contains('\\')
+        && !name.contains(':')
         && !name.contains("..")
         && !name.contains('\0')
 }
@@ -395,7 +404,20 @@ pub fn unmount_drive(drive0: u8) -> Result<String, String> {
                 m.filename
             ))
         }
-        None => Err(format!("drive {drive}: has no image mounted")),
+        // A drive that did not come back from a boot reads as empty but is
+        // still in `cpm_mounts`; unmounting it is how the operator takes it
+        // out.  Answering "no image mounted" would leave no way to.
+        None => match registry::forget_unrestored(drive0) {
+            Some(name) => {
+                crate::glog!(
+                    "CP/M: removed {} from drive {}: (it had not come back from a boot)",
+                    name,
+                    drive
+                );
+                Ok(format!("{drive}: {name} removed - it had not come back after a booted session"))
+            }
+            None => Err(format!("drive {drive}: has no image mounted")),
+        },
     }
 }
 
@@ -555,6 +577,11 @@ pub fn current_mounts_value() -> String {
     // any save made during a boot rewrite `cpm_mounts` without them, and the
     // configuration would come back short after a restart.
     mounts.extend(registry::boot_loans());
+    // And a drive a boot could not hand back is still the operator's mount:
+    // its restore failed, which is not the operator unmounting it.  Listed
+    // after the live table so a drive mounted since wins the de-duplication
+    // below (though `registry::mount` clears the entry anyway).
+    mounts.extend(registry::unrestored());
     mounts.sort_by_key(|(d, _)| *d);
     // A drive is briefly in both tables while a booted session hands it back —
     // the restore publishes the mount before the loan ends, deliberately, so
@@ -1034,6 +1061,9 @@ mod tests {
         assert!(!is_safe_image_name("sub/dir.dsk"));
         assert!(!is_safe_image_name("back\\slash.dsk"));
         assert!(!is_safe_image_name("nul\0byte.dsk"));
+        // Windows: a drive-relative path, and an alternate data stream.
+        assert!(!is_safe_image_name("C:x.dsk"));
+        assert!(!is_safe_image_name("DISK01.DSK:hidden"));
     }
 
     /// A created disk must land in the images folder under a name that mounts
