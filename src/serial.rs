@@ -6684,6 +6684,23 @@ impl PlusEscape {
     ) {
         let escape_enabled = esc <= 127 && !guard.is_zero();
         for &byte in data {
+            // One or two held for longer than guard time were data, whatever
+            // comes next.  `poll` normally releases them first, but the online
+            // loops read before they poll, so a byte arriving just after guard
+            // time reaches here first -- and a slow `+` would otherwise
+            // continue the run, letting `+`, a pause and `++` escape.
+            if (1..3).contains(&self.plus_count) && now.duration_since(self.plus_start) >= guard {
+                if let Some(port) = trace {
+                    glog!(
+                        "[esc] Port {}: {} escape char(s) held past guard time; forwarded to host as data",
+                        port,
+                        self.plus_count
+                    );
+                }
+                forward.extend(std::iter::repeat_n(esc, self.plus_count as usize));
+                self.plus_count = 0;
+                self.last_data_time = self.plus_start;
+            }
             if escape_enabled && byte == esc {
                 if self.plus_count == 0 {
                     // First escape char: only start sequence if guard time (silence) has elapsed
@@ -7908,6 +7925,26 @@ mod tests {
         assert_eq!(plus_poll(&mut det, t0 + step * 2), PlusPoll::Idle);
         assert!(plus_feed(&mut det, b"+", t0 + step * 2).is_empty());
         assert_eq!(plus_poll(&mut det, t0 + step * 2 + guard), PlusPoll::Escape);
+    }
+
+    /// **A stale `+` is data even when the next byte beats the poll.**  The
+    /// online loops read before they poll, so after `+` and a pause the next
+    /// characters can reach `feed` while the first is still held.  They must
+    /// not continue its run: `+`, a pause, then `++` is not an escape.
+    #[test]
+    fn test_a_stale_plus_is_released_by_the_next_byte_not_continued() {
+        let (_, guard) = plus_defaults();
+        let t0 = Instant::now();
+        let mut det = quiet_detector(t0);
+        assert!(plus_feed(&mut det, b"+", t0).is_empty());
+        let t1 = t0 + guard + guard / 20; // no poll in between
+        assert_eq!(plus_feed(&mut det, b"++", t1), b"+", "the stale + goes out first");
+        assert_eq!(det.plus_count, 2, "the two quick ones are a fresh run");
+        assert_eq!(plus_poll(&mut det, t1 + guard), PlusPoll::Release(b"++".to_vec()), "not an escape");
+        // Three held past guard time is the escape itself and is left to `poll`.
+        let mut det = quiet_detector(t0);
+        assert!(plus_feed(&mut det, b"+++", t0).is_empty());
+        assert_eq!(plus_poll(&mut det, t0 + guard), PlusPoll::Escape);
     }
 
     /// S12 = 0 (and S2 > 127) disable detection: nothing is ever held.
