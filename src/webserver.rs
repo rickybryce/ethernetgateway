@@ -2369,6 +2369,10 @@ function vdmKbNote() {
       + ' (cpm_screen_input is off).';
     return;
   }
+  if (vdmCurrent === null) {
+    el.textContent = 'Choose a session above to type at it.';
+    return;
+  }
   var here = document.activeElement === document.getElementById('vdm-stage');
   if (!here) {
     el.textContent = 'Click the screen to type at this guest.';

@@ -492,8 +492,11 @@ async fn accept_code(
     loop {
         // The deadline holds even with a byte carried: a peer sending ESCs
         // under `ESC_ALONE_MS` apart would otherwise carry one into the next
-        // turn for ever.  A byte carried at the deadline is simply dropped,
-        // as one arriving a moment later would have been.
+        // turn for ever.  A byte carried at the deadline is lost -- it was
+        // already read, so unlike a late byte it is not there for the next
+        // call.  It cannot be the end of a code this call was matching (the
+        // ESC ahead of it is in the window), and at worst it is the first
+        // byte of the peer's next code, which Punter repeats.
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Ok(None);

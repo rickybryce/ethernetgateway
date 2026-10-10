@@ -5299,8 +5299,9 @@ response (timeout 30 seconds). The answer is paginated:
 </ul>
 
 <p>
-Responses are word-wrapped to fit the terminal — 38 columns for PETSCII, 78
-for ANSI/ASCII. Long code blocks and unusual punctuation are preserved but
+Responses are word-wrapped to fit the terminal — 37 columns for PETSCII, 77
+for ANSI/ASCII, so with the two-space indent no line reaches the last column
+(a C64 wraps there, and every full-width line would cost two rows). Long code blocks and unusual punctuation are preserved but
 may wrap awkwardly on narrow screens.
 </p>
 

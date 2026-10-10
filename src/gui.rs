@@ -4197,8 +4197,8 @@ impl App {
             &config::get_config().slave_master_password,
         );
         let result = config::save_config(&out);
-        // Re-read rather than cloning `out`: `save_config` hashes a newly
-        // typed password, so the global is the only place the value we
+        // Re-read rather than cloning `out`: the password was hashed on its
+        // way in (`password_for_save`), so the global is the only place the value we
         // actually stored can be read back from.  Syncing to anything else
         // would leave `refresh_from_global` seeing a difference every frame.
         self.last_synced_cfg = config::get_config();

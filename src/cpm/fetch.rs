@@ -241,11 +241,13 @@ pub(in crate::cpm) fn place_new(dir: &std::path::Path, name: &str, bytes: &[u8])
 /// are never overwritten by the next run, so nothing else would.  Only ones
 /// more than an hour old: a download still running elsewhere writes its file
 /// and claims it within seconds, so an hour cannot take one from under it.
+/// And only names [`place_new`] makes (`<name>.<pid>.<n>.part`): these folders
+/// sit in the transfer tree, and an operator's own `something.part` is theirs.
 fn sweep_stale_parts(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let hour = std::time::Duration::from_secs(3600);
     for e in entries.flatten() {
-        let stale = e.file_name().to_string_lossy().ends_with(".part")
+        let stale = is_our_part_name(&e.file_name().to_string_lossy())
             && e.metadata().ok().and_then(|m| m.modified().ok())
                 .and_then(|t| t.elapsed().ok())
                 .is_some_and(|age| age > hour);
@@ -253,6 +255,15 @@ fn sweep_stale_parts(dir: &std::path::Path) {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// Is `name` a temporary name [`place_new`] makes -- `<name>.<pid>.<n>.part`,
+/// two runs of digits before the suffix?
+fn is_our_part_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".part") else { return false };
+    let mut parts = stem.rsplitn(3, '.');
+    let digits = |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+    digits(parts.next()) && digits(parts.next()) && parts.next().is_some_and(|s| !s.is_empty())
 }
 
 /// How a download ended.
@@ -831,6 +842,17 @@ mod tests {
             .collect();
         assert!(left.is_empty(), "temporary files left behind: {left:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stale-file sweep only ever takes names `place_new` made; an
+    /// operator's own `.part` file in the transfer tree is left alone.
+    #[test]
+    fn test_only_our_own_part_files_are_swept() {
+        assert!(is_our_part_name("DISK01.DSK.4242.0.part"));
+        assert!(is_our_part_name("CUTER.BIN.1.17.part"));
+        for theirs in ["notes.part", "x.part", "DISK01.DSK.part", "a.b.part", ".1.2.part", "DISK01.DSK.12.x.part"] {
+            assert!(!is_our_part_name(theirs), "{theirs} would be deleted");
+        }
     }
 
     /// The catalogue is generated, so what matters is that every row survives
