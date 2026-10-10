@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked when the connection arrived, so every connection already at the
   prompt when its address was locked out still had its next guess checked
   &mdash; and a correct one logged in from the locked-out address.
+- **Kermit server on Windows: a device name is not a file.**  `get COM1`,
+  `remote type NUL`, `remote cd CON` and the other file commands were refused
+  only after the name had been opened, and opening a free serial port can move
+  its modem lines.  They are now refused before anything touches the disk.
+  Other hosts are unchanged: there `CON.ASM` is an ordinary file.
 - **A symlink in the transfer folder cannot lead outside it.**  Every surface
   but Kermit already refused one; the Kermit server's `remote cd`, `get` and
   `remote type` now refuse a link that leads out of the server's folder (one
@@ -335,6 +340,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Modem: a lone `+` reaches the remote.**  One or two `+` typed after a
+  pause were held in case they began `+++`, and released only by the next
+  keystroke, so a `+` with nothing after it never arrived.  They are now sent
+  once guard time (S12) passes without a third.  As on a Hayes modem, the three
+  characters of `+++` must each come within guard time of the one before.
+- **Modem: a port saved quiet (`ATQ1`) stays quiet when it opens.**  The `OK`
+  a port prints on opening ignored `ATQ1` and `ATV0`; it is now a result code
+  like any other, so it is silent or `0` as the profile asks.
 - **Kermit.**  One lost packet or ACK no longer ends a transfer: each retry
   gets its own timeout.  Sliding windows past 22 packets no longer stall.  A
   receiver no longer answers a stale packet for ever.  Kermit server mode from

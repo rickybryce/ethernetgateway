@@ -4587,6 +4587,7 @@ The implementation details:
     <li>Guard time is <code>S12 / 50</code> seconds on both sides of the triple.</li>
     <li>Setting <code>S12&nbsp;=&nbsp;0</code> or <code>S2&nbsp;&gt;&nbsp;127</code> disables escape detection entirely.</li>
     <li>Fewer or more than three consecutive escape characters are passed through as data.</li>
+    <li>Each of the three must follow the one before within the guard time. One or two followed by a guard time of silence are passed through as data, so a lone <code>+</code> typed at a remote prompt still arrives.</li>
     <li>The escape is interrupted if the sender emits any non-escape byte mid-sequence.</li>
 </ul>
 

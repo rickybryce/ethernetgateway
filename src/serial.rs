@@ -793,9 +793,8 @@ struct ModemState {
     echo: bool,
     verbose: bool,
     quiet: bool,
-    last_data_time: Instant,
-    plus_count: u8,
-    plus_start: Instant,
+    /// The `+++` escape detector for the current call.
+    escape: PlusEscape,
     cmd_buffer: String,
     /// What a menu session dialled from this port inherits, **held across
     /// dials**.
@@ -3699,9 +3698,7 @@ fn serial_thread(
         echo: port_cfg.echo,
         verbose: port_cfg.verbose,
         quiet: port_cfg.quiet,
-        last_data_time: now,
-        plus_count: 0,
-        plus_start: now,
+        escape: PlusEscape::new(now),
         cmd_buffer: String::new(),
         prev_cmd_byte: 0,
         handle,
@@ -3731,7 +3728,7 @@ fn serial_thread(
     // &C1, forced-asserted under &C0).  No-op when the opt-in is off.
     apply_carrier(&mut state, false);
 
-    send_response(&mut state, "OK");
+    port_open_banner(&mut state);
 
     let restart_flag = &SERIAL_RESTART[id.index()];
     let mut port_lost = false;
@@ -3788,6 +3785,16 @@ fn serial_thread(
         glog!("Serial modem (Port {}): shutting down", id.label());
     }
     false
+}
+
+/// The `OK` a port says when it opens, as a modem says one on power-up.
+///
+/// A result code like any other, so it goes through [`send_result`]: an
+/// operator who saved `ATQ1` asked for silence and gets it here too, and
+/// `ATV0` hears `0`.  It was `send_response`, which checks neither, so a
+/// program driving the port in quiet mode met a stray `OK` on every reopen.
+fn port_open_banner(state: &mut ModemState) {
+    send_result(state, "OK");
 }
 
 // ─── Command mode ──────────────────────────────────────────
@@ -3860,8 +3867,7 @@ fn command_mode_tick(state: &mut ModemState) -> bool {
             // condition: a Commodore's shifted letters become ASCII, and
             // everything else is untouched.  See `fold_petscii_command_byte`.
             let folded = fold_petscii_command_byte(byte);
-            state.last_data_time = Instant::now();
-            state.plus_count = 0;
+            state.escape.reset(Instant::now());
 
             let cr = state.s_regs[3];
             let lf = state.s_regs[4];
@@ -6219,8 +6225,7 @@ where
     let mut duplex_buf = [0u8; 4096];
     let mut link = PetsciiLink::new();
 
-    state.plus_count = 0;
-    state.last_data_time = Instant::now();
+    state.escape.reset(Instant::now());
 
     let restart_flag = &SERIAL_RESTART[state.port_id.index()];
     loop {
@@ -6320,9 +6325,25 @@ where
             Err(_) => {} // timeout — no data from duplex
         }
 
-        // Check trailing +++ guard time
-        if check_plus_complete(state) {
-            return OnlineExit::Escaped;
+        // Check trailing +++ guard time, and release a `+` or two that it
+        // turned out were data.
+        match poll_plus_escape(state) {
+            PlusPoll::Idle => {}
+            PlusPoll::Escape => return OnlineExit::Escaped,
+            PlusPoll::Release(mut held) => {
+                if dials_a_host && state.petscii_translate {
+                    held = link.for_host(&held);
+                }
+                if !held.is_empty() {
+                    let result = state.handle.block_on(async {
+                        tokio::time::timeout(Duration::from_secs(5), duplex_write.write_all(&held))
+                            .await
+                    });
+                    if !matches!(result, Ok(Ok(()))) {
+                        return OnlineExit::Disconnected;
+                    }
+                }
+            }
         }
     }
 }
@@ -6471,8 +6492,7 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
     let mut serial_buf = [0u8; 256];
     let mut tcp_buf = [0u8; 4096];
 
-    state.plus_count = 0;
-    state.last_data_time = Instant::now();
+    state.escape.reset(Instant::now());
 
     // Only consulted when AT+PETSCII=1 is active, but its state has to live
     // across reads regardless -- see `PetsciiLink`.
@@ -6552,9 +6572,19 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
             Err(_) => return OnlineExit::Disconnected,
         }
 
-        // Check trailing +++ guard time
-        if check_plus_complete(state) {
-            return OnlineExit::Escaped;
+        // Check trailing +++ guard time, and release a `+` or two that it
+        // turned out were data.
+        match poll_plus_escape(state) {
+            PlusPoll::Idle => {}
+            PlusPoll::Escape => return OnlineExit::Escaped,
+            PlusPoll::Release(mut held) => {
+                if state.petscii_translate {
+                    held = link.for_host(&held);
+                }
+                if !held.is_empty() && tcp.write_all(&held).is_err() {
+                    return OnlineExit::Disconnected;
+                }
+            }
         }
     }
 }
@@ -6590,11 +6620,159 @@ fn modem_trace_enabled() -> bool {
         || std::env::var_os("EGATEWAY_GATEWAY_DEBUG").is_some_and(|v| !v.is_empty())
 }
 
-/// Process bytes from the serial port during online mode.  Bytes that should
-/// be forwarded to the remote end are appended to `forward`.  Pending escape
-/// bytes from a possible escape sequence are held back (not appended) until
-/// either a different byte arrives (which flushes them) or `check_plus_complete`
-/// confirms the escape after the trailing guard time.
+/// The Hayes `+++` escape detector for one online call.
+///
+/// Pure and clock-injected -- every method is handed `now` -- so the tests
+/// drive the real state machine against supplied times, where they used to
+/// drive a copy of the algorithm that this could drift from unseen.  The CP/M
+/// emulator's virtual modem keeps its own, simpler detector in `cpm_modem.rs`.
+///
+/// The sequence is guard time of silence, three escape characters each within
+/// guard time of the one before, then guard time of silence.  **Anything
+/// short of that is data**, and the held characters are released: when a
+/// different byte arrives, when a fourth escape character does, and -- the
+/// case that used to be missing -- when guard time passes after one or two of
+/// them with no third.  Without that last release a lone `+` typed at a
+/// remote's prompt after a pause sat in the gateway until the next keystroke,
+/// and if none came it never reached the remote at all.
+struct PlusEscape {
+    /// When the last byte forwarded as data arrived (the leading guard).
+    last_data_time: Instant,
+    /// Escape characters held so far (0..=3).
+    plus_count: u8,
+    /// When the most recent held escape character arrived.
+    plus_start: Instant,
+}
+
+/// What [`PlusEscape::poll`] decided while the line was idle.
+#[derive(Debug, PartialEq)]
+enum PlusPoll {
+    /// Nothing to do.
+    Idle,
+    /// Three escape characters and the trailing guard: back to command mode.
+    Escape,
+    /// One or two escape characters and then guard time with no third: they
+    /// were data, and these are the bytes to forward now.
+    Release(Vec<u8>),
+}
+
+impl PlusEscape {
+    fn new(now: Instant) -> Self {
+        PlusEscape { last_data_time: now, plus_count: 0, plus_start: now }
+    }
+
+    /// Forget any partial sequence and count the line as busy from `now` --
+    /// on going online, and on every command-mode byte.
+    fn reset(&mut self, now: Instant) {
+        self.plus_count = 0;
+        self.last_data_time = now;
+    }
+
+    /// Process bytes from the serial port.  Bytes to forward to the remote
+    /// are appended to `forward`; escape characters that may begin the
+    /// sequence are held back.  Per Hayes, `esc > 127` or a zero `guard`
+    /// (S2 / S12) disables detection.  `trace` names the port when the modem
+    /// trace is armed.
+    fn feed(
+        &mut self,
+        data: &[u8],
+        esc: u8,
+        guard: Duration,
+        now: Instant,
+        forward: &mut Vec<u8>,
+        trace: Option<&str>,
+    ) {
+        let escape_enabled = esc <= 127 && !guard.is_zero();
+        for &byte in data {
+            if escape_enabled && byte == esc {
+                if self.plus_count == 0 {
+                    // First escape char: only start sequence if guard time (silence) has elapsed
+                    let silence = now.duration_since(self.last_data_time);
+                    if silence >= guard {
+                        self.plus_count = 1;
+                        self.plus_start = now;
+                        if let Some(port) = trace {
+                            glog!(
+                                "[esc] Port {}: escape char #1 accepted ({}ms silence before)",
+                                port,
+                                silence.as_millis()
+                            );
+                        }
+                        continue; // hold this byte
+                    }
+                    // Guard time not met — forward normally
+                    if let Some(port) = trace {
+                        glog!(
+                            "[esc] Port {}: escape char ignored — only {}ms silence before it (need {}ms); forwarded as data",
+                            port,
+                            silence.as_millis(),
+                            guard.as_millis()
+                        );
+                    }
+                } else if self.plus_count < 3 {
+                    self.plus_count += 1;
+                    // The time of the most recent one: `poll` measures both
+                    // the trailing guard and the give-up from it.
+                    self.plus_start = now;
+                    if let Some(port) = trace {
+                        glog!("[esc] Port {}: escape char #{} accepted", port, self.plus_count);
+                    }
+                    continue; // hold this byte
+                }
+                // plus_count == 3 and another escape char arrived — that's 4, not an escape.
+                // Fall through to flush and forward.
+            }
+
+            // Non-escape byte (or 4th escape char):  flush any pending escape chars
+            if self.plus_count > 0 {
+                if let Some(port) = trace {
+                    glog!(
+                        "[esc] Port {}: sequence broken after {} escape char(s) by byte 0x{:02X}; pending chars flushed to host",
+                        port,
+                        self.plus_count,
+                        byte
+                    );
+                }
+                forward.extend(std::iter::repeat_n(esc, self.plus_count as usize));
+                self.plus_count = 0;
+            }
+
+            forward.push(byte);
+            self.last_data_time = now;
+        }
+    }
+
+    /// Called while the line is idle: has guard time passed since the last
+    /// held escape character?  With three held that completes the escape;
+    /// with one or two it means they were data, and they are released.
+    fn poll(&mut self, esc: u8, guard: Duration, now: Instant, trace: Option<&str>) -> PlusPoll {
+        if self.plus_count == 0 || now.duration_since(self.plus_start) < guard {
+            return PlusPoll::Idle;
+        }
+        let held = std::mem::take(&mut self.plus_count);
+        if held == 3 {
+            if let Some(port) = trace {
+                glog!(
+                    "[esc] Port {}: escape complete (guard time after 3rd char elapsed) — returning to command mode",
+                    port
+                );
+            }
+            return PlusPoll::Escape;
+        }
+        if let Some(port) = trace {
+            glog!(
+                "[esc] Port {}: only {} escape char(s) before guard time elapsed; forwarded to host as data",
+                port,
+                held
+            );
+        }
+        // They were data, and the last of them is the last data byte.
+        self.last_data_time = self.plus_start;
+        PlusPoll::Release(vec![esc; held as usize])
+    }
+}
+
+/// Run a read from the serial port through the port's `+++` detector.
 fn process_online_bytes(
     state: &mut ModemState,
     data: &[u8],
@@ -6602,95 +6780,18 @@ fn process_online_bytes(
 ) {
     let esc = escape_char(state);
     let guard = guard_time(state);
-    // Per Hayes standard, S2 > 127 or S12 = 0 disables escape detection.
-    let escape_enabled = esc <= 127 && !guard.is_zero();
-    let trace = modem_trace_enabled();
-
-    for &byte in data {
-        let now = Instant::now();
-
-        if escape_enabled && byte == esc {
-            if state.plus_count == 0 {
-                // First escape char: only start sequence if guard time (silence) has elapsed
-                let silence = now.duration_since(state.last_data_time);
-                if silence >= guard {
-                    state.plus_count = 1;
-                    state.plus_start = now;
-                    if trace {
-                        glog!(
-                            "[esc] Port {}: escape char #1 accepted ({}ms silence before)",
-                            state.port_id.label(),
-                            silence.as_millis()
-                        );
-                    }
-                    continue; // hold this byte
-                }
-                // Guard time not met — forward normally
-                if trace {
-                    glog!(
-                        "[esc] Port {}: escape char ignored — only {}ms silence before it (need {}ms); forwarded as data",
-                        state.port_id.label(),
-                        silence.as_millis(),
-                        guard.as_millis()
-                    );
-                }
-            } else if state.plus_count < 3 {
-                state.plus_count += 1;
-                if trace {
-                    glog!(
-                        "[esc] Port {}: escape char #{} accepted",
-                        state.port_id.label(),
-                        state.plus_count
-                    );
-                }
-                if state.plus_count == 3 {
-                    state.plus_start = now; // record time of third escape char
-                    continue;
-                }
-                continue; // hold this byte
-            }
-            // plus_count == 3 and another escape char arrived — that's 4, not an escape.
-            // Fall through to flush and forward.
-        }
-
-        // Non-escape byte (or 4th escape char):  flush any pending escape chars
-        if state.plus_count > 0 {
-            if trace {
-                glog!(
-                    "[esc] Port {}: sequence broken after {} escape char(s) by byte 0x{:02X}; pending chars flushed to host",
-                    state.port_id.label(),
-                    state.plus_count,
-                    byte
-                );
-            }
-            for _ in 0..state.plus_count {
-                forward.push(esc);
-            }
-            state.plus_count = 0;
-        }
-
-        forward.push(byte);
-        state.last_data_time = now;
-    }
+    let trace = modem_trace_enabled().then_some(state.port_id.label());
+    state.escape.feed(data, esc, guard, Instant::now(), forward, trace);
 }
 
-/// Check whether the trailing guard time after the escape sequence has elapsed.
-/// Returns `true` if the escape is complete and the modem should return to
-/// command mode.
-fn check_plus_complete(state: &mut ModemState) -> bool {
-    if state.plus_count == 3
-        && Instant::now().duration_since(state.plus_start) >= guard_time(state)
-    {
-        state.plus_count = 0;
-        if modem_trace_enabled() {
-            glog!(
-                "[esc] Port {}: escape complete (guard time after 3rd char elapsed) — returning to command mode",
-                state.port_id.label()
-            );
-        }
-        return true;
-    }
-    false
+/// Check the `+++` detector while the line is idle: [`PlusPoll::Escape`]
+/// returns the modem to command mode, [`PlusPoll::Release`] hands back held
+/// escape characters that turned out to be data, for the caller to forward.
+fn poll_plus_escape(state: &mut ModemState) -> PlusPoll {
+    let esc = escape_char(state);
+    let guard = guard_time(state);
+    let trace = modem_trace_enabled().then_some(state.port_id.label());
+    state.escape.poll(esc, guard, Instant::now(), trace)
 }
 
 // ─── Ring emulator ────────────────────────────────────────
@@ -7685,138 +7786,139 @@ mod tests {
 
     // ─── +++ escape detection ────────────────────────────
 
-    /// Helper: create a minimal ModemState-like struct for testing +++ logic.
-    struct PlusState {
-        last_data_time: Instant,
-        plus_count: u8,
-        plus_start: Instant,
+    /// Default S2/S12: `+` and one second.
+    fn plus_defaults() -> (u8, Duration) {
+        (S_REG_DEFAULTS[2], Duration::from_millis(S_REG_DEFAULTS[12] as u64 * 20))
     }
 
-    impl PlusState {
-        fn new() -> Self {
-            Self {
-                last_data_time: Instant::now() - Duration::from_secs(5), // long silence
-                plus_count: 0,
-                plus_start: Instant::now(),
-            }
-        }
-
-        fn as_modem_fields(&self) -> (Instant, u8, Instant) {
-            (self.last_data_time, self.plus_count, self.plus_start)
-        }
+    /// A detector whose line has been silent for five seconds before `t0`.
+    fn quiet_detector(t0: Instant) -> PlusEscape {
+        PlusEscape::new(t0 - Duration::from_secs(5))
     }
 
-    /// Run process_online_bytes using a PlusState (avoids needing a real serial port).
-    /// Uses the default S-register values for escape char and guard time.
-    fn test_process_bytes(
-        last_data_time: &mut Instant,
-        plus_count: &mut u8,
-        plus_start: &mut Instant,
-        data: &[u8],
-    ) -> (Vec<u8>, bool) {
-        let esc_char = S_REG_DEFAULTS[2]; // '+' (43)
-        let guard = Duration::from_millis(S_REG_DEFAULTS[12] as u64 * 20);
-        // We can't create a real ModemState without a serial port, so we
-        // test the logic inline using the same algorithm.
+    /// Feed `data` at `now` through the real detector; return what it forwards.
+    fn plus_feed(det: &mut PlusEscape, data: &[u8], now: Instant) -> Vec<u8> {
+        let (esc, guard) = plus_defaults();
         let mut forward = Vec::new();
-        for &byte in data {
-            let now = Instant::now();
+        det.feed(data, esc, guard, now, &mut forward, None);
+        forward
+    }
 
-            if byte == esc_char {
-                if *plus_count == 0 {
-                    if now.duration_since(*last_data_time) >= guard {
-                        *plus_count = 1;
-                        *plus_start = now;
-                        continue;
-                    }
-                } else if *plus_count < 3 {
-                    *plus_count += 1;
-                    if *plus_count == 3 {
-                        *plus_start = now;
-                        continue;
-                    }
-                    continue;
-                }
-            }
-
-            if *plus_count > 0 {
-                for _ in 0..*plus_count {
-                    forward.push(esc_char);
-                }
-                *plus_count = 0;
-            }
-
-            forward.push(byte);
-            *last_data_time = now;
-        }
-        let complete = *plus_count == 3
-            && Instant::now().duration_since(*plus_start) >= guard;
-        (forward, complete)
+    fn plus_poll(det: &mut PlusEscape, now: Instant) -> PlusPoll {
+        let (esc, guard) = plus_defaults();
+        det.poll(esc, guard, now, None)
     }
 
     #[test]
     fn test_plus_escape_with_guard_time() {
-        let s = PlusState::new();
-        let (mut last, mut count, mut start) = s.as_modem_fields();
+        let t0 = Instant::now();
+        let mut det = quiet_detector(t0);
         // Long silence already present (5 seconds ago).  Send +++.
-        let (forward, _) = test_process_bytes(&mut last, &mut count, &mut start, b"+++");
-        assert!(forward.is_empty(), "should hold +++ bytes");
-        assert_eq!(count, 3);
-        // After guard time, check_plus_complete would return true.
-        // We simulate by checking the count.
+        assert!(plus_feed(&mut det, b"+++", t0).is_empty(), "should hold +++ bytes");
+        assert_eq!(det.plus_count, 3);
+        let (_, guard) = plus_defaults();
+        assert_eq!(plus_poll(&mut det, t0 + guard / 2), PlusPoll::Idle, "trailing guard not yet met");
+        assert_eq!(plus_poll(&mut det, t0 + guard), PlusPoll::Escape);
+        assert_eq!(det.plus_count, 0);
     }
 
     #[test]
     fn test_plus_no_guard_before() {
-        let mut last = Instant::now(); // just now — no silence
-        let mut count = 0u8;
-        let mut start = Instant::now();
-        let (forward, _) = test_process_bytes(&mut last, &mut count, &mut start, b"+++");
+        let t0 = Instant::now();
+        let mut det = PlusEscape::new(t0); // just now — no silence
         // Without guard time before, the '+' chars should be forwarded
-        assert_eq!(forward, b"+++");
-        assert_eq!(count, 0);
+        assert_eq!(plus_feed(&mut det, b"+++", t0), b"+++");
+        assert_eq!(det.plus_count, 0);
     }
 
     #[test]
     fn test_plus_interrupted_by_data() {
-        let s = PlusState::new();
-        let (mut last, mut count, mut start) = s.as_modem_fields();
+        let t0 = Instant::now();
+        let mut det = quiet_detector(t0);
         // Send ++ then 'a' — should flush the two pluses and the 'a'
-        let (forward, _) = test_process_bytes(&mut last, &mut count, &mut start, b"++a");
-        assert_eq!(forward, b"++a");
-        assert_eq!(count, 0);
+        assert_eq!(plus_feed(&mut det, b"++a", t0), b"++a");
+        assert_eq!(det.plus_count, 0);
     }
 
     #[test]
     fn test_plus_partial_two() {
-        let s = PlusState::new();
-        let (mut last, mut count, mut start) = s.as_modem_fields();
-        let (forward, _) = test_process_bytes(&mut last, &mut count, &mut start, b"++");
-        assert!(forward.is_empty(), "should hold ++ bytes");
-        assert_eq!(count, 2);
+        let t0 = Instant::now();
+        let mut det = quiet_detector(t0);
+        assert!(plus_feed(&mut det, b"++", t0).is_empty(), "should hold ++ bytes");
+        assert_eq!(det.plus_count, 2);
         // Then a non-plus byte arrives
-        let (forward2, _) = test_process_bytes(&mut last, &mut count, &mut start, b"x");
-        assert_eq!(forward2, b"++x");
-        assert_eq!(count, 0);
+        assert_eq!(plus_feed(&mut det, b"x", t0), b"++x");
+        assert_eq!(det.plus_count, 0);
     }
 
     #[test]
     fn test_plus_four_pluses() {
-        let s = PlusState::new();
-        let (mut last, mut count, mut start) = s.as_modem_fields();
+        let t0 = Instant::now();
+        let mut det = quiet_detector(t0);
         // Send ++++: first three are held, fourth flushes all
-        let (forward, _) = test_process_bytes(&mut last, &mut count, &mut start, b"++++");
-        assert_eq!(forward, b"++++");
-        assert_eq!(count, 0);
+        assert_eq!(plus_feed(&mut det, b"++++", t0), b"++++");
+        assert_eq!(det.plus_count, 0);
+        let (_, guard) = plus_defaults();
+        assert_eq!(plus_poll(&mut det, t0 + guard * 2), PlusPoll::Idle, "four is not an escape");
     }
 
     #[test]
     fn test_normal_data_passes_through() {
-        let s = PlusState::new();
-        let (mut last, mut count, mut start) = s.as_modem_fields();
-        let (forward, _) =
-            test_process_bytes(&mut last, &mut count, &mut start, b"hello world");
-        assert_eq!(forward, b"hello world");
+        let t0 = Instant::now();
+        let mut det = quiet_detector(t0);
+        assert_eq!(plus_feed(&mut det, b"hello world", t0), b"hello world");
+    }
+
+    /// **One or two escape characters followed by silence are data.**  They
+    /// used to be held until the next keystroke, so a lone `+` typed at a
+    /// remote's prompt after a pause never arrived.  Once guard time passes
+    /// without a third they are released, and released once.
+    #[test]
+    fn test_plus_short_of_three_is_released_after_guard_time() {
+        let (_, guard) = plus_defaults();
+        for held in [1usize, 2] {
+            let t0 = Instant::now();
+            let mut det = quiet_detector(t0);
+            let pluses = vec![b'+'; held];
+            assert!(plus_feed(&mut det, &pluses, t0).is_empty());
+            assert_eq!(plus_poll(&mut det, t0 + guard / 2), PlusPoll::Idle, "released early");
+            assert_eq!(plus_poll(&mut det, t0 + guard), PlusPoll::Release(pluses.clone()));
+            assert_eq!(det.plus_count, 0);
+            assert_eq!(plus_poll(&mut det, t0 + guard * 3), PlusPoll::Idle, "released twice");
+            // A release only happens once guard time has passed since the
+            // last of them, so the line is quiet again and the next `+` can
+            // begin a fresh sequence -- held, and released in its turn.
+            let t1 = t0 + guard + guard / 4;
+            assert!(plus_feed(&mut det, b"+", t1).is_empty(), "a + after the release starts afresh");
+            assert_eq!(plus_poll(&mut det, t1 + guard), PlusPoll::Release(b"+".to_vec()));
+        }
+    }
+
+    /// The give-up is measured from the *latest* escape character, so a
+    /// sequence typed at an even pace inside guard time still escapes.
+    #[test]
+    fn test_plus_give_up_runs_from_the_latest_escape_char() {
+        let (_, guard) = plus_defaults();
+        let t0 = Instant::now();
+        let step = guard * 3 / 4;
+        let mut det = quiet_detector(t0);
+        assert!(plus_feed(&mut det, b"+", t0).is_empty());
+        assert_eq!(plus_poll(&mut det, t0 + step), PlusPoll::Idle);
+        assert!(plus_feed(&mut det, b"+", t0 + step).is_empty());
+        assert_eq!(plus_poll(&mut det, t0 + step * 2), PlusPoll::Idle);
+        assert!(plus_feed(&mut det, b"+", t0 + step * 2).is_empty());
+        assert_eq!(plus_poll(&mut det, t0 + step * 2 + guard), PlusPoll::Escape);
+    }
+
+    /// S12 = 0 (and S2 > 127) disable detection: nothing is ever held.
+    #[test]
+    fn test_plus_disabled_holds_nothing() {
+        let t0 = Instant::now();
+        let mut det = quiet_detector(t0);
+        let mut forward = Vec::new();
+        det.feed(b"+", b'+', Duration::ZERO, t0, &mut forward, None);
+        assert_eq!(forward, b"+");
+        assert_eq!(det.poll(b'+', Duration::ZERO, t0 + Duration::from_secs(9), None), PlusPoll::Idle);
     }
 
     // ─── Serial-port descriptions ────────────────────────
@@ -9820,8 +9922,9 @@ mod tests {
         assert!(code.contains(concat!("let dials_a_host = matches!(target, ", "crate::relay::RelayTarget::Dial { .. });")));
         assert_eq!(
             code.matches(concat!("if dials_a_host && ", "state.petscii_translate {")).count(),
-            2,
-            "both directions translate on the flag: keys out, and text in (below)"
+            3,
+            "both directions translate on the flag: keys out, a held `+` released \
+             as a key, and text in (below)"
         );
         assert!(
             code.contains(concat!("let out: &[u8] = if dials_a_host && ", "state.petscii_translate {")),
@@ -10607,5 +10710,115 @@ mod tests {
         assert!(!held(), "a dropped announcer future kept the claim");
         cpm_announce_release();
         reset();
+    }
+
+    // ─── A ModemState on a mock port ─────────────────────
+
+    /// A serial port that records what is written to it and never has
+    /// anything to read, so the real `ModemState` functions can be driven
+    /// without hardware.  Every modem-line call succeeds and does nothing.
+    struct MockPort {
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Read for MockPort {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "mock"))
+        }
+    }
+
+    impl std::io::Write for MockPort {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl serialport::SerialPort for MockPort {
+        fn name(&self) -> Option<String> { Some("mock".into()) }
+        fn baud_rate(&self) -> serialport::Result<u32> { Ok(9600) }
+        fn data_bits(&self) -> serialport::Result<serialport::DataBits> { Ok(serialport::DataBits::Eight) }
+        fn flow_control(&self) -> serialport::Result<serialport::FlowControl> { Ok(serialport::FlowControl::None) }
+        fn parity(&self) -> serialport::Result<serialport::Parity> { Ok(serialport::Parity::None) }
+        fn stop_bits(&self) -> serialport::Result<serialport::StopBits> { Ok(serialport::StopBits::One) }
+        fn timeout(&self) -> Duration { SERIAL_READ_TIMEOUT }
+        fn set_baud_rate(&mut self, _: u32) -> serialport::Result<()> { Ok(()) }
+        fn set_data_bits(&mut self, _: serialport::DataBits) -> serialport::Result<()> { Ok(()) }
+        fn set_flow_control(&mut self, _: serialport::FlowControl) -> serialport::Result<()> { Ok(()) }
+        fn set_parity(&mut self, _: serialport::Parity) -> serialport::Result<()> { Ok(()) }
+        fn set_stop_bits(&mut self, _: serialport::StopBits) -> serialport::Result<()> { Ok(()) }
+        fn set_timeout(&mut self, _: Duration) -> serialport::Result<()> { Ok(()) }
+        fn write_request_to_send(&mut self, _: bool) -> serialport::Result<()> { Ok(()) }
+        fn write_data_terminal_ready(&mut self, _: bool) -> serialport::Result<()> { Ok(()) }
+        fn read_clear_to_send(&mut self) -> serialport::Result<bool> { Ok(true) }
+        fn read_data_set_ready(&mut self) -> serialport::Result<bool> { Ok(true) }
+        fn read_ring_indicator(&mut self) -> serialport::Result<bool> { Ok(false) }
+        fn read_carrier_detect(&mut self) -> serialport::Result<bool> { Ok(false) }
+        fn bytes_to_read(&self) -> serialport::Result<u32> { Ok(0) }
+        fn bytes_to_write(&self) -> serialport::Result<u32> { Ok(0) }
+        fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> { Ok(()) }
+        fn try_clone(&self) -> serialport::Result<Box<dyn serialport::SerialPort>> {
+            Ok(Box::new(MockPort { written: self.written.clone() }))
+        }
+        fn set_break(&self) -> serialport::Result<()> { Ok(()) }
+        fn clear_break(&self) -> serialport::Result<()> { Ok(()) }
+    }
+
+    /// A real `ModemState` for `id` on a [`MockPort`], with the port's
+    /// default AT profile, plus the buffer its writes land in.
+    fn mock_modem_state(
+        id: SerialPortId,
+        handle: tokio::runtime::Handle,
+    ) -> (ModemState, Arc<std::sync::Mutex<Vec<u8>>>) {
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let now = Instant::now();
+        let state = ModemState {
+            dialled: crate::telnet::Inherited::fresh(true, None),
+            port_id: id,
+            port: Box::new(MockPort { written: written.clone() }),
+            mode: ModemMode::Command,
+            echo: true,
+            verbose: true,
+            quiet: false,
+            escape: PlusEscape::new(now),
+            cmd_buffer: String::new(),
+            prev_cmd_byte: 0,
+            handle,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            restart: Arc::new(AtomicBool::new(false)),
+            baud: 9600,
+            active_connection: None,
+            s_regs: S_REG_DEFAULTS,
+            x_code: 4,
+            dtr_mode: 0,
+            flow_mode: 0,
+            dcd_mode: 1,
+            last_dial: String::new(),
+            last_command: String::new(),
+            stored_numbers: Default::default(),
+            petscii_translate: false,
+            drive_carrier: false,
+            bc_rx: serial_broadcast().subscribe(),
+        };
+        (state, written)
+    }
+
+    /// The port-open `OK` is a result code: `ATQ1` silences it and `ATV0`
+    /// makes it `0`.
+    #[test]
+    fn test_the_port_open_banner_honours_quiet_and_numeric() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut state, written) = mock_modem_state(SerialPortId::A, rt.handle().clone());
+        state.quiet = true;
+        port_open_banner(&mut state);
+        assert!(written.lock().unwrap().is_empty(), "ATQ1 must silence the banner");
+
+        state.quiet = false;
+        state.verbose = false;
+        port_open_banner(&mut state);
+        assert_eq!(&*written.lock().unwrap(), b"0\r");
     }
 }

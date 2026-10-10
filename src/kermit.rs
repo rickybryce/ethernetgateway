@@ -2192,6 +2192,48 @@ pub(crate) fn is_safe_resume_filename(name: &str) -> bool {
         && !name.contains('\0')
 }
 
+/// [`is_safe_resume_filename`] plus, **on Windows only**, no device name:
+/// there `CON`, `NUL`, `COM1.TXT` and the rest open a device whatever
+/// directory they are joined onto, so a `get COM1` would open the serial
+/// port the gateway may be holding.  `resolves_inside` does refuse such a
+/// path, but only after `metadata` and `canonicalize` have opened it, and
+/// opening a serial port can move its modem lines.  Used by GET and every
+/// `G` command that names a file or folder, before anything touches the
+/// filesystem.
+///
+/// Windows only: on any other host `CON.ASM` is an ordinary file, and a
+/// Kermit-80 that uploaded one must be able to fetch, type or delete it
+/// again -- the same reason `TelnetSession::save_received_file_collision_safe`
+/// converts device names on Windows alone.
+fn is_safe_server_filename(name: &str) -> bool {
+    is_safe_server_filename_on(name, cfg!(windows))
+}
+
+/// Does any component of a `remote cd` path name a Windows device?  The
+/// same hazard as [`is_safe_server_filename`], one step earlier: the CWD
+/// handler's `is_dir()` check opens `COM1` on Windows exactly as a GET did.
+/// Windows only, for the same reason.
+fn subdir_names_a_device(subdir: &str) -> bool {
+    subdir_names_a_device_on(subdir, cfg!(windows))
+}
+
+/// [`subdir_names_a_device`] with the host named.
+fn subdir_names_a_device_on(subdir: &str, windows: bool) -> bool {
+    windows
+        && subdir.split('/').any(|c| {
+            crate::cpm::is_host_device_name(c.split('.').next().unwrap_or("").trim_end_matches(' '))
+        })
+}
+
+/// [`is_safe_server_filename`] with the host named, so both halves of the
+/// rule are tested on every host.
+fn is_safe_server_filename_on(name: &str, windows: bool) -> bool {
+    // Windows ignores trailing spaces as well as an extension, so `NUL `
+    // and `nul.txt` are both the device.
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+    is_safe_resume_filename(name) && !(windows && crate::cpm::is_host_device_name(stem))
+}
+
 /// Look up the on-disk size of a partial file eligible for resume,
 /// keyed on the sender's filename.  Returns `Some(size)` only when
 /// every check passes:
@@ -5713,7 +5755,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
         } else {
             resolve_cwd_target(&self.subdir, &raw_arg)
         };
-        if !is_safe_relative_subdir(&new_subdir) {
+        if !is_safe_relative_subdir(&new_subdir) || subdir_names_a_device(&new_subdir) {
             self.refuse(seq, "Invalid directory").await?;
             if self.verbose {
                 glog!(
@@ -5843,7 +5885,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
         // subdir (so deletes outside `<base>/<subdir>`
         // are impossible by construction).
         let fname = g_text_argument(arg);
-        if !is_safe_resume_filename(&fname) {
+        if !is_safe_server_filename(&fname) {
             self.refuse(seq, "Invalid filename").await?;
             if self.verbose {
                 glog!(
@@ -5883,7 +5925,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
     async fn rename(&mut self, seq: u8, arg: &[u8]) -> Result<(), String> {
         // RENAME — `remote rename <old> <new>`, spec §6.7.
         // Two field-encoded args back-to-back.  Both
-        // names must pass `is_safe_resume_filename`;
+        // names must pass `is_safe_server_filename`;
         // both are rooted at the per-session subdir.
         let parsed = parse_g_field_argument_with_remainder(arg)
             .and_then(|(old, rest)| {
@@ -5899,8 +5941,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
         };
         let old_name = String::from_utf8_lossy(old_bytes).into_owned();
         let new_name = String::from_utf8_lossy(new_bytes).into_owned();
-        if !is_safe_resume_filename(&old_name)
-            || !is_safe_resume_filename(&new_name)
+        if !is_safe_server_filename(&old_name)
+            || !is_safe_server_filename(&new_name)
         {
             self.refuse(seq, "Invalid filename").await?;
             if self.verbose {
@@ -5967,7 +6009,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
         // matching `remote type` on a binary is the
         // user's call.
         let fname = g_text_argument(arg);
-        if !is_safe_resume_filename(&fname) {
+        if !is_safe_server_filename(&fname) {
             self.refuse(seq, "Invalid filename").await?;
             if self.verbose {
                 glog!(
@@ -6018,11 +6060,11 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
         // C-Kermit reserves for `remote message`).
         // Field-encoded directory name; rooted at the
         // per-session subdir so we can't escape the
-        // sandbox.  Reuses `is_safe_resume_filename` —
+        // sandbox.  Reuses `is_safe_server_filename` —
         // a single-component name with no traversal —
         // because directory names are leaves, not paths.
         let dname = g_text_argument(arg);
-        if !is_safe_resume_filename(&dname) {
+        if !is_safe_server_filename(&dname) {
             self.refuse(seq, "Invalid directory name").await?;
             if self.verbose {
                 glog!(
@@ -6071,7 +6113,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
         // Refusing recursive delete by default avoids
         // the worst footgun.
         let dname = g_text_argument(arg);
-        if !is_safe_resume_filename(&dname) {
+        if !is_safe_server_filename(&dname) {
             self.refuse(seq, "Invalid directory name").await?;
             if self.verbose {
                 glog!(
@@ -6209,7 +6251,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
         // pre-2026-05 builds passed every interop test we ran.
         let raw = decode_data(&pkt.payload, command_quoting()).unwrap_or_default();
         let fname = String::from_utf8_lossy(&raw).into_owned();
-        if !is_safe_resume_filename(&fname) {
+        if !is_safe_server_filename(&fname) {
             self.refuse(pkt.seq, "Invalid filename").await?;
             if self.verbose {
                 glog!("Kermit server: refused R '{}' (unsafe filename)", fname);
@@ -8414,6 +8456,32 @@ mod tests {
         assert!(!is_safe_resume_filename("C:x"));
         assert!(!is_safe_resume_filename("C:"));
         assert!(!is_safe_resume_filename("file.txt:stream"));
+    }
+
+    /// **A device name is refused by the server on Windows only.**  Both
+    /// hosts are exercised on every host, since the rule takes the host as
+    /// an argument; the extension, case and a trailing space do not hide the
+    /// device, and an ordinary file that merely starts like one is not one.
+    #[test]
+    fn test_a_device_name_is_refused_on_windows_only() {
+        for dev in ["CON", "nul", "COM1", "com9.txt", "LPT3.DAT", "AUX.ASM", "NUL ", "PRN .TXT"] {
+            assert!(!is_safe_server_filename_on(dev, true), "{dev:?} must be refused on Windows");
+            assert!(is_safe_server_filename_on(dev.trim_end(), false), "{dev:?} is a file elsewhere");
+        }
+        for ok in ["CONFIG.SYS", "COM10", "COM.TXT", "NULLS.BIN", "LPT", "hello.bin"] {
+            assert!(is_safe_server_filename_on(ok, true), "{ok:?} is an ordinary file");
+        }
+        // A `remote cd` into one is refused the same way, at any depth.
+        for dev in ["COM1", "docs/nul", "a/LPT2.DIR/b"] {
+            assert!(subdir_names_a_device_on(dev, true), "{dev:?} names a device on Windows");
+            assert!(!subdir_names_a_device_on(dev, false), "{dev:?} is a folder elsewhere");
+        }
+        assert!(!subdir_names_a_device_on("games/COM10/console", true));
+        assert!(!subdir_names_a_device_on("", true), "the base is no device");
+        // Everything the base rule refuses stays refused on both hosts.
+        for bad in ["", "../x", "C:x", "a/b", ".hidden"] {
+            assert!(!is_safe_server_filename_on(bad, true) && !is_safe_server_filename_on(bad, false), "{bad:?}");
+        }
     }
 
     #[test]
