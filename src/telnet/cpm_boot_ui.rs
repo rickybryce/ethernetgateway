@@ -1240,12 +1240,22 @@ impl TelnetSession {
         // owns the screen -- and held there, because the main menu clears it
         // the moment this returns and a line shown for one frame is a line
         // nobody read.
+        // The input is drained first: the operator left with ESC ESC, and a
+        // third from key repeat -- or anything typed at the guest that it
+        // never read -- would answer the keypress at once.  The wait is
+        // bounded like every other one after a session, so an abandoned
+        // connection still reaches the idle timeout.
         if !self.held_print_notices.is_empty() {
             self.show_held_print_notices().await?;
             self.send_line("").await?;
             self.send("  Press any key to continue.").await?;
             self.flush().await?;
-            self.wait_for_key().await?;
+            self.drain_input().await;
+            if self.idle_timeout.is_zero() {
+                self.wait_for_key().await?;
+            } else if let Ok(r) = tokio::time::timeout(self.idle_timeout, self.wait_for_key()).await {
+                r?;
+            }
         }
         self.send_line("").await?;
         result
@@ -1728,8 +1738,13 @@ mod tests {
         let session = body("cpm_boot_session");
         let back = session.find("Returned to the gateway.").expect("the parting line");
         let show = session.find("self.show_held_print_notices()").expect("the notices are never shown");
+        let drain = show + session[show..].find("self.drain_input()").expect("stale input is not drained");
         let key = show + session[show..].find("self.wait_for_key()").expect("no key is waited for");
-        assert!(back < show && show < key, "parting line, notices, then a key");
+        assert!(back < show && show < drain && drain < key, "parting line, notices, drain, then a key");
+        assert!(
+            session[drain..].contains("tokio::time::timeout(self.idle_timeout, self.wait_for_key())"),
+            "the keypress is not bounded by the idle timeout"
+        );
         assert!(
             !body("cpm_boot_run").contains("show_held_print_notices"),
             "shown inside the run, the main menu wipes them"
