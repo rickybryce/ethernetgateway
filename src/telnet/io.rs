@@ -1167,7 +1167,7 @@ impl TelnetSession {
         let start = std::time::Instant::now();
         let result = {
             let mut writer_guard = self.writer.lock().await;
-            crate::zmodem::zmodem_receive(
+            crate::zmodem::zmodem_receive_keeping(
                 &mut self.reader,
                 &mut *writer_guard,
                 self.xmodem_iac,
@@ -1175,11 +1175,15 @@ impl TelnetSession {
                 decide,
             )
             .await
+            .into_parts()
         };
         let elapsed = start.elapsed();
 
-        let received = match result {
-            Ok(rxs) => rxs,
+        // Files the sender was told were received are saved even when a later
+        // one fails -- the same rule as the Upload menu's batch, since this is
+        // the same exchange started by the terminal instead.
+        let (received, batch_error) = match result {
+            Ok(parts) => parts,
             Err(e) => {
                 self.post_transfer_settle().await;
                 self.show_error(&format!("ZMODEM receive failed: {}", e))
@@ -1221,7 +1225,8 @@ impl TelnetSession {
         self.post_transfer_settle().await;
         self.send_line("").await?;
         self.send_line(&format!(
-            "  ZMODEM upload completed in {:.1}s.",
+            "  ZMODEM upload {} in {:.1}s.",
+            if batch_error.is_some() { "stopped" } else { "completed" },
             elapsed.as_secs_f64()
         ))
         .await?;
@@ -1248,6 +1253,13 @@ impl TelnetSession {
                 self.red("✗"),
                 self.amber(name),
                 reason
+            ))
+            .await?;
+        }
+        if let Some(e) = &batch_error {
+            self.send_line(&format!(
+                "  {}",
+                self.red(&format!("Transfer failed: {}", e))
             ))
             .await?;
         }

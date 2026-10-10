@@ -949,7 +949,10 @@ pub(crate) struct ZfileInfo {
 /// their own counter.
 ///
 /// All or nothing: a failure after file 1 was confirmed drops file 1 too.
-/// The Upload menu calls [`zmodem_receive_keeping`], which does not.
+/// For the tests that drive it; production -- the Upload menu and the
+/// terminal-started autostart -- calls [`zmodem_receive_keeping`], which does
+/// not.
+#[cfg(test)]
 pub(crate) async fn zmodem_receive<F>(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
