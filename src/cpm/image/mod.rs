@@ -521,6 +521,17 @@ pub fn apply_mount_selection(
             .map(|(_, n)| n.as_str());
         let have = current.get(drive0 as usize).and_then(|n| n.as_deref());
         match (have, want) {
+            // The same image on a drive a boot could not restore: the screen
+            // showed it selected, so a Save of it is the operator asking for
+            // it again -- try the mount.  Treated as "unchanged", the retry
+            // took two Saves (drive folder, then the image) with nothing on
+            // the screen saying so.
+            (Some(_), Some(name)) if have == want && is_unrestored(drive0) => {
+                match mount_image(cpm_base, drive0, name) {
+                    Ok(n) => notes.push(n),
+                    Err(e) => errors.push(e),
+                }
+            }
             // Unchanged, including both-absent: touch nothing.
             (a, b) if a == b => {}
             (Some(_), None) => match unmount_drive(drive0) {
@@ -550,6 +561,16 @@ pub fn apply_mount_selection(
         }
     }
     (notes, errors)
+}
+
+/// What every screen says beside a drive a booted session could not put back.
+/// One text for the three surfaces, short enough for the web and desktop rows
+/// (telnet marks the row `(not back)`).
+pub const NOT_BACK_NOTE: &str = "not back from a boot: Save to retry, or choose (drive folder)";
+
+/// Whether `drive0` names an image only because a boot could not restore it.
+pub fn is_unrestored(drive0: u8) -> bool {
+    registry::get(drive0).is_none() && registry::unrestored().iter().any(|(d, _)| *d == drive0)
 }
 
 /// The image each drive holds as far as the screens and `cpm_mounts` are

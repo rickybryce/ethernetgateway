@@ -183,12 +183,15 @@ fn main() {
             // it on every call, so a copy that then backed off had already
             // replaced it -- losing a save the running copy made meanwhile, and
             // from an older binary every key it did not know.
-            let cfg = config::load_config_read_only();
+            // Said before the config is read: an unreadable file stops this
+            // copy right there, and its FATAL alone would read as though no
+            // gateway were running at all.
             let who = match pid {
                 Some(p) => format!("another copy (process {p})"),
                 None => "another copy".to_string(),
             };
             glog!("The gateway is already running in this directory — {} holds the ports.", who);
+            let cfg = config::load_config_read_only();
             if !cfg.enable_console {
                 // **A headless launch must not take over by itself.** With no
                 // window there is nobody to ask, and a service restarted by

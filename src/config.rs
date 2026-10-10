@@ -1912,7 +1912,7 @@ pub fn load_or_create_config() -> Config {
 /// downgrade a secured gateway to security off and the published password.
 fn refuse_unreadable_config(path: &str, e: &std::io::Error) -> ! {
     glog!("FATAL: {} exists but could not be read: {}", CONFIG_FILE, e);
-    glog!("       Refusing to start rather than overwrite it with");
+    glog!("       Refusing to start rather than fall back to");
     glog!("       insecure defaults.");
     // Why it happened, when we can tell — a permission error on a file
     // somebody else owns is almost always the sudo-once trap.

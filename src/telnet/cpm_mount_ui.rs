@@ -280,7 +280,9 @@ impl TelnetSession {
                 }
                 for (drive0, name) in &unrestored {
                     let slot = ctx.slot(*drive0);
-                    let width = if self.terminal_type == TerminalType::Petscii { 18 } else { 50 };
+                    // 16 on a C64: a board slot label is up to 8 columns
+                    // (`unit 0.1`), and 3 + 8 + 1 + 16 + 1 + 10 is 39.
+                    let width = if self.terminal_type == TerminalType::Petscii { 16 } else { 50 };
                     self.send_line(&format!(
                         "   {} {} {}",
                         self.cyan(&slot),

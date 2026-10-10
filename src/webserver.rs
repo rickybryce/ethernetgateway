@@ -3381,6 +3381,12 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         }
 
         let mut note = String::new();
+        if crate::cpm::image::is_unrestored(drive0) {
+            note.push_str(&format!(
+                " <span class=\"sub\">{}</span>",
+                html_escape(crate::cpm::image::NOT_BACK_NOTE)
+            ));
+        }
         if let Some(m) = mounted {
             if crate::cpm::boot::mount_refuses_writes(&naming, m) {
                 // The reason is our BDOS's and only fits its own verdict; under

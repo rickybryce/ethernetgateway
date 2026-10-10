@@ -2312,6 +2312,12 @@ impl App {
                         if let Some(b) = &busy {
                             ui.label(egui::RichText::new(b).color(AMBER_BRIGHT));
                         }
+                        if crate::cpm::image::is_unrestored(drive0) {
+                            ui.label(
+                                egui::RichText::new(crate::cpm::image::NOT_BACK_NOTE)
+                                    .color(AMBER_BRIGHT),
+                            );
+                        }
                         // Under a booted disk the slot is a number on a board,
                         // not one of our drive letters — the same `cpm_mounts`
                         // underneath, named for what is actually running.

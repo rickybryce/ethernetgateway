@@ -2331,12 +2331,23 @@ mod tests {
         // and must see the drive too: a Save that leaves the row alone keeps
         // it, and choosing "(drive folder)" removes it.  Both screens showed it
         // empty, so the second was silently a no-op.
-        use crate::cpm::image::{apply_mount_selection, drive_image_names};
+        use crate::cpm::image::{apply_mount_selection, drive_image_names, is_unrestored};
         registry::note_unrestored(1, "altair8_gone.dsk");
         assert_eq!(drive_image_names()[1].as_deref(), Some("altair8_gone.dsk"), "the screens cannot see it");
+        assert!(is_unrestored(1), "the screens cannot mark it");
+        // Saving the row as shown is a retry: still unmountable, it stays.
+        let (_, errors) = apply_mount_selection(&base, &[(1, "altair8_gone.dsk".to_string())]);
+        assert!(!errors.is_empty(), "a Save of the image shown did not try to mount it");
+        assert_eq!(current_mounts_value(), "B=altair8_gone.dsk", "a failed retry dropped it");
+        // ...and once the image mounts again, the same one Save brings it back.
+        blank_image_at(&images.join("altair8_gone.dsk"));
         let (_, errors) = apply_mount_selection(&base, &[(1, "altair8_gone.dsk".to_string())]);
         assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(current_mounts_value(), "B=altair8_gone.dsk", "an unchanged row dropped it");
+        assert!(registry::get(1).is_some(), "the retry did not mount it");
+        assert!(!is_unrestored(1));
+        unmount_drive(1).unwrap();
+        // Choosing the drive folder removes an unrestored drive.
+        registry::note_unrestored(1, "altair8_gone.dsk");
         let (_, errors) = apply_mount_selection(&base, &[]);
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(current_mounts_value(), "", "choosing the drive folder did not remove it");
