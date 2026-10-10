@@ -59,6 +59,24 @@ pub(crate) const CAN: u8 = 0x18;
 /// already `usize`-shaped.
 pub(crate) const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
 
+/// The error a read returns when the peer has hung up.
+///
+/// A distinct value because a closed connection is not line noise: a
+/// protocol that treats it as one retries into a socket that answers every
+/// read at once, and a ZMODEM receiver still negotiating spun a core for the
+/// whole 45 s negotiation budget that way.  `read_error` is the one place it
+/// is made, so a caller can test for it by value.
+pub(crate) const PEER_CLOSED_ERR: &str = "connection closed by the peer";
+
+/// A read error as the protocols report it, with a hang-up made recognisable.
+pub(crate) fn read_error(e: std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+        PEER_CLOSED_ERR.into()
+    } else {
+        e.to_string()
+    }
+}
+
 // ─── Retry budget ────────────────────────────────────────────
 
 /// **What `*_max_retries = N` means, in every protocol here: N retries.**
@@ -161,10 +179,7 @@ pub(crate) async fn raw_read_byte(
         // data byte" and the caller owns the overall wait (block/negotiation
         // timeout).  Only the bytes *inside* a committed IAC sequence are
         // bounded below (N4).
-        reader
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| e.to_string())?;
+        reader.read_exact(&mut buf).await.map_err(read_error)?;
         if is_tcp && buf[0] == IAC {
             // We've committed to an IAC sequence — the command byte (and any
             // option payload) must arrive promptly.  Without a bound, a peer

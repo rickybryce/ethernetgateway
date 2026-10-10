@@ -487,9 +487,14 @@ const PEER_CANCEL_ERR: &str = "ZMODEM: peer cancelled (CAN)";
 /// suggests 5; some senders emit more (our own `send_cancel` emits 8).
 const CANCEL_CAN_RUN: u32 = 5;
 
-/// True if `err` is the peer-cancel signal raised by the read primitives.
+/// True if the peer is gone: it sent the cancel signal, or it hung up.
+///
+/// Every recovery loop that asks this short-circuits, and a hang-up belongs
+/// with the cancel for the same reason -- nothing on the wire can answer a
+/// retry.  Left as a mere read error, a closed connection fails every read at
+/// once and the negotiation loop resent ZRINIT as fast as it could run.
 fn is_peer_cancel(err: &str) -> bool {
-    err == PEER_CANCEL_ERR
+    err == PEER_CANCEL_ERR || err == crate::tnio::PEER_CLOSED_ERR
 }
 
 /// Read one ZMODEM header from the wire.  Scans for the ZPAD sync,
@@ -1078,7 +1083,7 @@ where
             Ok(Err(e)) => {
                 if is_peer_cancel(&e) {
                     if verbose {
-                        glog!("ZMODEM recv: peer cancelled the session");
+                        glog!("ZMODEM recv: peer ended the session: {}", e);
                     }
                     return Err(e);
                 }
@@ -3569,6 +3574,40 @@ mod tests {
             Err(e) => assert!(is_peer_cancel(&e), "expected peer-cancel, got {:?}", e),
             Ok(_) => panic!("expected cancel error, receiver returned Ok"),
         }
+    }
+
+    /// **A peer that hangs up during negotiation ends the receive at once.**
+    /// A closed connection answers every read immediately, so treated as line
+    /// noise it had the receiver resend ZRINIT in a tight loop -- a core spun
+    /// for the whole negotiation budget (45 s by default).  The count of
+    /// ZRINITs is the signal: a hang-up is one more read, not a reason to keep
+    /// talking.
+    #[tokio::test]
+    async fn test_receiver_stops_when_the_peer_hangs_up() {
+        let (inbound_writer, mut inbound_reader) = tokio::io::duplex(1024);
+        drop(inbound_writer);
+        let (mut sent_reader, mut outbound_writer) = tokio::io::duplex(1 << 20);
+        let started = std::time::Instant::now();
+        // Bounded here so a regression fails rather than hangs: the spin it
+        // guards against runs out the whole negotiation budget.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            zmodem_receive(&mut inbound_reader, &mut outbound_writer, false, false, |_, _, _| true),
+        )
+        .await
+        .expect("the receiver kept going after the peer hung up");
+        let elapsed = started.elapsed();
+        drop(outbound_writer);
+        let mut sent = Vec::new();
+        sent_reader.read_to_end(&mut sent).await.unwrap();
+        let zrinits = sent.windows(4).filter(|w| *w == b"**\x18B").count();
+        assert_eq!(
+            result.err().as_deref(),
+            Some(crate::tnio::PEER_CLOSED_ERR),
+            "a hang-up is reported as one"
+        );
+        assert_eq!(zrinits, 1, "ZRINIT was resent to a closed peer {zrinits} times");
+        assert!(elapsed < std::time::Duration::from_secs(2), "took {elapsed:?}");
     }
 
     /// **A file answered with ZRINIT survives a later file's failure.**  File

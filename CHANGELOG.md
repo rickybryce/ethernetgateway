@@ -71,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0`; it read as `auto` before.
 
 ### Fixed
+- ZMODEM: a sender that hangs up while the receiver is still negotiating
+  ends the receive at once. A closed connection was treated as line noise,
+  so the receiver resent ZRINIT in a tight loop and spun a core for the whole
+  negotiation timeout (45 s by default).
 
 - **Web: the master-password panel broke the settings form.**  The panel was a
   form nested inside the main one, so while it was showing, every setting
