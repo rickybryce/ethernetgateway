@@ -355,6 +355,13 @@ pub const MAX_JOB_CELLS: usize = 2_000_000;
 /// print again; nothing is ever deleted for them.
 pub const MAX_SPOOL_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Most documents that may share one second's name (`PRINT-…`, `-2`, …).
+///
+/// Past this a job is refused rather than written over one already there --
+/// a hundred jobs finishing in one second is a runaway, and the spool cap
+/// above is what stops a runaway; this only keeps it from costing a document.
+const MAX_SAME_NAME: u32 = 999;
+
 /// Columns before the printer wraps to the next line.
 ///
 /// Wrapping at all is the choice worth noting: a real line printer at the end
@@ -745,11 +752,11 @@ impl SpoolJob {
     /// **Two sessions can print at once**, and the timestamp only resolves to a
     /// second, so neither name may be assumed unique. The staging name carries a
     /// process-wide counter so two jobs cannot write over each other's
-    /// half-finished bytes, and the final name is probed for a free one — which
-    /// also matters because `fs::rename` **fails on Windows** when the target
-    /// exists rather than replacing it, so relying on overwrite would have made
-    /// a same-second collision an error on one platform and a lost document on
-    /// the others.
+    /// half-finished bytes, and the final name is **claimed** -- linked into
+    /// place, which fails rather than replaces when the name is taken -- never
+    /// probed and then renamed.  `fs::rename` replaces on Unix and fails on
+    /// Windows, so a probe that lost a race made a same-second collision a lost
+    /// document on one platform and an error on the other.
     pub fn write(&self, transfer_dir: &str, format: Format) -> std::io::Result<String> {
         let dir = Path::new(transfer_dir).join(SPOOL_DIR);
         std::fs::create_dir_all(&dir)?;
@@ -781,25 +788,69 @@ impl SpoolJob {
         let staged = dir.join(format!(".{stem}.{}.{seq}.part", std::process::id()));
         std::fs::write(&staged, &body)?;
 
-        // The first free name: `PRINT-…`, then `PRINT-…-2` and so on. Bounded
-        // rather than looping forever if the folder is somehow unwritable.
-        let mut name = format!("{stem}.{ext}");
-        for n in 2..=99 {
-            if !dir.join(&name).exists() {
-                break;
-            }
-            name = format!("{stem}-{n}.{ext}");
-        }
-        if let Err(e) = std::fs::rename(&staged, dir.join(&name)) {
-            // Do not leave the staging file behind to be collected by a puzzled
-            // operator as though it were their document.
-            let _ = std::fs::remove_file(&staged);
-            return Err(e);
-        }
+        // The first free name: `PRINT-…`, then `PRINT-…-2` and so on, each
+        // **claimed atomically** rather than probed.  `exists()` then `rename`
+        // was a race between two sessions finishing in the same second, and on
+        // Unix `rename` replaces its target, so the loser's document silently
+        // overwrote the winner's -- and the probe never even looked at the last
+        // name it built, so a hundredth job in one second replaced `-99`.  A
+        // hard link fails with `AlreadyExists` instead of replacing, which is
+        // the whole test and the claim in one call.  Bounded, and running out
+        // is an error, never an overwrite.
+        let result = Self::claim_free_name(&dir, &staged, &body, &stem, ext);
+        // The staging file is never the document: on success the document is
+        // the link (or the copy), and on failure an operator must not collect
+        // it as though it were their printout.
+        let _ = std::fs::remove_file(&staged);
+        let name = result?;
         // Reported with the folder in front of it.  The operator has to go
         // somewhere to fetch this, and a bare file name would send them looking
         // in the transfer root where it is not.
         Ok(format!("{SPOOL_DIR}/{name}"))
+    }
+
+    /// Give the staged document the first free name, never replacing one.
+    ///
+    /// A hard link from the staging file claims a name atomically and fails
+    /// with `AlreadyExists` when the name is taken.  A filesystem that has no
+    /// hard links (FAT on a USB stick) gets `create_new` and the bytes written
+    /// into it -- still an atomic claim, just not an atomic *content*, which is
+    /// the lesser loss.
+    fn claim_free_name(
+        dir: &Path,
+        staged: &Path,
+        body: &[u8],
+        stem: &str,
+        ext: &str,
+    ) -> std::io::Result<String> {
+        use std::io::ErrorKind::AlreadyExists;
+        for n in 1..=MAX_SAME_NAME {
+            let name = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
+            let target = dir.join(&name);
+            match std::fs::hard_link(staged, &target) {
+                Ok(()) => return Ok(name),
+                Err(e) if e.kind() == AlreadyExists => continue,
+                Err(_) => {}
+            }
+            let made = std::fs::OpenOptions::new().write(true).create_new(true).open(&target);
+            match made {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    if let Err(e) = f.write_all(body) {
+                        drop(f);
+                        let _ = std::fs::remove_file(&target);
+                        return Err(e);
+                    }
+                    return Ok(name);
+                }
+                Err(e) if e.kind() == AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            AlreadyExists,
+            format!("{MAX_SAME_NAME} documents named {stem} already; not overwriting one"),
+        ))
     }
 
     /// Bytes in the spool folder's files.  A folder that cannot be read counts as
@@ -1788,6 +1839,51 @@ mod tests {
             .filter(|n| n.ends_with(".part"))
             .collect();
         assert!(leftovers.is_empty(), "left {leftovers:?} behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hundredth document in one second must not replace the ninety-ninth.
+    ///
+    /// The old probe built `-99` as its last candidate and never checked it,
+    /// and `rename` replaces on Unix, so the job silently overwrote a document
+    /// already there.  Every name is claimed now, and none is ever replaced.
+    #[test]
+    fn test_a_crowded_second_never_overwrites_a_document() {
+        let dir = temp_dir("crowded");
+        let (stem, ext) = ("PRINT-20260101-000000", "txt");
+        std::fs::write(dir.join(format!("{stem}.{ext}")), "OLD-1").unwrap();
+        for n in 2..=99 {
+            std::fs::write(dir.join(format!("{stem}-{n}.{ext}")), format!("OLD-{n}")).unwrap();
+        }
+        let staged = dir.join(".staged.part");
+        std::fs::write(&staged, "NEW").unwrap();
+        let name = SpoolJob::claim_free_name(&dir, &staged, b"NEW", stem, ext).expect("a free name");
+        assert_eq!(name, format!("{stem}-100.{ext}"));
+        assert_eq!(std::fs::read_to_string(dir.join(&name)).unwrap(), "NEW");
+        for n in 2..=99 {
+            let old = std::fs::read_to_string(dir.join(format!("{stem}-{n}.{ext}"))).unwrap();
+            assert_eq!(old, format!("OLD-{n}"), "{stem}-{n} was overwritten");
+        }
+        assert_eq!(std::fs::read_to_string(dir.join(format!("{stem}.{ext}"))).unwrap(), "OLD-1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Out of names is an error, and still not an overwrite.
+    #[test]
+    fn test_running_out_of_names_refuses_rather_than_overwrites() {
+        let dir = temp_dir("exhausted");
+        let (stem, ext) = ("PRINT-20260101-000001", "txt");
+        std::fs::write(dir.join(format!("{stem}.{ext}")), "OLD").unwrap();
+        for n in 2..=MAX_SAME_NAME {
+            std::fs::write(dir.join(format!("{stem}-{n}.{ext}")), "OLD").unwrap();
+        }
+        let staged = dir.join(".staged.part");
+        std::fs::write(&staged, "NEW").unwrap();
+        let err = SpoolJob::claim_free_name(&dir, &staged, b"NEW", stem, ext)
+            .expect_err("every name is taken");
+        assert!(err.to_string().contains("not overwriting"), "{err}");
+        let last = dir.join(format!("{stem}-{MAX_SAME_NAME}.{ext}"));
+        assert_eq!(std::fs::read_to_string(last).unwrap(), "OLD");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

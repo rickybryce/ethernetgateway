@@ -455,6 +455,17 @@ impl Dcdd {
             if drive as usize >= MAX_DRIVES {
                 return Request::None;
             }
+            // Selecting a *different* drive takes the bus away from the one
+            // that was writing, and that sector is finished, not abandoned --
+            // the same reason as the D7 branch above: the write circuit
+            // "will continue writing the last byte outputted to the end of
+            // that sector".  Without this the old drive kept `writing` and its
+            // dirty buffer, nothing ever passed its sector again, and the
+            // guest's sector never reached the image.  Re-selecting the drive
+            // already selected changes nothing, so it leaves the write open.
+            if let Some(old) = self.selected.filter(|&old| old != drive) {
+                request = self.finish_write(old);
+            }
             self.selected = Some(drive);
         }
         self.sector_true = false;
@@ -544,6 +555,21 @@ impl Dcdd {
         }
     }
 
+    /// Finish every write still held in a drive's sector buffer.
+    ///
+    /// For the end of a session.  A write is committed when its sector passes,
+    /// the head moves, or the drive is deselected -- and a guest stopped
+    /// between its last data byte and any of those (ESC ESC mid-`SAVE`, or a
+    /// guest that simply sits at its prompt with the head loaded) would
+    /// otherwise lose a sector it had finished writing.  Real hardware
+    /// finishes the sector regardless; this is that, said explicitly.
+    pub fn finish_all_writes(&mut self) -> Vec<Request> {
+        (0..MAX_DRIVES as u8)
+            .map(|drive| self.finish_write(drive))
+            .filter(|r| *r != Request::None)
+            .collect()
+    }
+
     /// Write one byte into the current sector, port 0Ah.
     fn write_data(&mut self, value: u8) -> Request {
         let Some(sel) = self.selected else {
@@ -619,6 +645,10 @@ impl super::controller::Controller for Dcdd {
 
     fn as_dcdd(&mut self) -> Option<&mut Dcdd> {
         Some(self)
+    }
+
+    fn finish_writes(&mut self) -> Vec<super::controller::HostRequest> {
+        Dcdd::finish_all_writes(self).into_iter().map(|r| self.to_host(r)).collect()
     }
 
     fn stuck_polls(&self) -> u32 {
@@ -728,6 +758,21 @@ mod tests {
         // And the head really did move, so this is not a no-op test.  Status
         // is returned inverted, so the track-0 bit reads 0 while at track 0.
         assert_ne!(c.read_status() & status::TRACK0, 0, "the head stepped off track 0");
+    }
+
+    /// Selecting a different drive with D7 clear finishes the old drive's
+    /// write; re-selecting the same drive leaves it open.
+    #[test]
+    fn test_selecting_another_drive_finishes_the_write() {
+        let mut c = ready();
+        c.insert(1, Disk { geometry: Geometry::EIGHT_INCH, read_only: false });
+        c.port_out(0x09, control::WRITE_ENABLE);
+        for i in 0..SECTOR_LEN {
+            c.port_out(0x0A, i as u8);
+        }
+        assert_eq!(c.port_out(0x08, 0), Request::None, "same drive: still writing");
+        assert_eq!(c.port_out(0x08, 1), Request::Write { drive: 0, track: 0, sector: 0 });
+        assert!(c.finish_all_writes().is_empty(), "and it is not committed twice");
     }
 
     /// The ordinary path — the sector passing under the head — must commit to

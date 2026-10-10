@@ -724,7 +724,17 @@ impl BootMachine {
     /// Handing them back rather than writing them ourselves keeps host file
     /// access on the caller's side, where the read-only rules and the mount
     /// bookkeeping already live.
+    ///
+    /// Writes a controller is still holding are finished first (see
+    /// [`Controller::finish_writes`]): this is called as the session ends, and
+    /// a sector the guest wrote must not be lost because nothing turned the
+    /// disk past it afterwards.
     pub fn take_dirty(&mut self) -> Vec<(u8, Vec<u8>)> {
+        for ctrl in 0..self.controllers.len() {
+            for req in self.controllers[ctrl].finish_writes() {
+                self.service(req, ctrl);
+            }
+        }
         let mut out = Vec::new();
         for (i, slot) in self.disks.iter_mut().enumerate() {
             if let Some(m) = slot {
@@ -2570,6 +2580,51 @@ pub(crate) mod tests {
         assert_eq!(dirty[0].0, 0);
         assert_eq!(dirty[0].1[5], 5, "the bytes landed in the image");
         assert!(m.take_dirty().is_empty(), "taken once, not repeatedly");
+    }
+
+    /// A sector the guest finished writing must reach the image even when the
+    /// session ends before the disk turns past it.
+    ///
+    /// The 88-DCDD commits on rotation, a step or a deselect; a guest stopped
+    /// right after its last data byte did none of those, and `take_dirty` used
+    /// to hand back an image without the sector in it.
+    #[test]
+    fn test_take_dirty_commits_a_write_the_disk_never_turned_past() {
+        let mut m = BootMachine::new();
+        m.insert(0, image(Geometry::EIGHT_INCH), false).unwrap();
+        m.port_out(0x08, 0);
+        m.port_out(0x09, 0x04); // head load
+        m.port_out(0x09, 0x80); // write enable
+        for i in 0..SECTOR_LEN {
+            m.port_out(0x0A, i as u8 ^ 0x5A);
+        }
+        let dirty = m.take_dirty();
+        assert_eq!(dirty.len(), 1, "the half-committed sector was dropped");
+        let want: Vec<u8> = (0..SECTOR_LEN).map(|i| i as u8 ^ 0x5A).collect();
+        assert_eq!(&dirty[0].1[..SECTOR_LEN], &want[..], "track 0 sector 0 holds the write");
+        assert!(m.take_dirty().is_empty(), "committed once, not repeatedly");
+    }
+
+    /// Selecting another drive straight away (D7 clear) finishes the first
+    /// drive's write rather than stranding it.
+    #[test]
+    fn test_selecting_another_drive_commits_the_pending_write() {
+        let mut m = BootMachine::new();
+        m.insert(0, image(Geometry::EIGHT_INCH), false).unwrap();
+        m.insert(1, image(Geometry::EIGHT_INCH), false).unwrap();
+        m.port_out(0x08, 0);
+        m.port_out(0x09, 0x04);
+        m.port_out(0x09, 0x80);
+        for i in 0..SECTOR_LEN {
+            m.port_out(0x0A, i as u8 ^ 0xA5);
+        }
+        m.port_out(0x08, 1); // straight to drive 1, no deselect
+        // Commit happened on the select, before any end-of-session flush:
+        // the disk image already holds the bytes.
+        let img = m.disks[0].as_ref().expect("drive 0 loaded");
+        assert!(img.dirty, "the reselect did not commit drive 0's sector");
+        let want: Vec<u8> = (0..SECTOR_LEN).map(|i| i as u8 ^ 0xA5).collect();
+        assert_eq!(&img.bytes[..SECTOR_LEN], &want[..]);
     }
 
     /// A read-only image must never come back as dirty, however hard the guest

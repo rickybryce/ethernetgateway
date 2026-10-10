@@ -93,25 +93,58 @@ pub const MHZ_Z80: f64 = 4.0;
 /// the pump sleeps a couple of hundred times a second rather than thousands.
 pub const SLACK: Duration = Duration::from_millis(5);
 
-/// The clock `setting` asks for, given the CPU in use.
+/// What a `cpm_boot_speed` setting means, before any CPU is known.
 ///
-/// `None` means unlimited — no pacing at all, which is what every version before
-/// this did. An unrecognised setting reads as the default rather than as
-/// unlimited: a typo in a config file should not silently remove the governor.
-pub fn mhz_for(setting: &str, cpu: &str) -> Option<f64> {
-    let period = if cpu.trim().eq_ignore_ascii_case("8080") { MHZ_8080 } else { MHZ_Z80 };
+/// **The one reading of a setting.** `mhz_for` and `label_for` each had their
+/// own, and they drifted: `off`, `none` and `0` ran the guest unpaced while the
+/// desktop combo labelled them "Period speed for the CPU". Both now ask this, so
+/// the number a guest runs at and the words a screen shows cannot part again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Speed {
+    /// The chosen processor's own clock.
+    Auto,
+    /// No pacing at all.
+    Unlimited,
+    /// A clock in MHz, already floored at [`MIN_MHZ`].
+    Mhz(f64),
+}
+
+/// Read a setting.
+///
+/// An unrecognised setting reads as `Auto` rather than as unlimited: a typo in
+/// a config file should not silently remove the governor.
+///
+/// **Any spelling of zero is unlimited**, not only the literal `0`: `0.0` and
+/// `00` are the same number, and an operator who typed one meant what `0`
+/// means.  It used to read as `auto` because it fell past the word match into
+/// the numeric arm, whose `> 0` refusal then sent it to the default -- a
+/// distinction by spelling that nobody could have intended.  A negative clock
+/// is still nonsense and still reads as `Auto`.
+pub fn parse(setting: &str) -> Speed {
     match setting.trim().to_ascii_lowercase().as_str() {
-        "unlimited" | "off" | "none" | "0" => None,
-        "auto" | "" => Some(period),
+        "unlimited" | "off" | "none" => Speed::Unlimited,
+        "auto" | "" => Speed::Auto,
         // Floored at `MIN_MHZ`: `1e-20` made the first nap overflow a
         // `Duration` and panic the session, and `0.0001` slept for hours inside
         // the pump where ESC-ESC cannot reach.  `inf` is not a clock either.
-        other => other
-            .parse::<f64>()
-            .ok()
-            .filter(|m| m.is_finite() && *m > 0.0)
-            .map(|m| m.max(MIN_MHZ))
-            .or(Some(period)),
+        other => match other.parse::<f64>() {
+            Ok(0.0) => Speed::Unlimited,
+            Ok(m) if m.is_finite() && m > 0.0 => Speed::Mhz(m.max(MIN_MHZ)),
+            _ => Speed::Auto,
+        },
+    }
+}
+
+/// The clock `setting` asks for, given the CPU in use.
+///
+/// `None` means unlimited — no pacing at all, which is what every version before
+/// this did.  See [`parse`] for how a setting is read.
+pub fn mhz_for(setting: &str, cpu: &str) -> Option<f64> {
+    let period = if cpu.trim().eq_ignore_ascii_case("8080") { MHZ_8080 } else { MHZ_Z80 };
+    match parse(setting) {
+        Speed::Unlimited => None,
+        Speed::Auto => Some(period),
+        Speed::Mhz(m) => Some(m),
     }
 }
 
@@ -128,19 +161,21 @@ pub const MAX_NAP: Duration = Duration::from_secs(1);
 pub const MAX_ARREARS: Duration = Duration::from_millis(50);
 
 /// The label for a setting, for a screen that shows the current value.
+///
+/// From [`parse`], like [`mhz_for`], so the label always describes the clock
+/// the guest is actually held to.  A listed choice is found by what it
+/// *means*, so `2.0` shows the `2` row's label.
 pub fn label_for(setting: &str) -> String {
-    let want = setting.trim().to_ascii_lowercase();
-    for (value, label) in SPEED_CHOICES {
-        if *value == want {
-            return (*label).to_string();
-        }
+    let speed = parse(setting);
+    if let Some((_, label)) = SPEED_CHOICES.iter().find(|(value, _)| parse(value) == speed) {
+        return (*label).to_string();
     }
-    // A number the list does not carry is still a valid setting.
-    // The same floor and the same refusal of `inf` as `mhz_for`, so this label
-    // and `short_label` cannot disagree about one setting.
-    match want.parse::<f64>() {
-        Ok(m) if m.is_finite() && m > 0.0 => format!("{} MHz", m.max(MIN_MHZ)),
-        _ => SPEED_CHOICES[0].1.to_string(),
+    match speed {
+        // A number the list does not carry is still a valid setting.
+        Speed::Mhz(m) => format!("{m} MHz"),
+        // Both are listed, so this is unreachable while the list holds them;
+        // answering rather than panicking keeps a trimmed list survivable.
+        Speed::Auto | Speed::Unlimited => SPEED_CHOICES[0].1.to_string(),
     }
 }
 
@@ -284,6 +319,39 @@ mod tests {
         assert_eq!(mhz_for("nonsense", "8080"), Some(MHZ_8080));
         assert_eq!(mhz_for("-3", "z80"), Some(MHZ_Z80));
         assert_eq!(mhz_for("", "z80"), Some(MHZ_Z80));
+    }
+
+    /// What the desktop combo shows must be the clock the guest runs at.
+    ///
+    /// `label_for` had its own reading and labelled `off`/`none`/`0` as period
+    /// speed while `mhz_for` ran them unpaced; `0.0` read as auto while `0` read
+    /// as unlimited.  Classified three ways for both functions, every input.
+    #[test]
+    fn test_the_label_and_the_clock_agree_about_every_setting() {
+        let unlimited = SPEED_CHOICES.iter().find(|(v, _)| *v == "unlimited").unwrap().1;
+        let auto = SPEED_CHOICES[0].1;
+        for s in [
+            "off", "none", "0", "0.0", "00", "unlimited", "UNLIMITED", "auto", "", "2", "2.0",
+            "4.5", "garbage", "-3", "inf", "nan", "0.0001",
+        ] {
+            let clock = match mhz_for(s, "z80") {
+                None => "unlimited",
+                Some(m) if m == MHZ_Z80 && parse(s) == Speed::Auto => "auto",
+                Some(_) => "paced",
+            };
+            let label = label_for(s);
+            let shown = if label == unlimited {
+                "unlimited"
+            } else if label == auto {
+                "auto"
+            } else {
+                "paced"
+            };
+            assert_eq!(shown, clock, "{s:?}: labelled {label:?}");
+        }
+        assert_eq!(mhz_for("0.0", "z80"), None, "every spelling of zero is unlimited");
+        assert_eq!(label_for("2.0"), label_for("2"), "a listed clock by any spelling");
+        assert_eq!(label_for("4.5"), "4.5 MHz");
     }
 
     #[test]

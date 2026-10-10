@@ -262,6 +262,21 @@ pub trait Controller: Send {
     /// sequence of port writes.
     fn cold_started(&mut self, _drive: u8) {}
 
+    /// Hand back every write the board is still holding, for the end of a
+    /// session.
+    ///
+    /// Only the 88-DCDD has any: it commits a sector when the sector passes
+    /// or the head moves, so a guest stopped between its last data byte and
+    /// either of those leaves a finished sector in the buffer.  The other
+    /// boards commit at a point the *guest* chooses -- the FD1771 when the
+    /// sector's last byte arrives, the 88-HDSK on its write command -- so a
+    /// buffer they hold at exit is a sector the guest never finished, and
+    /// writing it would put half a sector on the operator's disk.  Hence the
+    /// empty default, which is a decision and not an omission.
+    fn finish_writes(&mut self) -> Vec<HostRequest> {
+        Vec::new()
+    }
+
     /// How many times a guest has polled for something that never arrived.
     ///
     /// Every controller here has *some* wait a guest can sit in forever — a
