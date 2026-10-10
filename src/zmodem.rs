@@ -27,7 +27,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::config;
 use crate::logger::glog;
-use crate::tnio::{nvt_read_byte, raw_write_bytes, ReadState};
+use crate::tnio::{nvt_read_byte, raw_write_bytes, retries_exhausted, ReadState};
 
 // ─── Wire constants ──────────────────────────────────────────
 const ZPAD: u8 = b'*';          // 0x2A, frame padding
@@ -1941,7 +1941,7 @@ pub(crate) async fn zmodem_send(
     let rx_window: RxWindow;
     send_zrqinit(writer, is_tcp, verbose).await?;
     loop {
-        if tokio::time::Instant::now() >= deadline || attempts >= max_retries {
+        if tokio::time::Instant::now() >= deadline {
             return Err("ZMODEM: no ZRINIT from receiver".into());
         }
 
@@ -2010,10 +2010,16 @@ pub(crate) async fn zmodem_send(
                 continue;
             }
             _ => {
+                // Judged *before* resending, not at the top of the loop: the
+                // top-of-loop check gave up straight after a resend, so the
+                // last ZRQINIT went out and its answer was never waited for.
+                attempts += 1;
+                if retries_exhausted(attempts, max_retries) {
+                    return Err("ZMODEM: no ZRINIT from receiver".into());
+                }
                 if verbose {
                     glog!("ZMODEM send: ZRINIT wait timed out, re-sending ZRQINIT");
                 }
-                attempts += 1;
                 send_zrqinit(writer, is_tcp, verbose).await?;
                 continue;
             }
@@ -2054,7 +2060,9 @@ pub(crate) async fn zmodem_send(
         let start_pos: u32;
         let mut skipped = false;
         'zfile: loop {
-            if zfile_attempts >= max_retries {
+            // `zfile_attempts` counts sends so far, every one of which
+            // failed -- the loop is only re-entered on a failure.
+            if retries_exhausted(zfile_attempts, max_retries) {
                 send_cancel(writer, is_tcp).await.ok();
                 return Err("ZMODEM: no ZRPOS from receiver".into());
             }
@@ -2205,7 +2213,7 @@ pub(crate) async fn zmodem_send(
         let post_zeof_timeout = POST_ZEOF_ZRINIT_FLOOR_SECS.max(frame_timeout);
         let mut zeof_attempts: u32 = 0;
         loop {
-            if zeof_attempts >= max_retries {
+            if retries_exhausted(zeof_attempts, max_retries) {
                 send_cancel(writer, is_tcp).await.ok();
                 return Err("ZMODEM: receiver did not acknowledge ZEOF".into());
             }
@@ -2384,7 +2392,7 @@ async fn send_zdata_run(
         if pos >= data.len() {
             break;
         }
-        if zdata_attempts >= max_retries {
+        if retries_exhausted(zdata_attempts, max_retries) {
             send_cancel(writer, is_tcp).await.ok();
             return Err("ZMODEM: too many retransmissions".into());
         }

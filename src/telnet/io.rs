@@ -1186,7 +1186,10 @@ impl TelnetSession {
             Ok(parts) => parts,
             Err(e) => {
                 self.post_transfer_settle().await;
-                self.show_error(&format!("ZMODEM receive failed: {}", e))
+                // `show_transfer_error`, as the Upload menu's failure uses:
+                // it records the note the menu draws, and asks for a key the
+                // way a transfer must.
+                self.show_transfer_error(&format!("ZMODEM receive failed: {}", e))
                     .await?;
                 return Ok(());
             }
@@ -1222,6 +1225,10 @@ impl TelnetSession {
             }
         }
 
+        // Recorded before anything is printed, so a write that fails on the
+        // way out cannot lose it: the menu this returns to is where the
+        // operator of a vintage terminal will actually read the outcome.
+        self.last_transfer_note = Some(Self::upload_note(&saved, &skipped, &batch_error, elapsed));
         self.post_transfer_settle().await;
         self.send_line("").await?;
         self.send_line(&format!(

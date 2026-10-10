@@ -43,7 +43,7 @@ use crate::aichat::sanitize_for_terminal;
 use crate::config;
 use crate::logger::glog;
 use crate::telnet::is_esc_key;
-use crate::tnio::{is_can_abort, nvt_read_byte, raw_write_bytes, ReadState};
+use crate::tnio::{is_can_abort, nvt_read_byte, raw_write_bytes, retries_exhausted, ReadState};
 
 // ─── Wire constants ──────────────────────────────────────────
 
@@ -3032,7 +3032,7 @@ async fn send_and_await_ack_opts(
     // but Send-Init passes `now + timeout` for this one packet, so it is a
     // *per-attempt* allowance -- and reusing the absolute instant made every
     // retransmit after the first timeout fail before reading a byte: the
-    // packet went out `max_retries - 1` more times back to back and one lost
+    // packet went out all its remaining retries back to back and one lost
     // packet or ACK ended a stop-and-wait transfer that the peer's reply,
     // already waiting, would have saved.
     let attempt_span = deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
@@ -3117,7 +3117,7 @@ async fn send_and_await_ack_opts(
                                 max_retries
                             );
                         }
-                        if attempts >= max_retries {
+                        if retries_exhausted(attempts, max_retries) {
                             return Err(format!(
                                 "Kermit: too many NAKs (>{}) for seq {} type '{}'",
                                 max_retries, seq, kind as char
@@ -3178,7 +3178,7 @@ async fn send_and_await_ack_opts(
                             e
                         );
                     }
-                    if attempts >= max_retries {
+                    if retries_exhausted(attempts, max_retries) {
                         return Err(format!("Kermit: too many timeouts: {}", e));
                     }
                     if !resend_on_timeout {
@@ -3365,7 +3365,7 @@ async fn send_d_packets_windowed(
                         let bytes = {
                             let p = &mut outstanding[idx];
                             p.retries += 1;
-                            if p.retries >= max_retries {
+                            if retries_exhausted(p.retries, max_retries) {
                                 return Err(format!(
                                     "Kermit: too many NAKs (>{}) for seq {} (window)",
                                     max_retries, p.seq
@@ -3414,7 +3414,7 @@ async fn send_d_packets_windowed(
                     let bytes = {
                         let p = &mut outstanding[i];
                         p.retries += 1;
-                        if p.retries >= max_retries {
+                        if retries_exhausted(p.retries, max_retries) {
                             return Err(format!(
                                 "Kermit: too many timeouts for seq {} (window)",
                                 p.seq
@@ -3586,7 +3586,7 @@ async fn send_d_and_z_streaming(
                 }
                 if resp.kind == TYPE_NAK && resp.seq == z_seq {
                     z_attempts += 1;
-                    if z_attempts >= max_retries {
+                    if retries_exhausted(z_attempts, max_retries) {
                         return Err(format!(
                             "Kermit: too many NAKs for Z-packet seq {} (stream)",
                             z_seq
@@ -3619,7 +3619,7 @@ async fn send_d_and_z_streaming(
                 let now = tokio::time::Instant::now();
                 if now >= z_sent_at + pkt_timeout {
                     z_attempts += 1;
-                    if z_attempts >= max_retries {
+                    if retries_exhausted(z_attempts, max_retries) {
                         return Err(format!(
                             "Kermit: too many timeouts for Z-packet seq {} (stream)",
                             z_seq
@@ -3655,7 +3655,7 @@ async fn send_d_and_z_streaming(
                     let bytes_clone = {
                         let p = &mut outstanding[i];
                         p.retries += 1;
-                        if p.retries >= max_retries {
+                        if retries_exhausted(p.retries, max_retries) {
                             return Err(format!(
                                 "Kermit: too many timeouts for D-packet seq {} (stream)",
                                 p.seq
@@ -3754,7 +3754,7 @@ async fn handle_streaming_response(
             let bytes = {
                 let p = &mut outstanding[idx];
                 p.retries += 1;
-                if p.retries >= max_retries {
+                if retries_exhausted(p.retries, max_retries) {
                     return Err(format!(
                         "Kermit: too many NAKs (>{}) for seq {} (stream)",
                         max_retries, p.seq
@@ -4054,7 +4054,7 @@ async fn kermit_receive_committing(
                             e
                         );
                     }
-                    if consecutive_failures >= max_retries {
+                    if retries_exhausted(consecutive_failures, max_retries) {
                         send_error(
                             writer,
                             expected_seq,
@@ -4068,7 +4068,7 @@ async fn kermit_receive_committing(
                         .await?;
                         return Err(format!(
                             "Kermit recv: aborting after {} consecutive read errors: {}",
-                            max_retries, e
+                            consecutive_failures, e
                         ));
                     }
                     send_nak(
@@ -6592,7 +6592,9 @@ async fn kermit_client_send_g_simple(
     // instead turned one G packet eaten by noise into a 300 s failure.
     let repeatable = action != b'C';
     let wait = if repeatable {
-        (cfg.kermit_negotiation_timeout / u64::from(cfg.kermit_max_retries.max(1))).max(1)
+        // `max_retries` resends after the first, so that many plus one
+        // attempts share it (`retries_exhausted`).
+        (cfg.kermit_negotiation_timeout / (u64::from(cfg.kermit_max_retries) + 1)).max(1)
     } else {
         cfg.kermit_negotiation_timeout
     };
@@ -7599,6 +7601,39 @@ mod tests {
             count, 1,
             "packet should be transmitted once, not resent on a stale ACK"
         );
+    }
+
+    /// **`kermit_max_retries = N` retransmits N times** -- "NAK / timeout
+    /// retransmits per packet", as the manual has it, and as
+    /// `tnio::retries_exhausted` now states for every protocol.  The sender
+    /// gave up after N transmissions, one retransmit short.
+    #[tokio::test]
+    async fn test_kermit_sender_retransmits_max_retries_times() {
+        let payload = b"data";
+        let seq = 2u8;
+        for max_retries in [1u32, 2, 5] {
+            let mut wire = Vec::new();
+            for _ in 0..16 {
+                wire.extend(build_packet(TYPE_NAK, seq, &[], b'1', 0, 0, CR));
+            }
+            let mut reader = cursor(wire);
+            let mut writer: Vec<u8> = Vec::new();
+            let mut state = ReadState::default();
+            let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
+            let r = send_and_await_ack(
+                &mut reader, &mut writer, TYPE_DATA, seq, payload, b'1', 0, 0, CR,
+                false, false, false, &mut state, deadline, max_retries, false,
+            )
+            .await;
+            assert!(r.is_err(), "a peer that only NAKs is given up on");
+            let pkt = build_packet(TYPE_DATA, seq, payload, b'1', 0, 0, CR);
+            let sent = writer.windows(pkt.len()).filter(|w| *w == pkt.as_slice()).count();
+            assert_eq!(
+                sent as u32,
+                max_retries + 1,
+                "max_retries = {max_retries}: the first send plus {max_retries} retransmits"
+            );
+        }
     }
 
     /// **A peer that only ever resends one stale packet is stopped.**  Each

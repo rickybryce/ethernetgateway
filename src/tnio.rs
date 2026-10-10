@@ -59,6 +59,27 @@ pub(crate) const CAN: u8 = 0x18;
 /// already `usize`-shaped.
 pub(crate) const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
 
+// ─── Retry budget ────────────────────────────────────────────
+
+/// **What `*_max_retries = N` means, in every protocol here: N retries.**
+///
+/// The first attempt is not a retry.  A block, frame or packet is therefore
+/// sent -- or, on the receiving side, re-prompted for with a NAK / ZRPOS --
+/// up to N more times after it first fails, and the transfer gives up on the
+/// (N + 1)th consecutive failure.  `failures` is how many attempts have failed
+/// so far.
+///
+/// One statement of the rule because there were two in the tree.  Every
+/// receiver and Punter already counted this way; every *sender* in XMODEM,
+/// ZMODEM and Kermit, and Kermit's receiver, compared with `>=` and so gave up
+/// one attempt early -- `max_retries = 10` resent a block nine times, while
+/// the manual and the reference pages say "resends of one block".  The
+/// difference matters most at the small values an operator sets to fail
+/// fast: `1` meant *no* resend at all on those paths.
+pub(crate) fn retries_exhausted<T: PartialOrd>(failures: T, max_retries: T) -> bool {
+    failures > max_retries
+}
+
 // ─── Per-stream read state ───────────────────────────────────
 
 /// State threaded through the byte readers so the protocols can implement
@@ -298,6 +319,81 @@ mod tests {
             "an IAC WILL with no option byte must time out, not block forever"
         );
         drop(writer);
+    }
+
+    /// A subnegotiation that starts and never reaches `IAC SE` is bounded
+    /// too, not only the single continuation byte after an IAC.  The outer
+    /// timeout is this test's own, so a regression fails rather than hangs.
+    #[tokio::test(start_paused = true)]
+    async fn test_raw_read_byte_times_out_on_unterminated_subnegotiation() {
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(&[IAC, SB, 0x18, 0x01]).await.unwrap(); // no IAC SE
+        let r = tokio::time::timeout(
+            tokio::time::Duration::from_secs(60),
+            raw_read_byte(&mut reader, true),
+        )
+        .await
+        .expect("the reader itself must give up on a stalled subnegotiation");
+        assert!(r.is_err(), "an unterminated IAC SB must time out, not block forever");
+        drop(writer);
+    }
+
+    /// The retry rule, at its boundary: N failures still allow a retry, the
+    /// (N + 1)th does not.  Zero means one attempt and no retry.
+    #[test]
+    fn test_max_retries_counts_retries_not_attempts() {
+        for n in [0u32, 1, 5, 10] {
+            for failures in 0..=n {
+                assert!(!retries_exhausted(failures, n), "{failures} of {n}: still a retry left");
+            }
+            assert!(retries_exhausted(n + 1, n), "{} failures exhaust {n} retries", n + 1);
+        }
+    }
+
+    /// **No protocol may count its retry budget the other way.**  The `>=`
+    /// form gave up one attempt early and sat in every sender for as long as
+    /// the receivers used `>`; a scan, because the next counter is written in
+    /// whatever file the next protocol change touches.  Flags a comparison
+    /// that makes `N` a count of *attempts* -- `>= max_retries`,
+    /// `< max_retries`, `0..max_retries` -- anywhere outside test code.
+    /// (`0..=max_retries` and `> max_retries` are the rule, and pass.)
+    #[test]
+    fn test_no_protocol_counts_max_retries_as_attempts() {
+        let mut offenders = Vec::new();
+        for file in ["xmodem.rs", "zmodem.rs", "kermit.rs", "punter.rs"] {
+            let path = format!("{}/src/{}", env!("CARGO_MANIFEST_DIR"), file);
+            let src = std::fs::read_to_string(&path).unwrap();
+            for (no, line) in src.lines().enumerate() {
+                if line.starts_with("mod tests") {
+                    break;
+                }
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+                let mut from = 0;
+                while let Some(at) = compact[from..].find("max_retries") {
+                    let at = from + at;
+                    // Back over the name and any `t.` / `cfg.` before it.
+                    let start = compact[..at]
+                        .rfind(|c: char| !(c.is_ascii_lowercase() || c == '_' || c == '.'))
+                        .map_or(0, |i| i + 1);
+                    let before = &compact[..start];
+                    let is_count_of_attempts = before.ends_with(">=")
+                        || (before.ends_with('<') && !before.ends_with("<<"))
+                        || before.ends_with("..");
+                    if is_count_of_attempts {
+                        offenders.push(format!("{}:{}: {}", file, no + 1, line.trim()));
+                    }
+                    from = at + "max_retries".len();
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "max_retries counted as attempts (use `tnio::retries_exhausted`):\n{}",
+            offenders.join("\n")
+        );
     }
 
     #[test]

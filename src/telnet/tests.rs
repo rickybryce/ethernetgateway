@@ -14873,3 +14873,125 @@ fn test_the_port_settings_arms_are_gated_only_by_the_key_set() {
         assert!(!body.contains(stale), "a row is drawn from `{stale}` instead of the key set");
     }
 }
+
+/// **One file that cannot be saved does not take the rest with it.**
+///
+/// Under `X` the first file goes to the typed name and a YMODEM batch can
+/// still arrive behind it.  A failure saving that first file `return`ed out of
+/// the save loop, so files 2..N -- which the sender had been told were
+/// delivered -- were never written.  Here the typed name is taken (as a late
+/// collision makes it), and the second file must still land, with the first
+/// reported in the list.  And the single-file upload keeps its error screen.
+#[tokio::test]
+async fn test_a_failed_first_file_does_not_lose_the_rest_of_the_batch() {
+    let dir = std::env::temp_dir().join(format!("egw_saveups_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("taken.txt"), b"theirs").unwrap();
+    let typed_path = dir.join("taken.txt");
+    let none = std::collections::HashSet::new();
+
+    let uploads = vec![
+        (None, b"first".to_vec(), None),
+        (Some("second.txt".to_string()), b"second".to_vec(), None),
+    ];
+    let out = TelnetSession::save_uploads(
+        &dir,
+        &uploads,
+        Some(("taken.txt", typed_path.as_path(), false)),
+        false,
+        &none,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(out.saved, vec![("second.txt".to_string(), 6)], "file 2 is saved");
+    assert_eq!(out.skipped, vec![("taken.txt".to_string(), "already exists")], "file 1 is reported");
+    assert_eq!(out.lone_failure, None, "a batch reports in its list, not on an error screen");
+    assert_eq!(std::fs::read(dir.join("second.txt")).unwrap(), b"second");
+    assert_eq!(std::fs::read(&typed_path).unwrap(), b"theirs", "never overwritten");
+
+    let lone = vec![(None, b"only".to_vec(), None)];
+    let out = TelnetSession::save_uploads(
+        &dir,
+        &lone,
+        Some(("taken.txt", typed_path.as_path(), false)),
+        false,
+        &none,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(out.lone_failure.as_deref(), Some("File already exists."));
+    assert!(out.saved.is_empty() && out.skipped.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The ZMODEM autostart leaves the outcome for the menu, as the Upload menu
+/// does.**  A terminal that starts an upload by itself still restores its
+/// screen afterwards, so the summary printed then is lost and the menu is
+/// where the result is read -- and the autostart set no note at all.  Both
+/// ways out are driven: a real ZMODEM send from the peer side, and a peer
+/// that hangs up before answering.
+#[tokio::test]
+async fn test_the_zmodem_autostart_leaves_a_transfer_note() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    // Absolute, and restored inside the lock -- see
+    // `test_cpm_dir_operand_selects_directory_or_pattern`.
+    struct TransferDirGuard(String, u64);
+    impl Drop for TransferDirGuard {
+        fn drop(&mut self) {
+            config::update_config_value("transfer_dir", &self.0);
+            config::update_config_value("zmodem_negotiation_timeout", &self.1.to_string());
+        }
+    }
+    let cfg = config::get_config();
+    let _dir_guard = TransferDirGuard(cfg.transfer_dir, cfg.zmodem_negotiation_timeout);
+    // The failure case waits out the negotiation window; keep it short.
+    config::update_config_value("zmodem_negotiation_timeout", "2");
+    let base = std::env::temp_dir().join(format!("egw_autonote_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    config::update_config_value("transfer_dir", &base.to_string_lossy());
+
+    // A successful upload, sent by our own ZMODEM sender from the peer side.
+    let (mut session, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let peer_task = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut pr, mut pw) = tokio::io::split(peer);
+        let sent = crate::zmodem::zmodem_send(&mut pr, &mut pw, &[("NOTE.TXT", b"hello note")], false, false)
+            .await;
+        // Finished: hang up our sending side so "press any key" ends, and go
+        // on reading so the session's summary never blocks on a full pipe.
+        pw.shutdown().await.ok();
+        let mut sink = Vec::new();
+        let _ = pr.read_to_end(&mut sink).await;
+        sent
+    });
+    session.handle_zmodem_autostart().await.unwrap();
+    let note = session.last_transfer_note.take();
+    drop(session);
+    peer_task.await.unwrap().expect("the send completes");
+    assert_eq!(std::fs::read(base.join("NOTE.TXT")).unwrap(), b"hello note");
+    let note = note.expect("a successful autostart leaves a note");
+    assert!(note.ok, "a saved file is a success");
+    assert!(note.text.starts_with("Rcvd 10 bytes"), "the Upload menu's words: {}", note.text);
+
+    // A receive that fails: the peer stops sending before it says anything
+    // (still reading, so what the session prints has somewhere to go).
+    let (mut session, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let peer_task = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut pr, mut pw) = tokio::io::split(peer);
+        pw.shutdown().await.ok();
+        let mut sink = Vec::new();
+        let _ = pr.read_to_end(&mut sink).await;
+    });
+    // `Err` is expected here: the keypress it asks for meets a closed line.
+    let _ = session.handle_zmodem_autostart().await;
+    let note = session.last_transfer_note.take();
+    drop(session);
+    peer_task.await.unwrap();
+    let note = note.expect("a failed autostart leaves a note too");
+    assert!(!note.ok, "and it says the upload failed: {}", note.text);
+
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::config;
 use crate::logger::glog;
 use crate::telnet::is_esc_key;
-use crate::tnio::{is_can_abort, nvt_read_byte, raw_write_bytes, ReadState, CAN};
+use crate::tnio::{is_can_abort, nvt_read_byte, raw_write_bytes, retries_exhausted, ReadState, CAN};
 
 // XMODEM protocol constants
 const SOH: u8 = 0x01;
@@ -405,11 +405,11 @@ async fn receive_batch_into(
                         Ok(r) => r?,
                         Err(_) => return Err("XMODEM: timed out reading first block header".into()),
                     };
-                    if byte == SOH
-                        && block_num == 0
-                        && block_complement == 0xFF
-                    {
-                        // YMODEM block 0 — read the 128-byte payload +
+                    // SOH *or* STX: block 0 framed as a 1K block is still
+                    // block 0 (see `read_ymodem_block_zero_body`).  A first
+                    // data block is numbered 1, so nothing else can match.
+                    if block_num == 0 && block_complement == 0xFF {
+                        // YMODEM block 0 — read the payload +
                         // trailer under a hard timeout so a stalled
                         // sender can't deadlock the session.  On CRC
                         // success we ACK and send a second 'C' to start
@@ -426,12 +426,26 @@ async fn receive_batch_into(
                                 // retries to cross the fallback point, reading
                                 // a CRC retransmit as a 1-byte checksum would
                                 // mismatch and NAK-loop to exhaustion.
-                                reader, TransferMode::Crc16, is_tcp, verbose, state,
+                                reader, block_size, TransferMode::Crc16, is_tcp, verbose, state,
                             ),
                         )
                         .await
                         {
-                            Ok(Ok((true, _is_terminator, filename, meta))) => {
+                            // **An empty batch**: the null block 0 first, with
+                            // no file before it -- `sb` given nothing to send,
+                            // or a sender whose selection came up empty.  It
+                            // is the end of the batch, so it is ACKed and
+                            // nothing else: the second 'C' below would ask a
+                            // sender that has finished for a data phase, and
+                            // the session would sit out the whole negotiation
+                            // and report a failure for a batch that ended
+                            // exactly as the protocol says one may.
+                            Ok(Ok((true, true, _, _))) => {
+                                raw_write_byte(writer, ACK, is_tcp).await?;
+                                if verbose { glog!("XMODEM recv: YMODEM empty batch (null block 0 first), ACKed"); }
+                                return Ok(());
+                            }
+                            Ok(Ok((true, false, filename, meta))) => {
                                 raw_write_byte(writer, ACK, is_tcp).await?;
                                 // Second 'C' starts the data phase.
                                 raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
@@ -827,9 +841,12 @@ async fn receive_batch_into(
                         std::time::Duration::from_secs(inter_file_timeout),
                         async {
                             let b = nvt_read_byte(reader, is_tcp, state).await?;
-                            if b != SOH {
-                                return Ok::<InterFileBlock0, String>(InterFileBlock0::NotBlock0);
-                            }
+                            // STX too: a 1K-framed block 0, as for file 1.
+                            let b0_size = match b {
+                                SOH => XMODEM_BLOCK_SIZE,
+                                STX => XMODEM_1K_BLOCK_SIZE,
+                                _ => return Ok::<InterFileBlock0, String>(InterFileBlock0::NotBlock0),
+                            };
                             let bn = nvt_read_byte(reader, is_tcp, state).await?;
                             let bc = nvt_read_byte(reader, is_tcp, state).await?;
                             if bn != 0 || bc != 0xFF {
@@ -837,7 +854,7 @@ async fn receive_batch_into(
                                 return Ok(InterFileBlock0::Invalid);
                             }
                             let (valid, is_term, filename, meta) = read_ymodem_block_zero_body(
-                                reader, TransferMode::Crc16, is_tcp, verbose, state,
+                                reader, b0_size, TransferMode::Crc16, is_tcp, verbose, state,
                             )
                             .await?;
                             Ok(if !valid {
@@ -1073,14 +1090,21 @@ async fn receive_block(
 /// where `length` is decimal and `modtime`/`mode`/`sno` are octal.
 /// All metadata fields are optional from the receiver's standpoint —
 /// minimal senders omit the trailing fields, and we tolerate that.
+///
+/// `block_size` is the size the header byte announced.  Forsberg fixes
+/// block 0 at 128 bytes, and a sender that frames every block as 1K sends
+/// it as a 1024-byte STX block anyway.  Refusing that refuses a real peer
+/// for no gain: the fields are NUL-terminated, so the extra 896 bytes are
+/// only more NUL fill and parse the same.
 async fn read_ymodem_block_zero_body(
     reader: &mut (impl AsyncRead + Unpin),
+    block_size: usize,
     mode: TransferMode,
     is_tcp: bool,
     verbose: bool,
     state: &mut ReadState,
 ) -> Result<(bool, bool, Option<String>, Option<YmodemReceiveMeta>), String> {
-    let mut payload = [0u8; XMODEM_BLOCK_SIZE];
+    let mut payload = vec![0u8; block_size];
     for b in payload.iter_mut() {
         *b = nvt_read_byte(reader, is_tcp, state).await?;
     }
@@ -1625,7 +1649,7 @@ pub(crate) async fn xmodem_send(
 
         let mut retries = 0;
         loop {
-            if retries >= max_retries {
+            if retries_exhausted(retries, max_retries) {
                 raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
                 return Err("Too many retries, transfer aborted".into());
             }
@@ -1797,7 +1821,9 @@ pub(crate) async fn xmodem_send(
     // failed after the single, *expected* verification NAK.  A receiver that
     // ACKs the first EOT still returns on the first pass, so the wire exchange
     // is unchanged in the common case.
-    let eot_attempts = max_retries.max(2);
+    // `max_retries` resends after the first EOT, as for a block -- see
+    // `retries_exhausted`.
+    let eot_attempts = max_retries.saturating_add(1).max(2);
     for _ in 0..eot_attempts {
         raw_write_byte(writer, EOT, is_tcp).await?;
         // **A cancel is not an ACK.**  Every byte but NAK used to end the
@@ -1963,7 +1989,7 @@ async fn send_ymodem_block_zero(
 
     let mut retries = 0;
     loop {
-        if retries >= max_retries {
+        if retries_exhausted(retries, max_retries) {
             return Err("YMODEM block 0: too many retries".into());
         }
         raw_write_bytes(writer, &packet, is_tcp).await?;
@@ -6722,6 +6748,112 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].filename.as_deref(), Some("solo.dat"));
         assert_eq!(files[0].data, data);
+    }
+
+    /// Replay `capture` and keep what the receiver wrote back, for the tests
+    /// whose point is a byte the receiver must *not* send.
+    async fn replay_ymodem_batch_keeping_replies(
+        capture: &[u8],
+    ) -> (Result<Vec<XmodemReceivedFile>, String>, Vec<u8>) {
+        let (mut inbound_writer, mut inbound_reader) = tokio::io::duplex(capture.len() + 8192);
+        inbound_writer.write_all(capture).await.expect("prefill inbound");
+        drop(inbound_writer);
+        let (mut reply_reader, mut outbound_writer) = tokio::io::duplex(64 * 1024);
+        let collect = tokio::spawn(async move {
+            let mut out = Vec::new();
+            let _ = reply_reader.read_to_end(&mut out).await;
+            out
+        });
+        let result =
+            xmodem_receive_batch(&mut inbound_reader, &mut outbound_writer, false, false, false)
+                .await;
+        drop(outbound_writer);
+        (result, collect.await.unwrap())
+    }
+
+    /// **An empty batch ends cleanly.**  A sender with nothing to send opens
+    /// with the null block 0 itself.  That is the end of the batch, so it is
+    /// ACKed and the receive returns no files -- it used to be ACKed *and*
+    /// answered with the 'C' that opens a data phase, and the receiver then
+    /// waited on a sender that had finished, ending in an error for a batch
+    /// that had ended exactly as YMODEM allows.
+    #[tokio::test]
+    async fn test_ymodem_empty_batch_ends_cleanly_with_no_files() {
+        let wire = ymodem_frame(0, &[0u8; XMODEM_BLOCK_SIZE]);
+        let (result, replies) = replay_ymodem_batch_keeping_replies(&wire).await;
+        let files = result.expect("an empty batch is not an error");
+        assert!(files.is_empty(), "nothing was sent, so nothing is received");
+        assert_eq!(
+            replies.last(),
+            Some(&ACK),
+            "the null block 0 is ACKed and is the last thing said -- no data-phase 'C' \
+             after it; replies were {:02X?}",
+            replies
+        );
+    }
+
+    /// Frame one 1024-byte block: `STX seq ~seq payload[1024] crchi crclo`.
+    fn ymodem_frame_1k(seq: u8, payload: &[u8]) -> Vec<u8> {
+        let mut p = vec![0u8; XMODEM_1K_BLOCK_SIZE];
+        p[..payload.len()].copy_from_slice(payload);
+        let crc = crc16_xmodem(&p);
+        let mut v = vec![STX, seq, !seq];
+        v.extend_from_slice(&p);
+        v.push((crc >> 8) as u8);
+        v.push((crc & 0xFF) as u8);
+        v
+    }
+
+    /// **Block 0 framed as a 1K STX block is still block 0.**  Forsberg fixes
+    /// it at 128 bytes, but a sender that frames everything as 1K sends it as
+    /// STX, and the fields are NUL-terminated so the size changes nothing.
+    /// Both places a block 0 is read are covered -- the first file's and the
+    /// one between files -- since they are separate code.
+    #[tokio::test]
+    async fn test_ymodem_block_zero_framed_as_stx_is_accepted() {
+        let data_a = b"first file, 1K block 0".to_vec();
+        let data_b: Vec<u8> = (0u8..=255).cycle().take(1100).collect();
+        let mut wire = ymodem_frame_1k(0, &ymodem_block0_payload("one.txt", data_a.len()));
+        wire.extend(ymodem_frame_1k(1, &data_a));
+        wire.push(EOT);
+        wire.extend(ymodem_frame_1k(0, &ymodem_block0_payload("two.bin", data_b.len())));
+        wire.extend(ymodem_frame_1k(1, &data_b[..1024]));
+        wire.extend(ymodem_frame_1k(2, &data_b[1024..]));
+        wire.push(EOT);
+        wire.extend(ymodem_frame_1k(0, &[]));
+        let files = replay_ymodem_batch(&wire).await.expect("an STX block 0 must be accepted");
+        assert_eq!(files.len(), 2, "both files, each announced by an STX block 0");
+        assert_eq!(files[0].filename.as_deref(), Some("one.txt"));
+        assert_eq!(files[0].data, data_a, "truncated to the size the STX block 0 declared");
+        assert_eq!(files[1].filename.as_deref(), Some("two.bin"));
+        assert_eq!(files[1].data, data_b);
+    }
+
+    /// **`max_retries = N` resends N times** (`tnio::retries_exhausted`).  The
+    /// sender used to give up after N transmissions -- N - 1 resends -- while
+    /// every receiver and the manual said N.  Driven through block 0 because
+    /// it takes the budget as a parameter; the data-block loop applies the
+    /// same call to the configured value.
+    #[tokio::test]
+    async fn test_xmodem_sender_resends_max_retries_times() {
+        let hdr = YmodemHeader { filename: "r.bin".into(), size: 1, modtime: None, mode: None };
+        for max_retries in [0usize, 1, 3] {
+            // A receiver that refuses everything, with NAKs to spare.
+            let mut reader = std::io::Cursor::new(vec![NAK; 32]);
+            let mut writer: Vec<u8> = Vec::new();
+            let mut state = ReadState::default();
+            let r = send_ymodem_block_zero(
+                &mut reader, &mut writer, &hdr, false, 1, max_retries, false, &mut state,
+            )
+            .await;
+            assert!(r.is_err(), "a receiver that only NAKs is given up on");
+            let sent = writer.len() / (3 + XMODEM_BLOCK_SIZE + 2);
+            assert_eq!(
+                sent,
+                max_retries + 1,
+                "max_retries = {max_retries}: the first send plus {max_retries} resends"
+            );
+        }
     }
 
     /// Regression for the review finding: a mid-batch file whose block-0 name

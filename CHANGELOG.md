@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a slave's relayed Kermit call &mdash; always starts at the top of the
   transfer folder and is unchanged.
 
+- **`*_max_retries = N` now means N retries in every protocol.**  The first
+  attempt is not a retry, so a block, frame or packet is sent at most N + 1
+  times, as the manual has always described ("resends of one block").  The
+  receivers and Punter already counted this way; the XMODEM, YMODEM, ZMODEM
+  and Kermit *senders* and the Kermit receiver gave up one attempt sooner, so
+  `max_retries = 1` meant no resend at all there.  Defaults are unchanged;
+  those paths now make one more attempt before giving up.
+
 - **The Kermit server saves each file when it completes**, at its end-of-file
   packet, so a failure later in the session no longer loses the files before
   it.  A file the sender abandons without that packet is not saved, as the
@@ -132,6 +140,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thrown away when a later one failed; they are now saved, and the screen
   says the upload stopped and why.  This covers the Upload menu and a
   terminal that starts the ZMODEM upload itself.
+- **An upload whose first file cannot be saved keeps the rest.**  Under `X`
+  the first file goes to the name you typed and a YMODEM batch can follow it;
+  when that first file could not be saved (the name was taken meanwhile, or
+  the write failed), every later file was silently dropped.  Each file is now
+  saved on its own and the failed one is listed with its reason.  A
+  single-file upload still shows its error screen.
+- **A ZMODEM upload your terminal starts by itself now reports on the File
+  Transfer menu**, as the Upload menu's transfers do.  A vintage terminal
+  restores its screen after a transfer, so the summary printed at the end was
+  lost and nothing said whether the upload had worked.
+- **An empty YMODEM batch ends cleanly.**  A sender with nothing to send opens
+  with the end-of-batch block; the gateway answered it by asking for data,
+  waited out the whole negotiation and reported a failure.  It now ends the
+  upload with nothing received.
+- **YMODEM's file-header block is accepted as a 1K (STX) block**, as some
+  senders send it, both for the first file and between files.  It was only
+  recognised as a 128-byte block.
 - **An XMODEM download that the receiver cancels at the end is a failure**,
   not a success: `CAN CAN` in answer to the final EOT was taken as an ACK.
   A single `CAN` there is still line noise and is answered within a second.

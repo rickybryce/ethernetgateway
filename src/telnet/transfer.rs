@@ -863,6 +863,190 @@ impl TelnetSession {
         }
     }
 
+    /// The menu's one-line record of an upload that ran to the save step.
+    ///
+    /// **One function for both upload paths** -- the Upload menu and the
+    /// ZMODEM autostart a terminal starts by itself.  The autostart set no
+    /// note at all, so the outcome it printed went into the screen restore
+    /// that a vintage terminal performs after a transfer and the menu it came
+    /// back to said nothing (the measurement behind `TransferNote`).  Shared
+    /// rather than copied so the two cannot phrase or colour one outcome two
+    /// ways.
+    pub(in crate::telnet) fn upload_note(
+        saved: &[(String, usize)],
+        skipped: &[(String, &'static str)],
+        batch_error: &Option<String>,
+        elapsed: std::time::Duration,
+    ) -> TransferNote {
+        if saved.len() == 1 && skipped.is_empty() && batch_error.is_none() {
+            let bytes = saved.first().map(|(_, n)| *n).unwrap_or(0);
+            return TransferNote {
+                ok: true,
+                text: format!("Rcvd {} bytes, {:.1}s", bytes, elapsed.as_secs_f64()),
+            };
+        }
+        TransferNote {
+            // Not "ok" when nothing was saved: every file declined or failed
+            // is an upload that did not happen.  Nor when a batch failed
+            // partway: what it saved first is kept, but files are missing.
+            ok: !saved.is_empty() && batch_error.is_none(),
+            // A stopped batch carries its reason, as a failed one does
+            // (`show_transfer_error`): "Rcvd 2 file(s)" in red says
+            // something went wrong and not what.
+            text: match batch_error {
+                Some(e) => truncate_to_width(e, 34),
+                None => format!("Rcvd {} file(s), {} skipped", saved.len(), skipped.len()),
+            },
+        }
+    }
+
+    /// Save every file an upload received, each on its own: one that cannot
+    /// be saved is listed in `skipped` with its reason and the rest are still
+    /// written.
+    ///
+    /// **The first file is not special in that respect.**  Under `X` a typed
+    /// name goes to file 1 and a YMODEM batch can still arrive behind it, and
+    /// a failure saving file 1 used to `return` out of the save loop -- the
+    /// sender had been told all N were delivered and files 2..N were simply
+    /// never written.  `typed` is `(name, path, overwrite)` when the operator
+    /// named the first file; `lone_failure` carries that file's error message
+    /// only when it was the *only* file, so the single-file upload keeps its
+    /// error screen and a batch reports the failure in its list instead.
+    pub(in crate::telnet) async fn save_uploads(
+        dir: &std::path::Path,
+        uploads: &[(Option<String>, Vec<u8>, Option<crate::xmodem::YmodemReceiveMeta>)],
+        typed: Option<(&str, &std::path::Path, bool)>,
+        kermit: bool,
+        kermit_resumed: &std::collections::HashSet<String>,
+        declined: Vec<(String, &'static str)>,
+    ) -> UploadSaves {
+        let mut saved: Vec<(String, usize)> = Vec::new();
+        let mut skipped: Vec<(String, &'static str)> = declined;
+        let mut lone_failure = None;
+
+        for (idx, (sender_name, data, ymeta)) in uploads.iter().enumerate() {
+            // A ZMODEM upload has no typed name, so every file -- the first
+            // included -- takes the batch path below: its own name, never
+            // overwriting.
+            if idx == 0 && let Some((filename, filepath, overwrite)) = typed {
+                // First file: user-entered filename, honor overwrite.
+                // A codec may refine the name — Punter appends the
+                // .prg/.seq extension matching the declared CBM type when
+                // the user's filename had none (the same suffix
+                // `PunterFileType::autodetect` reads on the way back out).
+                // The user's overwrite choice for the base name carries to
+                // the suffixed name; a late collision still surfaces via
+                // create_new below.
+                let (save_name, save_path) = match sender_name {
+                    Some(n) if Self::validate_filename(n).is_ok() => (n.clone(), dir.join(n)),
+                    _ => (filename.to_string(), filepath.to_path_buf()),
+                };
+                // (message for a lone file, reason for a batch's list)
+                let failure: Option<(String, &'static str)> =
+                    // Checked again here: the codec may have refined the
+                    // name, and the overwrite answer carries to the new one.
+                    if overwrite && Self::is_symlink(&save_path).await {
+                        Some(("That name is a link; not replaced.".into(), "a link; not replaced"))
+                    } else {
+                        let mut opts = tokio::fs::OpenOptions::new();
+                        opts.write(true);
+                        if overwrite {
+                            opts.create(true).truncate(true);
+                        } else {
+                            opts.create_new(true);
+                        }
+                        match opts.open(&save_path).await {
+                            Ok(mut file) => {
+                                if let Err(e) = file.write_all(data).await {
+                                    // A partial file under the real name is
+                                    // worse than none: it looks like the
+                                    // upload, and it holds the name against
+                                    // the retry.
+                                    drop(file);
+                                    let _ = tokio::fs::remove_file(&save_path).await;
+                                    Some((format!("Failed to save: {}", e), "write failed"))
+                                } else {
+                                    let _ = file.flush().await;
+                                    drop(file);
+                                    Self::apply_ymodem_meta(&save_path, ymeta.as_ref());
+                                    None
+                                }
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                                Some(("File already exists.".into(), "already exists"))
+                            }
+                            Err(e) => Some((format!("Failed to save: {}", e), "write failed")),
+                        }
+                    };
+                match failure {
+                    None => saved.push((save_name, data.len())),
+                    Some((msg, _)) if uploads.len() == 1 => lone_failure = Some(msg),
+                    Some((_, reason)) => skipped.push((save_name, reason)),
+                }
+            } else {
+                // Batch file 2..N: save under sender's name.  ZMODEM, Kermit,
+                // and a YMODEM batch (`sb file1 file2 …`) all produce these, so
+                // `sender_name` is Some here.  Routes through the same atomic
+                // save_received_file helper as the autostart and Kermit-server
+                // batch paths so the create_new + tokio::fs guarantees stay
+                // symmetric.
+                let name = match sender_name {
+                    Some(n) => n.clone(),
+                    // A nameless file -- a non-UTF-8 YMODEM block 0, or plain
+                    // XMODEM sent under `Y` -- gets the first free generated
+                    // name.  A fixed `ymodem_file_1` could be saved once, and
+                    // every later upload was refused as "already exists".
+                    None => (idx + 1..)
+                        .map(|n| format!("ymodem_file_{n}"))
+                        .find(|n| !dir.join(n).exists())
+                        .expect("an unbounded range always yields a free name"),
+                };
+                if Self::validate_filename(&name).is_err() {
+                    // Sanitize the sender-supplied name before it reaches the
+                    // terminal (a rejected name can carry ANSI escapes).
+                    let safe = crate::aichat::sanitize_for_terminal(&name);
+                    skipped.push((safe, "invalid filename"));
+                    continue;
+                }
+                // Two sender names that convert to one: say so, rather than
+                // "already exists" about a file this same batch just wrote.
+                if saved.iter().any(|(n, _)| *n == name) {
+                    skipped.push((name, "same name as another file sent"));
+                    continue;
+                }
+                // Kermit saves as Kermit server mode does: a resumed file
+                // replaces its own partial, and a name that is taken is
+                // numbered (DOS/CP-M-Kermit style) rather than dropped.
+                if kermit {
+                    let resumed = kermit_resumed.contains(&name);
+                    match Self::save_received_file_collision_safe(
+                        dir,
+                        &name,
+                        data,
+                        ymeta.as_ref(),
+                        resumed,
+                    ) {
+                        Ok(actual) => saved.push((actual, data.len())),
+                        Err(SaveError::AlreadyExists) => skipped.push((name, "already exists")),
+                        Err(SaveError::WriteFailed) => skipped.push((name, "write failed")),
+                    }
+                    continue;
+                }
+                let batch_path = dir.join(&name);
+                match Self::save_received_file(&batch_path, data, ymeta.as_ref()).await {
+                    Ok(()) => saved.push((name, data.len())),
+                    Err(SaveError::AlreadyExists) => {
+                        skipped.push((name, "already exists"));
+                    }
+                    Err(SaveError::WriteFailed) => {
+                        skipped.push((name, "write failed"));
+                    }
+                }
+            }
+        }
+        UploadSaves { saved, skipped, lone_failure }
+    }
+
     pub(in crate::telnet) async fn file_transfer_upload(&mut self) -> Result<(), std::io::Error> {
         self.ensure_transfer_dir().await?;
 
@@ -1265,132 +1449,22 @@ impl TelnetSession {
         // ZMODEM by `safe_upload_name`), and a collision is skipped rather
         // than clobbered.  Batch files share the transfer-complete window
         // with the first file; we don't prompt per-file.
-        let mut saved: Vec<(String, usize)> = Vec::new();
-        let mut skipped: Vec<(String, &'static str)> = declined;
-
-        for (idx, (sender_name, data, ymeta)) in uploads.iter().enumerate() {
-            // A ZMODEM upload has no typed name, so every file -- the first
-            // included -- takes the batch path below: its own name, never
-            // overwriting.
-            if idx == 0 && !named_by_sender {
-                // First file: user-entered filename, honor overwrite.
-                // A codec may refine the name — Punter appends the
-                // .prg/.seq extension matching the declared CBM type when
-                // the user's filename had none (the same suffix
-                // `PunterFileType::autodetect` reads on the way back out).
-                // The user's overwrite choice for the base name carries to
-                // the suffixed name; a late collision still surfaces via
-                // create_new below.
-                let (save_name, save_path) = match sender_name {
-                    Some(n) if Self::validate_filename(n).is_ok() => {
-                        (n.clone(), self.transfer_path().join(n))
-                    }
-                    _ => (filename.clone(), filepath.clone()),
-                };
-                // Checked again here: the codec may have refined the name,
-                // and the overwrite answer carries to the new one.
-                if overwrite && Self::is_symlink(&save_path).await {
-                    self.post_transfer_settle().await;
-                    self.show_error("That name is a link; not replaced.").await?;
-                    return Ok(());
-                }
-                let mut opts = tokio::fs::OpenOptions::new();
-                opts.write(true);
-                if overwrite {
-                    opts.create(true).truncate(true);
-                } else {
-                    opts.create_new(true);
-                }
-                match opts.open(&save_path).await {
-                    Ok(mut file) => {
-                        if let Err(e) = file.write_all(data).await {
-                            // A partial file under the real name is worse than
-                            // none: it looks like the upload, and it holds the
-                            // name against the retry.
-                            drop(file);
-                            let _ = tokio::fs::remove_file(&save_path).await;
-                            self.post_transfer_settle().await;
-                            self.show_error(&format!("Failed to save: {}", e))
-                                .await?;
-                            return Ok(());
-                        }
-                        let _ = file.flush().await;
-                        drop(file);
-                        Self::apply_ymodem_meta(&save_path, ymeta.as_ref());
-                        saved.push((save_name, data.len()));
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        self.post_transfer_settle().await;
-                        self.show_error("File already exists.").await?;
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        self.post_transfer_settle().await;
-                        self.show_error(&format!("Failed to save: {}", e))
-                            .await?;
-                        return Ok(());
-                    }
-                }
-            } else {
-                // Batch file 2..N: save under sender's name.  ZMODEM, Kermit,
-                // and a YMODEM batch (`sb file1 file2 …`) all produce these, so
-                // `sender_name` is Some here.  Routes through the same atomic
-                // save_received_file helper as the autostart and Kermit-server
-                // batch paths so the create_new + tokio::fs guarantees stay
-                // symmetric.
-                let name = match sender_name {
-                    Some(n) => n.clone(),
-                    // A nameless file -- a non-UTF-8 YMODEM block 0, or plain
-                    // XMODEM sent under `Y` -- gets the first free generated
-                    // name.  A fixed `ymodem_file_1` could be saved once, and
-                    // every later upload was refused as "already exists".
-                    None => (idx + 1..)
-                        .map(|n| format!("ymodem_file_{n}"))
-                        .find(|n| !self.transfer_path().join(n).exists())
-                        .expect("an unbounded range always yields a free name"),
-                };
-                if Self::validate_filename(&name).is_err() {
-                    // Sanitize the sender-supplied name before it reaches the
-                    // terminal (a rejected name can carry ANSI escapes).
-                    let safe = crate::aichat::sanitize_for_terminal(&name);
-                    skipped.push((safe, "invalid filename"));
-                    continue;
-                }
-                // Two sender names that convert to one: say so, rather than
-                // "already exists" about a file this same batch just wrote.
-                if saved.iter().any(|(n, _)| *n == name) {
-                    skipped.push((name, "same name as another file sent"));
-                    continue;
-                }
-                // Kermit saves as Kermit server mode does: a resumed file
-                // replaces its own partial, and a name that is taken is
-                // numbered (DOS/CP-M-Kermit style) rather than dropped.
-                if matches!(protocol, UploadProtocol::Kermit) {
-                    let resumed = kermit_resumed.contains(&name);
-                    match Self::save_received_file_collision_safe(
-                        &self.transfer_path(),
-                        &name,
-                        data,
-                        ymeta.as_ref(),
-                        resumed,
-                    ) {
-                        Ok(actual) => saved.push((actual, data.len())),
-                        Err(SaveError::AlreadyExists) => skipped.push((name, "already exists")),
-                        Err(SaveError::WriteFailed) => skipped.push((name, "write failed")),
-                    }
-                    continue;
-                }
-                let batch_path = self.transfer_path().join(&name);
-                match Self::save_received_file(&batch_path, data, ymeta.as_ref()).await {
-                    Ok(()) => saved.push((name, data.len())),
-                    Err(SaveError::AlreadyExists) => {
-                        skipped.push((name, "already exists"));
-                    }
-                    Err(SaveError::WriteFailed) => {
-                        skipped.push((name, "write failed"));
-                    }
-                }
-            }
+        let typed = (!named_by_sender).then_some((filename.as_str(), filepath.as_path(), overwrite));
+        let UploadSaves { saved, skipped, lone_failure } = Self::save_uploads(
+            &self.transfer_path(),
+            &uploads,
+            typed,
+            matches!(protocol, UploadProtocol::Kermit),
+            &kermit_resumed,
+            declined,
+        )
+        .await;
+        // The only file failed: the error screen it always had, rather than
+        // a one-line "0 saved, 1 skipped" summary.
+        if let Some(msg) = lone_failure {
+            self.post_transfer_settle().await;
+            self.show_error(&msg).await?;
+            return Ok(());
         }
 
         // **No settle here.**  `press_any_key_after_transfer` at the end of
@@ -1430,10 +1504,7 @@ impl TelnetSession {
                 self.send_line(&format!("  Saved as {}", self.amber(&truncate_to_width(name, room))))
                     .await?;
             }
-            self.last_transfer_note = Some(TransferNote {
-                ok: true,
-                text: format!("Rcvd {} bytes, {:.1}s", bytes, elapsed.as_secs_f64()),
-            });
+            self.last_transfer_note = Some(Self::upload_note(&saved, &skipped, &batch_error, elapsed));
         } else {
             // Not green, and not "ok", when nothing was saved: every file
             // declined or failed is an upload that did not happen, whatever
@@ -1452,16 +1523,7 @@ impl TelnetSession {
                 self.green(&line)
             };
             self.send_line(&format!("  {}", line)).await?;
-            self.last_transfer_note = Some(TransferNote {
-                ok: !saved.is_empty() && batch_error.is_none(),
-                // A stopped batch carries its reason, as a failed one does
-                // (`show_transfer_error`): "Rcvd 2 file(s)" in red says
-                // something went wrong and not what.
-                text: match &batch_error {
-                    Some(e) => truncate_to_width(e, 34),
-                    None => format!("Rcvd {} file(s), {} skipped", saved.len(), skipped.len()),
-                },
-            });
+            self.last_transfer_note = Some(Self::upload_note(&saved, &skipped, &batch_error, elapsed));
             for (name, bytes) in &saved {
                 self.send_line(&format!(
                     "  {} {} ({} bytes)",

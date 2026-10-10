@@ -480,6 +480,18 @@ pub(crate) enum SaveError {
     WriteFailed,
 }
 
+/// What `TelnetSession::save_uploads` did with an upload's files.
+#[derive(Debug, Default, PartialEq)]
+pub(in crate::telnet) struct UploadSaves {
+    /// Saved, as `(name written, bytes)`.
+    pub(in crate::telnet) saved: Vec<(String, usize)>,
+    /// Not saved, as `(name, reason)` -- declined-before-sent ones included.
+    pub(in crate::telnet) skipped: Vec<(String, &'static str)>,
+    /// The error screen's message when the upload's *only* file, under a
+    /// typed name, could not be saved.  Never set for a batch.
+    pub(in crate::telnet) lone_failure: Option<String>,
+}
+
 // ─── Menu ───────────────────────────────────────────────────
 #[derive(Clone, Debug, PartialEq)]
 enum Menu {
