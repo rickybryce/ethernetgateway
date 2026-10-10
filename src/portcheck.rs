@@ -14,15 +14,19 @@
 //!   listener at its own address, something is blocking it — on every platform.
 //!   That is worth telling the operator, in red.
 //!
-//! * **A successful probe is weak evidence, and on two of the three platforms it
-//!   is no evidence at all.** On Linux a connection to your own non-loopback
-//!   address still traverses the `INPUT` chain, so getting through really does
-//!   mean no local rule is dropping it. On **Windows** the Filtering Platform
+//! * **A successful probe is no evidence on any of the three platforms.** On
+//!   **Linux** a connection to your own non-loopback address is routed over the
+//!   loopback interface (`ip route get <own address>` answers `local ... dev
+//!   lo`), and the common firewalls accept `lo` before any port rule -- ufw's
+//!   `-i lo -j ACCEPT` in `before.rules`, firewalld's `iifname "lo" accept`, and
+//!   most hand-written rulesets -- so a port they block for the network still
+//!   answers here. Only a ruleset that does *not* exempt loopback is caught,
+//!   and then as a failure. On **Windows** the Filtering Platform
 //!   exempts traffic a machine sends to its own address, so a port blocked by
 //!   Defender probes as reachable. On **macOS** the application firewall is
 //!   per-application rather than per-port and does not filter self-traffic
-//!   either. On both, a pass would be a false all-clear on the platform where a
-//!   blocking firewall is *most* likely — Defender is on by default and prompts
+//!   either. On those two, a pass would be a false all-clear on the platform
+//!   where a blocking firewall is *most* likely — Defender is on by default and prompts
 //!   the first time a listener appears.
 //!
 //! So a pass says **nothing at all** here: [`Reach::Answered`] is recorded but no
@@ -152,9 +156,11 @@ pub struct PlatformFact {
 pub const WHAT_THE_TEST_PROVES: &[PlatformFact] = &[
     PlatformFact {
         question: "Finds a firewall on this machine",
-        // A connection to your own non-loopback address still traverses the
-        // INPUT chain here, so a DROP really does block it.
-        linux: "yes",
+        // A connection to your own non-loopback address is routed over `lo`,
+        // and ufw, firewalld and most hand rulesets accept `lo` before any port
+        // rule -- so only a ruleset that does not exempt loopback is caught.
+        // Measured: `ip route get <own LAN address>` -> `local ... dev lo`.
+        linux: "rarely",
         // The Filtering Platform exempts traffic a machine sends to its own
         // address, so a port Defender is blocking answers anyway.
         windows: "no",
@@ -456,12 +462,14 @@ fn run_check_inner(cycle: Option<u64>) -> usize {
 
     let blocked = store_for(found, cycle);
     if blocked == 0 {
-        // Deliberately not "all ports are open".  On Windows and macOS a pass
-        // proves nothing, and this line is read by operators on all three.
+        // Deliberately not "all ports are open".  A pass proves next to nothing
+        // on any platform -- self-traffic rides loopback on Linux, which the
+        // usual firewalls accept, and skips the firewall on Windows and macOS.
         glog!(
-            "Port check: every bound listener answered on this machine. That rules out a \
-             local block on Linux; on Windows and macOS self-connections skip the firewall, \
-             and no check here can see a router that is not forwarding a port."
+            "Port check: every bound listener answered on this machine. That is not \
+             evidence the firewall is open: a connection to your own address skips the \
+             firewall's port rules (on Linux it arrives on loopback, which firewalls \
+             accept), and no check here can see a router that is not forwarding a port."
         );
     }
     blocked
@@ -550,9 +558,11 @@ mod tests {
     ///
     /// Both graphical surfaces and the manual render this table, so it is the
     /// one place a claim about what the test proves can be made — and the row
-    /// that matters is the running platform's. The Linux answer is the only
-    /// `yes` in it, which is the point: a self-connection meets the `INPUT`
-    /// chain here and meets nothing at all on the other two.
+    /// that matters is the running platform's. The detection row has **no**
+    /// `yes`: Linux said so until it was measured -- a self-connection there is
+    /// routed over `lo`, which ufw and firewalld accept before any port rule --
+    /// so it is `rarely`, and every surface treats anything but `yes` as "a
+    /// pass is not evidence".
     #[test]
     fn test_the_capability_table_answers_for_this_platform() {
         let facts = WHAT_THE_TEST_PROVES;
@@ -561,18 +571,22 @@ mod tests {
         // Every row answers for every column, and for here.
         for f in facts {
             for v in [f.linux, f.windows, f.macos] {
-                assert!(v == "yes" || v == "no", "{}: {v:?} is not an answer", f.question);
+                assert!(
+                    v == "yes" || v == "no" || v == "rarely",
+                    "{}: {v:?} is not an answer",
+                    f.question
+                );
             }
             if this_platform().is_some() {
                 assert!(f.here().is_some(), "{}: no answer for this platform", f.question);
             }
         }
 
-        // The detection row: Linux yes, the other two no.  If this ever flips,
-        // it is because somebody measured something new — and the manual and
-        // both popups say so from this table, so they follow automatically.
+        // The detection row: yes nowhere.  If this ever flips, it is because
+        // somebody measured something new — and both popups say so from this
+        // table, so they follow automatically (the manual is hand-written).
         let detect = &facts[0];
-        assert_eq!(detect.linux, "yes");
+        assert_eq!(detect.linux, "rarely", "self-traffic rides `lo`, which firewalls accept");
         assert_eq!(detect.windows, "no", "self-connections skip the Windows firewall");
         assert_eq!(detect.macos, "no", "the macOS application firewall is per-application");
 
@@ -584,7 +598,7 @@ mod tests {
         }
 
         #[cfg(target_os = "linux")]
-        assert_eq!(detect.here(), Some("yes"));
+        assert_eq!(detect.here(), Some("rarely"));
     }
 
     /// **A passing re-check clears the red.**

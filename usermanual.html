@@ -1610,20 +1610,23 @@ meets the firewall at all is an operating-system decision:
 <table>
     <thead><tr><th></th><th>Linux</th><th>Windows</th><th>macOS</th></tr></thead>
     <tbody>
-        <tr><td>Finds a firewall on this machine</td><td><strong>yes</strong></td><td>no</td><td>no</td></tr>
+        <tr><td>Finds a firewall on this machine</td><td>rarely</td><td>no</td><td>no</td></tr>
         <tr><td>Can raise a false alarm</td><td>no</td><td>no</td><td>no</td></tr>
         <tr><td>Sees a router not forwarding</td><td>no</td><td>no</td><td>no</td></tr>
     </tbody>
 </table>
 
-On <strong>Linux</strong> a connection to your own non-loopback address still passes
-through the <code>INPUT</code> chain, so an <code>iptables</code> or
-<code>nftables</code> rule that drops the port really is caught.  On
+On <strong>Linux</strong> a connection to your own non-loopback address is routed over
+the loopback interface, and the usual firewalls accept loopback before any port rule
+&mdash; <code>ufw</code> and <code>firewalld</code> both do, as do most hand-written
+<code>iptables</code>/<code>nftables</code> rulesets &mdash; so a port they block for
+the network still answers here.  Only a ruleset that does not exempt loopback is
+caught.  On
 <strong>Windows</strong> the Filtering Platform exempts traffic a machine sends to its
 own address, so a port that Windows Defender is blocking answers anyway; on
 <strong>macOS</strong> the application firewall is per-<em>application</em> rather than
-per-port and does not filter this traffic either.  On those two the test can only ever
-come back clear, which is why nothing here ever reports a port as &ldquo;open&rdquo;
+per-port and does not filter this traffic either.  So on all three a pass is not
+evidence, which is why nothing here ever reports a port as &ldquo;open&rdquo;
 &mdash; the windows say <em>answered on this machine</em>, and say plainly that
 answering is not the same as reachable.
 <br><br>

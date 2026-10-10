@@ -1229,10 +1229,10 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     if fields.get("action").map(String::as_str) == Some("portcheck") {
         let blocked = crate::portcheck::run_check();
         let msg = if blocked == 0 {
-            // Never "all ports are open".  A self-connection skips the firewall
-            // on Windows and macOS, so a pass is not evidence -- and this page
-            // is read on all three.
-            "Port check: every bound listener answered on this machine. That rules out a local block on Linux; on Windows and macOS a connection to your own address skips the firewall, and nothing here can see a router that is not forwarding a port."
+            // Never "all ports are open".  A self-connection rides loopback on
+            // Linux (accepted by the usual firewalls) and skips the firewall on
+            // Windows and macOS, so a pass is not evidence on any of them.
+            "Port check: every bound listener answered on this machine. That is not evidence the firewall is open: a connection to your own address skips the firewall's port rules (on Linux it arrives on loopback, which firewalls accept), and nothing here can see a router that is not forwarding a port."
                 .to_string()
         } else {
             format!(
@@ -3665,8 +3665,8 @@ fn render_port_check_modal() -> String {
             != Some("yes")
         {
             "So on this platform a pass means very little: a connection to your own address \
-             does not meet the firewall at all. Open the ports on your firewall and test from \
-             another machine."
+             does not meet the firewall's port rules. Open the ports on your firewall and test \
+             from another machine."
         } else {
             "Nothing here can see past this machine, so a router that is not forwarding a port \
              looks fine from in here. Open these ports on your firewall."

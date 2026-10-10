@@ -86,7 +86,9 @@ fn main() {
 
     // Shutdown and restart coordination (persist across restart cycles)
     let shutdown = Arc::new(AtomicBool::new(false));
-    // Set by SIGINT/SIGTERM only -- see `register_signal_handlers`.
+    // "Somebody asked this process to end": set by SIGINT/SIGTERM (see
+    // `register_signal_handlers`) and by the handover watcher when a later
+    // copy takes over (`instance::spawn_handover_watcher`).  Never cleared.
     let stop = Arc::new(AtomicBool::new(false));
     let restart = Arc::new(AtomicBool::new(false));
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
@@ -176,9 +178,12 @@ fn main() {
         }
         Ok(instance::Instance::Busy { pid }) => {
             // The config is needed to answer one question -- is there a window
-            // to ask in -- and reading it costs nothing we would not pay in a
-            // moment anyway.
-            let cfg = config::load_or_create_config();
+            // to ask in -- and it is **read, never written**: the file belongs
+            // to the copy holding the lock.  `load_or_create_config` rewrites
+            // it on every call, so a copy that then backed off had already
+            // replaced it -- losing a save the running copy made meanwhile, and
+            // from an older binary every key it did not know.
+            let cfg = config::load_config_read_only();
             let who = match pid {
                 Some(p) => format!("another copy (process {p})"),
                 None => "another copy".to_string(),
@@ -241,9 +246,14 @@ fn main() {
                 Ok(Some(lock)) => {
                     // The window was closed to end the ask; clear the flag it
                     // was closed with, or the server we are about to start
-                    // would shut down the moment it came up.
-                    shutdown.store(false, Ordering::SeqCst);
-                    restart.store(false, Ordering::SeqCst);
+                    // would shut down the moment it came up.  Through
+                    // `reset_for_next_cycle`, because a SIGTERM that arrived
+                    // while we waited for the handover would otherwise be
+                    // wiped by that very reset.
+                    if !reset_for_next_cycle(&shutdown, &restart, &stop) {
+                        glog!("Asked to stop during the handover — not starting.");
+                        return;
+                    }
                     glog!("Took over — this copy now holds the ports.");
                     lock
                 }
@@ -724,13 +734,17 @@ fn main() {
         // send us round again on a process that was asked to end.  This is the
         // one place the decision to live another cycle is actually taken, so
         // it is the place that has to honour the ask.
+        //
+        // The check alone leaves a gap of its own: a SIGTERM landing after
+        // `stop` is read and before `shutdown` is reset is wiped by the reset,
+        // and the next cycle runs with nobody watching for it.
+        // `reset_for_next_cycle` re-reads `stop` *after* the reset, which
+        // closes it -- see that function for why the re-read cannot miss.
         if should_run_another_cycle(
             restart.load(Ordering::SeqCst),
             stop.load(Ordering::SeqCst),
-        ) {
-            // Reset flags and loop back to start fresh
-            restart.store(false, Ordering::SeqCst);
-            shutdown.store(false, Ordering::SeqCst);
+        ) && reset_for_next_cycle(&shutdown, &restart, &stop)
+        {
             glog!("Restarting server...");
             glog!();
             continue;
@@ -770,6 +784,31 @@ pub(crate) fn should_run_another_cycle(restart: bool, stop_requested: bool) -> b
     restart && !stop_requested
 }
 
+/// Clear `restart` and `shutdown` for a fresh server cycle, then re-read
+/// `stop`; `false` means a stop arrived and the process must end instead.
+///
+/// **Reset, then re-check -- the other order loses the stop.**  A SIGTERM sets
+/// `shutdown` and `stop` together, so one landing between a read of `stop` and
+/// the reset of `shutdown` used to be erased by the reset: the next cycle ran
+/// with `shutdown` false, and nothing reads `stop` again until that cycle
+/// ends, which with no further signal is never.  Re-reading after the reset
+/// closes the window rather than narrowing it, because every writer sets
+/// `stop` **before** `shutdown` (signal-hook runs a signal's actions in
+/// registration order and `register_signal_handlers` registers `stop` first;
+/// the handover watcher stores `stop` first) and `stop` is never cleared.  So
+/// either the re-read sees the stop, or the writer's `shutdown` store comes
+/// after our reset and survives it -- and on a stop we put `shutdown` back, so
+/// the caller's exit path finds it set either way.
+fn reset_for_next_cycle(shutdown: &AtomicBool, restart: &AtomicBool, stop: &AtomicBool) -> bool {
+    restart.store(false, Ordering::SeqCst);
+    shutdown.store(false, Ordering::SeqCst);
+    if stop.load(Ordering::SeqCst) {
+        shutdown.store(true, Ordering::SeqCst);
+        return false;
+    }
+    true
+}
+
 /// Register handlers for SIGINT, SIGTERM, and SIGHUP using signal-hook.
 fn register_signal_handlers(
     shutdown: Arc<AtomicBool>,
@@ -780,21 +819,27 @@ fn register_signal_handlers(
 ) {
     use signal_hook::consts::{SIGINT, SIGTERM};
 
+    // **SIGINT and SIGTERM set a flag of their own, because `shutdown`
+    // cannot tell who set it.**  The watcher below trips `shutdown` itself to
+    // unwind a reload, so by the time anything reads it the flag no longer
+    // says whether anybody asked us to stop.  `stop` is written by these two
+    // signals and by the handover watcher (`instance::spawn_handover_watcher`,
+    // when a later copy takes over) -- never by a reload -- and is never
+    // cleared, so "someone asked this process to end" survives every cycle.
+    //
+    // **Registered before `shutdown`, and the order is load-bearing.**
+    // signal-hook runs a signal's actions in registration order, so `stop` is
+    // always set before `shutdown`; `reset_for_next_cycle` relies on that to
+    // close the window between its reset and its re-read.
+    signal_hook::flag::register(SIGINT, stop.clone())
+        .expect("Failed to register SIGINT stop flag");
+    signal_hook::flag::register(SIGTERM, stop.clone())
+        .expect("Failed to register SIGTERM stop flag");
     // signal-hook's flag::register sets the AtomicBool on signal delivery
     signal_hook::flag::register(SIGINT, shutdown.clone())
         .expect("Failed to register SIGINT handler");
     signal_hook::flag::register(SIGTERM, shutdown.clone())
         .expect("Failed to register SIGTERM handler");
-    // **And the same two signals into a flag of their own, because
-    // `shutdown` cannot tell who set it.**  The watcher below trips
-    // `shutdown` itself to unwind a reload, so by the time anything reads it
-    // the flag no longer says whether a human asked us to stop.  `stop` is
-    // written only by SIGINT and SIGTERM and never cleared, so "someone asked
-    // this process to end" survives every server cycle.
-    signal_hook::flag::register(SIGINT, stop.clone())
-        .expect("Failed to register SIGINT stop flag");
-    signal_hook::flag::register(SIGTERM, stop.clone())
-        .expect("Failed to register SIGTERM stop flag");
 
     // SIGHUP is a *reload* request, not a shutdown: systemd's ExecReload
     // (`kill -HUP`) sends it and expects the service to come back up with
@@ -927,39 +972,75 @@ mod tests {
 
     use super::*;
 
+    /// **A stop that lands while a new cycle is being armed is not lost.**
+    ///
+    /// The state is the race itself: the main loop has already decided to run
+    /// another cycle (it read `stop` as false), and then SIGTERM set `stop` and
+    /// `shutdown`.  The reset that follows used to clear `shutdown` and start
+    /// the server anyway, with nothing left that would read `stop` again.
     #[test]
-    fn test_shutdown_flag_default() {
-        let flag = Arc::new(AtomicBool::new(false));
-        assert!(!flag.load(Ordering::SeqCst));
+    fn test_a_stop_landing_in_the_reset_is_not_lost() {
+        let shutdown = AtomicBool::new(true);
+        let restart = AtomicBool::new(true);
+        let stop = AtomicBool::new(true);
+        assert!(
+            !reset_for_next_cycle(&shutdown, &restart, &stop),
+            "a stop that arrived before the reset must end the process, not start a cycle",
+        );
+        assert!(
+            shutdown.load(Ordering::SeqCst),
+            "the reset wiped `shutdown` and left it wiped -- the next cycle would never end",
+        );
+        assert!(!restart.load(Ordering::SeqCst), "a stop must not leave a restart armed");
+
+        // The ordinary reload still resets and goes round.
+        let shutdown = AtomicBool::new(true);
+        let restart = AtomicBool::new(true);
+        let stop = AtomicBool::new(false);
+        assert!(reset_for_next_cycle(&shutdown, &restart, &stop));
+        assert!(!shutdown.load(Ordering::SeqCst));
+        assert!(!restart.load(Ordering::SeqCst));
     }
 
-    #[test]
-    fn test_shutdown_flag_set() {
-        let flag = Arc::new(AtomicBool::new(false));
-        flag.store(true, Ordering::SeqCst);
-        assert!(flag.load(Ordering::SeqCst));
+    /// This file's source up to its test module, CRLF-normalised so a Windows
+    /// checkout scans the same text.
+    fn main_source() -> String {
+        let src = include_str!("main.rs").replace("\r\n", "\n");
+        let end = src.find("#[cfg(test)]\nmod tests").expect("test module marker");
+        src[..end].to_string()
     }
 
+    /// `reset_for_next_cycle` can only close its window if every SIGINT/SIGTERM
+    /// sets `stop` **before** `shutdown` -- signal-hook runs a signal's actions
+    /// in registration order, so that is the order they are registered in.
+    /// Swapping the two registrations reopens the race and compiles.
     #[test]
-    fn test_signal_handlers_register() {
-        // Verify that signal registration doesn't panic
-        let shutdown = Arc::new(AtomicBool::new(false));
-        // Written only by SIGINT/SIGTERM, so a reload cannot outrank a stop.
-        let stop = Arc::new(AtomicBool::new(false));
-        let restart = Arc::new(AtomicBool::new(false));
-        let notify = Arc::new(tokio::sync::Notify::new());
-        let gui_ctx: GuiCtxSlot = Arc::new(Mutex::new(None));
-        // This should not panic — signals can be registered multiple times
-        register_signal_handlers(shutdown, stop, restart, notify, gui_ctx);
+    fn test_stop_is_registered_before_shutdown() {
+        let src = main_source();
+        let body = &src[src.find("fn register_signal_handlers(").expect("fn")..];
+        for sig in ["SIGINT", "SIGTERM"] {
+            let stop = body
+                .find(&format!("register({sig}, stop.clone())"))
+                .unwrap_or_else(|| panic!("{sig} -> stop registration not found"));
+            let shutdown = body
+                .find(&format!("register({sig}, shutdown.clone())"))
+                .unwrap_or_else(|| panic!("{sig} -> shutdown registration not found"));
+            assert!(stop < shutdown, "{sig} sets `shutdown` before `stop`");
+        }
     }
 
+    /// A copy that found the lock held reads the config and **does not write
+    /// it** -- see `config::load_config_read_only`.  Bounded to that arm.
     #[test]
-    fn test_transfer_dir_creation() {
-        let dir = std::env::temp_dir().join("xmodem_test_transfer_dir_main");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(!dir.exists());
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(dir.exists());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn test_a_second_copy_does_not_rewrite_the_config() {
+        let src = main_source();
+        let start = src.find("Ok(instance::Instance::Busy").expect("Busy arm");
+        let end = start + src[start..].find("Now that we own the directory").expect("arm end");
+        let arm = &src[start..end];
+        assert!(arm.contains("config::load_config_read_only()"), "the Busy arm reads no config");
+        assert!(
+            !arm.contains("config::load_or_create_config()"),
+            "the Busy arm rewrites egateway.conf before it knows whether it will back off",
+        );
     }
 }

@@ -7137,8 +7137,8 @@ impl eframe::App for App {
                 ui.label(
                     egui::RichText::new(
                         "So on this platform a pass means very little: a connection to \
-                         your own address does not meet the firewall at all. Open the \
-                         ports on your firewall and test from another machine.",
+                         your own address does not meet the firewall's port rules. Open \
+                         the ports on your firewall and test from another machine.",
                     )
                     .color(AMBER),
                 );

@@ -1924,6 +1924,24 @@ pub fn load_or_create_config() -> Config {
     cfg
 }
 
+/// Read the configuration **without writing anything**, and store it in the
+/// global singleton.
+///
+/// For a launch that does not own the data directory -- a second copy that
+/// found the instance lock held.  `load_or_create_config` rewrites the file on
+/// every call (to add new keys, and to hash a cleartext password), and doing
+/// that from a copy that then backs off loses a save the running copy made in
+/// the meantime, and -- from an older binary -- drops every key it does not
+/// know.  The file belongs to whoever holds the lock.  So: no create, no
+/// rewrite, no migration; a missing or unreadable file answers the defaults,
+/// in memory only.
+pub fn load_config_read_only() -> Config {
+    let cfg = read_config_file_checked(&config_file_path()).unwrap_or_default();
+    let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(cfg.clone());
+    cfg
+}
+
 /// Put `cfg` in the global singleton and hand back what was there.
 ///
 /// Test-only, and **in memory only** — it does not touch `egateway.conf`, which
@@ -4932,6 +4950,42 @@ mod tests {
         let after = get_config();
         assert_eq!(after.password, stored, "an unrelated save re-salted the password");
         assert!(crate::credential::verify(&after.password, "hunter2"));
+
+        swap_config_for_test(saved);
+    }
+
+    /// **A copy that does not hold the instance lock must not write the file.**
+    ///
+    /// The second-copy path read the config with `load_or_create_config`,
+    /// which rewrites it every time -- so a copy that then backed off had
+    /// already replaced the running copy's file: a save made in between was
+    /// lost, and an older binary dropped every key it did not know.  The file
+    /// here is the awkward one on purpose: keys missing (a full rewrite would
+    /// add them), a key no version knows (a rewrite would drop it), and a
+    /// cleartext password (the migration would hash it).  And a missing file
+    /// must stay missing.
+    #[tokio::test]
+    async fn test_the_read_only_loader_leaves_the_file_alone() {
+        let _lock = CONFIG_TEST_LOCK.lock().await;
+        let saved = swap_config_for_test(None);
+        let path = config_file_path();
+        let original =
+            "# hand-written\ntelnet_port = 2424\npassword = cleartext\nfrom_a_newer_build = 7\n";
+        std::fs::write(&path, original).expect("seed");
+
+        let cfg = load_config_read_only();
+        assert_eq!(cfg.telnet_port, 2424, "the file was not read");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            original,
+            "the read-only loader rewrote egateway.conf"
+        );
+        assert_eq!(get_config().telnet_port, 2424, "the singleton was not filled");
+
+        std::fs::remove_file(&path).expect("remove");
+        let cfg = load_config_read_only();
+        assert_eq!(cfg.telnet_port, Config::default().telnet_port);
+        assert!(!Path::new(&path).exists(), "the read-only loader created egateway.conf");
 
         swap_config_for_test(saved);
     }
