@@ -1320,7 +1320,7 @@ fn apply_cpm_mount_form(
     cfg: &Config,
 ) -> (String, String) {
     use crate::cpm::image;
-    let current = image::registry::all();
+    let current = image::drive_image_names();
     let mut desired: Vec<(u8, String)> = Vec::new();
     for drive0 in 0..crate::cpm::NUM_DRIVES {
         let key = format!("cpm_mount_{}", ((b'a' + drive0) as char));
@@ -1329,8 +1329,8 @@ fn apply_cpm_mount_form(
             Some(_) => {} // explicitly "(drive folder)" — unmount
             None => {
                 // Not submitted: keep whatever is there.
-                if let Some(m) = current.get(drive0 as usize).and_then(|m| m.as_ref()) {
-                    desired.push((drive0, m.filename.clone()));
+                if let Some(name) = current.get(drive0 as usize).and_then(|n| n.clone()) {
+                    desired.push((drive0, name));
                 }
             }
         }
@@ -3272,6 +3272,7 @@ fn render_warning_popups() -> String {
 fn render_cpm_disks_modal(cfg: &Config) -> String {
     let base = crate::cpm::layout::cpm_dir(&cfg.transfer_dir);
     let mounts = crate::cpm::image::registry::all();
+    let names = crate::cpm::image::drive_image_names();
     let usage = crate::cpm::image::registry::usage();
 
     // Resolved, not read off the key — a `cpm_boot_image` naming a disk that is
@@ -3307,6 +3308,10 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
     for drive0 in 0..crate::cpm::NUM_DRIVES {
         let letter = (b'A' + drive0) as char;
         let mounted = mounts.get(drive0 as usize).and_then(|m| m.as_ref());
+        // What the row shows as chosen: the mount, or an image a booted session
+        // could not put back -- still in `cpm_mounts`, so it must be on screen
+        // to be kept or removed.
+        let shown = names.get(drive0 as usize).and_then(|n| n.as_deref());
         // A drive lent to a booted session reads as empty here, so without the
         // note it would render free and enabled and then refuse on Save.
         let held = crate::cpm::image::drive_held_note(drive0);
@@ -3320,7 +3325,7 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         // without first clearing `cpm_boot_image`.  A disabled `select` submits
         // nothing, which `apply_cpm_mount_form` reads as "keep whatever is
         // there" -- and there is nothing there, so the two agree.
-        let reserved_for_boot = drive0 == 0 && booting && mounted.is_none();
+        let reserved_for_boot = drive0 == 0 && booting && shown.is_none();
         let disabled = if busy.is_some() || reserved_for_boot { " disabled" } else { "" };
 
         // A reserved slot shows what reserved it, selected, so the control is not
@@ -3334,7 +3339,7 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
             String::from("<option value=\"\">(drive folder)</option>")
         };
         for name in &images {
-            let sel = if mounted.map(|m| m.filename.as_str()) == Some(name.as_str()) {
+            let sel = if shown == Some(name.as_str()) {
                 " selected"
             } else {
                 ""
@@ -3348,6 +3353,15 @@ fn render_cpm_disks_modal(cfg: &Config) -> String {
         }
         // An image that is mounted but no longer in the folder would otherwise
         // vanish from its own row and read as "no image".
+        if let (Some(name), None) = (shown, mounted) {
+            if !images.iter().any(|i| i == name) {
+                opts.push_str(&format!(
+                    "<option value=\"{}\" selected>{} (not back from a boot)</option>",
+                    html_escape(name),
+                    html_escape(name),
+                ));
+            }
+        }
         if let Some(m) = mounted {
             if !images.contains(&m.filename) {
                 // Two different reasons a mounted image is not in the list, and
@@ -4126,8 +4140,14 @@ fn render_more_popups(cfg: &Config) -> String {
             let mut o = String::from(
                 "<label>Booted-disk speed <select name=\"cpm_boot_speed\">",
             );
+            // Chosen by **meaning**, not spelling: `off`, `0` or `2.0` matched
+            // no option's text, so the browser selected the first (`auto`)
+            // and a Save of any other setting rewrote the speed with it.
+            let current = crate::cpm::speed::parse(&cfg.cpm_boot_speed);
+            let mut matched = false;
             for (value, label) in crate::cpm::speed::SPEED_CHOICES {
-                let sel = if cfg.cpm_boot_speed.trim().eq_ignore_ascii_case(value) {
+                let sel = if !matched && crate::cpm::speed::parse(value) == current {
+                    matched = true;
                     " selected"
                 } else {
                     ""
@@ -4135,6 +4155,13 @@ fn render_more_popups(cfg: &Config) -> String {
                 let shown =
                     crate::cpm::speed::choice_label(value, label, &cfg.cpm_cpu);
                 o.push_str(&format!("<option value=\"{value}\"{sel}>{shown}</option>"));
+            }
+            // A number the list does not carry is still a valid setting, and
+            // is offered as itself so a Save keeps it.
+            if !matched {
+                let v = html_escape(cfg.cpm_boot_speed.trim());
+                let shown = html_escape(&crate::cpm::speed::label_for(&cfg.cpm_boot_speed));
+                o.push_str(&format!("<option value=\"{v}\" selected>{shown}</option>"));
             }
             o.push_str("</select></label>");
             o
@@ -6513,6 +6540,27 @@ mod tests {
             "the first session is picked automatically while the operator is choosing"
         );
         assert!(VDM_SCRIPT.contains("vdmChoosing = vdmCurrent === null;"), "a pick does not end the wait");
+    }
+
+    /// **The speed select shows the setting by meaning.**  `off` and `2.0`
+    /// matched no option's text, so the browser fell back to the first,
+    /// `auto`, and a Save made anywhere on the page rewrote the speed.
+    #[test]
+    fn test_the_speed_select_keeps_a_setting_spelled_differently() {
+        let select = |speed: &str| {
+            let cfg = Config { cpm_boot_speed: speed.to_string(), ..Config::default() };
+            let html = render_main_page(&cfg, None, false);
+            let start = html.find("<select name=\"cpm_boot_speed\">").expect("the select");
+            let end = start + html[start..].find("</select>").expect("its end");
+            html[start..end].to_string()
+        };
+        let off = select("off");
+        assert!(off.contains("value=\"unlimited\" selected"), "{off}");
+        assert_eq!(off.matches(" selected").count(), 1, "{off}");
+        assert!(select("2.0").contains("value=\"2\" selected"));
+        let odd = select("3.5");
+        assert!(odd.contains("value=\"3.5\" selected"), "a listed-less number was not kept: {odd}");
+        assert!(!odd.contains("value=\"auto\" selected"));
     }
 
     /// **The screen page's notes follow the session being watched.**  A first

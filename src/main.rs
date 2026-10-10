@@ -1029,6 +1029,20 @@ mod tests {
         }
     }
 
+    /// `reset_for_next_cycle` must reset **then** read `stop`.  The behavioural
+    /// test above sets `stop` before the call, which a check-then-reset body
+    /// answers identically -- and that order reopens the window the function
+    /// exists to close.  So the order itself is pinned.
+    #[test]
+    fn test_the_cycle_reset_reads_stop_after_clearing_shutdown() {
+        let src = main_source();
+        let start = src.find("fn reset_for_next_cycle(").expect("fn");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("fn end")];
+        let reset = body.find("shutdown.store(false").expect("the reset");
+        let check = body.find("stop.load(").expect("the re-read");
+        assert!(reset < check, "`stop` is read before `shutdown` is reset -- a SIGTERM between them is lost");
+    }
+
     /// A copy that found the lock held reads the config and **does not write
     /// it** -- see `config::load_config_read_only`.  Bounded to that arm.
     #[test]

@@ -1454,11 +1454,13 @@ impl TelnetSession {
             self.send_line(&format!("  {}", line)).await?;
             self.last_transfer_note = Some(TransferNote {
                 ok: !saved.is_empty() && batch_error.is_none(),
-                text: format!(
-                    "Rcvd {} file(s), {} skipped",
-                    saved.len(),
-                    skipped.len()
-                ),
+                // A stopped batch carries its reason, as a failed one does
+                // (`show_transfer_error`): "Rcvd 2 file(s)" in red says
+                // something went wrong and not what.
+                text: match &batch_error {
+                    Some(e) => truncate_to_width(e, 34),
+                    None => format!("Rcvd {} file(s), {} skipped", saved.len(), skipped.len()),
+                },
             });
             for (name, bytes) in &saved {
                 self.send_line(&format!(

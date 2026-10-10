@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A password such as `$ecret$2024` looked like an already-hashed value, so it
   was saved unhashed and every login then failed.  A typed password is now
   hashed on every surface whatever it looks like.
+- **SSH: a refused connection costs nothing.**  A connection turned away by
+  the rate limit or the pre-login cap still wrote a log line or two and read
+  the relay key file, so a flood could push the evidence out of the rolling
+  log.  It is now refused before any of that, with one line per flood.
+- **Relay: what a slave sends to name its ports is checked.**  The port name,
+  mode and erase key are refused unless they are short plain words, so a
+  slave cannot draw escape sequences on the master's screens.
 
 ### Changed
 
@@ -47,6 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packet, so a failure later in the session no longer loses the files before
   it.  A file the sender abandons without that packet is not saved, as the
   Kermit spec requires.
+
+- **The port check no longer says a pass rules out a firewall on Linux.**  A
+  connection to the machine's own address arrives on loopback, which ufw,
+  firewalld and most rule sets accept before any port rule, so a pass is no
+  evidence on Linux either.  Only a failure is reported, as before.
+- **`cpm_boot_speed = 0.0`** (any spelling of zero) now means unlimited, like
+  `0`; it read as `auto` before.
 
 ### Fixed
 
@@ -113,6 +127,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there is no longer counted as downloaded.
 - **A username containing `:` is refused**, on every surface: the web UI's
   login could never accept it.  Usernames are stored trimmed.
+- **A YMODEM or ZMODEM batch upload that fails partway keeps the files
+  already received.**  Every file the sender had been told was received was
+  thrown away when a later one failed; they are now saved, and the screen
+  says the upload stopped and why.  This covers the Upload menu and a
+  terminal that starts the ZMODEM upload itself.
+- **An XMODEM download that the receiver cancels at the end is a failure**,
+  not a success: `CAN CAN` in answer to the final EOT was taken as an ACK.
+- **ZMODEM finds a header behind any number of `*` bytes**, as lrzsz does;
+  three or more cost a retry.
+- **A second copy of the gateway no longer rewrites `egateway.conf`** before
+  it backs off, which could undo a change the running copy had just saved.
+- **A stop signal that arrives during a restart is no longer lost**, which
+  left systemd to kill the process 90 seconds later.
+- **Relay: a refused key enrolment is retried later** rather than never again
+  until the slave restarts, so a master that briefly had relays off no
+  longer leaves the slave on its stored password for good.  A relay command
+  that could not be sent backs off as a network fault, not a refusal.
+- **A "master host key changed" entry is withdrawn** once the slave is pointed
+  at a different master or is no longer a slave.
+- **CP/M emulator: a program whose buffer follows a 33-byte FCB no longer
+  loses the first three bytes of every record it reads.**  The whole 36-byte
+  FCB was written back after each call; only the fields a call changes are
+  now.
+- **CP/M emulator: a printout is delivered while the program waits at its
+  prompt**, not only when a key is pressed.  BIOS `SELDSK` reports "no such
+  drive" in all of `HL`, and `SECTRAN` returns the sector unchanged.
+- **A disk image with a block claimed twice is mounted read-only** whether or
+  not its format was named; naming it let one file's `SAVE` overwrite
+  another's data.
+- **A mounted image the boot could not put back stays in `cpm_mounts`**
+  rather than silently dropping out at the next save.  Image names containing
+  `:` are refused (on Windows they could name a file outside the images
+  folder).
+- **88-DCDD: a sector the guest finished writing always reaches the disk**,
+  including when it selects another drive straight away or the session ends
+  before the disk turns past it.
+- **Printer: a printout never replaces another**; past 99 in the same second
+  it kept writing over the last one.
+- **The speed setting is shown by what it means.**  The desktop showed the
+  period speed for `off`, `none` and `0`, which run unlimited; and the web
+  page selected `auto` for any spelling its list did not carry (`off`, `2.0`,
+  `3.5`), so a Save of any other setting rewrote the speed to `auto`.
 - **Crashes fixed:** a YMODEM file with an absurd timestamp; a monitor ROM
   file with a non-ASCII line in its Intel HEX, or a raw image running past
   `FFFF`.  Files a ZMODEM receiver skips now count toward the batch limit.

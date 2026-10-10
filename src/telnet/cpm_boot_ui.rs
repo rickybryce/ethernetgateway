@@ -2326,6 +2326,20 @@ mod tests {
         registry::note_unrestored(1, "altair8_gone.dsk");
         unmount_drive(1).expect("an unrestored drive can be unmounted");
         assert_eq!(current_mounts_value(), "");
+
+        // The web and desktop screens save through `apply_mount_selection`,
+        // and must see the drive too: a Save that leaves the row alone keeps
+        // it, and choosing "(drive folder)" removes it.  Both screens showed it
+        // empty, so the second was silently a no-op.
+        use crate::cpm::image::{apply_mount_selection, drive_image_names};
+        registry::note_unrestored(1, "altair8_gone.dsk");
+        assert_eq!(drive_image_names()[1].as_deref(), Some("altair8_gone.dsk"), "the screens cannot see it");
+        let (_, errors) = apply_mount_selection(&base, &[(1, "altair8_gone.dsk".to_string())]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(current_mounts_value(), "B=altair8_gone.dsk", "an unchanged row dropped it");
+        let (_, errors) = apply_mount_selection(&base, &[]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(current_mounts_value(), "", "choosing the drive folder did not remove it");
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
     }

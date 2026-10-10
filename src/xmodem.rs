@@ -1805,9 +1805,15 @@ pub(crate) async fn xmodem_send(
         // vintage receiver can leave here and wrong for CAN CAN: the
         // receiver discarding the file was reported as a completed send.
         // Same CAN×2 rule as the data blocks -- one CAN is line noise and
-        // the wait goes on for the byte after it, under one deadline.
+        // the wait goes on for the byte after it, under one deadline.  A lone
+        // CAN that nothing follows is answered as it always was, as an
+        // acceptance: refusing it would report a send the receiver may well
+        // have finished as failed.  And the pair must arrive in *this*
+        // attempt -- one stray CAN per resent EOT is not a cancel.
+        state.pending_can = false;
         let eot_deadline = tokio::time::Instant::now()
             + std::time::Duration::from_secs(block_timeout);
+        let mut lone_can = false;
         let reply = loop {
             let remaining = eot_deadline.saturating_duration_since(tokio::time::Instant::now());
             let got = tokio::time::timeout(remaining, nvt_read_byte(reader, is_tcp, state)).await;
@@ -1817,9 +1823,11 @@ pub(crate) async fn xmodem_send(
                     return Err("Transfer cancelled by receiver".into());
                 }
                 Ok(Ok(CAN)) => {
-                    if verbose { glog!("XMODEM send: single CAN at EOT treated as line noise"); }
+                    if verbose { glog!("XMODEM send: single CAN at EOT, waiting for the next byte"); }
+                    lone_can = true;
                     continue;
                 }
+                Err(_) if lone_can => break Ok(Ok(CAN)),
                 other => break other,
             }
         };
@@ -6904,6 +6912,12 @@ mod tests {
         send_with_eot_reply(&[0x55])
             .await
             .expect("a stray byte at EOT is still taken as acceptance");
+        // A lone CAN with nothing after it was acceptance before the CAN×2
+        // rule arrived, and stays so: refusing it reports a send the
+        // receiver may have finished as failed.
+        send_with_eot_reply(&[CAN])
+            .await
+            .expect("a lone CAN then silence is taken as acceptance, as it always was");
     }
 
     /// **A declared size is compared as the `u64` it was parsed as.**  The

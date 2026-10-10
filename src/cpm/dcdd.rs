@@ -561,13 +561,25 @@ impl Dcdd {
     /// the head moves, or the drive is deselected -- and a guest stopped
     /// between its last data byte and any of those (ESC ESC mid-`SAVE`, or a
     /// guest that simply sits at its prompt with the head loaded) would
-    /// otherwise lose a sector it had finished writing.  Real hardware
-    /// finishes the sector regardless; this is that, said explicitly.
+    /// otherwise lose a sector it had finished writing.
+    ///
+    /// **Only a whole sector.**  A guest stopped *mid*-sector has not finished
+    /// it: the buffer holds its new bytes up to there and, after them, whatever
+    /// sector was last read -- committing that is a torn sector with a wrong
+    /// checksum on the operator's disk, where leaving it uncommitted keeps the
+    /// old sector intact.  (Real hardware pads with the last byte; that would be
+    /// no more use to the guest, which is gone.)  The same reason the other
+    /// boards keep `Controller::finish_writes`' empty default.
     pub fn finish_all_writes(&mut self) -> Vec<Request> {
-        (0..MAX_DRIVES as u8)
-            .map(|drive| self.finish_write(drive))
-            .filter(|r| *r != Request::None)
-            .collect()
+        let mut done = Vec::new();
+        for drive in 0..MAX_DRIVES as u8 {
+            let whole = self.drives[drive as usize].byte.is_some_and(|n| n >= SECTOR_LEN);
+            let r = self.finish_write(drive);
+            if whole && r != Request::None {
+                done.push(r);
+            }
+        }
+        done
     }
 
     /// Write one byte into the current sector, port 0Ah.
@@ -773,6 +785,25 @@ mod tests {
         assert_eq!(c.port_out(0x08, 0), Request::None, "same drive: still writing");
         assert_eq!(c.port_out(0x08, 1), Request::Write { drive: 0, track: 0, sector: 0 });
         assert!(c.finish_all_writes().is_empty(), "and it is not committed twice");
+    }
+
+    /// The end-of-session flush commits a finished sector and **never a torn
+    /// one**: a guest stopped mid-sector leaves new bytes followed by the last
+    /// sector read, which is not a sector anybody wrote.
+    #[test]
+    fn test_the_end_of_session_flush_takes_only_whole_sectors() {
+        let mut c = ready();
+        c.port_out(0x09, control::WRITE_ENABLE);
+        for i in 0..SECTOR_LEN / 2 {
+            c.port_out(0x0A, i as u8);
+        }
+        assert!(c.finish_all_writes().is_empty(), "half a sector was committed");
+
+        c.port_out(0x09, control::WRITE_ENABLE);
+        for i in 0..SECTOR_LEN {
+            c.port_out(0x0A, i as u8);
+        }
+        assert_eq!(c.finish_all_writes(), vec![Request::Write { drive: 0, track: 0, sector: 0 }]);
     }
 
     /// The ordinary path — the sector passing under the head — must commit to

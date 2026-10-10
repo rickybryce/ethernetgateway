@@ -513,16 +513,13 @@ pub fn apply_mount_selection(
 ) -> (Vec<String>, Vec<String>) {
     let mut notes = Vec::new();
     let mut errors = Vec::new();
-    let current = registry::all();
+    let current = drive_image_names();
     for drive0 in 0..crate::cpm::NUM_DRIVES {
         let want = desired
             .iter()
             .find(|(d, _)| *d == drive0)
             .map(|(_, n)| n.as_str());
-        let have = current
-            .get(drive0 as usize)
-            .and_then(|m| m.as_ref())
-            .map(|m| m.filename.as_str());
+        let have = current.get(drive0 as usize).and_then(|n| n.as_deref());
         match (have, want) {
             // Unchanged, including both-absent: touch nothing.
             (a, b) if a == b => {}
@@ -553,6 +550,26 @@ pub fn apply_mount_selection(
         }
     }
     (notes, errors)
+}
+
+/// The image each drive holds as far as the screens and `cpm_mounts` are
+/// concerned: the live mount, or else the image a booted session could not put
+/// back (`registry::unrestored`).  One answer for every picker and for
+/// [`apply_mount_selection`], so a drive kept in `cpm_mounts` is also shown,
+/// selected, where it can be changed or removed -- shown empty, a Save kept it
+/// invisibly and choosing "(drive folder)" could not take it out.
+pub fn drive_image_names() -> Vec<Option<String>> {
+    let mut names: Vec<Option<String>> = registry::all()
+        .iter()
+        .map(|m| m.as_ref().map(|m| m.filename.clone()))
+        .collect();
+    names.resize(crate::cpm::NUM_DRIVES as usize, None);
+    for (drive0, name) in registry::unrestored() {
+        if let Some(slot) = names.get_mut(drive0 as usize) {
+            slot.get_or_insert(name);
+        }
+    }
+    names
 }
 
 /// The live mount table in `cpm_mounts` form, for writing back to the config.

@@ -2568,9 +2568,7 @@ impl TelnetSession {
         }
     }
 
-    /// Read one byte with a short timeout, for CSI-arrow lookahead — fast
-    /// terminal-generated sequences arrive back-to-back, while a human's lone
-    /// `ESC` has no follower and times out.
+    /// A console read that also delivers a print job: like
     /// [`Self::read_byte_filtered`], but a print job that goes quiet while
     /// the program waits for a key is closed and delivered then, not at the
     /// next keystroke.
@@ -2604,6 +2602,9 @@ impl TelnetSession {
         }
     }
 
+    /// Read one byte with a short timeout, for CSI-arrow lookahead — fast
+    /// terminal-generated sequences arrive back-to-back, while a human's lone
+    /// `ESC` has no follower and times out.
     async fn cpmemu_peek_byte(&mut self) -> Result<Option<u8>, std::io::Error> {
         match tokio::time::timeout(
             std::time::Duration::from_millis(50),

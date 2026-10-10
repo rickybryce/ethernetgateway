@@ -1880,13 +1880,15 @@ impl App {
     /// reflects what is actually mounted — including changes made from the web
     /// or a telnet session while the desktop window sat closed.
     fn cpm_mount_reload_draft(&mut self) {
-        let mounts = crate::cpm::image::registry::all();
+        // `drive_image_names`, not the live table alone: a drive a booted
+        // session could not put back is still in `cpm_mounts`, and a row that
+        // showed it empty could neither keep nor remove it on purpose.
+        let names = crate::cpm::image::drive_image_names();
         self.cpm_mount_draft = (0..crate::cpm::NUM_DRIVES as usize)
             .map(|i| {
-                mounts
+                names
                     .get(i)
-                    .and_then(|m| m.as_ref())
-                    .map(|m| m.filename.clone())
+                    .and_then(|n| n.clone())
                     .unwrap_or_default()
             })
             .collect();
@@ -2466,13 +2468,9 @@ impl App {
         self.save_config_now();
         // Re-seed from what actually happened, so a refused row snaps back to
         // the truth instead of showing a choice that did not take.
-        let mounts = crate::cpm::image::registry::all();
+        let names = crate::cpm::image::drive_image_names();
         for (i, slot) in self.cpm_mount_draft.iter_mut().enumerate() {
-            *slot = mounts
-                .get(i)
-                .and_then(|m| m.as_ref())
-                .map(|m| m.filename.clone())
-                .unwrap_or_default();
+            *slot = names.get(i).and_then(|n| n.clone()).unwrap_or_default();
         }
     }
 

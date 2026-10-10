@@ -1889,24 +1889,7 @@ pub fn load_or_create_config() -> Config {
                         );
                         return kept;
                     }
-                    Err(()) => {
-                        glog!("FATAL: {} exists but could not be read: {}", CONFIG_FILE, e);
-                        glog!("       Refusing to start rather than overwrite it with");
-                        glog!("       insecure defaults.");
-                        // Why it happened, when we can tell — a permission
-                        // error on a file somebody else owns is almost always
-                        // the sudo-once trap.
-                        let (uid, name) = current_owner_identity();
-                        for line in unreadable_config_diagnosis(
-                            e.kind(),
-                            file_owner_uid(&path),
-                            uid,
-                            name.as_deref(),
-                        ) {
-                            glog!("{}", line);
-                        }
-                        std::process::exit(1);
-                    }
+                    Err(()) => refuse_unreadable_config(&path, &e),
                 }
             }
         }
@@ -1924,6 +1907,22 @@ pub fn load_or_create_config() -> Config {
     cfg
 }
 
+/// Stop the process over an existing `egateway.conf` that cannot be read,
+/// saying why when that can be told.  Never falls back to defaults: that would
+/// downgrade a secured gateway to security off and the published password.
+fn refuse_unreadable_config(path: &str, e: &std::io::Error) -> ! {
+    glog!("FATAL: {} exists but could not be read: {}", CONFIG_FILE, e);
+    glog!("       Refusing to start rather than overwrite it with");
+    glog!("       insecure defaults.");
+    // Why it happened, when we can tell — a permission error on a file
+    // somebody else owns is almost always the sudo-once trap.
+    let (uid, name) = current_owner_identity();
+    for line in unreadable_config_diagnosis(e.kind(), file_owner_uid(path), uid, name.as_deref()) {
+        glog!("{}", line);
+    }
+    std::process::exit(1);
+}
+
 /// Read the configuration **without writing anything**, and store it in the
 /// global singleton.
 ///
@@ -1933,13 +1932,33 @@ pub fn load_or_create_config() -> Config {
 /// that from a copy that then backs off loses a save the running copy made in
 /// the meantime, and -- from an older binary -- drops every key it does not
 /// know.  The file belongs to whoever holds the lock.  So: no create, no
-/// rewrite, no migration; a missing or unreadable file answers the defaults,
-/// in memory only.
+/// rewrite, no migration; a missing file answers the defaults, in memory only.
+///
+/// **An existing file it cannot read is refused exactly as
+/// `load_or_create_config` refuses it**, not answered with defaults.  The
+/// defaults say `enable_console = true`, so a copy reading them would offer
+/// Take Over on a box whose real file says headless -- and if the operator
+/// took over, the running copy would stand down and this one would then die
+/// on the same unreadable file, leaving no gateway at all.
 pub fn load_config_read_only() -> Config {
-    let cfg = read_config_file_checked(&config_file_path()).unwrap_or_default();
+    let path = config_file_path();
+    let cfg = match read_config_without_writing(&path) {
+        Ok(cfg) => cfg,
+        Err(e) => refuse_unreadable_config(&path, &e),
+    };
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(cfg.clone());
     cfg
+}
+
+/// The decision inside [`load_config_read_only`]: a missing file is the
+/// defaults, an existing one is read or is an error.
+fn read_config_without_writing(path: &str) -> std::io::Result<Config> {
+    if Path::new(path).exists() {
+        read_config_file_checked(path)
+    } else {
+        Ok(Config::default())
+    }
 }
 
 /// Put `cfg` in the global singleton and hand back what was there.
@@ -4988,6 +5007,26 @@ mod tests {
         assert!(!Path::new(&path).exists(), "the read-only loader created egateway.conf");
 
         swap_config_for_test(saved);
+    }
+
+    /// **An existing file the read-only loader cannot read is an error, not
+    /// the defaults.**  The defaults say `enable_console = true`: a second copy
+    /// reading them offered Take Over on a headless box, and taking over made
+    /// the running copy stand down and this one die on the same file -- no
+    /// gateway at all.  Only a *missing* file is the defaults.
+    #[test]
+    fn test_the_read_only_loader_refuses_an_unreadable_file() {
+        let dir = std::env::temp_dir().join(format!("eg-ro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("egateway.conf");
+        let path_s = path.to_str().unwrap();
+        std::fs::write(&path, [0xFFu8, 0xFE, b'\n']).unwrap();
+        assert!(read_config_without_writing(path_s).is_err(), "a non-UTF-8 file read as the defaults");
+        std::fs::remove_file(&path).unwrap();
+        let missing = read_config_without_writing(path_s).expect("a missing file is the defaults");
+        assert_eq!(missing.enable_console, Config::default().enable_console);
+        assert!(!path.exists(), "reading created the file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The reported failure was "the program will not run without root", and

@@ -191,7 +191,11 @@ impl TelnetSession {
             let ctx = self.cpmmount_context();
             let naming = ctx.naming.clone();
             let lent = image::registry::boot_loans();
-            let any = mounts.iter().any(|m| m.is_some()) || !lent.is_empty();
+            // Drives a booted session could not put back: still in
+            // `cpm_mounts`, so listed -- and `U` offered -- or nothing on this
+            // screen could take one out.
+            let unrestored = image::registry::unrestored();
+            let any = mounts.iter().any(|m| m.is_some()) || !lent.is_empty() || !unrestored.is_empty();
             // **Which disk holds slot 0**, from the same context as the slot
             // names.  Outside the `any` branch on purpose: with a disk set to
             // boot and nothing mounted -- the ordinary case -- the screen
@@ -271,6 +275,17 @@ impl TelnetSession {
                         self.cyan(&slot),
                         self.amber(&truncate_to_width(name, width)),
                         self.dim("(booted)"),
+                    ))
+                    .await?;
+                }
+                for (drive0, name) in &unrestored {
+                    let slot = ctx.slot(*drive0);
+                    let width = if self.terminal_type == TerminalType::Petscii { 18 } else { 50 };
+                    self.send_line(&format!(
+                        "   {} {} {}",
+                        self.cyan(&slot),
+                        self.amber(&truncate_to_width(name, width)),
+                        self.dim("(not back)"),
                     ))
                     .await?;
                 }
@@ -473,11 +488,15 @@ impl TelnetSession {
     async fn cpmmount_pick_unmount(&mut self) -> Result<(), std::io::Error> {
         let mounts = image::registry::all();
         let usage = image::registry::usage();
-        let listed: Vec<(u8, String, bool)> = mounts
+        let mut listed: Vec<(u8, String, bool)> = mounts
             .iter()
             .enumerate()
             .filter_map(|(i, m)| m.as_ref().map(|m| (i as u8, m.filename.clone(), m.read_only)))
             .collect();
+        // A drive a booted session could not put back is removed the same way
+        // (`unmount_drive` forgets it).
+        listed.extend(image::registry::unrestored().into_iter().map(|(d, n)| (d, n, false)));
+        listed.sort_by_key(|(d, _, _)| *d);
         if listed.is_empty() {
             return Ok(());
         }
