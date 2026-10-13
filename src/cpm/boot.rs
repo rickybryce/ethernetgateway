@@ -750,19 +750,27 @@ pub fn boot_target(transfer_dir: &str, boot_image: &str) -> BootTarget {
 /// `image_len` is `None` for an empty slot or one whose file cannot be read;
 /// under [`SlotNaming::Boards`] the board is chosen by the image's *size*, so
 /// without it the honest answer names the number and stops there.
-pub fn slot_name(naming: &SlotNaming, slot: u8, image_len: Option<u64>) -> String {
+///
+/// `machine` is the resolved machine key, and it matters: several boards take
+/// the same size (256,256 bytes is a Tarbell, a Cromemco and a z80pack disk),
+/// so asking without it names the slot after whichever board is listed first.
+/// The boot screen used to do exactly that while looking the *board* up with
+/// the machine -- one line, two answers to "which board is this?".
+pub fn slot_name(
+    naming: &SlotNaming,
+    machine: Option<&str>,
+    slot: u8,
+    image_len: Option<u64>,
+) -> String {
     match naming {
         SlotNaming::Drives => format!("{}:", (b'A' + slot) as char),
-        SlotNaming::Boards => match image_len.and_then(|len| slot_label(len, slot)) {
+        SlotNaming::Boards => match image_len
+            .and_then(|len| super::boot_machine::BootMachine::slot_label(machine, len, slot))
+        {
             Some(label) => label,
             None => format!("slot {slot}"),
         },
     }
-}
-
-/// What the board taking an image this size calls slot `slot`.
-pub fn slot_label(image_len: u64, slot: u8) -> Option<String> {
-    super::boot_machine::BootMachine::slot_label(None, image_len, slot)
 }
 
 /// Will this mount refuse writes, for whichever of the two runs CP/M?
@@ -947,14 +955,16 @@ impl std::fmt::Display for BootError {
     }
 }
 
-// WHERE THIS STANDS, for whoever picks it up next.
+// FOR WHOEVER PICKS THIS UP NEXT.
 //
-// Altair CP/M boots to its `A>` prompt, and so do the eight other CP/M images
-// in the sample set.  The MITS operating systems — Altair DOS, Disk BASIC and
-// Time Sharing BASIC — load and run their loaders too.
+// Which disks boot is not written down here, because it was once, and went
+// stale: it is MEASURED, and the answer is `nonbooting.txt` (the disks that
+// do not) and `repodisks.txt` (every disk, marked).  Re-record both rather
+// than reasoning about a disk -- see versionchange.txt for the order.
 //
-// The diagnostics that got it there are still in the boot test and are worth
-// reaching for before theorising: `CPM_BOOT_TRACE` prints the first PCs,
+// The diagnostics that got the first disks booting are in the boot test
+// (`boot_machine.rs`) and are worth reaching for before theorising:
+// `CPM_BOOT_TRACE` prints the first PCs,
 // `CPM_BOOT_DISASM=addr:count` disassembles what actually landed in memory,
 // `CPM_BOOT_STEP` forces a different sector step, and the test prints a
 // per-port access count.  Every fault found so far was visible in one of them
@@ -1309,9 +1319,9 @@ pub(crate) mod tests {
         );
 
         // The emulator's names never mention a board — its drives are ours.
-        assert_eq!(slot_name(&SlotNaming::Drives, 0, None), "A:");
-        assert_eq!(slot_name(&SlotNaming::Drives, 1, Some(337_568)), "B:");
-        assert_eq!(slot_name(&SlotNaming::Drives, 15, None), "P:");
+        assert_eq!(slot_name(&SlotNaming::Drives, None, 0, None), "A:");
+        assert_eq!(slot_name(&SlotNaming::Drives, None, 1, Some(337_568)), "B:");
+        assert_eq!(slot_name(&SlotNaming::Drives, None, 15, None), "P:");
     }
 
     /// A booted slot is named by the board the image's **size** puts it on, and
@@ -1335,15 +1345,15 @@ pub(crate) mod tests {
             .expect("the floppy medium is in the table");
         let platter = 4_988_928u64;
 
-        let f = slot_name(&SlotNaming::Boards, 1, Some(floppy));
-        let h = slot_name(&SlotNaming::Boards, 1, Some(platter));
+        let f = slot_name(&SlotNaming::Boards, None, 1, Some(floppy));
+        let h = slot_name(&SlotNaming::Boards, None, 1, Some(platter));
         assert_eq!(f, "drive 1", "a floppy board has drives");
         // Two coordinates, because the 88-HDSK's slots are not a flat row: a
         // drive carries four platters and each is one image, so slot 1 is the
         // *first* drive's *second* platter — which is what Altair Hard Disk
         // BASIC calls disk 1.
         assert_eq!(h, "unit 0.1", "an 88-HDSK slot is a platter on a drive");
-        assert_eq!(slot_name(&SlotNaming::Boards, 5, Some(platter)), "unit 1.1");
+        assert_eq!(slot_name(&SlotNaming::Boards, None, 5, Some(platter)), "unit 1.1");
         assert_ne!(f, h, "the two boards must not read the same at the same slot");
 
         // The board itself is a separate question, asked by the surfaces with
@@ -1363,9 +1373,27 @@ pub(crate) mod tests {
         // A size no board takes, and an unknown size, both fall back to the bare
         // number — never to a drive letter, which would be the one answer that
         // says something untrue.  The board reads as absent rather than guessed.
-        assert_eq!(slot_name(&SlotNaming::Boards, 2, Some(4_242)), "slot 2");
+        assert_eq!(slot_name(&SlotNaming::Boards, None, 2, Some(4_242)), "slot 2");
         assert_eq!(board(4_242), None);
-        assert_eq!(slot_name(&SlotNaming::Boards, 3, None), "slot 3");
+        assert_eq!(slot_name(&SlotNaming::Boards, None, 3, None), "slot 3");
+    }
+
+    /// **The slot is named by the configured machine's boards, not by any
+    /// board that takes the size.** An 88-HDSK platter on a z80pack machine is
+    /// on no board that machine has, so it gets the bare number -- the same
+    /// answer `board_for` gives with the machine -- and not the HDSK's
+    /// `unit 0.1`, which is what asking without the machine said.
+    #[test]
+    fn test_a_slot_is_named_by_the_machine_that_is_running() {
+        let platter = crate::cpm::hdsk::IMAGE_LEN;
+        assert_eq!(slot_name(&SlotNaming::Boards, None, 1, Some(platter)), "unit 0.1");
+        assert_eq!(
+            crate::cpm::boot_machine::BootMachine::board_for(Some("z80pack"), platter),
+            None,
+            "the premise: z80pack carries no 88-HDSK"
+        );
+        assert_eq!(slot_name(&SlotNaming::Boards, Some("z80pack"), 1, Some(platter)), "slot 1");
+        assert_eq!(slot_name(&SlotNaming::Boards, Some("altair_2sio"), 1, Some(platter)), "unit 0.1");
     }
 
     /// **A slot name has to leave room for the filename beside it.**
@@ -1398,7 +1426,7 @@ pub(crate) mod tests {
         for naming in [SlotNaming::Drives, SlotNaming::Boards] {
             for &len in &sizes {
                 for slot in 0..crate::cpm::NUM_DRIVES {
-                    let name = slot_name(&naming, slot, Some(len));
+                    let name = slot_name(&naming, None, slot, Some(len));
                     let row = INDENT + name.chars().count() + 1 + FILENAME;
                     assert!(
                         row <= PETSCII_COLS,
@@ -1852,7 +1880,7 @@ pub(crate) mod tests {
             let naming = boot_target(&transfer, stale).slot_naming();
             assert_eq!(naming, SlotNaming::Drives, "{stale} runs the emulator");
             // The consequence on the rows themselves, not just on the enum.
-            assert_eq!(slot_name(&naming, 1, Some(337_568)), "B:");
+            assert_eq!(slot_name(&naming, None, 1, Some(337_568)), "B:");
         }
 
         // And the disk that *is* there boots, at the path the session opens.

@@ -818,8 +818,11 @@ impl TelnetSession {
             // exactly what happened to the board itself.
             let board =
                 crate::cpm::boot_machine::BootMachine::board_for(Some(machine_key), len as u64);
+            // The same machine for both, so the name and the board are one
+            // board's answer -- see `slot_name`.
             let slot = crate::cpm::boot::slot_name(
                 &crate::cpm::boot::SlotNaming::Boards,
+                Some(machine_key),
                 step.unit,
                 Some(len as u64),
             );

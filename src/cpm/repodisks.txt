@@ -30,7 +30,7 @@ you are making.  Booting and mounting are different things:
                nothing with.
 
 A disk that carries a boot program which does NOT start here says
-so on its own line, under the summary, with the reason.  Twelve do.
+so on its own line, under the summary, with the reason.  12 do.
 They are still listed and still mountable -- they are simply not
 offered as boot disks, because a picker full of disks that will not
 start is worse than a short one: nothing tells you which is which
@@ -1398,7 +1398,7 @@ ZORK3.DAT
 
 >> DISK0B.DSK
    (hansel)  neither -- data in another system's format
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> DISK0C.DSK
@@ -1408,7 +1408,7 @@ ZORK3.DAT
 
 >> DISK0D.DSK
    (hansel)  neither -- data in another system's format
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> DISK0E.DSK
@@ -1418,7 +1418,7 @@ ZORK3.DAT
 
 >> DISK0F.DSK
    (hansel)  neither -- data in another system's format
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> DISK10.DSK
@@ -3095,14 +3095,14 @@ TARGET.PRN
 
 >> ucsd-i5-2.dsk
    (altairsim)  neither -- data in another system's format
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> ucsd-i5-interp.dsk
    (altairsim)  neither -- data in another system's format
       does not boot here:
       loads, and then reaches no sign-on here
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> ucsd-iv-1.dsk
@@ -3114,27 +3114,27 @@ TARGET.PRN
    (imsaisim)  neither -- data in another system's format
       does not boot here:
       needs the IMSAI FIF disk controller (port FDh), not emulated here
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> ucsd-iv-2.dsk
    (cpmsim)  neither -- data in another system's format
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> ucsd-iv-2.dsk
    (imsaisim)  neither -- data in another system's format
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> ucsd-iv-interp.dsk
    (cpmsim)  neither -- data in another system's format
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> ucsd-iv-interp.dsk
    (imsaisim)  neither -- data in another system's format
-(no CP/M filesystem -- this disk boots its own system)
+(no CP/M filesystem)
 
 
 >> um-cpm13.dsk

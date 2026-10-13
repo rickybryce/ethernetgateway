@@ -247,12 +247,13 @@ that file says where each comes from.
 MOUNTING IS NOT BOOTING
 -----------------------
 
-An Altair 88-DCDD floppy or an 88-HDSK hard disk can also be BOOTED, which
-is a different thing.  Mounting gives you one drive of sixteen with the
-gateway's CP/M underneath.  Booting hands the disk the whole machine, and
-its OWN operating system runs — so booting reaches the disks that are not
-CP/M at all: Altair DOS, Altair Disk Extended BASIC, Time Sharing BASIC,
-Hard Disk BASIC, and CP/M 3.0.
+A disk with a boot program on it can also be BOOTED, which is a different
+thing (FORMATS YOU CAN BOOT, below, lists the boards that can do it).
+Mounting gives you one drive of sixteen with the gateway's CP/M
+underneath.  Booting hands the disk the whole machine, and its OWN
+operating system runs — so booting reaches the disks that are not CP/M at
+all: Altair DOS, Altair Disk Extended BASIC, Time Sharing BASIC, Hard Disk
+BASIC, and CP/M 3.0.
 
 Inside a booted disk there is no jail, no A> from us and no EGT8080.  Press
 ESC twice to get back to the gateway.  A booted image is held by one session
@@ -833,11 +834,12 @@ mod generate {
         /// own [`crate::cpm::boot::image_can_boot`] rather than a second
         /// opinion — so the catalogue and the picker cannot disagree.
         ///
-        /// That function is false for exactly one reason,
-        /// `Bootability::NoBootProgram`, which is the machine-independent
-        /// one: "cannot boot on any machine in any configuration". A disk
-        /// this machine merely has no *board* for still counts as bootable
-        /// here, which is what makes the answer safe to ship in a file.
+        /// That function is false for two reasons, and neither depends on this
+        /// machine's boards: `Bootability::NoBootProgram` ("cannot boot on any
+        /// machine in any configuration"), and a disk measured never to sign
+        /// on (`not_here`, below). A disk this machine merely has no *board*
+        /// for still counts as bootable here, which is what makes the answer
+        /// safe to ship in a file.
         boots: bool,
         /// Why this disk will not start here, when that is known.
         ///
@@ -1059,9 +1061,12 @@ mod generate {
             a.disk.to_ascii_lowercase().cmp(&b.disk.to_ascii_lowercase()).then(a.order.cmp(&b.order))
         });
 
+        // Counted, not typed: this said "Twelve do." in words, which was true
+        // only until the next re-record of `nonbooting.txt`.
+        let not_here = entries.iter().filter(|e| e.not_here.is_some()).count();
         let mut s = String::new();
         s.push_str(REPODISKS_HEADER);
-        s.push_str(
+        s.push_str(&format!(
             "\n\nWhat is on each disk image the gateway is known to run, so you can\n\
              tell which one you want before going to find it.  These are not\n\
              shipped with the gateway -- they are other people's collections, and\n\
@@ -1086,7 +1091,7 @@ mod generate {
              \x20              system's format, which this gateway can do\n\
              \x20              nothing with.\n\n\
              A disk that carries a boot program which does NOT start here says\n\
-             so on its own line, under the summary, with the reason.  Twelve do.\n\
+             so on its own line, under the summary, with the reason.  {not_here} do.\n\
              They are still listed and still mountable -- they are simply not\n\
              offered as boot disks, because a picker full of disks that will not\n\
              start is worse than a short one: nothing tells you which is which\n\
@@ -1096,7 +1101,7 @@ mod generate {
              whether it boots is the machine actually running it -- so none of\n\
              them is guessed from the others.  The third is why this file and\n\
              the three boot pickers cannot disagree: they read the same list.\n",
-        );
+        ));
 
         s.push_str("\n\n\nWHERE THEY COME FROM\n--------------------\n");
         for (tag, name, _rel, from, _only) in REPOS {
@@ -1142,7 +1147,15 @@ mod generate {
                     }
                 }
                 Some(_) => s.push_str("(the CP/M directory is empty)\n"),
-                None => s.push_str("(no CP/M filesystem -- this disk boots its own system)\n"),
+                // Only a disk that was measured to boot gets told it does.  This
+                // used to say "this disk boots its own system" under every disk
+                // with no CP/M directory, so the eight `neither` disks -- data,
+                // no boot program -- contradicted their own summary line one
+                // line above it.
+                None if e.boots => {
+                    s.push_str("(no CP/M filesystem -- this disk boots its own system)\n")
+                }
+                None => s.push_str("(no CP/M filesystem)\n"),
             }
             s.push('\n');
         }
@@ -1783,6 +1796,38 @@ mod tests {
         assert!(s.matches("no CP/M filesystem -- this disk boots its own system").count() > 10);
         // A disk that *does* have a filesystem lists real 8.3 names.
         assert!(s.contains("\nPIP.COM\n"), "a listing looks like a CP/M directory");
+    }
+
+    /// **The note under a disk never contradicts the summary above it.**
+    ///
+    /// The generator used to write "this disk boots its own system" under every
+    /// disk with no CP/M directory, so ten `neither` disks -- data, nothing to
+    /// boot -- said `neither` on one line and "boots" on the next.  Checked per
+    /// entry against the summary, which may wrap onto a second line.
+    #[test]
+    fn test_the_catalogue_only_says_boots_under_a_disk_that_boots() {
+        let s = repo_disks();
+        let full = s.split("EVERY DISK IN FULL").nth(1).expect("the full section");
+        let mut checked = 0;
+        for entry in full.split("\n>> ").skip(1) {
+            let name = entry.lines().next().unwrap_or("");
+            let summary: String = entry
+                .lines()
+                .skip(1)
+                .take_while(|l| l.starts_with("   "))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let says_boots = entry.contains("this disk boots its own system");
+            let marked_boots = summary.contains(")  boots --");
+            if entry.contains("(no CP/M filesystem") {
+                checked += 1;
+                assert_eq!(
+                    says_boots, marked_boots,
+                    "{name}: the note and the summary disagree about booting: {summary:?}"
+                );
+            }
+        }
+        assert!(checked > 20, "only {checked} no-filesystem disks found; the split is wrong");
     }
 
     /// **A readme we wrote is refreshed; one the operator wrote is not.**
