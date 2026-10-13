@@ -55,10 +55,9 @@ use super::uart::UartFamily;
 /// doing what the real routine's caller is entitled to expect. It is not a host
 /// trap, and nothing in the port dispatch knows it exists.
 ///
-/// Deliberately a list of placements rather than one blob. Cromemco's 16FDC
-/// cold-starts from a 4 KB ROM at `C000` with a dozen entry points, so the next
-/// user of this is much larger than a six-byte stub, and the shape should not
-/// have to change to admit it.
+/// Deliberately a list of placements rather than one blob, so a ROM much larger
+/// than a six-byte stub fits the same shape: [`super::rom`] loads an operator's
+/// own monitor ROM file into it, as one or more runs of bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RomImage {
     /// Where each run of bytes belongs.
@@ -165,15 +164,15 @@ const ALTAIR_BOARDS: &[Board] = &[Board::Dcdd, Board::Hdsk, Board::Tarbell];
 /// One selectable machine: the config value, a description for the UIs, the
 /// console the guest will find, and the disk controllers it carries.
 ///
-/// Named for the *machine* and not for the console alone, even though today
-/// every entry differs only in its console. That is deliberate and it is not
-/// speculative generality: 256,256 bytes is already claimed by the Tarbell and
-/// will be claimed by Cromemco and by z80pack's simulated controller, and
+/// Named for the *machine* and not for the console alone, because a machine is
+/// a console *and* a set of disk controllers. 256,256 bytes is claimed by the
+/// Tarbell, by Cromemco and by z80pack's simulated controller, and
 /// `Controller::accepts` hands an image to the first board that recognises the
-/// length. Resolving that needs an operator's choice, it needs to live on this
-/// same setting, and renaming a config key across telnet, web and desktop later
-/// is precisely the duplicated-rule churn that has produced defects here three
-/// times. One key now, with room in it.
+/// length -- so which boards a machine carries is what decides which of them
+/// gets a disk that size. That choice lives on this one setting rather than a
+/// second key, because renaming or splitting a config key across telnet, web
+/// and desktop is precisely the duplicated-rule churn that has produced defects
+/// here three times.
 pub struct MachineChoice {
     /// Canonical config value (stored in `egateway.conf`).
     pub key: &'static str,

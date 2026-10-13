@@ -167,11 +167,11 @@ pub fn machine_for(configured: &str, image: &[u8]) -> (String, Option<String>) {
 /// port at `C8h` — and a driver has to write it. Nothing else this gateway
 /// emulates answers there.
 ///
-/// **Measured across all 75 images in the four collections.** `OUT C8h` in the
-/// system tracks fires on exactly two, TDISK04 and `cpm14-vdm`, and both really
-/// are VDM-1 disks: **zero false positives**. The conjunction first proposed —
-/// the port *and* an address in the `CC00`–`CFFF` window — turned out to be
-/// unnecessary, because the address half is worthless on its own: 60 of the 75
+/// **Measured 2026-08-09, across all 75 images in the four collections then.**
+/// `OUT C8h` in the system tracks fires on exactly two, TDISK04 and `cpm14-vdm`,
+/// and both really are VDM-1 disks: **zero false positives**. The conjunction first
+/// proposed — the port *and* an address in the `CC00`–`CFFF` window — turned out to
+/// be unnecessary, because the address half is worthless on its own: 60 of the 75
 /// address that page for reasons that have nothing to do with a video card. The
 /// port alone is the declaration.
 ///
@@ -221,10 +221,10 @@ pub const IMSAI_FIF_REASON: &str =
 /// OUT 09`, every IMSAI loader drives `OUT FDh`, and **not one port is in
 /// common**.
 ///
-/// **Measured across all 60 images in the seven collections**, and at every
-/// window from one sector to the full system tracks: `OUT FDh` fires on exactly
-/// seven, all of them IMSAI, with **zero false positives** at any width. The
-/// width therefore follows the rest of this module rather than being tuned.
+/// **Measured 2026-09-19, across all 60 images in the seven collections then**, and
+/// at every window from one sector to the full system tracks: `OUT FDh` fires on
+/// exactly seven, all of them IMSAI, with **zero false positives** at any width.
+/// The width therefore follows the rest of this module rather than being tuned.
 pub fn image_drives_imsai_fif(image: &[u8]) -> bool {
     let (_, outs) = ports_touched(image, SYSTEM_SCAN_BYTES);
     outs.contains(&IMSAI_FIF_PORT)
@@ -238,11 +238,11 @@ pub fn image_drives_imsai_fif(image: &[u8]) -> bool {
 /// monitor is there, and the two that do it here both go on to print that they
 /// need CUTER and stop.  See [`super::rom::ROM_CHOICES`] for the disassembly.
 ///
-/// **Measured across all 74 images reachable in the two Altair collections**:
-/// this fires on `DISK11.DSK` and on the Altair-Duino collection's
+/// **Measured 2026-08-23, across all 74 images then reachable in the two Altair
+/// collections**: this fires on `DISK11.DSK` and on the Altair-Duino collection's
 /// `DISK16.DSK`, which is Hansel's `DISK11` byte for byte — one disk under two
-/// numbers, the same pattern already documented for `DISK17`/`DISK12`.  Zero
-/// other hits.
+/// numbers, the same pattern already documented for `DISK17`/`DISK12`.  Zero other
+/// hits.
 ///
 /// **A call into the window would not do.**  Scanning for `CALL C0xx`–`C7xx`
 /// instead fires on **45** of the 74 — every disk with a BIOS jump table up

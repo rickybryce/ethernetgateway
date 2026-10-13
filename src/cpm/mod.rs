@@ -1926,10 +1926,6 @@ mod tests {
 
     #[test]
     fn test_bios_jump_table_installed() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         // load_com lays a real 17-entry BIOS jump table; the warm-boot
         // pointer at 0x0001 points at its WBOOT entry (the 2nd slot) so a
         // guest that reads 0x0001 walks a real table, and each slot is a
@@ -1947,10 +1943,6 @@ mod tests {
 
     #[test]
     fn test_bios_conout_through_table_and_direct() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         // Both ways a guest reaches CONOUT (vector 4) must trap: CALLing the
         // jump-table slot (`JP` lands on the trap) and — like MBASIC —
         // CALLing the extracted operand address directly.
@@ -1967,10 +1959,6 @@ mod tests {
 
     #[test]
     fn test_bios_conin_returns_value_and_rets() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         // CALL CONIN (vector 3), host supplies a byte via bios_return, and
         // the guest stores A to a buffer then warm-boots — proving the
         // BIOS call returns the value in A and RETs to the caller.
@@ -2028,10 +2016,6 @@ mod tests {
 
     #[test]
     fn test_bios_conout_arg_in_c() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         // CONOUT takes its character in C (arg_c), unlike BDOS 2's E.
         // 0100: 0E 41      LD C,'A'
         // 0102: CD 0C FF   CALL CONOUT
@@ -2087,10 +2071,6 @@ mod tests {
 
     #[test]
     fn test_runaway_hits_instruction_budget() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         // JP $ (tight infinite loop): 0100: C3 00 01
         let prog = [0xC3, 0x00, 0x01];
         let mut cpm = Cpm::new();
@@ -2102,10 +2082,6 @@ mod tests {
 
     #[test]
     fn test_bdos_read_buffer_writes_cpm_layout() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         let mut cpm = Cpm::new();
         let de = 0x0200u16;
         // Caller sets the maximum length in byte 0.
@@ -2122,10 +2098,6 @@ mod tests {
 
     #[test]
     fn test_bdos_read_buffer_truncates_to_max() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         let mut cpm = Cpm::new();
         let de = 0x0300u16;
         cpm.mem.poke(de, 3); // max 3
@@ -2243,9 +2215,9 @@ mod tests {
     /// on.
     #[test]
     fn test_program_file_io_roundtrip() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_prog_io");
         let _ = std::fs::remove_dir_all(&base);
@@ -2309,9 +2281,9 @@ mod tests {
 
     #[test]
     fn test_bdos_login_vector_lists_all_drives() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_login");
         let _ = std::fs::remove_dir_all(&base);
@@ -2333,9 +2305,9 @@ mod tests {
     /// running here would never notice a `SUBMIT` batch already in progress.
     #[test]
     fn test_bdos_reset_reports_temp_file_and_resets_state() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_reset13");
         let _ = std::fs::remove_dir_all(&base);
@@ -2389,9 +2361,9 @@ mod tests {
     /// documented contract is 255 when the name is not in the directory.
     #[test]
     fn test_bdos_close_reports_a_missing_file() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir()
             .join(format!("xmodem_cpm_close_{}", std::process::id()));
@@ -2462,9 +2434,9 @@ mod tests {
 
     #[test]
     fn test_bdos_user_number_get_set() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_user");
         let _ = std::fs::remove_dir_all(&base);
@@ -2485,9 +2457,9 @@ mod tests {
 
     #[test]
     fn test_bdos_iobyte_get_set_roundtrip() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         // BDOS 8 (Set I/O Byte) stores E at the IOBYTE address; BDOS 7 (Get
         // I/O Byte) reads it back — a set-then-get round-trip is now
@@ -2515,9 +2487,9 @@ mod tests {
     /// unable to see the protection it had just asked for.
     #[test]
     fn test_bdos_write_protect_and_ro_vector() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_wp");
         let _ = std::fs::remove_dir_all(&base);
@@ -2557,9 +2529,9 @@ mod tests {
     /// trick.  System/Archive are accepted and ignored, not faked.
     #[test]
     fn test_bdos_set_file_attributes_ro_bit() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_attr");
         let _ = std::fs::remove_dir_all(&base);
@@ -2608,9 +2580,9 @@ mod tests {
     /// the guest can act on, not the fake success an unhandled function gets.
     #[test]
     fn test_bdos_write_to_protected_drive_reports_error() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_wpwrite");
         let _ = std::fs::remove_dir_all(&base);
@@ -2647,9 +2619,9 @@ mod tests {
 
     #[test]
     fn test_cdisk_byte_tracks_drive_and_user() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         // Page-zero CDISK (0x0004): low nibble = drive, high nibble = user.
         // A program that reads it directly (Infocom's interpreter, to find
@@ -2726,9 +2698,9 @@ mod tests {
 
     #[test]
     fn test_bdos_write_random_zero_fill_persists() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_wr40");
         let _ = std::fs::remove_dir_all(&base);
@@ -2763,9 +2735,9 @@ mod tests {
 
     #[test]
     fn test_disk_info_bdos_dpb_and_free_space() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_diskinfo");
         let _ = std::fs::remove_dir_all(&base);
@@ -2837,9 +2809,9 @@ mod tests {
 
     #[test]
     fn test_get_alloc_preserves_bios_table() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         // Regression: servicing BDOS 27 (Get-Alloc) must not corrupt the BIOS
         // jump table.  Before the scratch relocation, the 256-byte alloc
@@ -2870,10 +2842,6 @@ mod tests {
 
     #[test]
     fn test_setup_command_line_page_zero() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         let mut cpm = Cpm::new();
         cpm.load_com(&[0xC9]); // RET
         cpm.setup_command_line("B:FOO.TXT BAR.DAT");
@@ -2899,10 +2867,6 @@ mod tests {
 
     #[test]
     fn test_setup_command_line_empty_tail() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         let mut cpm = Cpm::new();
         cpm.load_com(&[0xC9]);
         cpm.setup_command_line("");
@@ -2921,9 +2885,9 @@ mod tests {
     /// BDOS 9, the same path the CCP-lite driver uses.
     #[test]
     fn test_run_com_loaded_from_drive() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let base = std::env::temp_dir().join("xmodem_cpm_run_from_drive");
         let _ = std::fs::remove_dir_all(&base);
@@ -2975,10 +2939,6 @@ mod tests {
 
     #[test]
     fn test_load_com_reinstalls_low_vectors() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         // A program can trash page zero; the next load_com must restore the
         // warm-boot (0x0000) and BDOS (0x0005) JP vectors so the following
         // program's CALL 5 / warm boot still behave — mirrors CP/M reloading
@@ -2992,10 +2952,6 @@ mod tests {
 
     #[test]
     fn test_tpa_persists_across_loads() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         // The machine persists across program runs: memory a prior program
         // left in the TPA (above the next program) survives the next
         // load_com. This is what lets SAVE dump a previous program's image.
@@ -3009,10 +2965,6 @@ mod tests {
 
     #[test]
     fn test_abort_flag_stops_the_loop() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
-        let _g = crate::cpm::image::registry::tests_lock();
         // Same tight loop, but the abort flag is already set: no progress.
         let prog = [0xC3, 0x00, 0x01];
         let mut cpm = Cpm::new();

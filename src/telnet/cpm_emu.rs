@@ -3167,9 +3167,9 @@ mod repl_tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_each_program_starts_with_the_default_dma() {
-        // Constructing a CP/M machine registers a session in the
-        // process-global image registry, which makes drives look busy to
-        // every other test.  Serialise with the registry tests.
+        // `CpmFs::new` registers a session in the process-global image
+        // registry, which makes drives look busy to every other test.
+        // Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
         let (base, mut fs) = scratch_fs("dma");
         let (mut sess, _peer) = make_test_session_with_peer(TerminalType::Ascii);
