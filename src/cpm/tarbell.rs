@@ -230,6 +230,16 @@ impl Tarbell {
     }
 }
 
+/// Whether `CPM_TARBELL_TRACE` is set, read once.
+///
+/// A bring-up trace, so it is consulted on every command the guest writes --
+/// and an environment lookup takes the process's environment lock each time.
+/// The answer cannot change while the gateway runs, so it is asked once.
+fn trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CPM_TARBELL_TRACE").is_some())
+}
+
 impl Controller for Tarbell {
     fn name(&self) -> &'static str {
         "Tarbell 1011 floppy"
@@ -253,7 +263,7 @@ impl Controller for Tarbell {
 
     fn port_out(&mut self, port: u8, value: u8) -> HostRequest {
         if port == PORT_WAIT {
-            if std::env::var_os("CPM_TARBELL_TRACE").is_some() {
+            if trace() {
                 eprintln!("tarbell ext {value:02x} (fn {:03b})", value & 0b111);
             }
             if value & 0b111 == FN_LATCH {
@@ -270,7 +280,7 @@ impl Controller for Tarbell {
         // A command has to be judged against the drive that is actually selected.
         if port & 0x03 == 0 {
             self.refresh_drive();
-            if std::env::var_os("CPM_TARBELL_TRACE").is_some() {
+            if trace() {
                 eprintln!(
                     "tarbell cmd {:02x} drive {} track {} sector {}",
                     value,
@@ -311,11 +321,11 @@ impl Controller for Tarbell {
                 "the Tarbell board selects drives 0 and 1 only; drive {drive} can never be reached"
             ));
         }
-        let d = self
-            .drives
-            .get_mut(drive as usize)
-            .ok_or_else(|| format!("the Tarbell addresses drives 0-3, not {drive}"))?;
-        *d = Drive { present: true, read_only };
+        // In range by the check above. This used to fall back to "the Tarbell
+        // addresses drives 0-3", which the drive 0/1 refusal made unreachable
+        // and which contradicted it; the bound is now the compiler's to hold.
+        const { assert!(SELECTABLE as usize <= DRIVES) };
+        self.drives[drive as usize] = Drive { present: true, read_only };
         if drive == self.selected {
             self.refresh_drive();
         }

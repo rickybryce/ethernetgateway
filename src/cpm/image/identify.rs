@@ -28,7 +28,9 @@
 //! size.** So a size does not select *between* formats at all; it names one. The
 //! realistic danger is therefore not "the wrong one of two candidates" but "a
 //! file of that size which is not a CP/M filesystem at all" — a UCSD p-System
-//! disk is 256,256 bytes, and so is a Cromemco CDOS one.
+//! disk is 256,256 bytes.  (A Cromemco CDOS disk is too, and is *not* an
+//! example: CDOS keeps a CP/M-compatible filesystem, and `CDISK01` is
+//! identified writable by exactly this inspection.)
 //!
 //! And *that* question is answerable, by applying the same class of check the
 //! write path already trusts, up front and to the whole directory rather than to
@@ -552,8 +554,15 @@ pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'stat
     let mut other = 0usize;
 
     for e in dir.as_chunks::<32>().0 {
-        // Free, in either spelling.
-        if e[0] == 0xE5 {
+        // Free, in either spelling -- `E5`, or a user byte and name of zeros,
+        // exactly the rule `ImageFs::free_dir_slot` mounts by.  This said
+        // "either spelling" and checked only `E5`, so a disk whose format
+        // program zero-filled its directory failed here as "a filename that is
+        // not printable 8.3" and mounted read-only, while the mount path would
+        // have read the same slots as free.  A directory of zeros from end to
+        // end never reaches this function: `looks_like_directory` finds no live
+        // entry and `is_erased_directory` demands `E5`, so `identify` drops it.
+        if e[0] == 0xE5 || (e[0] == 0 && e[1..12].iter().all(|&c| c == 0)) {
             continue;
         }
         // CP/M 3 disc labels and timestamp records are legitimate and carry no
@@ -1217,6 +1226,40 @@ mod tests {
         let mut d = [0xE5u8; 2048];
         d[0] = 0;
         assert!(!is_erased_directory(&d));
+    }
+
+    /// **A zero-filled free slot is free here exactly as it is to the mount.**
+    ///
+    /// Some format programs write zeros rather than `E5`, and `ImageFs` has
+    /// always read an all-zero entry as free.  This check did not, so such a
+    /// disk -- one real file, every other slot zero -- was identified read-only
+    /// as "a filename that is not printable 8.3", while the mount beside it
+    /// would have written to it happily.
+    #[test]
+    fn test_a_zero_filled_free_slot_is_free() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut dir = consistent_dir(fmt);
+        dir[32..].fill(0);
+        assert_eq!(directory_is_consistent(&dir, fmt), Ok(()), "zeros are a free slot");
+
+        // And end to end: no token, so the size names the format and the whole
+        // directory decides -- writable, not sniffed.
+        let id = identify("unnamed.dsk", fmt.min_bytes(), |f| {
+            (f.token == fmt.token).then(|| dir.clone())
+        })
+        .expect("identified");
+        assert!(!id.force_read_only(), "a sound disk with zeroed slots is writable: {:?}", id.why);
+
+        // Still strict: a slot that is zero in its user byte but carries a
+        // name is a real entry and is judged as one.
+        let mut bad = consistent_dir(fmt);
+        bad[32..].fill(0);
+        bad[33] = 0x01;
+        assert_eq!(
+            directory_is_consistent(&bad, fmt),
+            Err("a filename that is not printable 8.3"),
+            "only an entry zero in its user byte AND its name is free"
+        );
     }
 
     /// A blank formatted disk must be writable. Refusing to write to an empty

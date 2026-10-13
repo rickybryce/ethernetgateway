@@ -499,6 +499,16 @@ impl Cromemco {
     }
 }
 
+/// Whether `CPM_CROMEMCO_TRACE` is set, read once.
+///
+/// A bring-up trace, so it is consulted on every command the guest writes --
+/// and an environment lookup takes the process's environment lock each time.
+/// The answer cannot change while the gateway runs, so it is asked once.
+fn trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("CPM_CROMEMCO_TRACE").is_some())
+}
+
 impl Controller for Cromemco {
     fn name(&self) -> &'static str {
         "Cromemco 4FDC/16FDC floppy"
@@ -554,7 +564,7 @@ impl Controller for Cromemco {
                     // A command is judged against the drive and the track that
                     // are actually selected.
                     self.refresh_for(true);
-                    if std::env::var_os("CPM_CROMEMCO_TRACE").is_some() {
+                    if trace() {
                         eprintln!(
                             "cromemco cmd {value:02x} drive {} cyl {} side {} sector {} \
                              ctl {:02x} ({}{})",

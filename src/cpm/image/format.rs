@@ -441,9 +441,10 @@ pub struct Format {
     /// **No two formats here are the same size**, so a size names a format
     /// outright rather than merely shortlisting one.  It is still not
     /// sufficient on its own: a file can be exactly the right size and not hold
-    /// this filesystem at all — a UCSD p-System disk is 256,256 bytes, and so
-    /// is a Cromemco CDOS one — which is what the directory inspection in
-    /// `identify` decides.  (This used to say that two formats shared a size
+    /// this filesystem at all — a UCSD p-System disk is 256,256 bytes — which is
+    /// what the directory inspection in `identify` decides.  (A Cromemco CDOS
+    /// disk is 256,256 bytes too, but holds a CP/M-compatible filesystem and
+    /// passes that inspection.)  (This used to say that two formats shared a size
     /// and two more differed in layout at one size.  Neither was true, and the
     /// same false justification had been copied into `cpmreference.html`.)
     pub exact_size: Option<u64>,
@@ -680,7 +681,6 @@ impl Format {
 /// absent, because mounting one with wrong parameters would show a plausible
 /// file listing and hand back mangled data.
 pub const FORMATS: &[Format] = &[
-    // ---- 8" single density, 128-byte sectors -------------------------------
     // ---- Cromemco 8" double density, single sided, 625,920 bytes ----------
     //
     // Track 0 is recorded SINGLE density so a single-density boot ROM can read
@@ -804,6 +804,8 @@ pub const FORMATS: &[Format] = &[
         exm: None,
         exact_size: Some(4_177_920),
     },
+    // ---- 8" single density, 128-byte sectors, 256,256 bytes ---------------
+    //
     // The IBM 3740 layout, and the closest thing CP/M had to a universal disk.
     // Both the Tarbell and the Cromemco single-density 8" images are this.
     Format {
