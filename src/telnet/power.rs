@@ -88,6 +88,24 @@ fn sudo_timed_out_error() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::TimedOut, sudo_timed_out_line())
 }
 
+/// The screen line for a `sudo` that could not be run, or did not come back.
+///
+/// **A timeout is shown as itself, not as a failure to run.**  The password
+/// check used to wrap every error as `Could not run sudo: {e}`, and a timeout
+/// already *is* a sentence -- so a C64 was shown `Could not run sudo: sudo did
+/// not an...`, cut at the one part that said what happened, and every screen
+/// opened by claiming the failure that [`sudo_timed_out_line`] exists not to
+/// claim.  The probe never had the defect, because it returns that line bare;
+/// one function for both means the two cannot describe the event differently.
+///
+/// Anything else is unbounded OS text, so it is cut to `width`.
+pub(in crate::telnet) fn sudo_spawn_error_line(e: &std::io::Error, width: usize) -> String {
+    if e.kind() == std::io::ErrorKind::TimedOut {
+        return sudo_timed_out_line();
+    }
+    crate::webbrowser::truncate_to_width(&format!("Could not run sudo: {}", e), width)
+}
+
 /// Which way the machine is being taken down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PowerAction {
@@ -512,10 +530,7 @@ async fn probe_elevation_within(
         // the screen this lands on is 40 columns.  Cut here rather than at the
         // one call site, so a second caller cannot inherit an uncut version --
         // `sudo_error_line` is given a width for the same reason.
-        Err(e) => Err(crate::webbrowser::truncate_to_width(
-            &format!("Could not run sudo: {}", e),
-            PETSCII_WIDTH - 2,
-        )),
+        Err(e) => Err(sudo_spawn_error_line(&e, PETSCII_WIDTH - 2)),
     }
 }
 
@@ -1209,11 +1224,10 @@ impl TelnetSession {
                     .await?;
                     return Ok(true);
                 }
+                // Including the 30 s timeout, which must read as itself --
+                // see `sudo_spawn_error_line`.
                 Err(e) => {
-                    let msg = crate::webbrowser::truncate_to_width(
-                        &format!("Could not run sudo: {}", e),
-                        self.confirmation_content_width(),
-                    );
+                    let msg = sudo_spawn_error_line(&e, self.confirmation_content_width());
                     self.show_error(&msg).await?;
                     return Ok(true);
                 }

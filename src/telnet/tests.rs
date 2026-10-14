@@ -11887,6 +11887,82 @@ fn test_the_sudo_timeout_message_fits_and_does_not_claim_a_refusal() {
     }
 }
 
+/// A real timeout from [`run_elevated_within`] reaches the screen as itself.
+///
+/// The password check wrapped every error as `Could not run sudo: {e}`, and on
+/// a C64 that cut the timeout to `Could not run sudo: sudo did not an...` --
+/// the part that says what happened, gone, behind a claim of failure.  Driven
+/// with the error the runner really returns, not a hand-built one, so a
+/// change to how the timeout is reported cannot slip past.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_a_sudo_timeout_is_shown_whole_not_as_a_failure_to_run() {
+    use crate::telnet::power::{sudo_spawn_error_line, sudo_timed_out_line};
+    let err = crate::telnet::power::run_elevated_within(
+        Elevate::Direct,
+        None,
+        &["sleep", "30"],
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .expect_err("a command that outlives its budget must not return output");
+    for width in [PETSCII_WIDTH - 2, 78] {
+        assert_eq!(
+            sudo_spawn_error_line(&err, width),
+            sudo_timed_out_line(),
+            "at width {width} the timeout was rewritten",
+        );
+    }
+    // The control: any other error is still prefixed and still cut.
+    let other = std::io::Error::other("x".repeat(200));
+    let line = sudo_spawn_error_line(&other, PETSCII_WIDTH - 2);
+    assert!(line.starts_with("Could not run sudo: "), "{line:?}");
+    assert!(line.chars().count() <= PETSCII_WIDTH - 2, "{line:?}");
+}
+
+/// Both screens that report a sudo spawn error go through the one helper.
+///
+/// The helper above is only half the fix: the defect was a call site that
+/// formatted the error itself.  Bounded to `power_action` and the probe, with
+/// comments stripped, so the scan reads the code that draws the screen.
+#[cfg(unix)]
+#[test]
+fn test_the_power_page_reports_sudo_errors_through_one_helper() {
+    let src = include_str!("power.rs").replace('\r', "");
+    let body = |start: &str, end: &str| -> String {
+        let from = src.find(start).unwrap_or_else(|| panic!("{start} not found"));
+        let rest = &src[from..];
+        let to = rest.find(end).unwrap_or_else(|| panic!("{end} not found after {start}"));
+        rest[..to]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for (name, code) in [
+        ("power_action", body("async fn power_action(", "async fn power_confirm(")),
+        ("probe_elevation_within", body("async fn probe_elevation_within(", "fn direct_program(")),
+    ] {
+        assert!(
+            code.contains("sudo_spawn_error_line("),
+            "{name} no longer reports through sudo_spawn_error_line",
+        );
+        assert!(
+            !code.contains("\"Could not run sudo: {}\""),
+            "{name} formats a sudo error itself, which rewrites a timeout as a failure",
+        );
+    }
+}
+
+/// The help must not promise a password the machine may never ask for: a
+/// root gateway or a NOPASSWD rule asks for none.
+#[cfg(unix)]
+#[test]
+fn test_more_help_does_not_promise_a_password() {
+    let text = TelnetSession::more_help_lines().join(" ");
+    assert!(text.contains("password if needed"), "{text}");
+}
+
 /// A `Direct` run (already root) must not go anywhere near `sudo`.
 ///
 /// Driven with a harmless command rather than `shutdown`, which is the whole

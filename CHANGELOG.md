@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Second menu: a `sudo` that does not answer says so.**  When checking the
+  password took longer than 30 seconds, the screen read `Could not run sudo:
+  sudo did not an...` on a 40-column terminal &mdash; cut off before saying
+  what happened, and claiming a failure the gateway cannot know about.  It
+  now reads `sudo did not answer in 30s.`, as the elevation check already did.
+- **Second menu help no longer promises a password.**  It said both items ask
+  for one; a gateway running as root, or a `NOPASSWD` sudoers rule, asks for
+  none.  It now says "if needed", as the manual always has.
+
 ## [1.0.4] - 2026-10-10
 
 ### Security

@@ -2190,8 +2190,11 @@ impl TelnetSession {
             // two pages and the reader had to press a key to finish a short
             // explanation.  Measured on the live gateway, which said
             // "Page 1/2".
-            "  Both ask to confirm, then for a",
-            "  password. To restart the GATEWAY",
+            // "if needed": a root gateway or a NOPASSWD rule asks for none,
+            // and the manual (5.5) has always said so.  This said "then for
+            // a password" unconditionally.
+            "  Each confirms, then asks for a",
+            "  password if needed. GATEWAY restart",
             "  only: Configuration > Server > R.",
         ]
     }
