@@ -516,7 +516,24 @@ impl TelnetSession {
     ) -> Result<(), std::io::Error> {
         // Snapshot current config so we can detect changes and revert if needed.
         let original_cfg = config::get_config();
+        let shown = self.modem_settings_screen(id).await;
+        // Applied however the screen ended, not only on Q: a connection that
+        // drops inside a sub-screen (parity, flow, ...) has already saved what
+        // it changed there, and leaving that unapplied would hide it -- the
+        // next visit snapshots it as the starting point and sees no change.
+        // On the caller's own port, the apply finds the link gone and reverts.
+        let applied = self.modem_apply_settings(id, &original_cfg).await;
+        shown.and(applied)
+    }
 
+    /// The per-port settings screen.  Saves as it goes; [`modem_settings`]
+    /// applies the result when it returns, by whatever route.
+    ///
+    /// [`modem_settings`]: Self::modem_settings
+    async fn modem_settings_screen(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
@@ -621,20 +638,10 @@ impl TelnetSession {
                 ))
                 .await?;
             } else {
-                let petscii_state = if port.petscii_translate { "on" } else { "off" };
-                // The gateway's own PETSCII choice rides here too, abbreviated,
-                // for the same reason `PETSCII` does: this screen is at the
-                // 22-row budget and a fourth status row would push it over.
-                let gw_state = match port.gateway_petscii.as_str() {
-                    crate::serial::GW_PETSCII_TRANSLATE => "xlat",
-                    crate::serial::GW_PETSCII_PASSTHROUGH => "raw",
-                    _ => "dflt",
-                };
-                self.send_line(&format!(
-                    "  Flow: {}  PETSCII: {}  Gw: {}",
-                    self.amber(&port.flowcontrol),
-                    self.amber(petscii_state),
-                    self.amber(gw_state)
+                self.send_line(&self.modem_flow_row(
+                    &port.flowcontrol,
+                    port.petscii_translate,
+                    &port.gateway_petscii,
                 ))
                 .await?;
             }
@@ -757,10 +764,7 @@ impl TelnetSession {
 
             let input = match self.get_menu_input(false).await? {
                 Some(s) if !s.is_empty() => s,
-                _ => {
-                    self.modem_apply_settings(id, &original_cfg).await?;
-                    return Ok(());
-                }
+                _ => return Ok(()),
             };
 
             // The key set gates every arm below, so an arm cannot answer a key
@@ -797,8 +801,14 @@ impl TelnetSession {
                     .ok();
                     // Takes effect on the next bridge: the pump reads the
                     // setting once per session, so a user mid-command does not
-                    // have the wire changed under them.
-                    crate::serial::restart_serial(id);
+                    // have the wire changed under them -- and no restart here,
+                    // which would cut that user off.  Except on a slave: there
+                    // the port is the master's, and the master learns the erase
+                    // key only when the port registers (it warns before a
+                    // transfer from it), so the restart is what tells it.
+                    if crate::serial::console_relayed_to_master(&config::get_config(), id) {
+                        crate::serial::restart_serial(id);
+                    }
                 }
                 "g" => {
                     // Cycled in the shared list's own order, like every other
@@ -872,7 +882,6 @@ impl TelnetSession {
                     self.modem_show_help(id).await?;
                 }
                 "q" => {
-                    self.modem_apply_settings(id, &original_cfg).await?;
                     return Ok(());
                 }
                 _ => {
@@ -880,6 +889,34 @@ impl TelnetSession {
                 }
             }
         }
+    }
+
+    /// The modem-mode Flow status row, which carries the two PETSCII settings
+    /// as well.  The gateway's own PETSCII choice rides here, abbreviated, for
+    /// the same reason `PETSCII` does: this screen is at the 22-row budget and
+    /// a fourth status row would push it over.
+    ///
+    /// Single spaces between the three, because two made `hardware` / `off` /
+    /// `dflt` exactly 40 columns -- a row that fills a C64's 40 auto-wraps and
+    /// costs two rows of the twenty-two.
+    pub(in crate::telnet) fn modem_flow_row(
+        &self,
+        flow: &str,
+        petscii_translate: bool,
+        gateway_petscii: &str,
+    ) -> String {
+        let petscii_state = if petscii_translate { "on" } else { "off" };
+        let gw_state = match gateway_petscii {
+            crate::serial::GW_PETSCII_TRANSLATE => "xlat",
+            crate::serial::GW_PETSCII_PASSTHROUGH => "raw",
+            _ => "dflt",
+        };
+        format!(
+            "  Flow: {} PETSCII: {} Gw: {}",
+            self.amber(flow),
+            self.amber(petscii_state),
+            self.amber(gw_state)
+        )
     }
 
     /// Apply modem settings changes for a specific port.  For serial
@@ -1082,6 +1119,11 @@ impl TelnetSession {
             let parity_key = config::serial_key(id, "parity");
             let stopbits_key = config::serial_key(id, "stopbits");
             let flow_key = config::serial_key(id, "flowcontrol");
+            // These two are in `modem_apply_settings`' change test, so a
+            // change to either one asks for Y+Enter -- and must be undone
+            // here when it does not get it.
+            let petscii_key = config::serial_key(id, "petscii_translate");
+            let carrier_key = config::serial_key(id, "drive_carrier");
             let baud_str = port.baud.to_string();
             let databits_str = port.databits.to_string();
             let stopbits_str = port.stopbits.to_string();
@@ -1094,6 +1136,8 @@ impl TelnetSession {
                 (parity_key.as_str(), port.parity.as_str()),
                 (stopbits_key.as_str(), stopbits_str.as_str()),
                 (flow_key.as_str(), port.flowcontrol.as_str()),
+                (petscii_key.as_str(), if port.petscii_translate { "true" } else { "false" }),
+                (carrier_key.as_str(), if port.drive_carrier { "true" } else { "false" }),
             ]);
         })
         .await;
@@ -1152,7 +1196,10 @@ impl TelnetSession {
                     _ => return Ok(()),
                 };
                 let port_key = config::serial_key(id, "port");
-                match input.as_str() {
+                // The screen asks for R, N or Q in capitals, so they are taken
+                // in either case -- a capital letter falling through would be
+                // saved as the device path.  The path itself keeps its case.
+                match input.to_ascii_lowercase().as_str() {
                     "r" => continue,
                     "n" => {
                         let k = port_key.clone();
@@ -1223,7 +1270,8 @@ impl TelnetSession {
             };
 
             let port_key = config::serial_key(id, "port");
-            match input.as_str() {
+            // Either case, as above.
+            match input.to_ascii_lowercase().as_str() {
                 "r" => continue,
                 "n" => {
                     let k = port_key.clone();
@@ -1562,6 +1610,9 @@ impl TelnetSession {
         // which signals the serial thread to abort).  Timeout if the
         // serial thread never picks up the request.
         let local_telnet = self.speaks_telnet();
+        // Encoded before `self` is split below, so the line gets the same
+        // PETSCII case swap as everything else on this screen.
+        let ring_line = self.screen_bytes("  RING...\r\n").into_owned();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
@@ -1587,7 +1638,7 @@ impl TelnetSession {
                             timeout.as_mut().reset(tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(15));
                             let mut w = writer.lock().await;
-                            let _ = w.write_all(b"  RING...\r\n").await;
+                            let _ = w.write_all(&ring_line).await;
                             let _ = w.flush().await;
                         }
                         Some(1) => {

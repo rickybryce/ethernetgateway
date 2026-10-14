@@ -1474,7 +1474,15 @@ impl App {
         // no size rotation, and keep no rotated generations — matching the
         // config-file loader and `logger::should_rotate`/`rotate`.
         if let Ok(v) = self.log_max_size_kb_buf.parse::<u64>() { self.cfg.log_max_size_kb = v; }
-        if let Ok(v) = self.log_max_files_buf.parse::<u32>() { self.cfg.log_max_files = v; }
+        // Clamped, as the loader and `apply_config_key` do, with the buffer
+        // rewritten when it bites -- the `cpm_emu_max_minstr` rule below.
+        if let Ok(v) = self.log_max_files_buf.parse::<u32>() {
+            let clamped = v.min(crate::config::MAX_LOG_MAX_FILES);
+            self.cfg.log_max_files = clamped;
+            if clamped != v {
+                self.log_max_files_buf = clamped.to_string();
+            }
+        }
         // Same reasoning, same absent floor: `0` is the "auto" sentinel for
         // both, so a `>= 1` guard here would make automatic geometry
         // unreachable from the GUI (see config::gateway_term_hint).
@@ -1864,7 +1872,11 @@ impl App {
         // sync on the next frame, so cfg still holds the pre-edit numbers while
         // the operator is typing and the figure would lag a keystroke behind.
         let size_kb = self.log_max_size_kb_buf.parse::<u64>().unwrap_or(self.cfg.log_max_size_kb);
-        let files = self.log_max_files_buf.parse::<u32>().unwrap_or(self.cfg.log_max_files);
+        let files = self
+            .log_max_files_buf
+            .parse::<u32>()
+            .map(|v| v.min(crate::config::MAX_LOG_MAX_FILES))
+            .unwrap_or(self.cfg.log_max_files);
         // Shared with the web so the two cannot word this differently (they had
         // already drifted).  It also owns the "blank path is off too" rule.
         let hint = logger::log_state_hint(&self.cfg, size_kb, files);
@@ -6506,12 +6518,25 @@ impl eframe::App for App {
                 // the operator walks it through to Save; this popup closes so
                 // the wizard has the window to itself.  GUI-only by design —
                 // the telnet and web config UIs have no equivalent.
+                //
+                // Not while the editor holds unsaved edits.  The wizard opens
+                // from `self.cfg`, edits and all, and either way out of it saves
+                // the whole of `self.cfg` -- so "Exit setup -- keep current
+                // settings" would save edits the operator never pressed Save
+                // for, which is the opposite of `quit()`'s rule.  `dirty`, not a
+                // fresh `has_unsaved_edits()`: it is the flag that Exit path's
+                // `refresh_from_global` obeys, and it stays set until a save.
+                let unsaved = self.dirty;
                 if ui
-                    .button(
-                        egui::RichText::new("Run setup wizard...")
-                            .strong()
-                            .color(AMBER_BRIGHT),
+                    .add_enabled(
+                        !unsaved,
+                        egui::Button::new(
+                            egui::RichText::new("Run setup wizard...")
+                                .strong()
+                                .color(AMBER_BRIGHT),
+                        ),
                     )
+                    .on_disabled_hover_text("You have unsaved changes: save them first.")
                     .clicked()
                 {
                     wizard_requested = true;
@@ -8224,6 +8249,26 @@ mod tests {
         app.sync_numeric_fields();
         assert_eq!(app.cfg.log_max_size_kb, 0);
         assert_eq!(app.cfg.log_max_files, 0);
+
+        // A huge count is clamped, as telnet and the web clamp it, and the box
+        // shows what was kept.
+        app.log_max_files_buf = "4000000000".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.log_max_files, crate::config::MAX_LOG_MAX_FILES);
+        assert_eq!(app.log_max_files_buf, crate::config::MAX_LOG_MAX_FILES.to_string());
+    }
+
+    /// **The wizard cannot be re-run over unsaved edits.**  Either way out of
+    /// it saves the whole of `self.cfg`, so opening it with edits pending made
+    /// "Exit setup -- keep current settings" save them.  The button is disabled
+    /// by `dirty`, the flag the Exit path's `refresh_from_global` obeys.
+    #[test]
+    fn test_the_setup_wizard_button_is_disabled_by_unsaved_edits() {
+        let src = include_str!("gui.rs").replace("\r\n", "\n");
+        let at = src.find("egui::RichText::new(\"Run setup wizard...\")").expect("the button");
+        let before = &src[at.saturating_sub(1200)..at];
+        assert!(before.contains("let unsaved = self.dirty;"), "the button no longer asks `dirty`");
+        assert!(before.contains(".add_enabled(\n                        !unsaved,"), "the button is always enabled");
     }
 
     /// The CP/M ceiling is **clamped** here rather than range-guarded like its

@@ -345,6 +345,12 @@ const DEFAULT_LOG_MAX_SIZE_KB: u64 = 1024;
 /// Rotated generations to keep; older ones are deleted.  With the defaults the
 /// log can never occupy more than 1024 KB x (5 + 1) = 6 MB total.
 const DEFAULT_LOG_MAX_FILES: u32 = 5;
+/// Ceiling on `log_max_files`, clamped to by the loader, `apply_config_key` and
+/// the desktop editor alike (the `MAX_CPM_EMU_MAX_MINSTR` rule: a huge number
+/// lands on the cap, not on the default).  Rotation walks every generation up to
+/// this number under the log's lock, so an unbounded `u32` -- four billion
+/// `exists()` checks per rotation -- stalled every task that logs.
+pub const MAX_LOG_MAX_FILES: u32 = 99;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900; // 15 minutes
 /// How many connections one IP may open to telnet/SSH inside
 /// [`DEFAULT_CONN_RATE_WINDOW_SECS`] before the rest are refused.  `0`
@@ -2492,6 +2498,7 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
         log_max_files: map
             .get("log_max_files")
             .and_then(|v| v.parse().ok())
+            .map(|v: u32| v.min(MAX_LOG_MAX_FILES))
             .unwrap_or(DEFAULT_LOG_MAX_FILES),
         verbose: map
             .get("verbose")
@@ -3463,7 +3470,9 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push_str("# log_max_files is removed.  Worst-case disk use is therefore\n");
     content.push_str("# log_max_size_kb x (log_max_files + 1) -- 6 MB with the defaults below.\n");
     content.push_str("# Set log_max_size_kb = 0 to disable size-based rotation (unbounded growth),\n");
-    content.push_str("# or log_max_files = 0 to keep no history at all.\n");
+    content.push_str(&format!(
+        "# or log_max_files = 0 to keep no history at all (at most {MAX_LOG_MAX_FILES}).\n"
+    ));
     write_kv(&mut content, "log_to_file", cfg.log_to_file);
     write_kv_str(&mut content, "log_file", &cfg.log_file);
     write_kv(&mut content, "log_max_size_kb", cfg.log_max_size_kb);
@@ -4364,8 +4373,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             }
         }
         "log_max_files" => {
+            // Clamped, like the loader -- see [`MAX_LOG_MAX_FILES`].
             if let Ok(v) = value.parse::<u32>() {
-                cfg.log_max_files = v;
+                cfg.log_max_files = v.min(MAX_LOG_MAX_FILES);
             }
         }
         "xmodem_negotiation_timeout" => {
@@ -5738,6 +5748,30 @@ mod tests {
         assert_eq!(cfg.log_max_size_kb, 0);
         apply_config_key(&mut cfg, "log_max_files", "-1");
         assert_eq!(cfg.log_max_files, 0);
+
+        // A huge count lands on the cap, not on the default and not as typed:
+        // rotation walks every generation up to it under the log's lock.
+        apply_config_key(&mut cfg, "log_max_files", "4000000000");
+        assert_eq!(cfg.log_max_files, MAX_LOG_MAX_FILES);
+        apply_config_key(&mut cfg, "log_max_files", &MAX_LOG_MAX_FILES.to_string());
+        assert_eq!(cfg.log_max_files, MAX_LOG_MAX_FILES);
+    }
+
+    /// And a file that already holds a huge `log_max_files` is capped on load.
+    #[test]
+    fn test_an_oversized_log_max_files_is_capped_on_load() {
+        let dir = std::env::temp_dir().join(format!("egw_logfiles_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("egateway.conf");
+        std::fs::write(&path, "log_max_files = 4000000000\n").expect("write");
+        let cfg = read_config_file_checked(path.to_str().unwrap()).expect("read");
+        assert_eq!(cfg.log_max_files, MAX_LOG_MAX_FILES);
+        // The policy rotation acts on is capped too, whatever built the config.
+        let raw = Config { log_to_file: true, log_max_files: u32::MAX, ..Config::default() };
+        let p = crate::logger::file_policy_from(&raw).expect("file logging is on");
+        assert_eq!(p.max_files, MAX_LOG_MAX_FILES);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The gateway terminal-geometry override must survive `apply_config_key`

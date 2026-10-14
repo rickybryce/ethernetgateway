@@ -1,10 +1,11 @@
 //! Global log buffer shared between the server and GUI console.
 //!
 //! All server output that previously went to `eprintln!` is routed through
-//! [`log()`] which writes to stderr and two parallel in-memory ring buffers:
-//! a drain-style buffer used by the GUI's per-frame accumulator and a
-//! snapshot-style buffer used by the web server (which can be polled
-//! without disturbing the GUI's view).
+//! [`log()`] which writes to stderr, to the log file when one is configured
+//! (lines logged before it is armed wait in a small backlog), and two parallel
+//! in-memory ring buffers: a drain-style buffer used by the GUI's per-frame
+//! accumulator and a snapshot-style buffer used by the web server (which can be
+//! polled without disturbing the GUI's view).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -160,7 +161,9 @@ pub fn file_policy_from(cfg: &crate::config::Config) -> Option<FilePolicy> {
     Some(FilePolicy {
         path: PathBuf::from(cfg.log_file.trim()),
         max_bytes: cfg.log_max_size_kb.saturating_mul(1024),
-        max_files: cfg.log_max_files,
+        // Clamped here as well as by every surface that sets it: this is the
+        // number `rotate` walks, under the sink lock.
+        max_files: cfg.log_max_files.min(crate::config::MAX_LOG_MAX_FILES),
     })
 }
 
@@ -242,6 +245,20 @@ fn should_rotate(written: u64, next_len: u64, max_bytes: u64) -> bool {
 /// Errors go to stderr directly, **never** through [`log()`] — this runs while
 /// the sink mutex is held, so logging here would deadlock.
 fn rotate(policy: &FilePolicy) -> std::io::Result<std::fs::File> {
+    // Generations past the limit -- left by a larger `log_max_files` lowered
+    // since -- go too.  Only `.max_files` itself is deleted below, so lowering 5
+    // to 1 left `.2` to `.5` on disk for good, under a hint promising "at most"
+    // a size they were not counted in.  Walked to the cap rather than until the
+    // first gap, because a gap is what a failed delete leaves; the cap bounds
+    // the walk.
+    for n in policy.max_files.saturating_add(1)..=crate::config::MAX_LOG_MAX_FILES {
+        let stale = rotated_path(&policy.path, n);
+        if stale.exists()
+            && let Err(e) = std::fs::remove_file(&stale)
+        {
+            to_stderr(format_args!("Log rotation: could not delete {}: {}", stale.display(), e));
+        }
+    }
     if policy.max_files == 0 {
         // Keep no history: truncate in place.
         return open_log(&policy.path, true);
@@ -630,10 +647,39 @@ fn stamp() -> String {
     chrono::Local::now().format("[%Y-%m-%d %H:%M:%S] ").to_string()
 }
 
+/// `msg` with every control character written as `\xNN`, TAB excepted.
+///
+/// **Some lines carry names a peer chose.**  A Kermit sender names the file it
+/// sends, and the name is kept as sent -- ESC and BEL included -- then logged
+/// on every save.  Raw, that is an escape sequence played to the terminal the
+/// gateway was started from (retitling it, or writing its clipboard with OSC
+/// 52) and replayed by every later `cat` of the log file; a CR or LF in it
+/// forges a line of its own.  One place, here, rather than at each caller,
+/// because the next caller to log a remote string will not know to.
+///
+/// Covers C0, DEL and C1 (`char::is_control`).  Returned as it came, with no
+/// copy, when there is nothing to escape -- every line the gateway writes itself.
+fn escape_controls(msg: String) -> String {
+    if !msg.chars().any(|c| c != '\t' && c.is_control()) {
+        return msg;
+    }
+    let mut out = String::with_capacity(msg.len() + 8);
+    for c in msg.chars() {
+        if c != '\t' && c.is_control() {
+            out.push_str(&format!("\\x{:02X}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Log a message to stderr and append it to both shared buffers.  The
 /// drain buffer feeds the GUI's per-frame console accumulator; the
 /// history buffer is a non-draining ring that lets the web-config
 /// console poll for recent lines without competing with the GUI.
+///
+/// Control characters are written as `\xNN` (see [`escape_controls`]).
 pub fn log(msg: String) {
     // Stamped HERE, above the sink and the rings, so that every consumer --
     // stderr, the file, the GUI console and the web `/logs` view -- shows the
@@ -644,7 +690,7 @@ pub fn log(msg: String) {
     // most.  The lower layers (`write_line_to`, `push_bounded`,
     // `drain_backlog_into`) therefore still take an unadorned line, which is
     // what their own tests assert on.
-    let msg = format!("{}{}", stamp(), msg);
+    let msg = format!("{}{}", stamp(), escape_controls(msg));
     to_stderr(format_args!("{}", msg));
     // Before the rings, so a line is on disk even if a ring lock is contended.
     // A line that predates the config (the version banner, the config-load
@@ -922,6 +968,70 @@ mod tests {
 
         drop(sink);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Lowering `log_max_files` deletes the generations past the new limit.**
+    /// Rotation used to delete only `.max_files`, so going from 5 to 1 left `.2`
+    /// to `.5` on disk for good.  A gap (`.4` missing) must not stop the sweep,
+    /// and zero ("keep no history") clears every generation.
+    #[test]
+    fn test_rotation_deletes_generations_past_a_lowered_limit() {
+        for keep in [1u32, 0] {
+            let dir = std::env::temp_dir()
+                .join(format!("eg_log_orphans_{}_{keep}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let base = dir.join("t.log");
+            for n in [1, 2, 3, 5, crate::config::MAX_LOG_MAX_FILES] {
+                std::fs::write(rotated_path(&base, n), format!("old generation {n}\n")).unwrap();
+            }
+            let policy = FilePolicy { path: base.clone(), max_bytes: 100, max_files: keep };
+            let mut sink = FileSink { file: open_log(&policy.path, false).unwrap(), written: 0, policy };
+            for i in 0..10 {
+                write_line_to(&mut sink, &format!("line {i:02} ------------------------------")).unwrap();
+            }
+            drop(sink);
+            let mut present: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            present.sort();
+            let want: Vec<String> = if keep == 1 {
+                vec!["t.log".into(), "t.log.1".into()]
+            } else {
+                vec!["t.log".into()]
+            };
+            assert_eq!(present, want, "keeping {keep}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// **A control character from a peer reaches no log as itself.**  A Kermit
+    /// file name is logged as the sender sent it; raw, its ESC sequence was
+    /// played to the gateway's terminal and replayed by every `cat` of the log,
+    /// and a newline in it forged a line.  TAB is left alone, and text that
+    /// needs nothing comes back as it was.
+    #[test]
+    fn test_control_characters_are_escaped_in_every_log_line() {
+        assert_eq!(escape_controls("saved README.TXT\t(12 bytes)".into()), "saved README.TXT\t(12 bytes)");
+        assert_eq!(escape_controls("caf\u{e9} \u{2014} ok".into()), "caf\u{e9} \u{2014} ok");
+        assert_eq!(
+            escape_controls("\x1b]52;c;QQ==\x07X\r\nfake\x7f\u{9b}".into()),
+            "\\x1B]52;c;QQ==\\x07X\\x0D\\x0Afake\\x7F\\x9B",
+        );
+        // And `log()` applies it, so the rings (and with them the file and
+        // stderr, which take the same string) never see the raw bytes.
+        init();
+        let tag = format!("escape-check-{}", std::process::id());
+        log(format!("{tag} \x1b[2J\x07"));
+        let line = snapshot(2000)
+            .into_iter()
+            .rev()
+            .find(|l| l.contains(&tag))
+            .expect("the line reached the ring");
+        assert!(line.ends_with(&format!("{tag} \\x1B[2J\\x07")), "{line:?}");
+        assert!(!line.contains('\x1b') && !line.contains('\x07'));
     }
 
     /// A rotation that cannot rename must leave the active log **alone**.

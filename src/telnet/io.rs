@@ -120,13 +120,17 @@ impl TelnetSession {
     // ─── I/O helpers ───────────────────────────────────────
 
     pub(in crate::telnet) async fn send(&mut self, text: &str) -> Result<(), std::io::Error> {
+        let bytes = self.screen_bytes(text);
+        self.send_raw(&bytes).await
+    }
+
+    /// The bytes [`send`](Self::send) puts on the wire for `text`: case-swapped
+    /// and Latin-1 on PETSCII, as-is otherwise.  For the rare screen that has
+    /// to write while `self` is split into a reader and a writer.
+    pub(in crate::telnet) fn screen_bytes<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, [u8]> {
         match self.terminal_type {
-            TerminalType::Petscii => {
-                let swapped = swap_case_for_petscii(text);
-                let bytes = to_latin1_bytes(&swapped);
-                self.send_raw(&bytes).await
-            }
-            _ => self.send_raw(text.as_bytes()).await,
+            TerminalType::Petscii => to_latin1_bytes(&swap_case_for_petscii(text)).into(),
+            _ => text.as_bytes().into(),
         }
     }
 

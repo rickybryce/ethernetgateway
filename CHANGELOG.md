@@ -26,6 +26,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `backup.txt`, which DIR then listed twice with no way to tell them apart.
   They now refuse, as they already did on macOS and Windows.  REN and MOVE can
   still change the case of a name.
+- **Serial port settings are applied however the screen is left.**  Changes
+  made on the port, baud, data, flow and mode screens were saved at once but
+  applied only on Q or ESC, so a connection dropped part-way left them saved
+  and never applied.  They are now applied on every way out, and on the
+  caller's own port an unconfirmed change is undone.
+- **"Reverting settings" now reverts everything it asked about.**  A caller on
+  their own port who changed PETSCII translation or drive-carrier and did not
+  confirm was told the settings were reverted; those two were not.
+- **The serial port picker takes R, N and Q in capitals.**  The prompt names
+  them in capitals, but a capital letter was saved as the device path, and the
+  port then failed to open.
+- **The modem-mode Flow line fits a C64.**  With hardware or software flow
+  control it was exactly 40 columns, which wraps and pushed the port screen
+  past 22 rows.
+- **`RING...` on the ring emulator screen is in the right case on a C64.**
+- **Changing a port's erase key no longer cuts off a live Serial Gateway
+  session.**  The new key takes effect on the next connection, as the screen
+  says.  A slave still restarts the port, which is how its master learns the
+  new key.
+- **Setup wizard: "Enable SSH" can no longer reuse a port.**  The buttons on
+  the role screens turned SSH on without the port check the SSH screen does,
+  and Finish did not check again, so SSH and the web server could be saved on
+  the same port.  Both now check.
+- **Setup wizard: the master's stored password is no longer shown.**  On a
+  first run with one already in the config, it was filled into the Master
+  password box, which has a "show" toggle.  The box now starts empty, and
+  empty means unchanged.
+- **Setup wizard: re-running it cannot save unsaved edits.**  "Run setup
+  wizard..." is disabled while the editor has unsaved changes; leaving the
+  wizard would have saved them.
+- **CP/M sample disks: a blocked network no longer hangs the download for an
+  hour.**  Each file now has a 20-second connect timeout, and a run stops
+  after the same failure three times in a row, reporting the rest as
+  skipped.  Before, with outbound HTTPS silently dropped, every file waited
+  out a two-minute timeout behind a screen that could not be cancelled.
+- **Log files: `log_max_files` is capped at 99, and lowering it deletes the
+  extra generations.**  A huge value stalled every task that logs, because
+  rotation walked every generation number while holding the log's lock.
+  Lowering the limit, from 5 to 1 for example, used to leave `.2` to `.5` on
+  disk for good.
+- **Control characters from remote peers no longer reach the log raw.**  A
+  file name a Kermit sender chose was logged as sent, so its escape sequences
+  were replayed to the gateway's terminal and to anything that later displays
+  the log file.  Every log line now shows control characters as `\xNN`.
 
 ## [1.0.4] - 2026-10-10
 

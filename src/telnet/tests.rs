@@ -13709,6 +13709,32 @@ fn serial_menu_label_pairs() -> Vec<(String, String, String)> {
 /// key in bytes a terminal does not print, and aligning on the formatted
 /// string would line the invisible ones up on ANSI and leave the visible
 /// columns ragged.
+/// **The modem-mode Flow row fits a C64 for every value it can show.**  With
+/// two spaces between its three fields, `hardware` (or `software`) beside
+/// PETSCII `off` and Gw `dflt` came to exactly 40 columns, which auto-wraps
+/// and pushed a 22-row screen to 23.  The default flow, `none`, came to 36,
+/// which is why nobody saw it.
+#[test]
+fn test_the_modem_flow_row_fits_every_value() {
+    for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+        let mut session = make_test_session(term);
+        session.color_enabled = false; // measure what a terminal draws
+        let width = if term == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 80 };
+        for flow in ["none", "hardware", "software"] {
+            for petscii in [false, true] {
+                for (gw, _) in crate::serial::GW_PETSCII_CHOICES {
+                    let row = session.modem_flow_row(flow, petscii, gw);
+                    assert!(
+                        row.chars().count() <= width,
+                        "{:?} is {} columns on {:?}, budget {}",
+                        row, row.chars().count(), term, width,
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn test_the_port_settings_rows_align_their_second_key() {
     // **The labels are read out of the screen's own source, not listed here.**
@@ -15042,14 +15068,129 @@ fn test_the_port_settings_hint_names_exactly_the_keys_each_mode_answers() {
     );
 }
 
+/// **The revert undoes everything the change test counts as a change.**  A
+/// caller on their own port who changes any field `modem_apply_settings`
+/// compares is asked for Y+Enter, and without it is told "Reverting settings"
+/// -- which `petscii_translate` and `drive_carrier` were not: both stayed
+/// changed, in the file and on the wire.  Each field compared there must be
+/// written back by `revert_serial_config`, under its own key.
+#[test]
+fn test_the_serial_revert_restores_every_field_the_change_test_compares() {
+    let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
+    let body_of = |name: &str| -> String {
+        let start = src.find(name).unwrap_or_else(|| panic!("{name}"));
+        let rest = &src[start + name.len()..];
+        let end = rest.find("\n    pub(in crate::telnet) ").expect("a following fn");
+        rest[..end].to_string()
+    };
+    let apply = body_of("async fn modem_apply_settings(");
+    let revert = body_of("async fn revert_serial_config(");
+    let mut fields = Vec::new();
+    for (i, _) in apply.match_indices("new_port.") {
+        let field: String = apply[i + "new_port.".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if apply.contains(&format!("new_port.{field} != old_port.{field}")) {
+            fields.push(field);
+        }
+    }
+    assert!(fields.len() >= 10, "read only {fields:?} from the change test");
+    for field in &fields {
+        assert!(
+            revert.contains(&format!("serial_key(id, \"{field}\")")),
+            "`{field}` is compared by modem_apply_settings but never reverted",
+        );
+        assert!(
+            revert.contains(&format!("port.{field}")),
+            "`{field}` has a key in the revert but no value written to it",
+        );
+    }
+}
+
+/// **No text on the port screens skips `send()`'s encoding.**  The ring screen
+/// wrote `RING...` straight to the writer -- the reader and writer are borrowed
+/// apart inside its `select!` -- so a C64 got it without the PETSCII case swap.
+/// It now encodes through `screen_bytes` before the split; a literal written to
+/// the writer is the shape that bypasses it.
+#[test]
+fn test_the_serial_screens_write_no_unencoded_text() {
+    let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
+    assert!(!src.contains("write_all(b\""), "a byte-string literal is written past send()");
+    assert!(src.contains("let ring_line = self.screen_bytes(\"  RING...\\r\\n\").into_owned();"));
+    assert!(src.contains("w.write_all(&ring_line).await;"));
+}
+
+/// **The port picker takes R, N and Q in either case.**  Its prompt names them
+/// in capitals, and `get_line_input` only trims: a `Q` typed with Caps Lock on
+/// fell through every arm to "type a path" and was saved as the device, so the
+/// port then failed to open.  Both of the picker's matches -- the empty list
+/// and the full one -- must compare a lowered copy, never the input itself.
+#[test]
+fn test_the_port_picker_takes_its_letters_in_either_case() {
+    let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
+    let name = "async fn modem_select_port(";
+    let start = src.find(name).expect("modem_select_port");
+    let rest = &src[start + name.len()..];
+    let body = &rest[..rest.find("\n    pub(in crate::telnet) ").expect("a following fn")];
+    assert_eq!(
+        body.matches("match input.to_ascii_lowercase().as_str() {").count(),
+        2,
+        "the picker's two letter matches no longer lower the input",
+    );
+    assert!(!body.contains("match input.as_str()"), "a letter match compares the raw input");
+}
+
+/// **The port screen applies what it saved, however it was left.**  Its
+/// sub-screens save as they go, and the apply used to run only on Q or ESC: a
+/// connection dropped on the parity screen left a saved, unapplied setting that
+/// the next visit took as its starting point and so never applied either.  The
+/// apply now sits outside the screen, after it, with no `?` between them.
+///
+/// And the erase key (K) restarts the port only on a slave, where the restart
+/// is what re-registers the new key with the master.  Anywhere else the pump
+/// reads it per bridge, and a restart would cut off a live Serial Gateway user.
+#[test]
+fn test_the_port_screen_applies_on_every_exit_and_k_restarts_only_a_slave() {
+    let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
+    let body_of = |name: &str| -> String {
+        let start = src.find(name).unwrap_or_else(|| panic!("{name}"));
+        let rest = &src[start + name.len()..];
+        let end = rest.find("\n    async fn ")
+            .into_iter()
+            .chain(rest.find("\n    pub(in crate::telnet) "))
+            .min()
+            .expect("a following fn");
+        rest[..end].to_string()
+    };
+    let outer = body_of("async fn modem_settings(");
+    let screen = body_of("async fn modem_settings_screen(");
+    let shown = outer.find("let shown = self.modem_settings_screen(id).await;").expect("the screen runs");
+    let applied = outer
+        .find("let applied = self.modem_apply_settings(id, &original_cfg).await;")
+        .expect("the apply runs unconditionally");
+    assert!(shown < applied, "the apply runs before the screen");
+    assert!(outer.contains("shown.and(applied)"), "a screen error is no longer reported");
+    assert!(!screen.contains("self.modem_apply_settings("), "the screen applies on some exits only");
+
+    let k = &screen[screen.find("\"k\" => {").expect("the K arm")..];
+    let k = &k[..k.find("\"g\" => {").expect("the G arm follows K")];
+    let restart = k.find("crate::serial::restart_serial(id);").expect("K restarts a slave");
+    let gate = k
+        .find("if crate::serial::console_relayed_to_master(&config::get_config(), id) {")
+        .expect("K's restart is gated on a slave port");
+    assert!(gate < restart, "K restarts before asking whether the port is a slave's");
+    assert_eq!(k.matches("restart_serial").count(), 1, "K restarts by another route too");
+}
+
 /// Every key the port settings screen draws or handles belongs to the key set,
 /// and no arm carries a guard of its own -- the set is the only gate, which is
 /// what keeps the hint and the arms from drifting apart again.
 #[test]
 fn test_the_port_settings_arms_are_gated_only_by_the_key_set() {
     let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
-    let name = "async fn modem_settings(";
-    let start = src.find(name).expect("modem_settings");
+    let name = "async fn modem_settings_screen(";
+    let start = src.find(name).expect("modem_settings_screen");
     let next = src[start + name.len()..].find("async fn ").expect("a following fn");
     let body: String = src[start..start + name.len() + next]
         .lines()

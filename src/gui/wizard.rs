@@ -176,7 +176,11 @@ impl Wizard {
             master_host: cfg.slave_master_host.clone(),
             master_port: cfg.slave_master_port.to_string(),
             master_username: cfg.slave_master_username.clone(),
-            master_password: cfg.slave_master_password.clone(),
+            // Never the stored one, for the reason `password` is blank above:
+            // a stored password is never echoed into a field, and this box has
+            // a "show" toggle.  Blank means unchanged -- `apply_to` writes it
+            // only when something was typed.
+            master_password: String::new(),
         }
     }
 
@@ -349,6 +353,30 @@ impl Wizard {
         Ok(())
     }
 
+    /// Every listener this configuration brings up, checked as `validate` checks
+    /// the screen that set it.  Run once more on Finish, because a listener can
+    /// be switched on after its own screen was passed: the role screens offer an
+    /// "Enable SSH" button, and an SSH port left in an unticked box was never
+    /// checked against the web port chosen after it.
+    fn check_all_ports(&self, cfg: &Config) -> Result<(), String> {
+        for which in [Listener::Telnet, Listener::Ssh, Listener::Web] {
+            self.check_port(which, cfg)?;
+        }
+        Ok(())
+    }
+
+    /// The role screens' "Enable SSH" buttons.  Checked like the SSH screen's
+    /// Next, so the button cannot turn on a port another listener already holds
+    /// -- or one that does not parse; refused, SSH stays off and says why.
+    fn enable_ssh(&mut self, cfg: &Config) -> Result<(), String> {
+        self.ssh_enabled = true;
+        if let Err(e) = self.check_port(Listener::Ssh, cfg) {
+            self.ssh_enabled = false;
+            return Err(format!("{e} Change the SSH port on the SSH step."));
+        }
+        Ok(())
+    }
+
     /// The enabled flag and port text backing one listener.  Keyed off the
     /// `Listener` enum rather than a name string so the "skip myself" test in
     /// `check_port` can't be broken by an edit to a user-facing label.
@@ -476,8 +504,8 @@ impl Wizard {
                     Step::Web => self.draw_web(ui, local_ip),
                     Step::TransferDir => self.draw_transfer_dir(ui),
                     Step::Cpm => self.draw_cpm(ui),
-                    Step::Role => self.draw_role(ui),
-                    Step::SlaveMaster => self.draw_slave_master(ui),
+                    Step::Role => self.draw_role(ui, cfg),
+                    Step::SlaveMaster => self.draw_slave_master(ui, cfg),
                     Step::Finish => self.draw_finish(ui, cfg, local_ip),
                 }
 
@@ -525,7 +553,10 @@ impl Wizard {
                         ))
                         .clicked()
                     {
-                        outcome = Outcome::Finish;
+                        match self.check_all_ports(cfg) {
+                            Ok(()) => outcome = Outcome::Finish,
+                            Err(e) => self.error = Some(e),
+                        }
                     }
                 } else {
                     let next_label = if self.step == Step::Welcome {
@@ -866,7 +897,7 @@ impl Wizard {
         );
     }
 
-    fn draw_role(&mut self, ui: &mut egui::Ui) {
+    fn draw_role(&mut self, ui: &mut egui::Ui, cfg: &Config) {
         body(
             ui,
             "Most installations are standalone. The master/slave pair exists to put serial \
@@ -929,7 +960,7 @@ impl Wizard {
                     )
                     .clicked()
                 {
-                    self.ssh_enabled = true;
+                    self.error = self.enable_ssh(cfg).err();
                 }
             });
             ui.add_space(2.0);
@@ -941,7 +972,7 @@ impl Wizard {
         }
     }
 
-    fn draw_slave_master(&mut self, ui: &mut egui::Ui) {
+    fn draw_slave_master(&mut self, ui: &mut egui::Ui, cfg: &Config) {
         body(
             ui,
             "Tell this slave where its master is. The link is an SSH connection to the \
@@ -1009,7 +1040,7 @@ impl Wizard {
                     )
                     .clicked()
                 {
-                    self.ssh_enabled = true;
+                    self.error = self.enable_ssh(cfg).err();
                 }
             });
             ui.add_space(2.0);
@@ -1429,6 +1460,57 @@ mod tests {
         assert!(w.validate(&cfg).is_ok());
     }
 
+    /// **The "Enable SSH" buttons are checked, and so is Finish.**  Untick SSH
+    /// (port 2222), give the web server 2222 -- legal, SSH is off -- then press
+    /// the role screen's "Enable the SSH server on port 2222".  The button used
+    /// to set the flag unchecked and Finish did not look again, so the wizard
+    /// saved two listeners on one port and one failed to bind after the restart.
+    #[test]
+    fn test_enabling_ssh_late_cannot_reuse_a_port() {
+        let cfg = Config::default();
+        let mut w = wiz();
+        w.ssh_enabled = false;
+        w.ssh_port = "2222".into();
+        w.web_enabled = true;
+        w.web_port = "2222".into();
+        assert!(w.check_all_ports(&cfg).is_ok(), "SSH off: its port is inert");
+
+        let e = w.enable_ssh(&cfg).unwrap_err();
+        assert!(e.contains("already used by the web server"), "{e}");
+        assert!(!w.ssh_enabled, "a refused button leaves SSH off");
+
+        // Had the flag been set some other way, Finish still catches it.
+        w.ssh_enabled = true;
+        assert!(w.check_all_ports(&cfg).unwrap_err().contains("already used"));
+
+        // And a port that does not parse is refused, not saved as the old one.
+        w.ssh_enabled = false;
+        w.web_port = "8080".into();
+        w.ssh_port = "junk".into();
+        assert!(w.enable_ssh(&cfg).unwrap_err().contains("must be a number"));
+        assert!(!w.ssh_enabled);
+
+        w.ssh_port = "2222".into();
+        assert!(w.enable_ssh(&cfg).is_ok());
+        assert!(w.ssh_enabled);
+        assert!(w.check_all_ports(&cfg).is_ok());
+    }
+
+    /// The two checks above are wired where they act: Finish runs
+    /// `check_all_ports`, and neither "Enable SSH" button sets the flag itself.
+    #[test]
+    fn test_finish_and_the_ssh_buttons_go_through_the_checks() {
+        let src = include_str!("wizard.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("#[cfg(test)]").expect("the tests")];
+        let nav = &code[code.find("fn draw_nav(").expect("draw_nav")..];
+        let nav = &nav[..nav.find("\n    fn ").expect("a following fn")];
+        assert!(nav.contains("match self.check_all_ports(cfg) {"), "Finish no longer re-checks the ports");
+        assert!(nav.contains("Ok(()) => outcome = Outcome::Finish,"), "Finish is reached another way");
+        assert_eq!(nav.matches("Outcome::Finish").count(), 1, "Finish is reached another way");
+        assert_eq!(code.matches("self.error = self.enable_ssh(cfg).err();").count(), 2);
+        assert_eq!(code.matches("self.ssh_enabled = true;").count(), 1, "only enable_ssh sets it");
+    }
+
     #[test]
     fn test_kermit_server_port_participates_in_collision_check() {
         let mut cfg = Config { kermit_server_enabled: true, ..Config::default() };
@@ -1812,12 +1894,14 @@ mod tests {
             telnet_port: 9999,
             cpm_emu_uart: "off".into(),
             gateway_role: "slave".into(),
+            slave_master_password: "masterOnDisk".into(),
             ..Config::default()
         };
         let w = Wizard::new(&cfg);
         assert_eq!(w.username, "ricky");
         assert!(w.password.is_empty(), "never echo the stored password back");
         assert!(w.password_confirm.is_empty());
+        assert!(w.master_password.is_empty(), "never echo the stored master password back");
         assert_eq!(w.telnet_port, "9999");
         assert!(!w.cpm_dialout);
         assert_eq!(w.role, "slave");

@@ -327,7 +327,9 @@ fn main() {
         // Load or create config (re-read from disk on each restart)
         let cfg = config::load_or_create_config();
         // File logging can only be armed once the config exists, so the three
-        // banner lines above reach stderr only.  Re-applied on every restart
+        // banner lines above wait in the logger's pre-arm backlog and reach the
+        // file when this arms it (stderr and the rings have them already).
+        // Re-applied on every restart
         // cycle because the config is re-read here; `configure_file_logging` is
         // idempotent and keeps the file open when the policy is unchanged.
         logger::configure_file_logging(logger::file_policy_from(&cfg));
@@ -614,7 +616,7 @@ fn main() {
                 // Wait for shutdown signal
                 loop {
                     if shutdown_rt.load(Ordering::SeqCst) {
-                        glog!("\nShutdown signal received, stopping server...");
+                        glog!("Shutdown signal received, stopping server...");
                         break;
                     }
                     // Bounded wait: `notify_waiters()` (used by every notifier)

@@ -435,12 +435,9 @@ pub(in crate::cpm) fn sha256(data: &[u8]) -> String {
     h.iter().map(|w| format!("{w:08x}")).collect()
 }
 
-/// Fetch one disk and verify it, returning its bytes.
-///
-/// Verification is not a formality: the whole claim of this feature is that
-/// these exact bytes were booted, so a file that arrives different is refused
-/// rather than written. A truncated download and a changed upstream both land
-/// here, and both should stop.
+/// How long [`get`] waits for a connection, as against the whole transfer.
+const CONNECT_TIMEOUT_SECS: u64 = 20;
+
 /// GET a pinned URL and return its body.
 ///
 /// One copy, because the sample disks and the monitor ROMs
@@ -451,6 +448,11 @@ pub(in crate::cpm) fn get(url: &str, user_agent: &str, limit: u64) -> Result<Vec
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
             .timeout_global(Some(std::time::Duration::from_secs(120)))
+            // A connect of its own, far shorter: a firewall that drops
+            // outbound 443 silently makes every file wait out the whole global
+            // timeout just to connect, where a reachable server answers a
+            // connect in well under a second.
+            .timeout_connect(Some(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS)))
             .build(),
     );
     let mut resp =
@@ -461,6 +463,12 @@ pub(in crate::cpm) fn get(url: &str, user_agent: &str, limit: u64) -> Result<Vec
     resp.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| format!("{e}"))
 }
 
+/// Fetch one disk and verify it, returning its bytes.
+///
+/// Verification is not a formality: the whole claim of this feature is that
+/// these exact bytes were booted, so a file that arrives different is refused
+/// rather than written. A truncated download and a changed upstream both land
+/// here, and both should stop.
 fn fetch_one(disk: &Disk) -> Result<Vec<u8>, String> {
     let body = get(&disk.url(), "EthernetGateway (CP/M sample disks)", 64 << 20)?;
     if body.len() as u64 != disk.bytes {
@@ -522,12 +530,56 @@ mod report_tests {
     }
 }
 
+/// How many downloads in a row may fail for the *same* reason before a run
+/// stops trying the rest.
+const GIVE_UP_AFTER: usize = 3;
+
+/// The reason a run's remaining files are not tried.  Short enough that
+/// `"32 files: " + this` fits the 34 columns a C64 gives a failure line.
+const NOT_TRIED: &str = "skipped after 3 failures";
+
+/// Consecutive failures with one reason, so a run that cannot reach the server
+/// stops asking.
+///
+/// **Because nothing else stops it.**  Each file has its own timeout and a
+/// failure does not end the run -- one missing disk should not cost the
+/// others -- so with outbound HTTPS silently dropped, every one of thirty-five
+/// files waited out its connect, one after another, behind a telnet screen
+/// that says "Fetching" and cannot be cancelled.  The same reason three times
+/// running is the network, not the files.  A different reason breaks the run of
+/// them: a checksum mismatch names its hash, so it never matches another.
+#[derive(Default)]
+struct GiveUp {
+    reason: Option<String>,
+    count: usize,
+}
+
+impl GiveUp {
+    /// Note how one file went; `None` for a file that arrived.
+    fn note(&mut self, failed: Option<&str>) {
+        match failed {
+            Some(why) if self.reason.as_deref() == Some(why) => self.count += 1,
+            Some(why) => {
+                self.reason = Some(why.to_string());
+                self.count = 1;
+            }
+            None => *self = GiveUp::default(),
+        }
+    }
+
+    /// Whether the rest of the run should be skipped.
+    fn given_up(&self) -> bool {
+        self.count >= GIVE_UP_AFTER
+    }
+}
+
 /// Fetch every disk that is not already there.
 ///
 /// `progress` is called before each download with the name and the position in
 /// the run, so a caller can say something on a screen that is about to be quiet
 /// for a minute. Failures do not stop the run: one unavailable disk should not
-/// cost the operator all the others.
+/// cost the operator all the others -- unless the same failure repeats, see
+/// [`GiveUp`].
 pub fn download_missing(
     cpm_base: &Path,
     mut progress: impl FnMut(&str, usize, usize),
@@ -547,9 +599,16 @@ pub fn download_missing(
     // line reading `34/34` twice tells the operator the run has finished and
     // then keeps going.
     let total = wanted.len() + wanted_roms.len();
+    let mut give_up = GiveUp::default();
     for (i, disk) in wanted.iter().enumerate() {
+        if give_up.given_up() {
+            report.failed.push((disk.name.clone(), NOT_TRIED.to_string()));
+            continue;
+        }
         progress(&disk.name, i + 1, total);
-        match fetch_one(disk) {
+        let fetched = fetch_one(disk);
+        give_up.note(fetched.as_ref().err().map(String::as_str));
+        match fetched {
             Ok(bytes) => {
                 // Written to a temporary name and then claimed, so an
                 // interrupted download cannot leave half a disk image under a
@@ -588,9 +647,15 @@ pub fn download_missing(
             report.skipped.push(f.file.to_string());
             continue;
         }
+        if give_up.given_up() {
+            report.failed.push((f.file.to_string(), NOT_TRIED.to_string()));
+            continue;
+        }
         let at = wanted.len() + wanted_roms.iter().position(|w| w.file == f.file).unwrap_or(0) + 1;
         progress(f.file, at, total);
-        match super::rom::download_outcome(cpm_base, c.key) {
+        let outcome = super::rom::download_outcome(cpm_base, c.key);
+        give_up.note(outcome.as_ref().err().map(String::as_str));
+        match outcome {
             Ok((_, true)) => report.fetched.push(f.file.to_string()),
             Ok((_, false)) => report.skipped.push(f.file.to_string()),
             Err(e) => report.failed.push((f.file.to_string(), e)),
@@ -823,6 +888,40 @@ mod tests {
     /// A download never replaces a file that is already there -- including one
     /// that appeared after the run's own up-front check -- and leaves no
     /// temporary file behind either way.
+    /// **A run that cannot reach the server stops asking.**  Thirty-five files
+    /// each waiting out a connect behind an uncancellable telnet screen came to
+    /// over an hour on a firewalled network.  Three identical failures in a row
+    /// end it; a success or a different reason starts the count again.
+    #[test]
+    fn test_a_run_gives_up_after_the_same_failure_three_times() {
+        let mut g = GiveUp::default();
+        g.note(Some("timed out"));
+        g.note(Some("timed out"));
+        assert!(!g.given_up(), "two is not yet a pattern");
+        g.note(None);
+        g.note(Some("timed out"));
+        g.note(Some("timed out"));
+        assert!(!g.given_up(), "a success in between starts the count again");
+        g.note(Some("checksum mismatch (got 0123456789ab…)"));
+        g.note(Some("timed out"));
+        g.note(Some("timed out"));
+        assert!(!g.given_up(), "a different reason breaks the run");
+        g.note(Some("timed out"));
+        assert!(g.given_up(), "three of one reason in a row is the network");
+        assert_eq!(GIVE_UP_AFTER, 3, "NOT_TRIED names the count");
+        assert!(NOT_TRIED.contains(&GIVE_UP_AFTER.to_string()));
+        // The skipped files' line has to fit the C64's failure-line width.
+        assert!(format!("35 files: {NOT_TRIED}").chars().count() <= 34);
+
+        // And both loops in `download_missing` -- the disks and the ROMs --
+        // ask before each file and report each outcome.
+        let src = include_str!("fetch.rs").replace("\r\n", "\n");
+        let start = src.find("pub fn download_missing(").expect("download_missing");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("its end")];
+        assert_eq!(body.matches("if give_up.given_up() {").count(), 2);
+        assert_eq!(body.matches("give_up.note(").count(), 2);
+    }
+
     #[test]
     fn test_place_new_never_replaces_and_leaves_no_part_file() {
         let dir = std::env::temp_dir().join(format!("egw_place_new_{}", std::process::id()));
@@ -881,9 +980,10 @@ mod tests {
         }
     }
 
-    /// **The disks that do not work are not on offer.** Three data companions
-    /// with no boot program and one blank: downloading those and finding they
-    /// do nothing is the disappointment this feature exists to avoid.
+    /// **The disks that do not work are not on offer.** Four data companions
+    /// with no boot program (`TDISK06` among them -- not a blank, see the module
+    /// doc): downloading those and finding they do nothing is the disappointment
+    /// this feature exists to avoid.
     #[test]
     fn test_the_disks_that_do_not_run_are_not_offered() {
         let names: Vec<String> = catalogue().into_iter().map(|d| d.name).collect();
@@ -1060,7 +1160,7 @@ mod tests {
     /// into an empty folder, verify each against its recorded hash, then run it
     /// again and watch it touch nothing.
     ///
-    /// Ignored: it needs the network and moves 17 MB.
+    /// Ignored: it needs the network and moves about 42 MB.
     #[test]
     #[ignore]
     fn test_fetch_the_collection_for_real() {
@@ -1136,7 +1236,7 @@ mod tests {
     /// caught rather than quietly appended to a carve-out, and that this gate
     /// and `nonbooting.txt` can no longer disagree about what booting is.
     ///
-    /// Ignored: needs the network, and boots thirty machines.
+    /// Ignored: needs the network, and boots thirty-four machines.
     #[test]
     #[ignore]
     fn test_every_offered_disk_boots_when_downloaded() {

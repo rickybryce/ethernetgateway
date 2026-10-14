@@ -202,12 +202,15 @@ pub mod error {
     pub const WRITE_PROTECT: u8 = 1 << 7;
 }
 
-/// What the top nibble of a command's high byte selects.
+/// What a command word selects: the three-bit group in bits 15:13, with bit 12
+/// choosing the direction inside the two transfer groups.
 ///
 /// The manual gives these as individual bit conditions — "bits 12 and 13 must
 /// be ones and bits 14 and 15 must be zeros" — which is unreadable at the point
-/// of use and easy to transcribe wrongly. Collected here once, as the nibble
-/// they add up to.
+/// of use and easy to transcribe wrongly. Collected here once. (The values below
+/// are written as whole high nibbles because that is how the disks' source
+/// writes them; the decoder reads bits 15:13, as the controller's own firmware
+/// does -- see the comment at its `match`.)
 ///
 /// # These are not deduced from the bit conditions — the disks state them
 ///
@@ -228,10 +231,10 @@ pub mod error {
 /// ```
 ///
 /// That is **nine** commands, not the seven the manual's table lists, and it
-/// is why this decodes the whole four-bit nibble rather than testing bit 15
-/// first. Testing bit 15 first — which is what the manual's Set Byte example
-/// invites, since `80h` is the only value it shows with that bit set — folded
-/// Format (`C0h`) and Initialize (`E0h`) into Set Byte. Both then "succeeded"
+/// is why this decodes the whole group rather than testing bit 15 first.
+/// Testing bit 15 first — which is what the manual's Set Byte example invites,
+/// since `80h` is the only value it shows with that bit set — folded Format
+/// (`C0h`) and Initialize (`E0h`) into Set Byte. Both then "succeeded"
 /// while doing nothing, which is the same silent-success failure the Write
 /// Sector nibble already caused once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,10 +409,12 @@ pub struct Hdsk {
     /// Byte on the Disk Data Card is an input, so this test..." — while others
     /// drive the head positioner directly. Errata 88-HDSK-ME02 is specific: IV
     /// bytes 17, 18 and 19 "all invert the data", so selecting cylinder 0 means
-    /// writing 255. Nothing here knows which address is which kind, and guessing
-    /// at hardware semantics is how the sector layout went wrong for four
-    /// hypotheses. So: the addressable store is real, the meanings are not, and
-    /// no guest OS here needs them — seeking goes through Seek.
+    /// writing 255. Guessing at hardware semantics is how the sector layout went
+    /// wrong for four hypotheses, so an address gets a meaning only when two
+    /// sources agree on it. Three do -- IV 17, 18 and 19, the bytes a
+    /// diagnostic reads to find the heads (the `iv` module) -- and those are
+    /// modelled. For every other address the store is real and the meaning is
+    /// not, and no guest OS here needs one: seeking goes through Seek.
     ///
     /// **The reversed bit order in that errata must not be applied here.** It
     /// says the user data bits are reversed "from the way they appear to the
@@ -715,15 +720,6 @@ impl Hdsk {
                 // set NOT_READY instead. The guest reaches the same conclusion
                 // from the error byte, without a wait that this emulator would
                 // report as a stalled controller.
-                //
-                // Not modelled, and specified too loosely to guess at: the same
-                // errata says Read Status "rewrites 7 bits in IV Byte H (Address
-                // 17)" — user bits 4-7 from the command's unit bits, user bits
-                // 1-3 always 011b, user bit 0 left alone. How two unit bits
-                // become four is not stated, and inventing a mapping is how the
-                // sector layout went wrong four times. A guest that writes IV 17,
-                // reads status, and reads IV 17 back will see what it wrote here
-                // and something else on real hardware.
                 let addr = (word & 0xFF) as usize;
                 if !self.unit_ready(unit) {
                     self.status |= error::NOT_READY;
