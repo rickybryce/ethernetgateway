@@ -541,6 +541,34 @@ impl TelnetSession {
         Ok((dir, leaf.to_string()))
     }
 
+    /// Whether `name` is already taken in `dir` **ignoring case**, by
+    /// anything other than `except` (a canonical path, the file being moved
+    /// or renamed).
+    ///
+    /// Every lookup here is case-insensitive and DIR shows names in capitals,
+    /// but the four commands that create a name checked for a clash in the
+    /// exact case typed.  On a case-sensitive filesystem -- Linux, the Pi --
+    /// `COPY BACKUP.TXT README.TXT` beside an existing `backup.txt` made a
+    /// second file DIR showed identically, and later commands picked one of
+    /// the two by exact case.  macOS and Windows refuse that on their own.
+    ///
+    /// `except` lets MOVE and REN change a name's case, which is the one
+    /// reason to target a name that matches the source; COPY passes `None`,
+    /// since a case-variant copy beside its own source is the duplicate.
+    fn cpm_name_taken(
+        dir: &std::path::Path,
+        name: &str,
+        except: Option<&std::path::Path>,
+    ) -> bool {
+        let Some(real) = Self::cpm_real_components(dir, &[name.to_string()]) else {
+            return false;
+        };
+        match except {
+            Some(src) => std::fs::canonicalize(dir.join(&real[0])).ok().as_deref() != Some(src),
+            None => true,
+        }
+    }
+
     // ─── Wildcard glob (pure) ────────────────────────────────
 
     /// CP/M / DOS wildcard match: `*` matches any run of characters
@@ -1031,12 +1059,26 @@ impl TelnetSession {
             if idx >= lines.len() {
                 break;
             }
-            self.send(&format!("  {}", self.dim("--More-- (SPACE, RET, Q)")))
-                .await?;
+            const MORE: &str = "--More-- (SPACE, RET, Q)";
+            self.send(&format!("  {}", self.dim(MORE))).await?;
             self.flush().await?;
             let key = self.wait_for_key_returning().await?;
             // Erase the --More-- prompt line before continuing.
-            self.send_raw(b"\r").await?;
+            //
+            // **Overwritten, not just returned over.**  A bare CR only puts
+            // the cursor back at column 0, so the next line covered the
+            // prompt only if it was at least as wide -- a blank line, the
+            // commonest line in a text file, left the whole prompt on screen,
+            // and so did Q.  Spaces rather than `ESC [ K`, which a plain
+            // ASCII terminal does not understand.  Not on a Commodore, where
+            // CR is itself a new line and the 20-line page leaves the prompt
+            // its own row.
+            if self.terminal_type == TerminalType::Petscii {
+                self.send_raw(b"\r").await?;
+            } else {
+                let blank = format!("\r{}\r", " ".repeat(2 + MORE.len()));
+                self.send_raw(blank.as_bytes()).await?;
+            }
             let translated = if self.terminal_type == TerminalType::Petscii {
                 petscii_to_ascii_byte(key)
             } else {
@@ -1082,6 +1124,9 @@ impl TelnetSession {
             Ok(p) => p,
             Err(e) => return self.cpm_err(e).await,
         };
+        if Self::cpm_name_taken(&parent, last, None) {
+            return self.cpm_err("That name already exists.").await;
+        }
         let target = parent.join(last);
         match tokio::fs::create_dir(&target).await {
             Ok(()) => {
@@ -1202,8 +1247,9 @@ impl TelnetSession {
         let dst = self.transfer_path().join(new);
         // Courtesy pre-check; not atomic (see MOVE) — `rename(2)` would replace
         // an existing target, but a concurrent racer is out of scope under the
-        // trusted-user/LAN model.
-        if dst.exists() {
+        // trusted-user/LAN model.  Ignoring case, but not against the file
+        // itself, so `REN README.TXT=readme.txt` still fixes a name's case.
+        if dst.exists() || Self::cpm_name_taken(&self.transfer_path(), new, Some(&src)) {
             return self.cpm_err("Target name already exists.").await;
         }
         match tokio::fs::rename(&src, &dst).await {
@@ -1253,6 +1299,11 @@ impl TelnetSession {
             }
             let mut copied = 0u64;
             for (name, _) in &matches {
+                // Skipped like any other existing destination -- see
+                // `cpm_name_taken`.
+                if Self::cpm_name_taken(&dst_dir, name, None) {
+                    continue;
+                }
                 // Cap each read at the 8 MB transfer size, exactly like the
                 // single-file COPY path — never slurp an over-cap file whole.
                 let Ok(data) =
@@ -1286,6 +1337,9 @@ impl TelnetSession {
         let dst_path = dst_dir.join(&dst_name);
         if dst_path == src_path {
             return self.cpm_err_eg("Source and destination are the same.", eg).await;
+        }
+        if Self::cpm_name_taken(&dst_dir, &dst_name, None) {
+            return self.cpm_err("Destination exists.").await;
         }
         let data = match Self::cpm_read_capped(&src_path, Self::MAX_FILE_SIZE).await {
             Ok(d) => d,
@@ -1331,7 +1385,9 @@ impl TelnetSession {
         // create `dst_path` in the window before the rename.  Accepted under
         // the trusted-user/LAN concurrency model (the transfer menu shares the
         // same model); the copy-fallback below is atomically clobber-safe.
-        if dst_path.exists() {
+        // Ignoring case too, except against the source itself, so a MOVE can
+        // still change a name's case -- see `cpm_name_taken`.
+        if dst_path.exists() || Self::cpm_name_taken(&dst_dir, &dst_name, Some(&src_path)) {
             return self.cpm_err("Destination exists.").await;
         }
         // Try a straight rename first.

@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Second menu help no longer promises a password.**  It said both items ask
   for one; a gateway running as root, or a `NOPASSWD` sudoers rule, asks for
   none.  It now says "if needed", as the manual always has.
+- **Gateway Shell: `--More--` no longer stays on screen.**  On ANSI and ASCII
+  terminals the pager's prompt was left behind whenever the next line was
+  shorter than it (a blank line, most often) and when Q stopped the listing.
+  TYPE in the CP/M emulator, which shares the pager, is fixed too.
+- **Gateway Shell: no two names that differ only in case.**  On Linux, COPY,
+  MOVE, REN and MKDIR could create `BACKUP.TXT` beside an existing
+  `backup.txt`, which DIR then listed twice with no way to tell them apart.
+  They now refuse, as they already did on macOS and Windows.  REN and MOVE can
+  still change the case of a name.
 
 ## [1.0.4] - 2026-10-10
 

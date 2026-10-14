@@ -7190,6 +7190,195 @@ async fn test_cpm_dir_operand_selects_directory_or_pattern() {
     );
 }
 
+/// What a terminal would show for `out`: SGR colour dropped, CR back to column
+/// 0, LF to a new row, and printable characters overwriting in place.
+fn render_rows(out: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(out);
+    let mut rows: Vec<Vec<char>> = vec![Vec::new()];
+    let mut col = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => {
+                // `ESC [ ... m`: skip to the final byte.
+                for f in chars.by_ref() {
+                    if f.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            '\r' => col = 0,
+            '\n' => {
+                rows.push(Vec::new());
+                col = 0;
+            }
+            c if !c.is_control() => {
+                let row = rows.last_mut().unwrap();
+                if col < row.len() {
+                    row[col] = c;
+                } else {
+                    row.push(c);
+                }
+                col += 1;
+            }
+            _ => {}
+        }
+    }
+    rows.into_iter().map(|r| r.into_iter().collect()).collect()
+}
+
+/// The pager's `--More--` must be gone once a key is pressed.
+///
+/// It was cleared with a bare CR, which only returns to column 0, so a line
+/// shorter than the prompt -- a blank one, the commonest line in a text file
+/// -- left it on screen, and so did Q.  Checked on the rendered rows, because
+/// the bytes contain the prompt either way: the claim is what the screen shows.
+#[tokio::test]
+async fn test_the_pager_leaves_no_more_prompt_behind() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn page(term: TerminalType, lines: Vec<String>, keys: &[u8]) -> Vec<String> {
+        let (mut session, peer) = make_test_session_with_peer(term);
+        let (mut pr, mut pw) = tokio::io::split(peer);
+        pw.write_all(keys).await.unwrap();
+        let run = async move {
+            session.cpm_page_lines(&lines).await.unwrap();
+        };
+        let mut out = Vec::new();
+        let read = pr.read_to_end(&mut out);
+        let (_, r) = tokio::join!(run, read);
+        r.unwrap();
+        render_rows(&out)
+    }
+    let mut lines: Vec<String> = (0..22).map(|i| format!("  line {i:02} {}", "x".repeat(30))).collect();
+    lines.push(String::new());
+    lines.push("short".to_string());
+    lines.push("  tail".to_string());
+
+    for term in [TerminalType::Ansi, TerminalType::Ascii] {
+        // RET advances one line (the blank one), then SPACE shows the rest.
+        let rows = page(term, lines.clone(), b"\r ").await;
+        assert!(
+            rows.iter().all(|r| !r.contains("More--")),
+            "{term:?}: a --More-- prompt survived on screen: {rows:#?}",
+        );
+        // The control: the pager did stop, and the lines all arrived.
+        // Trailing spaces are the blanked prompt, and invisible.
+        assert!(rows.iter().any(|r| r.trim_end() == "short"), "{term:?}: {rows:#?}");
+        assert!(rows.iter().any(|r| r.trim_end() == "  tail"), "{term:?}: {rows:#?}");
+
+        // Q stops at the first prompt, and must not leave it either.
+        let rows = page(term, lines.clone(), b"q").await;
+        assert!(
+            rows.iter().all(|r| !r.contains("More--")),
+            "{term:?}: Q left the --More-- prompt on screen: {rows:#?}",
+        );
+        assert!(!rows.iter().any(|r| r.trim_end() == "short"), "{term:?}: Q did not stop: {rows:#?}");
+    }
+}
+
+/// A new name must not duplicate an existing one in a different case.
+///
+/// Every lookup in the shell is case-insensitive and DIR shows names in
+/// capitals, but COPY, MOVE, REN and MKDIR checked for a clash in the exact
+/// case typed -- so on Linux `COPY BACKUP.TXT README.TXT` beside `backup.txt`
+/// made a second file DIR showed identically.  Driven through `cpm_shell`
+/// with typed command lines, so the parser is in the path too.
+///
+/// The positive controls (a case change by REN and MOVE, a free name by COPY)
+/// keep this from passing on a shell that refuses everything; the case-change
+/// pair runs only where the filesystem is case-sensitive, because macOS and
+/// Windows refuse that rename on their own.
+#[tokio::test]
+async fn test_shell_refuses_a_name_that_differs_only_in_case() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    struct TransferDirGuard(String);
+    impl Drop for TransferDirGuard {
+        fn drop(&mut self) {
+            config::update_config_value("transfer_dir", &self.0);
+        }
+    }
+    let _dir_guard = TransferDirGuard(config::get_config().transfer_dir);
+    let base = std::env::temp_dir().join(format!("eg_cpm_case_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("temp transfer dir");
+    config::update_config_value("transfer_dir", &base.to_string_lossy());
+    let root = base.join("casetest");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::create_dir_all(root.join("into")).unwrap();
+    std::fs::write(root.join("backup.txt"), b"old backup").unwrap();
+    std::fs::write(root.join("readme.txt"), b"readme").unwrap();
+    std::fs::write(root.join("into").join("README.TXT"), b"already here").unwrap();
+    let case_sensitive = !root.join("BACKUP.TXT").exists();
+
+    async fn shell(input: &str) -> String {
+        let (mut session, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        session.transfer_subdir = "casetest".to_string();
+        let (mut pr, mut pw) = tokio::io::split(peer);
+        pw.write_all(format!("{input}\rEXIT\r").as_bytes()).await.unwrap();
+        let run = async move {
+            session.cpm_shell().await.unwrap();
+        };
+        let mut out = Vec::new();
+        let read = pr.read_to_end(&mut out);
+        let (_, r) = tokio::join!(run, read);
+        r.unwrap();
+        String::from_utf8_lossy(&out).to_string()
+    }
+    let names = |p: &std::path::Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(p)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+
+    let copy = shell("COPY BACKUP.TXT readme.txt").await;
+    let mv = shell("MOVE BACKUP.TXT readme.txt").await;
+    let ren = shell("REN BACKUP.TXT=readme.txt").await;
+    let mkdir = shell("MKDIR SUB").await;
+    let wild = shell("COPY INTO/ *.TXT").await;
+    let top = names(&root);
+    let into = names(&root.join("into"));
+    // Controls.
+    let fresh = shell("COPY NEW.TXT readme.txt").await;
+    let (recase_ren, recase_mv, after_recase) = if case_sensitive {
+        let r = shell("REN README.TXT=readme.txt").await;
+        let m = shell("MOVE Readme.Txt README.TXT").await;
+        (r, m, names(&root))
+    } else {
+        (String::new(), String::new(), Vec::new())
+    };
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert!(copy.contains("Destination exists."), "COPY: {copy:?}");
+    assert!(mv.contains("Destination exists."), "MOVE: {mv:?}");
+    assert!(ren.contains("Target name already exists."), "REN: {ren:?}");
+    assert!(mkdir.contains("That name already exists."), "MKDIR: {mkdir:?}");
+    assert_eq!(
+        top,
+        ["backup.txt", "into", "readme.txt", "sub"],
+        "a case-variant duplicate was created beside the originals",
+    );
+    // backup.txt is copied; readme.txt is skipped beside README.TXT.
+    assert!(wild.contains("1 copied."), "wildcard COPY: {wild:?}");
+    assert_eq!(into, ["README.TXT", "backup.txt"], "wildcard COPY made a case duplicate");
+
+    assert!(fresh.contains("Copied."), "COPY to a free name must still work: {fresh:?}");
+    if case_sensitive {
+        assert!(recase_ren.contains("Renamed."), "REN must still change case: {recase_ren:?}");
+        assert!(recase_mv.contains("Moved."), "MOVE must still change case: {recase_mv:?}");
+        assert!(
+            after_recase.contains(&"Readme.Txt".to_string())
+                && !after_recase.iter().any(|n| n == "README.TXT" || n == "readme.txt"),
+            "case changes did not land: {after_recase:?}",
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_send_raw_escapes_iac_bytes() {
     let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
