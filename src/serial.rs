@@ -677,6 +677,23 @@ static MODEM_PARKED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(
 /// When a Kermit-server port last read a byte from its wire, in milliseconds
 /// past [`traffic_epoch`] plus one -- zero is "never".
 static KERMIT_LAST_RX: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// A slave's Kermit-mode port is running its relay to the master's server --
+/// set by [`kermit_slave_relay_tick`] for as long as it runs.  What the port is
+/// *running*, not what the config now says: a screen that has just saved a new
+/// mode asks [`port_session_live`] before the restart that applies it.
+static KERMIT_RELAY_RUNNING: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+
+/// Clears [`KERMIT_RELAY_RUNNING`] when the relay thread leaves, however.
+struct KermitRelayRunning {
+    idx: usize,
+}
+
+impl Drop for KermitRelayRunning {
+    fn drop(&mut self) {
+        KERMIT_RELAY_RUNNING[self.idx].store(false, Ordering::SeqCst);
+    }
+}
+
 /// How recent Kermit traffic must be for the port to count as mid-transfer.
 /// A Kermit peer that is transferring sends a packet at least every few
 /// seconds -- its own retry timer is shorter than this -- so a quieter wire is
@@ -703,8 +720,8 @@ fn note_kermit_traffic(idx: usize) {
 ///
 /// - a local Serial Gateway bridge on a console port,
 /// - (on a slave) a master user bridged to a console or modem port -- not a
-///   Kermit-mode port, whose link to the master stands open whether or not
-///   anyone is transferring, so its traffic decides instead,
+///   port running the Kermit relay, whose link to the master stands open
+///   whether or not anyone is transferring, so its traffic decides instead,
 /// - a modem-mode call, online or parked by `+++`,
 /// - a Kermit-server port that has had traffic in the last
 ///   [`KERMIT_LIVE_WINDOW`] -- a transfer in progress.
@@ -717,8 +734,10 @@ pub fn port_session_live(id: SerialPortId) -> bool {
     let idx = id.index();
     let now = u64::try_from(traffic_epoch().elapsed().as_millis()).unwrap_or(u64::MAX - 1) + 1;
     let kermit_recent = kermit_traffic_recent(KERMIT_LAST_RX[idx].load(Ordering::SeqCst), now);
-    let relay_bridging =
-        relay_link_is_a_session(crate::relay::slave_link_state(idx), &config::get_config().port(id).mode);
+    let relay_bridging = relay_link_is_a_session(
+        crate::relay::slave_link_state(idx),
+        KERMIT_RELAY_RUNNING[idx].load(Ordering::SeqCst),
+    );
     BRIDGE_ACTIVE[idx].load(Ordering::SeqCst)
         || relay_bridging
         || MODEM_ONLINE[idx].load(Ordering::SeqCst)
@@ -727,11 +746,16 @@ pub fn port_session_live(id: SerialPortId) -> bool {
 }
 
 /// Does a slave port's link state mean a master user is on it?  `Bridging`
-/// does -- except on a Kermit-mode port, whose link to the master's server
-/// stands open whether or not anyone is transferring, so there the traffic
-/// decides (see [`port_session_live`]).
-fn relay_link_is_a_session(state: crate::relay::SlaveLinkState, mode: &str) -> bool {
-    state == crate::relay::SlaveLinkState::Bridging && mode != "kermit"
+/// does -- except while the port runs the Kermit relay, whose link to the
+/// master's server stands open whether or not anyone is transferring, so there
+/// the traffic decides (see [`port_session_live`]).
+///
+/// `kermit_relay` is whether that relay is *running*, never the configured
+/// mode: read from the config, a T that had just saved "modem" over a Kermit
+/// port made the standing link read as a user, and the screen warned that
+/// someone was connected when nobody was (measured on the Pi rig, 2026-10-15).
+fn relay_link_is_a_session(state: crate::relay::SlaveLinkState, kermit_relay: bool) -> bool {
+    state == crate::relay::SlaveLinkState::Bridging && !kermit_relay
 }
 
 /// Was Kermit traffic last seen at `last` recent enough, at `now`, to count as
@@ -2205,6 +2229,8 @@ fn kermit_slave_relay_tick(
     shutdown: Arc<AtomicBool>,
 ) {
     let idx = id.index();
+    KERMIT_RELAY_RUNNING[idx].store(true, Ordering::SeqCst);
+    let _running = KermitRelayRunning { idx };
     let label = id.label();
     let aborted =
         |idx: usize| shutdown.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst);
@@ -8414,10 +8440,24 @@ mod tests {
         // A slave's link: a master user on a console or modem port is a
         // session; a Kermit-mode port's standing link is not, by itself.
         use crate::relay::SlaveLinkState as L;
-        assert!(relay_link_is_a_session(L::Bridging, "console"));
-        assert!(relay_link_is_a_session(L::Bridging, "modem"));
-        assert!(!relay_link_is_a_session(L::Bridging, "kermit"), "a linked Kermit port is not busy");
-        assert!(!relay_link_is_a_session(L::Registered, "console"), "registered is idle");
+        assert!(relay_link_is_a_session(L::Bridging, false));
+        assert!(!relay_link_is_a_session(L::Bridging, true), "a linked Kermit port is not busy");
+        assert!(!relay_link_is_a_session(L::Registered, false), "registered is idle");
+        // Keyed on what runs, not on the config: the relay thread raises the
+        // flag and its guard drops it.
+        KERMIT_RELAY_RUNNING[idx].store(true, Ordering::SeqCst);
+        drop(KermitRelayRunning { idx });
+        assert!(!KERMIT_RELAY_RUNNING[idx].load(Ordering::SeqCst), "the relay's flag outlives it");
+        let src = include_str!("serial.rs").replace("\r\n", "\n");
+        let tick = &src[src.find("fn kermit_slave_relay_tick(").expect("the relay tick")..];
+        let tick = &tick[..tick.find("\n}\n").expect("its end")];
+        assert!(
+            tick.contains("KERMIT_RELAY_RUNNING[idx].store(true, Ordering::SeqCst);\n    let _running = KermitRelayRunning { idx };"),
+            "the Kermit relay no longer says it is running"
+        );
+        let live = &src[src.find("pub fn port_session_live(").expect("port_session_live")..];
+        let live = &live[..live.find("\n}\n").expect("its end")];
+        assert!(!live.contains("get_config"), "port_session_live reads the saved config again");
         // The window itself, without waiting fifteen seconds for it.
         let w = KERMIT_LIVE_WINDOW.as_millis() as u64;
         assert!(!kermit_traffic_recent(0, w * 10), "never seen is not recent");

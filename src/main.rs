@@ -342,13 +342,20 @@ fn main() {
         // line was the one machine that never printed it.
         if cfg.gateway_role == "slave" {
             match ssh::client_public_key_line() {
-                Ok(line) => glog!(
-                    "Relay: this slave's public key. The master records it by itself on \
-                     the first login and the stored password is then erased; paste it \
-                     into {} on the master only to authorize this slave in advance.\n{}",
-                    ssh::RELAY_AUTHORIZED_KEYS_FILE,
-                    line.trim()
-                ),
+                // Two log lines, not one with a newline in it: `log()` writes a
+                // control character as `\xNN`, so an embedded newline would
+                // glue the key onto the sentence -- and the key is the line an
+                // operator copies.
+                Ok(line) => {
+                    glog!(
+                        "Relay: this slave's public key. The master records it by itself on \
+                         the first login and the stored password is then erased; paste the \
+                         next line into {} on the master only to authorize this slave in \
+                         advance.",
+                        ssh::RELAY_AUTHORIZED_KEYS_FILE,
+                    );
+                    glog!("{}", line.trim());
+                }
                 Err(e) => glog!("Relay: could not read this slave's public key: {}", e),
             }
         }

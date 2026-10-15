@@ -1034,6 +1034,75 @@ mod tests {
         assert!(!line.contains('\x1b') && !line.contains('\x07'));
     }
 
+    /// **No log message is written with a newline in it.**  `log()` escapes
+    /// control characters, so a newline a message means to print comes out as
+    /// `\x0A` and glues two lines together -- measured live on 2026-10-15,
+    /// where the slave's public key, the line an operator copies, was stuck to
+    /// the end of the sentence before it.  Two lines are two `glog!` calls.
+    /// Scans every log call's string literals in `src/` (a backslash at the
+    /// end of a source line is a continuation, not a newline).
+    #[test]
+    fn test_no_log_call_embeds_a_newline() {
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).expect("src").flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    rs_files(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        rs_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        assert!(files.len() > 20, "found only {} source files", files.len());
+        let mut calls = 0;
+        let mut bad = Vec::new();
+        for f in &files {
+            let src = std::fs::read_to_string(f).expect("read").replace("\r\n", "\n");
+            let code = match src.find("\n#[cfg(test)]\nmod tests") {
+                Some(i) => &src[..i],
+                None => &src[..],
+            };
+            let b = code.as_bytes();
+            for opener in ["glog!(", "logger::log("] {
+                let mut from = 0;
+                while let Some(at) = code[from..].find(opener) {
+                    let start = from + at;
+                    let mut i = start + opener.len();
+                    let mut depth = 1;
+                    while depth > 0 && i < b.len() {
+                        match b[i] {
+                            b'(' => depth += 1,
+                            b')' => depth -= 1,
+                            b'"' => {
+                                i += 1;
+                                while i < b.len() && b[i] != b'"' {
+                                    if b[i] == b'\\' {
+                                        // `\n` / `\r` written in the literal is a
+                                        // real control character; `\` at a line
+                                        // end is a continuation.
+                                        if matches!(b.get(i + 1), Some(b'n') | Some(b'r')) {
+                                            bad.push(format!("{}:{}", f.display(), code[..start].lines().count() + 1));
+                                        }
+                                        i += 1;
+                                    }
+                                    i += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    calls += 1;
+                    from = start + opener.len();
+                }
+            }
+        }
+        assert!(calls > 200, "read only {calls} log calls -- the scan is not reading the source");
+        assert!(bad.is_empty(), "log messages with an embedded newline: {bad:?}");
+    }
+
     /// A rotation that cannot rename must leave the active log **alone**.
     ///
     /// This was a real data-loss path: `rotate` warned about the failed rename
