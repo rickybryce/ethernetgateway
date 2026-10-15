@@ -6555,7 +6555,11 @@ impl eframe::App for App {
                 }
             });
         if wizard_requested {
-            self.wizard = Some(wizard::Wizard::new(&self.cfg));
+            // From the saved config, not `self.cfg`: the two agree here (the
+            // button is disabled while anything is unsaved) except for the
+            // master password, which `self.cfg` holds blank -- and the wizard
+            // needs to know whether one is stored to say so.
+            self.wizard = Some(wizard::Wizard::new(&self.last_synced_cfg));
             server_open = false;
             // The close question dies with the screen it was asked on.  Both
             // can be open at once -- the dialog does not block input to the

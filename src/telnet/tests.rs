@@ -15147,11 +15147,13 @@ fn test_the_port_picker_takes_its_letters_in_either_case() {
 /// the next visit took as its starting point and so never applied either.  The
 /// apply now sits outside the screen, after it, with no `?` between them.
 ///
-/// And the erase key (K) restarts the port only on a slave, where the restart
-/// is what re-registers the new key with the master.  Anywhere else the pump
-/// reads it per bridge, and a restart would cut off a live Serial Gateway user.
+/// And the erase key (K) restarts a running port so it takes effect at once
+/// (on a slave that is what re-registers it with the master), but never drops
+/// a live connection unasked: with someone connected it warns and asks first,
+/// and "no" leaves even the setting unchanged -- so the ask comes before the
+/// write, and the write before the restart.
 #[test]
-fn test_the_port_screen_applies_on_every_exit_and_k_restarts_only_a_slave() {
+fn test_the_port_screen_applies_on_every_exit_and_k_asks_before_dropping_a_session() {
     let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
     let body_of = |name: &str| -> String {
         let start = src.find(name).unwrap_or_else(|| panic!("{name}"));
@@ -15175,12 +15177,37 @@ fn test_the_port_screen_applies_on_every_exit_and_k_restarts_only_a_slave() {
 
     let k = &screen[screen.find("\"k\" => {").expect("the K arm")..];
     let k = &k[..k.find("\"g\" => {").expect("the G arm follows K")];
-    let restart = k.find("crate::serial::restart_serial(id);").expect("K restarts a slave");
-    let gate = k
-        .find("if crate::serial::console_relayed_to_master(&config::get_config(), id) {")
-        .expect("K's restart is gated on a slave port");
-    assert!(gate < restart, "K restarts before asking whether the port is a slave's");
+    let ask = k
+        .find("&& crate::serial::console_session_live(id)\n                        && !self.confirm_port_restart(id, \"the erase key\").await?")
+        .expect("K asks before dropping a live session");
+    let declined = k[ask..].find("continue;").map(|i| ask + i).expect("a no changes nothing");
+    let write = k.find("config::update_config_value(&key, &next);").expect("K writes the key");
+    let restart = k.find("crate::serial::restart_serial(id);").expect("K restarts the port");
+    assert!(ask < declined && declined < write, "the key is written before the operator is asked");
+    assert!(!k[..ask].contains("update_config_value"), "the key is written before the operator is asked");
+    assert_eq!(k.matches("update_config_value").count(), 1, "K writes the key twice");
+    assert!(write < restart, "the port restarts before the new key is written");
+    assert!(k.contains("if running {\n                        crate::serial::restart_serial(id);"));
     assert_eq!(k.matches("restart_serial").count(), 1, "K restarts by another route too");
+}
+
+/// The restart warning fits a C64 for both ports.
+#[test]
+fn test_the_restart_warning_fits_forty_columns() {
+    let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
+    let start = src.find("async fn confirm_port_restart(").expect("confirm_port_restart");
+    let body = &src[start..start + src[start..].find("\n    }\n").expect("its end")];
+    let mut rows = 0;
+    for line in body.lines() {
+        let Some(open) = line.find("\"  ") else { continue };
+        let text = &line[open + 1..];
+        let text = &text[..text.find('"').expect("closing quote")];
+        // The widest substitutions: "the erase key" for {what}, one letter for {label}.
+        let shown = text.replace("{what}", "the erase key").replace("{label}", "A").replace("{}", "Their connection will be lost.");
+        assert!(shown.chars().count() <= 39, "{shown:?} is too wide for a C64");
+        rows += 1;
+    }
+    assert!(rows >= 6, "read only {rows} rows of the warning");
 }
 
 /// Every key the port settings screen draws or handles belongs to the key set,

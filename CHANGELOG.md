@@ -49,10 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control it was exactly 40 columns, which wraps and pushed the port screen
   past 22 rows.
 - **`RING...` on the ring emulator screen is in the right case on a C64.**
-- **Changing a port's erase key no longer cuts off a live Serial Gateway
-  session.**  The new key takes effect on the next connection, as the screen
-  says.  A slave still restarts the port, which is how its master learns the
-  new key.
+- **Changing a port's erase key asks before cutting anyone off.**  The
+  telnet port screen restarts the port so the new key takes effect at once,
+  and that restart silently dropped anyone connected through it.  With a
+  session live on the port it now warns that the connection will be lost and
+  asks first; answering no leaves the key unchanged.
 - **Setup wizard: "Enable SSH" can no longer reuse a port.**  The buttons on
   the role screens turned SSH on without the port check the SSH screen does,
   and Finish did not check again, so SSH and the web server could be saved on

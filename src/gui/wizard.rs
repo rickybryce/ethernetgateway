@@ -17,7 +17,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use eframe::egui;
 
 use super::{
-    labeled_field, singleline_with_menu, spawn_folder_picker, AMBER, AMBER_BRIGHT, AMBER_DIM,
+    labeled_field, singleline_with_hint, singleline_with_menu, spawn_folder_picker, AMBER, AMBER_BRIGHT, AMBER_DIM,
     SCRIPTURE, TEXT_PRIMARY, WARN_BORDER,
 };
 use crate::config::Config;
@@ -116,6 +116,9 @@ pub(super) struct Wizard {
     master_port: String,
     master_username: String,
     master_password: String,
+    /// How this slave logs into its master as the wizard opened -- the box
+    /// above starts empty whatever is stored, so this is what says why.
+    master_password_state: crate::relay::MasterPasswordState,
 }
 
 /// "34 disks (42 MB) from …" — what the sample-disk offer costs, said before
@@ -181,6 +184,7 @@ impl Wizard {
             // a "show" toggle.  Blank means unchanged -- `apply_to` writes it
             // only when something was typed.
             master_password: String::new(),
+            master_password_state: crate::relay::master_password_state(&cfg.slave_master_password),
         }
     }
 
@@ -995,8 +999,19 @@ impl Wizard {
         let mask = !self.show_passwords;
         ui.horizontal(|ui| {
             ui.label("Master password:");
-            singleline_with_menu(ui, &mut self.master_password, mask, Some(180.0));
+            // The editor's Pass-box placeholder, for the editor's reason: a
+            // blank box with nothing in it reads as a setting nobody filled in.
+            singleline_with_hint(
+                ui,
+                &mut self.master_password,
+                mask,
+                Some(180.0),
+                self.master_password_state.label(),
+            );
         });
+        if let Some(why) = master_password_note(self.master_password_state) {
+            indent(ui, why);
+        }
         ui.checkbox(&mut self.show_passwords, "Show the password I'm typing");
         ui.add_space(6.0);
         note(
@@ -1241,6 +1256,17 @@ impl Listener {
             Listener::Ssh => "SSH",
             Listener::Web => "the web server",
         }
+    }
+}
+
+/// What a blank Master password box means, when it does not mean "none":
+/// `None` when nothing is stored, where blank really is blank.
+fn master_password_note(state: crate::relay::MasterPasswordState) -> Option<&'static str> {
+    use crate::relay::MasterPasswordState as S;
+    match state {
+        S::Stored | S::Entered => Some("A password is already set. Leave this blank to keep it."),
+        S::UsingKey => Some("Not needed: this slave already logs in to the master with its key."),
+        S::Missing => None,
     }
 }
 
@@ -1509,6 +1535,17 @@ mod tests {
         assert_eq!(nav.matches("Outcome::Finish").count(), 1, "Finish is reached another way");
         assert_eq!(code.matches("self.error = self.enable_ssh(cfg).err();").count(), 2);
         assert_eq!(code.matches("self.ssh_enabled = true;").count(), 1, "only enable_ssh sets it");
+
+        // The Master password box shows the stored state as its placeholder,
+        // and the re-run builds the wizard from the saved config, which still
+        // holds the password the editor's `cfg` has blanked.
+        let slave = &code[code.find("fn draw_slave_master(").expect("draw_slave_master")..];
+        let slave = &slave[..slave.find("\n    fn ").expect("a following fn")];
+        assert!(slave.contains("self.master_password_state.label(),"), "the box lost its placeholder");
+        assert!(slave.contains("master_password_note(self.master_password_state)"), "the note is gone");
+        let gui = include_str!("../gui.rs");
+        assert!(gui.contains("self.wizard = Some(wizard::Wizard::new(&self.last_synced_cfg));"));
+        assert!(!gui.contains("wizard::Wizard::new(&self.cfg)"), "a re-run built from the blanked cfg");
     }
 
     #[test]
@@ -1902,6 +1939,18 @@ mod tests {
         assert!(w.password.is_empty(), "never echo the stored password back");
         assert!(w.password_confirm.is_empty());
         assert!(w.master_password.is_empty(), "never echo the stored master password back");
+        // ...but say one is there, or the blank box reads as "none set".
+        assert_ne!(
+            w.master_password_state,
+            crate::relay::MasterPasswordState::Missing,
+            "a stored master password must not read as missing"
+        );
+        assert!(master_password_note(w.master_password_state).is_some());
+        let none = Wizard::new(&Config { gateway_role: "slave".into(), ..Config::default() });
+        if !crate::relay::relay_authenticated_by_key() {
+            assert_eq!(none.master_password_state, crate::relay::MasterPasswordState::Missing);
+            assert_eq!(master_password_note(none.master_password_state), None);
+        }
         assert_eq!(w.telnet_port, "9999");
         assert!(!w.cpm_dialout);
         assert_eq!(w.role, "slave");

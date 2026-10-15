@@ -667,6 +667,15 @@ const CONSOLE_DUPLEX_BUFSIZE: usize = 16 * 1024;
 /// their own concurrent bridge.
 static BRIDGE_ACTIVE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
+/// Whether someone is connected through console port `id` right now -- a local
+/// Serial Gateway bridge, or (on a slave) a master user bridged to it.  A
+/// restart of the port ends that connection, so a screen about to restart one
+/// asks this first and warns.
+pub fn console_session_live(id: SerialPortId) -> bool {
+    BRIDGE_ACTIVE[id.index()].load(Ordering::SeqCst)
+        || crate::relay::slave_link_state(id.index()) == crate::relay::SlaveLinkState::Bridging
+}
+
 // ─── Serial broadcast channel ──────────────────────────────
 
 /// Capacity of the serial broadcast ring.  Each subscriber (one per open

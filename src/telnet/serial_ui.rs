@@ -793,20 +793,26 @@ impl TelnetSession {
                         .map(|i| (i + 1) % choices.len())
                         .unwrap_or(0);
                     let next = choices[idx].0.to_string();
+                    // **Restarted, so it takes effect at once** -- the pump
+                    // reads the setting when a bridge starts, and on a slave
+                    // the master learns it only when the port registers (it
+                    // warns before a transfer from it).  But a restart drops
+                    // whoever is connected through the port, so with someone
+                    // there it is asked first, and "no" changes nothing.
+                    let running = port.enabled && !port.port.is_empty();
+                    if running
+                        && crate::serial::console_session_live(id)
+                        && !self.confirm_port_restart(id, "the erase key").await?
+                    {
+                        continue;
+                    }
                     let key = config::serial_key(id, "backspace");
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value(&key, &next);
                     })
                     .await
                     .ok();
-                    // Takes effect on the next bridge: the pump reads the
-                    // setting once per session, so a user mid-command does not
-                    // have the wire changed under them -- and no restart here,
-                    // which would cut that user off.  Except on a slave: there
-                    // the port is the master's, and the master learns the erase
-                    // key only when the port registers (it warns before a
-                    // transfer from it), so the restart is what tells it.
-                    if crate::serial::console_relayed_to_master(&config::get_config(), id) {
+                    if running {
                         crate::serial::restart_serial(id);
                     }
                 }
@@ -889,6 +895,32 @@ impl TelnetSession {
                 }
             }
         }
+    }
+
+    /// Ask before a restart that will drop a live connection on port `id`.
+    /// `what` names the setting being changed ("the erase key").  True only on
+    /// an explicit Y.
+    pub(in crate::telnet) async fn confirm_port_restart(
+        &mut self,
+        id: crate::config::SerialPortId,
+        what: &str,
+    ) -> Result<bool, std::io::Error> {
+        let label = id.label();
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow(&format!("PORT {label} - RESTART")))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!("  Changing {what} restarts")).await?;
+        self.send_line(&format!("  Port {label}, and someone is connected")).await?;
+        self.send_line("  through it right now.").await?;
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.red("Their connection will be lost."))).await?;
+        self.send_line("").await?;
+        self.send(&format!("  Restart Port {label} now? (Y/N) ")).await?;
+        self.flush().await?;
+        self.cpm_confirm().await
     }
 
     /// The modem-mode Flow status row, which carries the two PETSCII settings

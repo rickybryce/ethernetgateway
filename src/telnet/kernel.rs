@@ -1413,7 +1413,7 @@ impl TelnetSession {
 
     /// Read a single Y/N answer for confirmations.  Returns true only on
     /// an explicit `Y`.
-    async fn cpm_confirm(&mut self) -> Result<bool, std::io::Error> {
+    pub(in crate::telnet) async fn cpm_confirm(&mut self) -> Result<bool, std::io::Error> {
         self.drain_input().await;
         let key = match self.read_byte_filtered().await? {
             Some(b) => b,
