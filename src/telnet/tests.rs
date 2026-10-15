@@ -15178,7 +15178,7 @@ fn test_the_port_screen_applies_on_every_exit_and_k_asks_before_dropping_a_sessi
     let k = &screen[screen.find("\"k\" => {").expect("the K arm")..];
     let k = &k[..k.find("\"g\" => {").expect("the G arm follows K")];
     let ask = k
-        .find("&& crate::serial::console_session_live(id)\n                        && !self.confirm_port_restart(id, \"the erase key\").await?")
+        .find("&& crate::serial::port_session_live(id)\n                        && !self.confirm_port_restart(id, \"the erase key\").await?")
         .expect("K asks before dropping a live session");
     let declined = k[ask..].find("continue;").map(|i| ask + i).expect("a no changes nothing");
     let write = k.find("config::update_config_value(&key, &next);").expect("K writes the key");
@@ -15189,6 +15189,29 @@ fn test_the_port_screen_applies_on_every_exit_and_k_asks_before_dropping_a_sessi
     assert!(write < restart, "the port restarts before the new key is written");
     assert!(k.contains("if running {\n                        crate::serial::restart_serial(id);"));
     assert_eq!(k.matches("restart_serial").count(), 1, "K restarts by another route too");
+}
+
+/// **Leaving the port screen never drops someone else unasked.**  Settings for
+/// a port the caller is not on used to restart it silently on the way out.
+/// With someone connected it now asks; "no" -- or an answer that never comes
+/// because the connection asking dropped -- puts the settings back, so nothing
+/// is left saved but not applied.
+#[test]
+fn test_another_ports_restart_asks_and_a_no_reverts() {
+    let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
+    let start = src.find("async fn modem_apply_settings(").expect("modem_apply_settings");
+    let body = &src[start..start + src[start..].find("\n    pub(in crate::telnet) ").expect("next fn")];
+    let other = &body[body.find("if !editing_own_port {").expect("the other-port path")..];
+    let other = &other[..other.find("\n        }\n").expect("its end")];
+    let ask = other
+        .find("if crate::serial::port_session_live(id)\n                && !matches!(self.confirm_port_restart(id, \"these settings\").await, Ok(true))")
+        .expect("the other-port restart no longer asks, or a lost answer skips the revert");
+    let revert = other.find("Self::revert_serial_config(id, original_cfg).await;").expect("a no reverts");
+    let restart = other.find("crate::serial::restart_serial(id);").expect("a yes restarts");
+    assert!(ask < revert && revert < restart, "ask, then revert on no, then restart");
+    let declined = &other[revert..restart];
+    assert!(declined.contains("return Ok(());"), "a no falls through to the restart");
+    assert!(!declined.contains("?;"), "an I/O error after the revert skips its own return");
 }
 
 /// The restart warning fits a C64 for both ports.

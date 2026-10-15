@@ -1768,8 +1768,10 @@ semantics:
         ports and enable-flags take effect (same flow as the GUI's
         <em>Save and Restart</em> button).</li>
     <li><strong>Serial Ports: Save</strong> — persists every field and
-        reopens the serial port managers only; telnet, SSH, and the web
-        UI itself stay running.</li>
+        restarts only the serial ports whose settings changed; telnet, SSH,
+        and the web UI itself stay running.  When a port about to restart
+        has someone connected, the page warns that the connection will be
+        lost and asks first.</li>
     <li><strong>Security / File Transfer / AI/Browser / General: Save</strong>
         — persists only.  The relevant code paths read these settings
         live, so no restart is needed.</li>
@@ -4130,7 +4132,7 @@ frame:
     <li>Pick a device from that port's dropdown.  If your port does not appear, plug in the adapter and click the refresh (&#8634;) button on Port A's row to re-scan both lists.</li>
     <li>Set the baud rate inline on the port's row.</li>
     <li>Click that port's <em>More&#8230;</em> button to choose <em>Mode</em> (Modem, Telnet-Serial, or Kermit Server), data bits, parity, stop bits, flow control, and the full Hayes AT state.</li>
-    <li>Click the <em>Save</em> button on the frame's header row.  Both ports' settings are persisted atomically and each manager reconfigures with the new values.</li>
+    <li>Click the <em>Save</em> button on the frame's header row.  Both ports' settings are persisted atomically. Only a port whose own settings changed is restarted; the other keeps whoever is on it. A restart cuts off anyone connected through the port &mdash; a Serial Gateway user, a modem call (including one parked with <code>+++</code>), a master user on a slave, or a Kermit transfer &mdash; so when a port that is about to restart has someone on it, the page, the desktop editor and the telnet port screen all say so and ask first.</li>
 </ol>
 
 <p>

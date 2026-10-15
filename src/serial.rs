@@ -20,7 +20,7 @@
 //! DTR/RTS correctly.  All settings persist via AT&W into `egateway.conf`.
 
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -667,13 +667,112 @@ const CONSOLE_DUPLEX_BUFSIZE: usize = 16 * 1024;
 /// their own concurrent bridge.
 static BRIDGE_ACTIVE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
-/// Whether someone is connected through console port `id` right now -- a local
-/// Serial Gateway bridge, or (on a slave) a master user bridged to it.  A
-/// restart of the port ends that connection, so a screen about to restart one
-/// asks this first and warns.
-pub fn console_session_live(id: SerialPortId) -> bool {
-    BRIDGE_ACTIVE[id.index()].load(Ordering::SeqCst)
-        || crate::relay::slave_link_state(id.index()) == crate::relay::SlaveLinkState::Bridging
+/// A modem-mode port is online -- in a call, the gateway menu or a peer
+/// bridge.  Published by [`set_mode`], the one place the mode changes.
+static MODEM_ONLINE: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+/// A modem-mode port holds a call parked by `+++`, which `ATO` resumes.
+/// Published once per pass of the command loop, and cleared when the port's
+/// thread ends.
+static MODEM_PARKED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+/// When a Kermit-server port last read a byte from its wire, in milliseconds
+/// past [`traffic_epoch`] plus one -- zero is "never".
+static KERMIT_LAST_RX: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// How recent Kermit traffic must be for the port to count as mid-transfer.
+/// A Kermit peer that is transferring sends a packet at least every few
+/// seconds -- its own retry timer is shorter than this -- so a quieter wire is
+/// a client between commands, or none.
+const KERMIT_LIVE_WINDOW: Duration = Duration::from_secs(15);
+
+/// The log label of a Kermit-mode port's pump -- also how the shared console
+/// bridge knows it is carrying Kermit, whose traffic is what says a transfer
+/// is in progress (see [`port_session_live`]).
+const KERMIT_SERVER_LABEL: &str = "Serial Kermit server";
+
+fn traffic_epoch() -> Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+fn note_kermit_traffic(idx: usize) {
+    let ms = u64::try_from(traffic_epoch().elapsed().as_millis()).unwrap_or(u64::MAX - 1);
+    KERMIT_LAST_RX[idx].store(ms + 1, Ordering::SeqCst);
+}
+
+/// Whether someone is connected through port `id` right now, so that
+/// restarting the port would cut them off:
+///
+/// - a local Serial Gateway bridge on a console port,
+/// - (on a slave) a master user bridged to a console or modem port -- not a
+///   Kermit-mode port, whose link to the master stands open whether or not
+///   anyone is transferring, so its traffic decides instead,
+/// - a modem-mode call, online or parked by `+++`,
+/// - a Kermit-server port that has had traffic in the last
+///   [`KERMIT_LIVE_WINDOW`] -- a transfer in progress.
+///
+/// Every screen that restarts a port asks this first and, when it is true,
+/// warns that the connection will be lost and asks before going on.  The
+/// operator's rule (2026-10-15): restart when needed, but never drop a live
+/// connection without saying so.
+pub fn port_session_live(id: SerialPortId) -> bool {
+    let idx = id.index();
+    let now = u64::try_from(traffic_epoch().elapsed().as_millis()).unwrap_or(u64::MAX - 1) + 1;
+    let kermit_recent = kermit_traffic_recent(KERMIT_LAST_RX[idx].load(Ordering::SeqCst), now);
+    let relay_bridging =
+        relay_link_is_a_session(crate::relay::slave_link_state(idx), &config::get_config().port(id).mode);
+    BRIDGE_ACTIVE[idx].load(Ordering::SeqCst)
+        || relay_bridging
+        || MODEM_ONLINE[idx].load(Ordering::SeqCst)
+        || MODEM_PARKED[idx].load(Ordering::SeqCst)
+        || kermit_recent
+}
+
+/// Does a slave port's link state mean a master user is on it?  `Bridging`
+/// does -- except on a Kermit-mode port, whose link to the master's server
+/// stands open whether or not anyone is transferring, so there the traffic
+/// decides (see [`port_session_live`]).
+fn relay_link_is_a_session(state: crate::relay::SlaveLinkState, mode: &str) -> bool {
+    state == crate::relay::SlaveLinkState::Bridging && mode != "kermit"
+}
+
+/// Was Kermit traffic last seen at `last` recent enough, at `now`, to count as
+/// a transfer in progress?  Both in [`KERMIT_LAST_RX`]'s units; `last == 0`
+/// is "never".
+fn kermit_traffic_recent(last: u64, now: u64) -> bool {
+    last != 0 && now.saturating_sub(last) < KERMIT_LIVE_WINDOW.as_millis() as u64
+}
+
+/// The ports whose own settings differ between `before` and `after` -- the
+/// ones a save has to restart.  Everything a port reads when it opens is in
+/// its [`SerialPortConfig`]; the shared settings (dial-up mappings, peer
+/// dial, the master's address) are read when they are used, or watched by
+/// the slave registration, so they restart nothing.  Restarting a port whose
+/// settings did not change only cuts off whoever is on it.
+pub fn ports_changed(before: &config::Config, after: &config::Config) -> Vec<SerialPortId> {
+    SERIAL_PORT_IDS
+        .into_iter()
+        .filter(|&id| before.port(id) != after.port(id))
+        .collect()
+}
+
+/// Clears a port's call and traffic flags when its thread ends, however it
+/// ends, so a port that has gone away never reads as busy.
+struct PortLiveGuard {
+    idx: usize,
+}
+
+impl Drop for PortLiveGuard {
+    fn drop(&mut self) {
+        MODEM_ONLINE[self.idx].store(false, Ordering::SeqCst);
+        MODEM_PARKED[self.idx].store(false, Ordering::SeqCst);
+        KERMIT_LAST_RX[self.idx].store(0, Ordering::SeqCst);
+    }
+}
+
+/// Change a modem port's mode, and publish whether it is online -- see
+/// [`port_session_live`].  The only way the mode is set after the port opens.
+fn set_mode(state: &mut ModemState, mode: ModemMode) {
+    state.mode = mode;
+    MODEM_ONLINE[state.port_id.index()].store(mode == ModemMode::Online, Ordering::SeqCst);
 }
 
 // ─── Serial broadcast channel ──────────────────────────────
@@ -986,16 +1085,6 @@ pub fn start_serial(
 /// settings" leave an in-flight Port B bridge alone.
 pub fn restart_serial(id: SerialPortId) {
     SERIAL_RESTART[id.index()].store(true, Ordering::SeqCst);
-}
-
-/// Signal both ports' managers to restart.  Used by the GUI's "Save"
-/// button when the operator might have changed either or both ports —
-/// cheaper than diffing config slices and avoids a bug where a saved
-/// change is silently ignored because we restarted the wrong port.
-pub fn restart_all_serial() {
-    for id in SERIAL_PORT_IDS {
-        restart_serial(id);
-    }
 }
 
 /// One detected serial port: the device path plus whatever the OS could tell
@@ -2227,7 +2316,7 @@ fn kermit_slave_relay_tick(
             stream,
             handle.clone(),
             shutdown.clone(),
-            "Serial Kermit server",
+            KERMIT_SERVER_LABEL,
         );
         handle.block_on(async move { drop(_session) });
         glog!(
@@ -3336,6 +3425,11 @@ fn run_console_bridge<S>(
                 break;
             }
             Ok(n) => {
+                // A slave's Kermit-mode port bridges to the master's server
+                // through here: its traffic is the transfer in progress.
+                if subsystem == KERMIT_SERVER_LABEL {
+                    note_kermit_traffic(id.index());
+                }
                 // Hand the bytes to the async pump, but stay responsive to
                 // shutdown / restart while doing so.  A stalled telnet peer
                 // can fill the bounded channel; an unbounded blocking_send
@@ -3639,7 +3733,8 @@ fn run_kermit_bridge_inline<S>(
     let mut wire_buf = [0u8; 4096];
     let mut duplex_buf = [0u8; 4096];
     let restart_flag = &SERIAL_RESTART[id.index()];
-    let subsystem = "Serial Kermit server";
+    let subsystem = KERMIT_SERVER_LABEL;
+    let _live = PortLiveGuard { idx: id.index() };
 
     while !shutdown.load(Ordering::SeqCst) && !restart_flag.load(Ordering::SeqCst) {
         // Wire → server: forward a client packet to the server's reader.
@@ -3650,6 +3745,8 @@ fn run_kermit_bridge_inline<S>(
                 break;
             }
             Ok(n) => {
+                // A client talking to the server: see `port_session_live`.
+                note_kermit_traffic(id.index());
                 let result = handle.block_on(async {
                     tokio::time::timeout(
                         Duration::from_secs(5),
@@ -3756,7 +3853,11 @@ fn serial_thread(
 
     let restart_flag = &SERIAL_RESTART[id.index()];
     let mut port_lost = false;
+    let _live = PortLiveGuard { idx: id.index() };
     while !state.shutdown.load(Ordering::SeqCst) && !restart_flag.load(Ordering::SeqCst) {
+        // A call parked by `+++` is a live connection too -- `ATO` resumes it --
+        // so a restart would drop it; see `port_session_live`.
+        MODEM_PARKED[id.index()].store(state.active_connection.is_some(), Ordering::SeqCst);
         // Check for a pending ring request.  Not while a call is parked: see
         // `line_free_for_incoming`.
         let line_free = line_free_for_incoming(state.mode, state.active_connection.is_some());
@@ -3784,7 +3885,7 @@ fn serial_thread(
             ModemMode::Online => {
                 // Online mode is entered and exits within the dial functions.
                 // If we somehow end up here, reset to command mode.
-                state.mode = ModemMode::Command;
+                set_mode(&mut state, ModemMode::Command);
             }
         }
     }
@@ -4995,12 +5096,12 @@ fn handle_return_online(state: &mut ModemState) {
         return;
     };
     send_result(state, "CONNECT");
-    state.mode = ModemMode::Online;
+    set_mode(state, ModemMode::Online);
     apply_carrier(state, true); // assert carrier for the duration of the call
     match conn {
         ActiveConnection::Tcp(mut tcp) => {
             let exit = online_mode_tcp(state, &mut tcp);
-            state.mode = ModemMode::Command;
+            set_mode(state, ModemMode::Command);
             match exit {
                 OnlineExit::Escaped => {
                     state.active_connection = Some(ActiveConnection::Tcp(tcp));
@@ -5014,7 +5115,7 @@ fn handle_return_online(state: &mut ModemState) {
         }
         ActiveConnection::Duplex { mut read, mut write } => {
             let exit = online_mode_duplex(state, &mut read, &mut write, false);
-            state.mode = ModemMode::Command;
+            set_mode(state, ModemMode::Command);
             match exit {
                 OnlineExit::Escaped => {
                     state.active_connection =
@@ -5037,7 +5138,7 @@ fn handle_return_online(state: &mut ModemState) {
             dials_a_host,
         } => {
             let exit = online_mode_duplex(state, &mut read, &mut write, dials_a_host);
-            state.mode = ModemMode::Command;
+            set_mode(state, ModemMode::Command);
             match exit {
                 OnlineExit::Escaped => {
                     state.active_connection = Some(ActiveConnection::Relay {
@@ -5662,11 +5763,11 @@ fn bridge_local_modem_peer(state: &mut ModemState, target: SerialPortId) {
 /// emits `NO CARRIER`.  Shared by every local/remote peer bridge.
 fn bridge_duplex_online(state: &mut ModemState, bridge: tokio::io::DuplexStream) {
     send_result(state, "CONNECT");
-    state.mode = ModemMode::Online;
+    set_mode(state, ModemMode::Online);
     apply_carrier(state, true);
     let (mut read, mut write) = tokio::io::split(bridge);
     let exit = online_mode_duplex(state, &mut read, &mut write, false);
-    state.mode = ModemMode::Command;
+    set_mode(state, ModemMode::Command);
     match exit {
         OnlineExit::Escaped => {
             state.active_connection = Some(ActiveConnection::Duplex {
@@ -5797,14 +5898,14 @@ fn dial_master_relay(
     };
 
     send_result(state, "CONNECT");
-    state.mode = ModemMode::Online;
+    set_mode(state, ModemMode::Online);
     apply_carrier(state, true); // assert carrier for the duration of the call
 
     let crate::relay::MasterRelay { _session, stream } = relay;
     let (mut relay_read, mut relay_write) = tokio::io::split(stream);
     let exit = online_mode_duplex(state, &mut relay_read, &mut relay_write, dials_a_host);
 
-    state.mode = ModemMode::Command;
+    set_mode(state, ModemMode::Command);
     match exit {
         OnlineExit::Escaped => {
             // Preserve the SSH connection across the +++ escape so ATO can
@@ -5894,7 +5995,7 @@ fn session_output_bufsize(baud: u32) -> usize {
 /// Dial into the local Ethernet Gateway menu via an in-memory duplex bridge.
 fn dial_ethernet_gateway(state: &mut ModemState) {
     send_result(state, "CONNECT");
-    state.mode = ModemMode::Online;
+    set_mode(state, ModemMode::Online);
     apply_carrier(state, true); // assert carrier for the duration of the call
 
     // Create a duplex pair: one end for TelnetSession, the other for this thread.
@@ -5969,7 +6070,7 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
     let mut wire_write = wire_write;
     let exit = online_mode_duplex(state, &mut wire_read, &mut wire_write, false);
 
-    state.mode = ModemMode::Command;
+    set_mode(state, ModemMode::Command);
     match exit {
         OnlineExit::Escaped => {
             state.active_connection = Some(ActiveConnection::Duplex {
@@ -5998,7 +6099,7 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
 /// verified `config.allow_atdt_kermit == true` before reaching here.
 fn dial_kermit_server(state: &mut ModemState) {
     send_result(state, "CONNECT");
-    state.mode = ModemMode::Online;
+    set_mode(state, ModemMode::Online);
     apply_carrier(state, true); // assert carrier for the duration of the call
 
     let (async_stream, serial_stream) = tokio::io::duplex(65536);
@@ -6052,7 +6153,7 @@ fn dial_kermit_server(state: &mut ModemState) {
         tokio::io::split(serial_stream);
     let exit = online_mode_duplex(state, &mut duplex_read, &mut duplex_write, false);
 
-    state.mode = ModemMode::Command;
+    set_mode(state, ModemMode::Command);
     match exit {
         OnlineExit::Escaped => {
             // User hit +++ to escape back to command mode mid-session.
@@ -6211,12 +6312,12 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
     send_result(state, "CONNECT");
-    state.mode = ModemMode::Online;
+    set_mode(state, ModemMode::Online);
     apply_carrier(state, true); // assert carrier for the duration of the call
 
     let exit = online_mode_tcp(state, &mut stream);
 
-    state.mode = ModemMode::Command;
+    set_mode(state, ModemMode::Command);
     match exit {
         OnlineExit::Escaped => {
             state.active_connection = Some(ActiveConnection::Tcp(stream));
@@ -7046,13 +7147,13 @@ fn process_peer_ring(state: &mut ModemState, call: PeerCall) {
     }
 
     send_result(state, "CONNECT");
-    state.mode = ModemMode::Online;
+    set_mode(state, ModemMode::Online);
     apply_carrier(state, true);
 
     let (mut read, mut write) = tokio::io::split(bridge);
     let exit = online_mode_duplex(state, &mut read, &mut write, false);
 
-    state.mode = ModemMode::Command;
+    set_mode(state, ModemMode::Command);
     match exit {
         OnlineExit::Escaped => {
             state.active_connection = Some(ActiveConnection::Duplex {
@@ -8262,45 +8363,72 @@ mod tests {
         }
     }
 
-    /// `restart_all_serial()` flips both ports' flags.  Used by the
-    /// GUI Save button when the operator might have changed either or
-    /// both ports.  Without this, a saved Port B change would be
-    /// silently ignored if the GUI happened to call `restart_serial(A)`
-    /// only.
+    /// **A save restarts only the ports whose own settings changed.**  Every
+    /// serial Save used to restart both ports, cutting off whoever was on the
+    /// one nobody touched.  A shared setting -- read when it is used -- restarts
+    /// neither.
     #[test]
-    fn test_restart_all_serial_sets_both_flags() {
-        let _g = lock_global_state();
-        for id in SERIAL_PORT_IDS {
-            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
-        }
-        restart_all_serial();
-        for id in SERIAL_PORT_IDS {
-            assert!(
-                SERIAL_RESTART[id.index()].load(Ordering::SeqCst),
-                "restart_all_serial must flip Port {}'s flag",
-                id.label()
-            );
-            // Restore for siblings.
-            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
-        }
+    fn test_ports_changed_names_only_the_changed_port() {
+        let before = config::Config::default();
+        assert!(ports_changed(&before, &before).is_empty(), "no change, no restart");
+        let mut after = before.clone();
+        after.serial_b.baud = 1200;
+        assert_eq!(ports_changed(&before, &after), vec![SerialPortId::B]);
+        after.serial_a.backspace = "rubout".into();
+        assert_eq!(ports_changed(&before, &after), vec![SerialPortId::A, SerialPortId::B]);
+        let mut shared = before.clone();
+        shared.allow_peer_dial = !shared.allow_peer_dial;
+        assert!(ports_changed(&before, &shared).is_empty(), "a shared setting restarts nothing");
     }
 
-    /// `restart_all_serial()` is idempotent — calling it when both
-    /// flags are already set must not panic or otherwise misbehave.
-    /// This exercise is cheap, but the safety net catches a future
-    /// change that switches storage from `Atomic*` to a type without
-    /// idempotent stores.
+    /// **Every kind of connection a restart would drop reads as live**, and a
+    /// port whose thread has ended reads as free.  The restart warnings on the
+    /// telnet port screen, the web page and the desktop editor all ask this.
     #[test]
-    fn test_restart_all_serial_idempotent() {
+    fn test_port_session_live_sees_every_kind_of_connection() {
         let _g = lock_global_state();
-        for id in SERIAL_PORT_IDS {
-            SERIAL_RESTART[id.index()].store(true, Ordering::SeqCst);
+        let id = SerialPortId::B;
+        let idx = id.index();
+        let clear = || {
+            BRIDGE_ACTIVE[idx].store(false, Ordering::SeqCst);
+            MODEM_ONLINE[idx].store(false, Ordering::SeqCst);
+            MODEM_PARKED[idx].store(false, Ordering::SeqCst);
+            KERMIT_LAST_RX[idx].store(0, Ordering::SeqCst);
+        };
+        clear();
+        if crate::relay::slave_link_state(idx) == crate::relay::SlaveLinkState::Bridging {
+            return; // another test holds the relay state; nothing to measure
         }
-        restart_all_serial();
-        for id in SERIAL_PORT_IDS {
-            assert!(SERIAL_RESTART[id.index()].load(Ordering::SeqCst));
-            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
+        assert!(!port_session_live(id), "an idle port is not live");
+        for (what, flag) in [
+            ("console bridge", &BRIDGE_ACTIVE[idx]),
+            ("modem call online", &MODEM_ONLINE[idx]),
+            ("modem call parked by +++", &MODEM_PARKED[idx]),
+        ] {
+            flag.store(true, Ordering::SeqCst);
+            assert!(port_session_live(id), "a {what} must read as live");
+            clear();
         }
+        note_kermit_traffic(idx);
+        assert!(port_session_live(id), "Kermit traffic just now is a transfer in progress");
+        // A slave's link: a master user on a console or modem port is a
+        // session; a Kermit-mode port's standing link is not, by itself.
+        use crate::relay::SlaveLinkState as L;
+        assert!(relay_link_is_a_session(L::Bridging, "console"));
+        assert!(relay_link_is_a_session(L::Bridging, "modem"));
+        assert!(!relay_link_is_a_session(L::Bridging, "kermit"), "a linked Kermit port is not busy");
+        assert!(!relay_link_is_a_session(L::Registered, "console"), "registered is idle");
+        // The window itself, without waiting fifteen seconds for it.
+        let w = KERMIT_LIVE_WINDOW.as_millis() as u64;
+        assert!(!kermit_traffic_recent(0, w * 10), "never seen is not recent");
+        assert!(kermit_traffic_recent(1000, 1000 + w - 1));
+        assert!(!kermit_traffic_recent(1000, 1000 + w));
+        // And a port whose thread ends is free again, however it ended.
+        MODEM_ONLINE[idx].store(true, Ordering::SeqCst);
+        MODEM_PARKED[idx].store(true, Ordering::SeqCst);
+        drop(PortLiveGuard { idx });
+        assert!(!port_session_live(id), "a closed port still reads as busy");
+        clear();
     }
 
     /// `SerialPortId::label` and `SerialPortId::index` agree with the

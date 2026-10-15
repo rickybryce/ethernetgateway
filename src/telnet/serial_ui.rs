@@ -801,7 +801,7 @@ impl TelnetSession {
                     // there it is asked first, and "no" changes nothing.
                     let running = port.enabled && !port.port.is_empty();
                     if running
-                        && crate::serial::console_session_live(id)
+                        && crate::serial::port_session_live(id)
                         && !self.confirm_port_restart(id, "the erase key").await?
                     {
                         continue;
@@ -989,6 +989,23 @@ impl TelnetSession {
         // skip the warn-+-revert and just apply.
         let editing_own_port = self.is_serial && self.serial_port_id == Some(id);
         if !editing_own_port {
+            // Someone else may be on that port.  Restarting it drops them, so
+            // with a live session the restart is asked for first; a "no" puts
+            // the port's settings back, because a change left saved but not
+            // applied is the state `modem_settings` exists to prevent.
+            //
+            // An answer that never comes -- the connection asking it dropped --
+            // is a "no": the revert must still run, so no `?` until it has.
+            if crate::serial::port_session_live(id)
+                && !matches!(self.confirm_port_restart(id, "these settings").await, Ok(true))
+            {
+                Self::revert_serial_config(id, original_cfg).await;
+                let _ = self.send_line(&format!("  {}", self.yellow("Changes undone."))).await;
+                let _ = self.send("  Press any key to continue.").await;
+                let _ = self.flush().await;
+                let _ = self.wait_for_key().await;
+                return Ok(());
+            }
             crate::serial::restart_serial(id);
             return Ok(());
         }

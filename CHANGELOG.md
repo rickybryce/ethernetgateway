@@ -49,11 +49,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control it was exactly 40 columns, which wraps and pushed the port screen
   past 22 rows.
 - **`RING...` on the ring emulator screen is in the right case on a C64.**
-- **Changing a port's erase key asks before cutting anyone off.**  The
-  telnet port screen restarts the port so the new key takes effect at once,
-  and that restart silently dropped anyone connected through it.  With a
-  session live on the port it now warns that the connection will be lost and
-  asks first; answering no leaves the key unchanged.
+- **Serial port settings never drop a live connection unasked.**  A port
+  has to restart for new settings to take effect, and the restart cuts off
+  whoever is connected through it: a Serial Gateway user, a modem call
+  (including one parked with `+++`), a master user on a slave, or a Kermit
+  transfer.  The telnet port screen, the web page and the desktop editor
+  restarted ports silently; all three now warn that the connection will be
+  lost and ask first when someone is on the port.  On the telnet screen a no
+  puts the settings back; on the web and in the editor it saves nothing.
+  The erase key (K) now restarts the port so it takes effect at once, under
+  the same warning.
+- **A serial Save restarts only the port that changed.**  The web page's and
+  desktop editor's serial Save restarted both ports every time, cutting off
+  anyone on the port nobody had touched.
 - **Setup wizard: "Enable SSH" can no longer reuse a port.**  The buttons on
   the role screens turned SSH on without the port check the SSH screen does,
   and Finish did not check again, so SSH and the web server could be saved on

@@ -194,8 +194,9 @@ enum SaveAction {
     /// telnet/SSH/Kermit/Web port bindings actually take hold.  Sets
     /// the same `restart` + `shutdown` flags `gui::App` does.
     SaveAndRestart,
-    /// Persist config and ask the serial subsystem to reopen its
-    /// ports.  Mirrors `gui::App::save_and_restart_serial`.
+    /// Persist config and restart the serial ports whose settings changed
+    /// (the page warns first when one has someone connected).  Mirrors
+    /// `gui::App::save_and_restart_serial`.
     SaveAndRestartSerial,
     /// Persist config and test the bound ports.  Its own action because the
     /// page that comes back shows the result in a modal, and only this one
@@ -593,6 +594,21 @@ async fn handle_connection(
             )
             .await?;
         }
+        ("GET", "/serial-live") => {
+            // Which ports have someone connected right now -- asked by the
+            // page when a serial Save would restart a port, so it can warn
+            // that the connection will be lost before it submits.
+            let body = serial_live_json();
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
         ("GET", "/serial-ports") => {
             // Live serial-port re-scan for the refresh button.  The
             // JS picks up the result and rewrites the option list of
@@ -614,10 +630,19 @@ async fn handle_connection(
             // mutates, and rewrites egateway.conf, which would otherwise
             // park a tokio worker on filesystem I/O for every save.
             let body = request.body;
-            let result = tokio::task::spawn_blocking(move || apply_form_post(&body)).await;
-            let (notice, action) = match result {
+            // The config as stored before this save, so a serial save can
+            // restart only the ports it changed (see the action match below).
+            let result = tokio::task::spawn_blocking(move || {
+                let before = crate::config::get_config();
+                (apply_form_post(&body), before)
+            })
+            .await;
+            let ((notice, action), before) = match result {
                 Ok(pair) => pair,
-                Err(e) => (format!("Save failed: {}", e), SaveAction::Save),
+                Err(e) => (
+                    (format!("Save failed: {}", e), SaveAction::Save),
+                    crate::config::get_config(),
+                ),
             };
             // 303 See Other so a browser reload after Save re-issues GET
             // instead of resubmitting the form.  The notice rides along
@@ -645,9 +670,23 @@ async fn handle_connection(
                 // result.  Listed rather than folded into `Save` so a reader
                 // sees that a port check restarts nothing.
                 SaveAction::Save | SaveAction::PortCheck => {}
+                // Only the ports whose own settings changed: restarting the
+                // other one would cut off whoever is on it for nothing.  Anyone
+                // on a changed port was warned by the page before it submitted
+                // (`/serial-live`, and the `warn-serial-restart` modal).
                 SaveAction::SaveAndRestartSerial => {
-                    crate::serial::restart_all_serial();
-                    logger::log("Web: serial ports reconfigured.".into());
+                    let changed =
+                        crate::serial::ports_changed(&before, &crate::config::get_config());
+                    for &id in &changed {
+                        crate::serial::restart_serial(id);
+                    }
+                    if changed.is_empty() {
+                        logger::log("Web: no serial port settings changed; nothing restarted.".into());
+                    } else {
+                        let names: Vec<String> =
+                            changed.iter().map(|id| format!("Port {}", id.label())).collect();
+                        logger::log(format!("Web: {} reconfigured.", names.join(" and ")));
+                    }
                 }
                 SaveAction::SaveAndRestart => {
                     logger::log("Web: configuration saved — restarting server...".into());
@@ -1118,6 +1157,16 @@ fn take_master_password_entry(fields: &HashMap<String, String>) -> Option<String
 /// caller can trigger the matching restart behavior after the
 /// response has flushed.  Synchronous because it does filesystem I/O
 /// — wrap in `spawn_blocking`.
+/// `{"a":true,"b":false}` -- [`crate::serial::port_session_live`] per port.
+fn serial_live_json() -> String {
+    use crate::config::SerialPortId;
+    format!(
+        "{{\"a\":{},\"b\":{}}}",
+        crate::serial::port_session_live(SerialPortId::A),
+        crate::serial::port_session_live(SerialPortId::B),
+    )
+}
+
 fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // Guard against a malformed submission (non-UTF-8 body, or a
     // chunked/empty body that read_request surfaced as zero-length): with
@@ -3237,6 +3286,13 @@ fn render_warning_popups() -> String {
         "OK", false,
     ));
     out.push_str(&warn_modal(
+        "warn-serial-restart", warn,
+        "Saving restarts <span id=\"warn-serial-restart-ports\">the serial port</span>, \
+         and someone is connected through it right now. Their connection will be lost. \
+         Cancel saves nothing and keeps your changes on this page.",
+        "Save and restart", true,
+    ));
+    out.push_str(&warn_modal(
         "warn-ip-safety", sec,
         "Disabling IP safety removes the private-IP allowlist entirely. Anyone \
          on the public internet who can reach your telnet port will be able to \
@@ -5280,18 +5336,74 @@ document.querySelectorAll('.modal').forEach(function(m) {
 // keyboard focus reaching a control behind the overlay — each modal's Cancel
 // still runs its own revert.
 var warnCancelCb = {};
-function showWarn(id, cancelCb) { warnCancelCb[id] = cancelCb || null; openModal(id); }
+var warnContinueCb = {};
+function showWarn(id, cancelCb, continueCb) {
+  warnCancelCb[id] = cancelCb || null;
+  warnContinueCb[id] = continueCb || null;
+  openModal(id);
+}
 document.querySelectorAll('.warn-continue').forEach(function(b) {
-  b.addEventListener('click', function() { delete warnCancelCb[b.dataset.warn]; closeModal(b.dataset.warn); });
+  b.addEventListener('click', function() {
+    var cb = warnContinueCb[b.dataset.warn];
+    delete warnCancelCb[b.dataset.warn];
+    delete warnContinueCb[b.dataset.warn];
+    closeModal(b.dataset.warn);
+    if (cb) cb();
+  });
 });
 document.querySelectorAll('.warn-cancel').forEach(function(b) {
   b.addEventListener('click', function() {
     var cb = warnCancelCb[b.dataset.warn];
     if (cb) cb();
     delete warnCancelCb[b.dataset.warn];
+    delete warnContinueCb[b.dataset.warn];
     closeModal(b.dataset.warn);
   });
 });
+// A serial Save restarts the ports whose settings changed, and a restart cuts
+// off whoever is connected through one.  So before it submits, the page asks
+// the gateway which ports are in use (/serial-live) and, when a changed one
+// is, shows warn-serial-restart: Continue submits, Cancel saves nothing.  A
+// port's state is every serial_<port>_ field the form would submit, compared
+// with the same at page load -- the server restarts by the same rule (the
+// port's own settings changed), so the two agree on which port is meant.
+(function() {
+  var form = document.getElementById('cfg-form');
+  if (!form) return;
+  function portState(p) {
+    var parts = [];
+    new FormData(form).forEach(function(v, k) {
+      if (k.indexOf('serial_' + p + '_') === 0) parts.push(k + '=' + v);
+    });
+    return parts.sort().join('&');
+  }
+  var initial = { a: portState('a'), b: portState('b') };
+  var confirmed = false;
+  form.addEventListener('submit', function(e) {
+    var btn = e.submitter;
+    if (confirmed || !btn || btn.value !== 'save_and_restart_serial') return;
+    var changed = ['a', 'b'].filter(function(p) { return portState(p) !== initial[p]; });
+    if (!changed.length) return;
+    e.preventDefault();
+    function go() {
+      confirmed = true;
+      if (form.requestSubmit) form.requestSubmit(btn); else btn.click();
+    }
+    function ask(busy) {
+      document.getElementById('warn-serial-restart-ports').textContent =
+        busy.map(function(p) { return 'Port ' + p.toUpperCase(); }).join(' and ');
+      showWarn('warn-serial-restart', null, go);
+    }
+    fetch('/serial-live', { cache: 'no-store' })
+      .then(function(r) { return r.json(); })
+      .then(function(live) {
+        var busy = changed.filter(function(p) { return live[p]; });
+        if (busy.length) ask(busy); else go();
+      })
+      // Could not tell: warn rather than risk dropping someone unasked.
+      .catch(function() { ask(changed); });
+  });
+})();
 function warnIfDisablingWeb(cb) {
   if (!cb.checked) {
     showWarn('warn-web-disable', function() { cb.checked = true; });
@@ -5829,6 +5941,45 @@ mod tests {
         assert!(html.contains("warnOnEnable(this, 'warn-ip-safety')"));
         assert!(html.contains("warnOnEnable(this, 'warn-kermit-server')"));
         assert!(html.contains("warnOnEnable(this, 'warn-atdt-kermit')"));
+    }
+
+    /// **A serial Save never drops a connection unasked.**  The page asks
+    /// `/serial-live` before submitting a serial Save that changed a port, and
+    /// shows `warn-serial-restart` when a changed port has someone on it;
+    /// Continue submits, Cancel saves nothing.  The server restarts only the
+    /// ports whose settings changed -- every Save used to restart both.
+    #[test]
+    fn test_a_serial_save_warns_before_dropping_a_connection() {
+        let html = render_main_page(&Config::default(), None, false);
+        assert!(html.contains("id=\"warn-serial-restart\""), "the warning modal is missing");
+        assert!(html.contains("id=\"warn-serial-restart-ports\""), "the modal cannot name the port");
+        assert!(html.contains("Their connection will be lost."));
+        for needle in [
+            "btn.value !== 'save_and_restart_serial'",
+            "fetch('/serial-live', { cache: 'no-store' })",
+            "if (busy.length) ask(busy); else go();",
+            "showWarn('warn-serial-restart', null, go);",
+            ".catch(function() { ask(changed); });",
+            // Continue runs the modal's own callback, or Continue would only close it.
+            "var cb = warnContinueCb[b.dataset.warn];",
+        ] {
+            assert!(html.contains(needle), "the serial Save check lost {needle:?}");
+        }
+        let json = serial_live_json();
+        for (port, rest) in [("a", "{\"a\":"), ("b", ",\"b\":")] {
+            let at = json.find(rest).unwrap_or_else(|| panic!("no {port} in {json}"));
+            let v = &json[at + rest.len()..];
+            assert!(v.starts_with("true") || v.starts_with("false"), "{json}");
+        }
+
+        let src = include_str!("webserver.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("#[cfg(test)]").expect("the tests")];
+        assert!(code.contains("(\"GET\", \"/serial-live\") => {"), "the live endpoint is gone");
+        let arm = &code[code.find("SaveAction::SaveAndRestartSerial => {").expect("the serial arm")..];
+        let arm = &arm[..arm.find("SaveAction::SaveAndRestart => {").expect("the next arm")];
+        assert!(arm.contains("crate::serial::ports_changed(&before, &crate::config::get_config());"));
+        assert!(arm.contains("for &id in &changed {\n                        crate::serial::restart_serial(id);"));
+        assert!(!arm.contains("restart_all"), "a serial Save restarts both ports again");
     }
 
     /// Every config key needs all three UIs, and the web one is the easiest to

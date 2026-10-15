@@ -1140,6 +1140,9 @@ struct App {
     /// operator clicks Enable.  Cancel leaves `disable_ip_safety` at
     /// its prior false value.
     disable_ip_safety_warn_open: bool,
+    /// Ports a serial Save is waiting to restart, held while the operator is
+    /// asked: each has someone connected, who the restart will cut off.
+    serial_restart_prompt: Option<Vec<crate::config::SerialPortId>>,
     /// When the user clicks the folder-browse button, the native dialog
     /// runs on a background OS thread so it can't block the egui event
     /// loop.  This channel carries back the chosen path (or None if
@@ -1414,6 +1417,7 @@ impl App {
             vdm_open_at: open_screen_asked
                 .then(|| std::time::Instant::now() + std::time::Duration::from_millis(2500)),
             disable_ip_safety_warn_open: false,
+            serial_restart_prompt: None,
             pending_dir_pick: None,
             pending_boot_pick: None,
             wizard,
@@ -4500,21 +4504,35 @@ impl App {
         }
     }
 
-    /// Persist config and signal both serial managers to reopen their
-    /// ports with the new settings.  Leaves telnet/SSH sessions
-    /// untouched.  The GUI Save button is the only call site, and it
-    /// might have changed either or both ports — restarting both is
-    /// cheaper than diffing config slices and avoids the bug where a
-    /// saved change is silently ignored.
+    /// The serial Save buttons.  A port whose settings changed has to be
+    /// restarted for them to take effect, and a restart cuts off whoever is
+    /// connected through it -- so when a changed port has someone on it, the
+    /// save waits for the warning window to be answered.
+    fn request_serial_save(&mut self) {
+        self.sync_numeric_fields();
+        let live = serial_ports_to_ask_about(&config::get_config(), &self.cfg);
+        if live.is_empty() {
+            self.save_and_restart_serial();
+        } else {
+            self.serial_restart_prompt = Some(live);
+        }
+    }
+
+    /// Persist config and restart the serial ports whose settings it changed.
+    /// Leaves telnet/SSH sessions untouched -- and the other port too: the
+    /// diff is between the saved config before and after this save, so a
+    /// port nobody changed keeps whoever is on it.
     fn save_and_restart_serial(&mut self) {
+        let before = config::get_config();
         let saved = self.persist_config();
-        crate::serial::restart_all_serial();
+        let changed = crate::serial::ports_changed(&before, &config::get_config());
+        for &id in &changed {
+            crate::serial::restart_serial(id);
+        }
+        let what = serial_restart_summary(&changed);
         match saved {
-            Ok(()) => logger::log("Configuration saved — serial ports reconfigured.".into()),
-            Err(e) => logger::log(format!(
-                "Configuration NOT saved ({}) — serial ports reconfigured.",
-                e
-            )),
+            Ok(()) => logger::log(format!("Configuration saved — {what}.")),
+            Err(e) => logger::log(format!("Configuration NOT saved ({e}) — {what}.")),
         }
     }
 
@@ -5342,6 +5360,37 @@ fn password_for_save(typed: &str, stored: &str) -> String {
         stored.to_string()
     } else {
         crate::credential::store_typed(typed)
+    }
+}
+
+/// The changed ports a serial save would restart that have someone connected
+/// -- the ones the operator is asked about.  `saved` is the config as stored,
+/// `edited` the editor's copy.
+fn serial_ports_to_ask_about(
+    saved: &Config,
+    edited: &Config,
+) -> Vec<crate::config::SerialPortId> {
+    crate::serial::ports_changed(saved, edited)
+        .into_iter()
+        .filter(|&id| crate::serial::port_session_live(id))
+        .collect()
+}
+
+/// "Port A", "Port A and Port B".
+fn serial_port_names(ports: &[crate::config::SerialPortId]) -> String {
+    ports
+        .iter()
+        .map(|id| format!("Port {}", id.label()))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+/// The log line's account of a serial save's restarts.
+fn serial_restart_summary(changed: &[crate::config::SerialPortId]) -> String {
+    if changed.is_empty() {
+        "no serial port settings changed, nothing restarted".to_string()
+    } else {
+        format!("{} reconfigured", serial_port_names(changed))
     }
 }
 
@@ -6232,7 +6281,7 @@ impl eframe::App for App {
                                     ui.label(egui::RichText::new("Serial Port B").strong().color(AMBER));
                                     ui.checkbox(&mut self.cfg.serial_b.enabled, "Enabled");
                                     if right_aligned_small_button(ui, "Save") {
-                                        self.save_and_restart_serial();
+                                        self.request_serial_save();
                                     }
                                 });
                                 self.draw_serial_primary_row(ui, crate::config::SerialPortId::A);
@@ -6725,7 +6774,7 @@ impl eframe::App for App {
                     ))
                     .clicked()
                 {
-                    self.save_and_restart_serial();
+                    self.request_serial_save();
                 }
             });
             self.serial_popup_open[idx] = serial_open;
@@ -7406,6 +7455,62 @@ impl eframe::App for App {
             dis_warn_open = false;
         }
         self.disable_ip_safety_warn_open = dis_warn_open;
+
+        // A serial Save waiting on the operator: the ports it would restart
+        // have someone connected.  "Save and restart" goes on; Cancel (or the
+        // X) saves nothing and leaves the edits in the editor.
+        if let Some(ports) = self.serial_restart_prompt.clone() {
+            let names = serial_port_names(&ports);
+            let mut open = true;
+            let mut go = false;
+            let mut cancel = false;
+            egui::Window::new(
+                egui::RichText::new("Restart serial port?")
+                    .strong()
+                    .color(AMBER_BRIGHT),
+            )
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(440.0)
+            .frame(warn_frame)
+            .show(&ctx, |ui| {
+                ui.label(egui::RichText::new("Warning").strong().color(AMBER));
+                ui.add_space(4.0);
+                ui.label(format!(
+                    "Saving restarts {names}, and someone is connected through \
+                     it right now. Their connection will be lost."
+                ));
+                ui.add_space(6.0);
+                ui.label("Cancel saves nothing; your changes stay in the editor.");
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("Save and restart")
+                                .strong()
+                                .color(AMBER_BRIGHT),
+                        ))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    ui.add_space(8.0);
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new("Cancel").strong()))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+            if go {
+                self.serial_restart_prompt = None;
+                self.save_and_restart_serial();
+            } else if cancel || !open {
+                self.serial_restart_prompt = None;
+            }
+        }
 
         // Detect whether the user has unsaved edits.  Compare bound
         // config fields against the last-synced snapshot so that
@@ -8260,6 +8365,49 @@ mod tests {
         app.sync_numeric_fields();
         assert_eq!(app.cfg.log_max_files, crate::config::MAX_LOG_MAX_FILES);
         assert_eq!(app.log_max_files_buf, crate::config::MAX_LOG_MAX_FILES.to_string());
+    }
+
+    /// **A serial Save restarts only what changed, and asks before dropping
+    /// anyone.**  Both serial Save buttons go through `request_serial_save`,
+    /// which holds the save in the warning window while a changed port has
+    /// someone connected; the save itself restarts only the changed ports.
+    #[test]
+    fn test_a_serial_save_restarts_only_changed_ports_and_asks_first() {
+        use crate::config::SerialPortId;
+        let saved = Config::default();
+        let mut edited = saved.clone();
+        // Nothing changed: nothing to ask about, whoever is connected.
+        assert!(serial_ports_to_ask_about(&saved, &edited).is_empty());
+        edited.serial_a.baud = 2400;
+        // Changed but idle (no thread is serving the port in a test): no ask.
+        if !crate::serial::port_session_live(SerialPortId::A) {
+            assert!(serial_ports_to_ask_about(&saved, &edited).is_empty());
+        }
+        assert_eq!(serial_restart_summary(&[]), "no serial port settings changed, nothing restarted");
+        assert_eq!(serial_restart_summary(&[SerialPortId::B]), "Port B reconfigured");
+        assert_eq!(serial_port_names(&[SerialPortId::A, SerialPortId::B]), "Port A and Port B");
+
+        let src = include_str!("gui.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("\n#[cfg(test)]\nmod tests {").expect("the tests")];
+        assert_eq!(code.matches("self.request_serial_save();").count(), 2, "a Save skips the ask");
+        assert_eq!(
+            code.matches("self.save_and_restart_serial();").count(),
+            2,
+            "saved only from request_serial_save and the window's Save and restart"
+        );
+        let save = &code[code.find("fn save_and_restart_serial(").expect("the save")..];
+        let save = &save[..save.find("\n    }\n").expect("its end")];
+        assert!(save.contains("crate::serial::ports_changed(&before, &config::get_config());"));
+        assert!(!save.contains("restart_all"), "a Save restarts both ports again");
+        assert!(
+            save.contains("for &id in &changed {\n            crate::serial::restart_serial(id);"),
+            "a Save no longer restarts only the changed ports"
+        );
+        assert_eq!(save.matches("crate::serial::restart_serial(").count(), 1, "a Save restarts by another route");
+        let ask = &code[code.find("fn request_serial_save(").expect("the ask")..];
+        let ask = &ask[..ask.find("\n    }\n").expect("its end")];
+        assert!(ask.contains("serial_ports_to_ask_about(&config::get_config(), &self.cfg)"));
+        assert!(ask.contains("self.serial_restart_prompt = Some(live);"));
     }
 
     /// **The wizard cannot be re-run over unsaved edits.**  Either way out of
