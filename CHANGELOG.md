@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **rustls updated to 0.23.46** for four advisories published 2026-10-14
+  (RUSTSEC-2026-0346 to 0349).  None is reachable in this gateway as built:
+  it enables neither Brotli certificate compression nor Encrypted Client
+  Hello, and implements no session store of its own.  Updated so the
+  advisories are not carried into a release.
+
 ### Fixed
 
 - **Second menu: a `sudo` that does not answer says so.**  When checking the
