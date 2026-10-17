@@ -1033,8 +1033,11 @@ impl TelnetSession {
         let rom_note = match crate::cpm::rom::load(&self.cpmmount_base(), &rom_setting) {
             Ok(Some(image)) => {
                 let at = image.chunks.iter().map(|(a, _)| *a).min().unwrap_or(0);
+                // The short name: the description repeats the address and
+                // says "(needs vdmcuter.hex)" of a file that just loaded, and a
+                // C64's 38 columns cut it before the ROM's name.
                 let note = crate::cpm::rom::choice_for(&rom_setting)
-                    .map(|c| c.description.to_string())
+                    .map(|c| c.short.to_string())
                     .unwrap_or_else(|| rom_setting.clone());
                 machine.set_rom(Some(image));
                 Some(Ok(format!("Monitor ROM at {at:#06x}: {note}")))

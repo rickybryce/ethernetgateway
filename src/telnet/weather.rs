@@ -290,10 +290,15 @@ impl TelnetSession {
             self.send(&format!("  {}: ", self.cyan("Location")))
                 .await?;
         } else {
+            // Folded and cut like the settings row that shows the same value
+            // (`test_weather_row_fits_petscii`): it may be 60 characters and
+            // not ASCII ("Zürich").
+            let room = if self.terminal_type == TerminalType::Petscii { 24 } else { 60 };
+            let shown = truncate_to_width(&self.web_text(&saved_location), room);
             self.send(&format!(
                 "  {} [{}]: ",
                 self.cyan("Location"),
-                self.amber(&saved_location)
+                self.amber(&shown)
             ))
             .await?;
         }
@@ -347,9 +352,13 @@ impl TelnetSession {
                 self.display_weather(&weather).await?;
             }
             Err(e) => {
+                // Wrapped, not cut: "Weather service unreachable. Try again
+                // later." lost its remedy on a C64 at 30 columns.  As the AI
+                // Chat error does.
                 let max_w = if self.terminal_type == TerminalType::Petscii { 30 } else { 50 };
-                let safe = crate::aichat::display_for_terminal(&e);
-                self.show_error(&truncate_to_width(&safe, max_w)).await?;
+                let lines = crate::aichat::wrap_line(&self.remote_text(&e), max_w);
+                let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+                self.show_error_lines(&refs).await?;
             }
         }
         Ok(())

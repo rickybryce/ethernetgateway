@@ -6012,11 +6012,15 @@ mod tests {
 
         let src = include_str!("gui.rs").replace("\r\n", "\n");
         let code = &src[..src.find("\n#[cfg(test)]\nmod tests {").expect("the tests")];
-        assert_eq!(code.matches("self.request_save_and_restart();").count(), 3, "a button skips the ask");
+        assert_eq!(
+            code.matches("self.request_save_and_restart();").count(),
+            4,
+            "a button or the wizard's finish skips the ask"
+        );
         assert_eq!(
             code.matches("self.save_and_restart_all();").count(),
-            3,
-            "restarted only from request_save_and_restart, the window and the wizard"
+            2,
+            "restarted only from request_save_and_restart and the window"
         );
         let ask = &code[code.find("fn request_save_and_restart(").expect("the ask")..];
         let ask = &ask[..ask.find("\n    }\n").expect("its end")];

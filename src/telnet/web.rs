@@ -20,8 +20,12 @@ impl TelnetSession {
     /// actually drawn.
     pub(in crate::telnet) const WEB_PAGE_HEIGHT_WIDE: usize = 16;
     pub(in crate::telnet) const WEB_PAGE_HEIGHT_PETSCII: usize = 15;
-    /// How many bookmarks the bookmarks screen lists.
+    /// How many bookmarks the bookmarks screen lists per page.
     pub(in crate::telnet) const WEB_BOOKMARKS_SHOWN: usize = 13;
+    /// Rows per page of `web_pick_from_list` (forms, a drop-down's options:
+    /// 3 header + 14 + the page row + blank + prompt = 20) and of the form
+    /// editor's field list (the same plus its hint row, 21).
+    pub(in crate::telnet) const WEB_LIST_SHOWN: usize = 14;
 
     pub(in crate::telnet) fn web_page_height(&self) -> usize {
         if self.terminal_type == TerminalType::Petscii {
@@ -467,14 +471,18 @@ impl TelnetSession {
         if let Some(url) = &self.web_url {
             let title = self.web_title.as_deref().unwrap_or("Untitled");
             if crate::webbrowser::add_bookmark(url, title) {
-                self.send_line("").await?;
+                // Two rows, no blank first: this is below a full page (see
+                // `web_prompt_url`).
                 self.send_line(&format!("  {}", self.green("Bookmark saved."))).await?;
-                self.send_line("").await?;
                 self.send("  Press any key to continue.").await?;
                 self.flush().await?;
                 self.wait_for_key().await?;
             } else {
-                self.show_error("Already bookmarked (or full).").await?;
+                // Two rows, like the success above.
+                self.send_line(&format!("  {}", self.red("Already bookmarked (or full)."))).await?;
+                self.send("  Press any key to continue.").await?;
+                self.flush().await?;
+                self.wait_for_key().await?;
             }
         } else {
             self.show_error("No page to bookmark.").await?;
@@ -482,78 +490,109 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// The bookmark list, a page of `WEB_BOOKMARKS_SHOWN` at a time.  Paged
+    /// because a list cut at the screen's height left bookmarks 14 to 100
+    /// (`MAX_BOOKMARKS`) saved but unreachable: neither openable nor
+    /// deletable, since only the numbers drawn were accepted.  Numbers are the
+    /// bookmark's place in the whole list, so any of them works from any page.
     pub(in crate::telnet) async fn web_show_bookmarks(&mut self) -> Result<(), std::io::Error> {
-        let bookmarks = crate::webbrowser::load_bookmarks();
-        if bookmarks.is_empty() {
-            self.show_error("No bookmarks saved.").await?;
-            return Ok(());
-        }
+        let mut page = 0usize;
+        loop {
+            let bookmarks = crate::webbrowser::load_bookmarks();
+            if bookmarks.is_empty() {
+                self.show_error("No bookmarks saved.").await?;
+                return Ok(());
+            }
+            let total = bookmarks.len();
+            let pages = total.div_ceil(Self::WEB_BOOKMARKS_SHOWN);
+            page = page.min(pages - 1);
+            let first = page * Self::WEB_BOOKMARKS_SHOWN;
+            let last = (first + Self::WEB_BOOKMARKS_SHOWN).min(total);
 
-        self.clear_screen().await?;
-        let sep = self.separator();
-        self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("BOOKMARKS"))).await?;
-        self.send_line(&sep).await?;
-        self.send_line("").await?;
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("BOOKMARKS"))).await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
 
-        let max_title = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
-        let display_max = bookmarks.len().min(Self::WEB_BOOKMARKS_SHOWN);
-        for (i, bm) in bookmarks.iter().take(display_max).enumerate() {
-            let title = crate::webbrowser::truncate_to_width(&self.web_text(&bm.title), max_title);
-            self.send_line(&format!("  {:>2}. {}", i + 1, title)).await?;
-        }
-        if bookmarks.len() > display_max {
-            self.send_line(&format!("  {} more...", bookmarks.len() - display_max)).await?;
-        }
-
-        self.send_line("").await?;
-        self.send_line(&format!("  {} {} {}",
-            self.dim("#=Open"),
-            self.action_prompt("D", "Delete"),
-            self.action_prompt("H", "Help"),
-        )).await?;
-        self.send(&format!("  {}: ", self.cyan("#/D"))).await?;
-        self.flush().await?;
-
-        // Folded, as `handle_web_browser_command` folds: the line reader does
-        // not, and the prompt above shows the letters in capitals.
-        let input = match self.get_line_input().await? {
-            Some(s) if !s.is_empty() => s.trim().to_ascii_lowercase(),
-            _ => return Ok(()),
-        };
-
-        if input == "h" {
-            self.show_help_page("BOOKMARKS HELP", Self::bookmarks_help_lines())
+            let max_title = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
+            for (i, bm) in bookmarks.iter().enumerate().take(last).skip(first) {
+                let title = crate::webbrowser::truncate_to_width(&self.web_text(&bm.title), max_title);
+                self.send_line(&format!("  {:>2}. {}", i + 1, title)).await?;
+            }
+            if pages > 1 {
+                self.send_line(&format!(
+                    "  Page {}/{} {} {}",
+                    page + 1,
+                    pages,
+                    self.action_prompt("N", "Next"),
+                    self.action_prompt("P", "Prev"),
+                ))
                 .await?;
-        } else if input == "d" {
-            // Delete mode
-            self.send(&format!("  {} (1-{}): ", self.cyan("Delete #"), display_max)).await?;
+            }
+
+            self.send_line("").await?;
+            self.send_line(&format!("  {} {} {}",
+                self.dim("#=Open"),
+                self.action_prompt("D", "Delete"),
+                self.action_prompt("H", "Help"),
+            )).await?;
+            self.send(&format!("  {}: ", self.cyan("#/D"))).await?;
             self.flush().await?;
-            let del_input = match self.get_line_input().await? {
-                Some(s) if !s.is_empty() => s,
+
+            // Folded, as `handle_web_browser_command` folds: the line reader
+            // does not, and the prompt above shows the letters in capitals.
+            let input = match self.get_line_input().await? {
+                Some(s) if !s.is_empty() => s.trim().to_ascii_lowercase(),
                 _ => return Ok(()),
             };
-            if let Ok(num) = del_input.parse::<usize>() {
-                if num >= 1 && num <= display_max {
-                    crate::webbrowser::remove_bookmark(num - 1);
-                    self.send_line(&format!("  {}", self.green("Deleted."))).await?;
-                    self.send_line("").await?;
-                    self.send("  Press any key to continue.").await?;
-                    self.flush().await?;
-                    self.wait_for_key().await?;
+
+            if input == "n" && pages > 1 {
+                page = (page + 1) % pages;
+                continue;
+            } else if input == "p" && pages > 1 {
+                page = (page + pages - 1) % pages;
+                continue;
+            } else if input == "h" {
+                self.show_help_page("BOOKMARKS HELP", Self::bookmarks_help_lines())
+                    .await?;
+            } else if input == "d" {
+                self.send(&format!("  {} (1-{}): ", self.cyan("Delete #"), total)).await?;
+                self.flush().await?;
+                let del_input = match self.get_line_input().await? {
+                    Some(s) if !s.is_empty() => s,
+                    _ => return Ok(()),
+                };
+                match del_input.trim().parse::<usize>() {
+                    // A refusal -- the number is past the end of the list as
+                    // `remove_bookmark` re-reads it (another session deleted
+                    // some since this was drawn), or the save failed -- is
+                    // said rather than reported as "Deleted.".
+                    Ok(num) if (1..=total).contains(&num) => {
+                        if crate::webbrowser::remove_bookmark(num - 1) {
+                            self.send_line(&format!("  {}", self.green("Deleted."))).await?;
+                            self.send_line("").await?;
+                            self.send("  Press any key to continue.").await?;
+                            self.flush().await?;
+                            self.wait_for_key().await?;
+                        } else {
+                            self.show_error("Could not delete it.").await?;
+                        }
+                    }
+                    Ok(_) => self.show_error("Invalid number.").await?,
+                    Err(_) => self.show_error("Enter a number.").await?,
+                }
+            } else if let Ok(num) = input.parse::<usize>() {
+                if (1..=total).contains(&num) {
+                    let url = bookmarks[num - 1].url.clone();
+                    self.web_fetch_page(&url, true).await?;
                 } else {
                     self.show_error("Invalid number.").await?;
                 }
             }
-        } else if let Ok(num) = input.parse::<usize>() {
-            if num >= 1 && num <= display_max {
-                let url = bookmarks[num - 1].url.clone();
-                self.web_fetch_page(&url, true).await?;
-            } else {
-                self.show_error("Invalid number.").await?;
-            }
+            return Ok(());
         }
-        Ok(())
     }
 
     pub(in crate::telnet) async fn web_search_in_page(&mut self) -> Result<(), std::io::Error> {
@@ -592,34 +631,91 @@ impl TelnetSession {
             return self.web_edit_form(0).await;
         }
 
-        self.send_line("").await?;
-        self.send_line(&format!("  {}", self.yellow("FORMS"))).await?;
-        let forms_snapshot: Vec<String> = self.web_forms.iter().enumerate().map(|(i, form)| {
-            let label = crate::webbrowser::truncate_to_width(&self.web_text(&form.label), 30);
-            format!("  {}. {}", i + 1, label)
-        }).collect();
-        for line in &forms_snapshot {
-            self.send_line(line).await?;
-        }
-        self.send_line("").await?;
-        self.send(&format!("  {} (1-{}): ", self.cyan("Form #"), self.web_forms.len())).await?;
-        self.flush().await?;
-
-        let input = match self.get_line_input().await? {
-            Some(s) if !s.is_empty() => s,
-            _ => return Ok(()),
-        };
-
-        if let Ok(num) = input.parse::<usize>() {
-            if num >= 1 && num <= self.web_forms.len() {
-                self.web_edit_form(num - 1).await?;
-            } else {
-                self.show_error("Invalid form number.").await?;
-            }
-        } else {
-            self.show_error("Enter a number.").await?;
+        let labels: Vec<String> =
+            self.web_forms.iter().map(|form| self.web_text(&form.label)).collect();
+        if let Some(i) = self.web_pick_from_list("FORMS", "Form #", &labels, None).await? {
+            self.web_edit_form(i).await?;
         }
         Ok(())
+    }
+
+    /// Pick one of `items` on a screen of its own, `WEB_LIST_SHOWN` a page
+    /// with N/P between pages.  A page can carry any number of forms and a
+    /// drop-down any number of options (a country list runs to 200); printed
+    /// in one go they scrolled a C64's screen away, leaving the user to pick
+    /// a number they could not see.  `current` is marked `>`.  Returns the
+    /// index picked, or `None` for a blank answer or a bad number (said).
+    pub(in crate::telnet) async fn web_pick_from_list(
+        &mut self,
+        title: &str,
+        prompt: &str,
+        items: &[String],
+        current: Option<usize>,
+    ) -> Result<Option<usize>, std::io::Error> {
+        let total = items.len();
+        if total == 0 {
+            return Ok(None);
+        }
+        let pages = total.div_ceil(Self::WEB_LIST_SHOWN);
+        // Open on the page holding the current choice.
+        let mut page = current.map_or(0, |c| c / Self::WEB_LIST_SHOWN).min(pages - 1);
+        let max_item = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
+        loop {
+            let first = page * Self::WEB_LIST_SHOWN;
+            let last = (first + Self::WEB_LIST_SHOWN).min(total);
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            let heading = crate::webbrowser::truncate_to_width(title, 34);
+            self.send_line(&format!("  {}", self.yellow(&heading))).await?;
+            self.send_line(&sep).await?;
+            for (i, item) in items.iter().enumerate().take(last).skip(first) {
+                let marker = if current == Some(i) { ">" } else { " " };
+                self.send_line(&format!(
+                    "  {}{}.{}",
+                    marker,
+                    i + 1,
+                    crate::webbrowser::truncate_to_width(item, max_item),
+                ))
+                .await?;
+            }
+            if pages > 1 {
+                self.send_line(&format!(
+                    "  Page {}/{} {} {}",
+                    page + 1,
+                    pages,
+                    self.action_prompt("N", "Next"),
+                    self.action_prompt("P", "Prev"),
+                ))
+                .await?;
+            }
+            self.send_line("").await?;
+            self.send(&format!("  {} (1-{}): ", self.cyan(prompt), total)).await?;
+            self.flush().await?;
+            let input = match self.get_line_input().await? {
+                Some(s) if !s.trim().is_empty() => s.trim().to_ascii_lowercase(),
+                _ => return Ok(None),
+            };
+            if pages > 1 && input == "n" {
+                page = (page + 1) % pages;
+                continue;
+            }
+            if pages > 1 && input == "p" {
+                page = (page + pages - 1) % pages;
+                continue;
+            }
+            return match input.parse::<usize>() {
+                Ok(n) if (1..=total).contains(&n) => Ok(Some(n - 1)),
+                Ok(_) => {
+                    self.show_error("Invalid number.").await?;
+                    Ok(None)
+                }
+                Err(_) => {
+                    self.show_error("Enter a number.").await?;
+                    Ok(None)
+                }
+            };
+        }
     }
 
     pub(in crate::telnet) async fn web_edit_form(&mut self, form_idx: usize) -> Result<(), std::io::Error> {
@@ -632,6 +728,7 @@ impl TelnetSession {
             return self.web_submit_form(form_idx).await;
         }
 
+        let mut field_page = 0usize;
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
@@ -696,8 +793,23 @@ impl TelnetSession {
                 }
             }).collect();
 
-            for line in &display_lines {
+            // A page of fields at a time: a long form printed whole scrolled
+            // its own title and the first fields off a C64.  Field numbers
+            // stay the field's place in the whole form.
+            let pages = display_lines.len().div_ceil(Self::WEB_LIST_SHOWN).max(1);
+            field_page = field_page.min(pages - 1);
+            for line in display_lines.iter().skip(field_page * Self::WEB_LIST_SHOWN).take(Self::WEB_LIST_SHOWN) {
                 self.send_line(line).await?;
+            }
+            if pages > 1 {
+                self.send_line(&format!(
+                    "  Page {}/{} {} {}",
+                    field_page + 1,
+                    pages,
+                    self.action_prompt("N", "Next"),
+                    self.action_prompt("P", "Prev"),
+                ))
+                .await?;
             }
 
             self.send_line("").await?;
@@ -717,6 +829,10 @@ impl TelnetSession {
             };
 
             match input.as_str() {
+                // Only with more than one page, wrapping as the bookmarks and
+                // the picker do; on one page they get the error below.
+                "n" if pages > 1 => field_page = (field_page + 1) % pages,
+                "p" if pages > 1 => field_page = (field_page + pages - 1) % pages,
                 "s" => {
                     self.web_forms[form_idx] = form;
                     return self.web_submit_form(form_idx).await;
@@ -734,7 +850,12 @@ impl TelnetSession {
                             self.show_error("Invalid field number.").await?;
                         }
                     } else {
-                        self.show_error("Enter S, Q, H, or a field #.").await?;
+                        let hint = if pages > 1 {
+                            "Enter S, Q, H, N, P or field #."
+                        } else {
+                            "Enter S, Q, H, or a field #."
+                        };
+                        self.show_error(hint).await?;
                     }
                 }
             }
@@ -786,29 +907,23 @@ impl TelnetSession {
                 }
             }
         } else if is_select {
-            self.send_line("").await?;
-            let opts_snapshot: Vec<(String, bool)> = if let FormField::Select { options, selected, .. } = &form.fields[idx] {
-                options.iter().enumerate().map(|(i, (_, display))| {
-                    (display.clone(), i == *selected)
-                }).collect()
+            let (title, items, current) = if let FormField::Select { label, options, selected, .. } = &form.fields[idx] {
+                (
+                    self.web_text(label),
+                    options.iter().map(|(_, display)| self.web_text(display)).collect::<Vec<_>>(),
+                    *selected,
+                )
             } else {
-                Vec::new()
+                (String::new(), Vec::new(), 0)
             };
-            for (i, (display, is_sel)) in opts_snapshot.iter().enumerate() {
-                let marker = if *is_sel { ">" } else { " " };
-                self.send_line(&format!("  {}{}.{}",
-                    marker, i + 1,
-                    crate::webbrowser::truncate_to_width(&self.web_text(display), 30),
-                )).await?;
+            // A drop-down with no label still gets a heading.
+            let title = if title.trim().is_empty() { "OPTIONS".to_string() } else { title };
+            if let Some(n) = self.web_pick_from_list(&title, "Pick", &items, Some(current)).await?
+                && n < opt_count
+                && let FormField::Select { selected, .. } = &mut form.fields[idx]
+            {
+                *selected = n;
             }
-            self.send(&format!("  {} (1-{}): ", self.cyan("Pick"), opt_count)).await?;
-            self.flush().await?;
-            if let Some(input) = self.get_line_input().await?
-                && let Ok(n) = input.parse::<usize>()
-                    && n >= 1 && n <= opt_count
-                        && let FormField::Select { selected, .. } = &mut form.fields[idx] {
-                            *selected = n - 1;
-                        }
         } else if is_checkbox {
             if let FormField::Checkbox { checked, .. } = &mut form.fields[idx] {
                 *checked = !*checked;

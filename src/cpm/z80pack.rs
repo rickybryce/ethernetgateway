@@ -141,12 +141,6 @@ pub struct Z80pack {
     /// machine then quietly discards, which is what a guest saving to a
     /// read-only boot (`cpm_boot_writable = false`) used to be told.
     read_only: [bool; DRIVES],
-    /// A write's bytes, handed up by the machine and handed back to it.
-    ///
-    /// Present only because [`Controller`] routes a write through
-    /// [`Controller::buffer`]; a DMA write is otherwise memory-to-image and
-    /// never passes through here.
-    buf: Vec<u8>,
 }
 
 /// Drives the device addresses. `cpmsim` offers sixteen; a booted machine here
@@ -166,7 +160,6 @@ impl Z80pack {
             status: status::OK,
             disks: (0..DRIVES).map(|_| None).collect(),
             read_only: [false; DRIVES],
-            buf: vec![0; SECTOR_LEN],
         }
     }
 
@@ -328,12 +321,13 @@ impl Controller for Z80pack {
         Ok(())
     }
 
-    fn buffer_loaded(&mut self, _drive: u8, bytes: &[u8]) {
-        self.buf = bytes.to_vec();
-    }
+    /// Never called: this device issues only [`HostRequest::Dma`], which is
+    /// memory-to-image, never `Read` or `Write`, the two requests a machine
+    /// answers through these.
+    fn buffer_loaded(&mut self, _drive: u8, _bytes: &[u8]) {}
 
     fn buffer(&self, _drive: u8) -> Option<&[u8]> {
-        Some(&self.buf)
+        None
     }
 
     /// What `cpmsim`'s bootstrap does: load track 0 sector 1 at `0000` and

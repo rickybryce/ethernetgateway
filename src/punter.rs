@@ -591,9 +591,9 @@ pub(crate) async fn punter_receive(
     .await?;
     // Phase A is fixed at TYPE_PHASE_SIZE = 8 bytes (header + one type byte),
     // so a missing payload byte means the negotiation was malformed.  Map it
-    // to `Unknown` rather than silently defaulting to a real type.
-    let file_type =
-        PunterFileType::from_byte(type_payload.first().copied().unwrap_or(3));
+    // to `Unknown` rather than silently defaulting to a real type (3 is USR
+    // since the type-byte table was corrected, so it is not a stand-in).
+    let file_type = type_from_payload(&type_payload);
     if verbose {
         glog!("PUNTER recv: file type = {:?}", file_type);
     }
@@ -655,6 +655,9 @@ async fn receive_phase(
     // Consecutive dropped-duplicate rounds.  Bounded because a dropped
     // duplicate does not grow `out`, so the MAX_FILE_SIZE backstop can't fire.
     let mut dup_rounds: u32 = 0;
+    // No block accepted yet in this phase.  Not `out.is_empty()`: block 0
+    // carries no payload, so that stayed true for the round after it.
+    let mut accepted_none = true;
 
     loop {
         // rc1: send GOO/BAD, then wait for the sender's ACK.  Re-send the
@@ -670,7 +673,7 @@ async fn receive_phase(
         // budget (the user may need a moment to start their terminal's sender);
         // mid-transfer it is one block timeout.  Either way we re-probe every
         // `retry_interval` seconds until the budget is spent.
-        let first_round = out.is_empty() && signal == Code::Goo;
+        let first_round = accepted_none && signal == Code::Goo;
         let total_budget = if first_round { t.negotiation_timeout } else { t.block_timeout };
         let probe = total_budget.min(t.retry_interval.max(1));
         let attempts = total_budget.div_ceil(probe.max(1)).max(1);
@@ -729,11 +732,15 @@ async fn receive_phase(
                     );
                 }
                 next_size = blk[SIZEPOS];
+                if (next_size as usize) < DATAPOS {
+                    return Err(format!("Punter receive: bad next-block size {}", next_size));
+                }
                 signal = Code::Goo;
                 bad_rounds = 0;
                 continue;
             }
             dup_rounds = 0;
+            accepted_none = false;
 
             if payload_len > 0 {
                 out.extend_from_slice(&blk[DATAPOS..]);
@@ -767,11 +774,12 @@ async fn receive_phase(
                 end_off_receiver(
                     reader, writer, is_tcp, is_petscii, verbose, state, t, last_phase,
                 )
-                .await?;
+                .await;
                 return Ok(out);
             }
 
-            if (next_size as usize) < DATAPOS || next_size as usize > MAX_BLOCK {
+            // Only the floor: `next_size` is a u8, so it can never pass MAX_BLOCK.
+            if (next_size as usize) < DATAPOS {
                 return Err(format!("Punter receive: bad next-block size {}", next_size));
             }
         } else {
@@ -881,7 +889,8 @@ async fn read_block(
         // avoids a false positive when a data block's checksum-pair bytes
         // coincidentally spell "ack" — those blocks carry a full payload
         // behind them, so they're longer than 3 bytes.
-        if buf == *Code::Ack.bytes() {
+        // Case-folded like every other code match (`Code::from_window`).
+        if buf.len() == 3 && Code::from_window(&[buf[0], buf[1], buf[2]]) == Some(Code::Ack) {
             continue; // resend S/B, read again
         }
         if buf.is_empty() {
@@ -890,6 +899,11 @@ async fn read_block(
         return Ok(buf); // full or partial; caller verifies the checksum
     }
     Err("Punter receive: block read failed".into())
+}
+
+/// The declared file type from Phase A's payload; none at all is `Unknown`.
+fn type_from_payload(payload: &[u8]) -> PunterFileType {
+    payload.first().map_or(PunterFileType::Unknown, |&b| PunterFileType::from_byte(b))
 }
 
 /// Receiver end-off (`rechand` rc6/rc8): GOO → wait ACK → S/B → wait SYN →
@@ -912,7 +926,7 @@ async fn end_off_receiver(
     state: &mut ReadState,
     t: &Tunables,
     last_phase: bool,
-) -> Result<(), String> {
+) {
     // Everything here is best-effort: the final data block was already ack'd,
     // so the file is complete.  A peer that tears down (EOF / closed pipe,
     // which `send_code`/`accept_code` surface as Err) or a local ESC must NOT
@@ -920,13 +934,19 @@ async fn end_off_receiver(
     // an inner future and discard any error — a teardown just stops the
     // re-handshake early.  (Timeouts return `Ok(None)`, so the per-stage
     // verbose warnings still fire.)
+    // Each stage re-sends on the short `retry_interval` cadence for about one
+    // block_timeout in all, as `end_off_sender` does: (max_retries + 1) full
+    // block timeouts per stage left a connected-but-silent peer holding a
+    // finished transfer for ~11 minutes at the defaults.
+    let probe = t.block_timeout.min(t.retry_interval.max(1));
+    let attempts = t.block_timeout.div_ceil(probe.max(1)).max(1);
     let _ = async {
         // Acknowledge the final block and re-handshake.
         let mut got_ack = false;
-        for _ in 0..=t.max_retries {
+        for _ in 0..attempts {
             send_code(writer, Code::Goo, is_tcp, verbose).await?;
             if let Some(Code::Ack) =
-                accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], t.block_timeout, verbose).await?
+                accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], probe, verbose).await?
             {
                 got_ack = true;
                 break;
@@ -940,8 +960,8 @@ async fn end_off_receiver(
         // Wait for the sender's SYN (resend S/B on timeout), then answer SYN
         // and wait for the sender's S/B (resend SYN on timeout).
         let mut got_syn = false;
-        for _ in 0..=t.max_retries {
-            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout, verbose).await? {
+        for _ in 0..attempts {
+            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], probe, verbose).await? {
                 Some(Code::Syn) => {
                     got_syn = true;
                     break;
@@ -953,9 +973,9 @@ async fn end_off_receiver(
             glog!("PUNTER recv: end-off SYN not received (peer may have torn down)");
         }
         let mut got_final_sb = false;
-        for _ in 0..=t.max_retries {
+        for _ in 0..attempts {
             send_code(writer, Code::Syn, is_tcp, verbose).await?;
-            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout, verbose).await? {
+            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], probe, verbose).await? {
                 Some(Code::Sb) => {
                     got_final_sb = true;
                     break;
@@ -995,7 +1015,6 @@ async fn end_off_receiver(
         Ok::<(), String>(())
     }
     .await;
-    Ok(())
 }
 
 // ─── Send ────────────────────────────────────────────────────────────────
@@ -1023,13 +1042,17 @@ pub(crate) async fn punter_send(
         );
     }
 
+    // Built before Phase A: a file with too many blocks for the index must
+    // be refused while the C64 can still be told so, not after the type
+    // phase, which would leave it waiting in Phase B (C1 has no abort).
+    let data_blocks = build_data_blocks(data, t.block_payload)?;
+
     // Phase A — type block.  The sender opens with GOO (`specmode`).
     let type_blocks = build_type_block(file_type);
     send_phase(reader, writer, is_tcp, is_petscii, verbose, &mut state, &type_blocks, true, &t)
         .await?;
 
     // Phase B — data blocks.  The receiver opens; the sender just waits.
-    let data_blocks = build_data_blocks(data, t.block_payload)?;
     send_phase(reader, writer, is_tcp, is_petscii, verbose, &mut state, &data_blocks, false, &t)
         .await?;
 
@@ -1107,7 +1130,7 @@ async fn send_phase(
                     // The block we last sent (idx) was accepted.
                     if is_final_block(&blocks[idx]) {
                         end_off_sender(reader, writer, is_tcp, is_petscii, verbose, state, t)
-                            .await?;
+                            .await;
                         return Ok(());
                     }
                     idx += 1;
@@ -1178,7 +1201,7 @@ async fn end_off_sender(
     verbose: bool,
     state: &mut ReadState,
     t: &Tunables,
-) -> Result<(), String> {
+) {
     // Best-effort, exactly like the receiver end-off: the final block was
     // already acknowledged, so a peer that tears down (EOF / closed pipe, which
     // `send_code`/`accept_code` surface as Err) or a local ESC must not fail a
@@ -1237,7 +1260,6 @@ async fn end_off_sender(
     for _ in 0..3 {
         let _ = send_code(writer, Code::Sb, is_tcp, verbose).await;
     }
-    Ok(())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────
@@ -1993,10 +2015,107 @@ mod tests {
         drop(peer_wr); // immediate EOF on every read
         let (mut wr, _drain) = duplex(256);
         let mut state = ReadState::default();
-        let res =
-            end_off_receiver(&mut rd, &mut wr, false, false, false, &mut state, &t, true)
-                .await;
-        assert!(res.is_ok(), "peer teardown during end-off must not fail a complete transfer");
+        // Returns `()`: it cannot fail a complete transfer.  What is left to
+        // pin is that a closed pipe ends it at once rather than waiting out
+        // every stage.
+        let start = std::time::Instant::now();
+        end_off_receiver(&mut rd, &mut wr, false, false, false, &mut state, &t, true).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "a torn-down peer kept end-off waiting {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn end_off_receiver_gives_up_quickly_on_a_silent_peer() {
+        // Connected but silent: each of the three stages is bounded to about
+        // one block_timeout, as on the send side.  It used to be
+        // (max_retries + 1) block timeouts per stage -- here 3 x 6 x 1 = 18 s,
+        // and ~11 minutes at the defaults -- with the file already complete.
+        let t = Tunables {
+            negotiation_timeout: 2,
+            block_timeout: 1,
+            max_retries: 5,
+            max_bad_rounds: 30,
+            retry_interval: 1,
+            block_payload: MAX_PAYLOAD,
+        };
+        let (_hold, mut rd) = duplex(64);
+        let (mut wr, _drain) = duplex(4096);
+        let mut state = ReadState::default();
+        let start = std::time::Instant::now();
+        end_off_receiver(&mut rd, &mut wr, false, false, false, &mut state, &t, true).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(6),
+            "end_off_receiver took {elapsed:?}; expected ~3 block timeouts"
+        );
+    }
+
+    #[test]
+    fn a_missing_type_byte_is_unknown() {
+        assert_eq!(type_from_payload(&[]), PunterFileType::Unknown, "not a real type");
+        assert_eq!(type_from_payload(&[3]), PunterFileType::Usr);
+        assert_eq!(type_from_payload(&[1, 9]), PunterFileType::Prg);
+    }
+
+    /// A file with more blocks than the index can address is refused before
+    /// Phase A, while the C64 can still be told -- refused after it, the C64
+    /// sits in Phase B for ever (C1 has no abort).
+    #[test]
+    fn punter_send_checks_the_block_count_before_the_type_phase() {
+        let src = include_str!("punter.rs").replace("\r\n", "\n");
+        let f = &src[src.find("pub(crate) async fn punter_send(").expect("punter_send")..];
+        let f = &f[..f.find("\n}\n").expect("its end")];
+        let build = f.find("build_data_blocks(data, t.block_payload)?").expect("the build");
+        let phase_a = f.find("send_phase(").expect("Phase A");
+        assert!(build < phase_a, "the block count is checked after the type phase again");
+    }
+
+    #[tokio::test]
+    async fn read_block_treats_a_lowercase_ack_as_a_missed_sb() {
+        // A sender that re-sends ACK (it missed our S/B) in lower case gets the
+        // S/B re-sent, exactly as for "ACK" -- not its 3 bytes handed back as
+        // a block that then fails the checksum.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let t = Tunables {
+            negotiation_timeout: 1,
+            block_timeout: 1,
+            max_retries: 3,
+            max_bad_rounds: 30,
+            retry_interval: 1,
+            block_payload: MAX_PAYLOAD,
+        };
+        let block = build_block(DATA_PHASE_FIRST_SIZE, 0x0001, &[]);
+        let (mut peer_wr, mut rd) = duplex(1024);
+        let (mut wr, mut peer_rd) = duplex(1024);
+        peer_wr.write_all(b"ack").await.unwrap();
+        let reply = block.clone();
+        let peer = tokio::spawn(async move {
+            let mut buf = [0u8; 3];
+            let mut sbs = 0;
+            while peer_rd.read_exact(&mut buf).await.is_ok() {
+                if &buf == b"S/B" {
+                    sbs += 1;
+                    if sbs == 2 {
+                        peer_wr.write_all(&reply).await.unwrap();
+                    }
+                }
+            }
+            sbs
+        });
+        let mut state = ReadState::default();
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_block(&mut rd, &mut wr, false, &mut state, block.len() as u8, &t, false),
+        )
+        .await
+        .expect("read_block hung");
+        drop(wr);
+        let sbs = peer.await.unwrap();
+        assert_eq!(got.expect("the block"), block, "the lowercase ack was returned as a block");
+        assert_eq!(sbs, 2, "S/B was not re-sent for the lowercase ack");
     }
 
     #[tokio::test]
@@ -2013,8 +2132,13 @@ mod tests {
         drop(peer_wr);
         let (mut wr, _drain) = duplex(256);
         let mut state = ReadState::default();
-        let res = end_off_sender(&mut rd, &mut wr, false, false, false, &mut state, &t).await;
-        assert!(res.is_ok(), "peer teardown during end-off must not fail a complete transfer");
+        let start = std::time::Instant::now();
+        end_off_sender(&mut rd, &mut wr, false, false, false, &mut state, &t).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "a torn-down peer kept end-off waiting {:?}",
+            start.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -2100,11 +2224,16 @@ mod tests {
         let mut rd = peer_to_recv_b;
         let mut wr = recv_to_peer_a;
         let mut state = ReadState::default();
-        let res = receive_phase(
-            &mut rd, &mut wr, false, false, false, &mut state, DATA_PHASE_FIRST_SIZE, &t,
-            true,
+        // Bounded, so a lost bound fails the test instead of hanging it.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            receive_phase(
+                &mut rd, &mut wr, false, false, false, &mut state, DATA_PHASE_FIRST_SIZE, &t,
+                true,
+            ),
         )
-        .await;
+        .await
+        .expect("the empty-block bound did not fire");
         drop(wr); // let the peer observe EOF and exit
         let _ = peer.await;
 

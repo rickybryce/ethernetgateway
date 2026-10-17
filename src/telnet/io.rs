@@ -7,71 +7,173 @@
 
 use super::*;
 
-/// Read a single byte, filtering out telnet IAC protocol sequences.
+/// Where the local user's inbound telnet stream is inside a command, kept
+/// **outside** the read future.
+///
+/// The gateway bridges read the user inside a `tokio::select!`, which drops
+/// the losing branch's future.  The readers used to take a whole command in
+/// one future, several reads deep, so a command split across TCP segments
+/// while remote output streamed lost its first half: `IAC SB` read and then
+/// dropped left `NAWS w w h h IAC SE` to be read as data and typed into the
+/// remote shell, and a typed 0xFF (`IAC IAC`) split in two lost a byte and
+/// swallowed the next keystroke.  Each read is now one byte, which a dropped
+/// future never consumes, and the state lives here between calls.
+#[derive(Default)]
+pub(crate) struct InboundTelnet {
+    state: InboundState,
+    opt: u8,
+    body: Vec<u8>,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum InboundState {
+    #[default]
+    Data,
+    Iac,
+    /// After WILL/WONT/DO/DONT: the option byte is next.
+    Option,
+    /// After IAC SB: the option code is next.
+    SbOption,
+    Sb,
+    SbIac,
+}
+
+/// One inbound byte's meaning once [`InboundTelnet`] has seen it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Inbound {
+    Data(u8),
+    Naws(u16, u16),
+    /// Part of a telnet command, consumed.
+    Nothing,
+}
+
+impl InboundTelnet {
+    /// Inside a subnegotiation, where every read is bounded (slowloris guard).
+    fn in_sb(&self) -> bool {
+        matches!(self.state, InboundState::SbOption | InboundState::Sb | InboundState::SbIac)
+    }
+
+    pub(crate) fn feed(&mut self, b: u8) -> Inbound {
+        use InboundState as S;
+        match self.state {
+            S::Data if b == IAC => {
+                self.state = S::Iac;
+                Inbound::Nothing
+            }
+            S::Data => Inbound::Data(b),
+            S::Iac => {
+                self.state = match b {
+                    IAC => {
+                        self.state = S::Data;
+                        return Inbound::Data(IAC);
+                    }
+                    SB => S::SbOption,
+                    WILL..=DONT => S::Option,
+                    // 2-byte command (NOP, DM, BRK, IP, AO, AYT, EC, EL, GA).
+                    _ => S::Data,
+                };
+                Inbound::Nothing
+            }
+            S::Option => {
+                self.state = S::Data;
+                Inbound::Nothing
+            }
+            S::SbOption => {
+                self.opt = b;
+                self.body.clear();
+                self.state = S::Sb;
+                Inbound::Nothing
+            }
+            S::Sb => {
+                if b == IAC {
+                    self.state = S::SbIac;
+                } else if self.body.len() < MAX_SB_BODY_BYTES {
+                    // Capped so a giant SB cannot grow memory; bytes past the
+                    // cap are dropped while the scan for IAC SE goes on.
+                    self.body.push(b);
+                }
+                Inbound::Nothing
+            }
+            S::SbIac => {
+                self.state = S::Sb;
+                if b == SE {
+                    self.state = S::Data;
+                    if self.opt == OPT_NAWS && self.body.len() == 4 {
+                        let w = u16::from_be_bytes([self.body[0], self.body[1]]);
+                        let h = u16::from_be_bytes([self.body[2], self.body[3]]);
+                        return Inbound::Naws(w, h);
+                    }
+                } else if b == IAC && self.body.len() < MAX_SB_BODY_BYTES {
+                    self.body.push(IAC);
+                }
+                Inbound::Nothing
+            }
+        }
+    }
+
+    /// Read the rest of a command a bridge left half-read when it ended, so
+    /// the next prompt's reader -- which starts in data -- does not take its
+    /// tail (a NAWS body, an option byte) as a keypress.  Bounded twice over:
+    /// each byte is waited for at most `FINISH_BYTE_WAIT`, and no more bytes
+    /// are read than a capped subnegotiation can hold.  What it gives up on is
+    /// dropped, and the state starts afresh.
+    pub(crate) async fn finish(&mut self, reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send)) {
+        const FINISH_BYTE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+        for _ in 0..MAX_SB_BODY_BYTES + 8 {
+            if self.state == InboundState::Data {
+                return;
+            }
+            match tokio::time::timeout(FINISH_BYTE_WAIT, self.next(reader)).await {
+                Ok(Ok(Some(_))) => {}
+                _ => break,
+            }
+        }
+        self.state = InboundState::Data;
+    }
+
+    /// The next byte's meaning, reading one byte at a time (cancel-safe: see
+    /// the type).  `None` is a closed connection -- or a subnegotiation
+    /// stalled past `SB_DRAIN_TIMEOUT`, treated as one.
+    pub(crate) async fn next(
+        &mut self,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<Option<Inbound>, std::io::Error> {
+        let mut buf = [0u8; 1];
+        let n = if self.in_sb() {
+            match tokio::time::timeout(SB_DRAIN_TIMEOUT, reader.read(&mut buf)).await {
+                Err(_) => return Ok(None),
+                Ok(r) => r?,
+            }
+        } else {
+            reader.read(&mut buf).await?
+        };
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.feed(buf[0])))
+    }
+}
+
+/// Read a single byte, filtering out telnet IAC protocol sequences (all of
+/// them, NAWS included).  `IAC IAC` is a data 0xFF.  Without `filter_iac`
+/// every byte is data.  Cancel-safe given the same `inbound` each call.
 pub(crate) async fn read_byte_iac_filtered(
     reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
     filter_iac: bool,
+    inbound: &mut InboundTelnet,
 ) -> Result<Option<u8>, std::io::Error> {
-    let mut buf = [0u8; 1];
+    if !filter_iac {
+        let mut buf = [0u8; 1];
+        return match reader.read(&mut buf).await? {
+            0 => Ok(None),
+            _ => Ok(Some(buf[0])),
+        };
+    }
     loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => return Ok(None),
-            Ok(_) => {
-                let byte = buf[0];
-                if filter_iac && byte == 0xFF {
-                    match reader.read(&mut buf).await {
-                        Ok(0) => return Ok(None),
-                        Ok(_) => {
-                            let cmd = buf[0];
-                            if cmd == 0xFF {
-                                return Ok(Some(0xFF));
-                            }
-                            if cmd == 0xFA {
-                                // Subnegotiation — consume until IAC SE.  Bound
-                                // each in-SB read so a peer can't pin us by
-                                // dribbling an SB that never terminates; a
-                                // stalled SB is treated as a closed connection.
-                                let mut in_iac = false;
-                                loop {
-                                    match tokio::time::timeout(
-                                        SB_DRAIN_TIMEOUT,
-                                        reader.read(&mut buf),
-                                    )
-                                    .await
-                                    {
-                                        Err(_) => return Ok(None),
-                                        Ok(Ok(0)) => return Ok(None),
-                                        Ok(Ok(_)) => {
-                                            if in_iac {
-                                                if buf[0] == 0xF0 {
-                                                    break;
-                                                }
-                                                in_iac = false;
-                                            } else if buf[0] == 0xFF {
-                                                in_iac = true;
-                                            }
-                                        }
-                                        Ok(Err(e)) => return Err(e),
-                                    }
-                                }
-                                continue;
-                            }
-                            // WILL/WONT/DO/DONT — consume the option byte
-                            if (0xFB..=0xFE).contains(&cmd) {
-                                match reader.read(&mut buf).await {
-                                    Ok(0) => return Ok(None),
-                                    Err(e) => return Err(e),
-                                    _ => {}
-                                }
-                            }
-                            continue;
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                return Ok(Some(byte));
-            }
-            Err(e) => return Err(e),
+        match inbound.next(reader).await? {
+            None => return Ok(None),
+            Some(Inbound::Data(b)) => return Ok(Some(b)),
+            Some(_) => {}
         }
     }
 }

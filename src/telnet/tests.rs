@@ -1491,7 +1491,34 @@ fn test_filter_petscii_shows_tilde_as_a_dash() {
 fn test_filter_petscii_folds_utf8_rather_than_sending_control_codes() {
     assert_eq!(filter_output("a\u{2013}b".as_bytes(), true), b"A-B");
     assert_eq!(filter_output("\u{2018}x\u{2019}".as_bytes(), true), b"'X'");
+    // Two-byte characters stay one `?` per byte (ü is C3 BC): see below.
     assert_eq!(filter_output("Z\u{fc}rich".as_bytes(), true), b"z??RICH");
+    // Box drawing keeps its columns: `─` and `┤` are three bytes each and
+    // were one `?` and two.
+    assert_eq!(filter_output("|\u{2500}\u{2524}|".as_bytes(), true), b"|??|");
+    // A three-byte character outside the E2 range, and a four-byte one.
+    assert_eq!(filter_output("a\u{4E2D}b".as_bytes(), true), b"A?B");
+    assert_eq!(filter_output("a\u{1F600}b".as_bytes(), true), b"A?B");
+    // A Latin-1 byte (not UTF-8) never swallows the text after it.
+    assert_eq!(filter_output(b"caf\xe9 ok", true), b"CAF? OK");
+    // CP437 box drawing (an ANSI BBS) keeps one column per byte, though
+    // `DA C4 BF` (┌─┐) and `C4 B4` (─┤) parse as two-byte UTF-8, and a CP437
+    // Greek letter (E0-EF) does not swallow the box glyphs after it.
+    assert_eq!(filter_output(b"\xda\xc4\xbf", true), b"???");
+    assert_eq!(filter_output(b"\xc4\xb4|", true), b"??|");
+    assert_eq!(filter_output(b"\xe0\xc4\xc4", true), b"???");
+    assert_eq!(filter_output(b"\xe2\xc4\xbf", true), b"???");
+    // Two bytes of a three-byte lead held, then not continued: both shown.
+    assert_eq!(filter_output(b"\xe0\xa0x", true), b"??X");
+    // A four-byte character whose bytes per byte would be two `?`.
+    assert_eq!(filter_output("a\u{1F4A9}b".as_bytes(), true), b"A?B");
+    // A held lead is shown before an escape sequence, not after it: CP437 `≡`
+    // (F0) then cursor-forward put its `?` three columns too far right.
+    let moved = filter_output(b"\xf0\x1b[3C", true);
+    assert_eq!(moved.first(), Some(&b'?'), "the held byte came out after the move: {moved:02x?}");
+    // A control byte that cuts an escape sequence short is still acted on.
+    assert_eq!(filter_output(b"a\x1b[3\rb", true), b"A\rB");
+    assert_eq!(filter_output(b"a\x1b\rb", true), b"A\rB");
     // A raw control-range byte with no escape sequence around it is dropped.
     assert_eq!(filter_output(b"a\x93b", true), b"AB");
     // Colour from an escape sequence still arrives: that half is untouched.
@@ -2734,10 +2761,12 @@ fn test_all_error_messages_fit_petscii() {
         "Enter a number.",
         "Invalid form number.",
         "Invalid field number.",
+        "Enter S, Q, H, N, P or field #.",
         "Enter S, Q, H, or a field #.",
         "Already bookmarked (or full).",
         "No page to bookmark.",
         "No bookmarks saved.",
+        "Could not delete it.",
         "Not found.",
         "Invalid number.",
         "Unknown command.",
@@ -5715,13 +5744,24 @@ fn test_main_help_screen_row_count() {
     assert!(rows <= 22, "main help screen is {} rows, exceeds 22", rows);
 }
 
-/// Serial Gateway pre-bridge screen rows: sep(1) + title(1) +
-/// sep(1) + blank(1) + Port + Baud + Data + blank(1) + Press +
-/// Single + next + blank(1) + prompt(1) = 13.  Stays comfortably
-/// within 22.
+/// Serial Gateway pre-connect screen, counted from the screen itself: every
+/// `send_line` between its clear and the "Connect now?" prompt (the erase-fold
+/// warning's loop counts as its lines, the PETSCII `<-` hint as one), plus the
+/// prompt's own row.  It used to be a hand-copied sum, which a row added to
+/// the screen could never turn red.
 #[test]
 fn test_serial_gateway_screen_row_count() {
-    let rows = 3 + 1 + 3 + 1 + 3 + 1 + 1; // 13
+    let src = include_str!("gateway.rs").replace("\r\n", "\n");
+    let title = src.find("SERIAL GATEWAY (PORT {})").expect("the title");
+    let start = src[..title].rfind("self.clear_screen().await?;").expect("the clear");
+    let end = title + src[title..].find("self.cyan(\"Connect now? (Y/N):\")").expect("the prompt");
+    let screen = &src[start..end];
+    let warning = crate::serial::erase_fold_transfer_warning(crate::serial::BACKSPACE_BS).expect("the warning").len();
+    assert!(screen.contains("for line in warning {"), "the warning is no longer a loop: recount");
+    let lines = screen.matches("self.send_line(").count() - 1 + warning;
+    let hint = screen.matches("self.send_gateway_esc_hint().await?;").count();
+    let rows = lines + hint + 1;
+    assert!(rows > 15, "counted only {rows} rows -- the window is wrong");
     assert!(rows <= 22, "serial gateway screen is {} rows, exceeds 22", rows);
 }
 
@@ -5733,10 +5773,10 @@ fn test_serial_gateway_screen_row_count() {
 fn test_serial_gateway_lines_fit_petscii() {
     let fixed = [
         "  SERIAL GATEWAY",
-        "  Press ESC ESC to disconnect.",
-        "  Press <- <- to disconnect.",
-        "  Single ESC passes through on the",
-        "  next keystroke.",
+        // The ANSI wording is never drawn on a C64.
+        "  Press <- twice quickly to disconnect.",
+        "  A single ESC is forwarded so",
+        "  editors like vi keep working.",
         "  Connect now? (Y/N): ",
         "  Acquiring serial port...",
         "  Connected.",
@@ -6028,7 +6068,9 @@ fn test_serial_gateway_picker_row_count() {
     // two, so it drives the worst case: header + capped entries +
     // "+N more" + trailing blank.
     let fallback = 1 + 1 + 1;
-    let remote_block = 1 + REMOTE_PORT_DISPLAY_CAP + 1 + 1;
+    // Plus the "Tip: enable local echo" line, drawn whenever a port is
+    // eligible -- and listing remotes makes one eligible.
+    let remote_block = 1 + REMOTE_PORT_DISPLAY_CAP + 1 + 1 + 1;
     let bigger = if remote_block > fallback { remote_block } else { fallback };
     let worst_case = chrome + peer_header + port_rows + blank_after + bigger + footer;
     assert!(
@@ -6743,6 +6785,7 @@ fn test_bookmarks_screen_lines_fit_petscii() {
     let lines = [
         "  BOOKMARKS",
         "  #=Open D=Delete",
+        "  Page 10/10 N=Next P=Prev",
     ];
     for line in &lines {
         assert!(
@@ -6755,8 +6798,8 @@ fn test_bookmarks_screen_lines_fit_petscii() {
 
 #[test]
 fn test_bookmark_entry_fits_petscii() {
-    // Worst case: "  99. " + 30 chars title
-    let line = format!("  {:>2}. {}", 99, "a".repeat(30));
+    // Worst case: "  100. " (MAX_BOOKMARKS) + 30 chars title
+    let line = format!("  {:>2}. {}", 100, "a".repeat(30));
     assert!(
         line.len() <= PETSCII_WIDTH,
         "bookmark entry '{}' is {} chars, exceeds {}",
@@ -9074,28 +9117,28 @@ fn test_qmethod_error_recovery_will_in_wantno() {
 #[tokio::test]
 async fn test_gateway_event_data_byte() {
     let mut data = &b"Ahello"[..];
-    let ev = read_gateway_event(&mut data, true).await.unwrap();
+    let ev = read_gateway_event(&mut data, true, &mut InboundTelnet::default()).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(b'A'));
 }
 
 #[tokio::test]
 async fn test_gateway_event_iac_iac_unescapes() {
     let mut data: &[u8] = &[IAC, IAC, b'B'];
-    let ev = read_gateway_event(&mut data, true).await.unwrap();
+    let ev = read_gateway_event(&mut data, true, &mut InboundTelnet::default()).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(0xFF));
 }
 
 #[tokio::test]
 async fn test_gateway_event_drops_2byte_iac() {
     let mut data: &[u8] = &[IAC, 0xF1, b'X']; // IAC NOP X
-    let ev = read_gateway_event(&mut data, true).await.unwrap();
+    let ev = read_gateway_event(&mut data, true, &mut InboundTelnet::default()).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(b'X'));
 }
 
 #[tokio::test]
 async fn test_gateway_event_drops_negotiation() {
     let mut data: &[u8] = &[IAC, WILL, OPT_ECHO, b'Y'];
-    let ev = read_gateway_event(&mut data, true).await.unwrap();
+    let ev = read_gateway_event(&mut data, true, &mut InboundTelnet::default()).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(b'Y'));
 }
 
@@ -9106,7 +9149,7 @@ async fn test_gateway_event_surfaces_naws() {
         IAC, SB, OPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE,
         b'Z',
     ];
-    let ev = read_gateway_event(&mut data, true).await.unwrap();
+    let ev = read_gateway_event(&mut data, true, &mut InboundTelnet::default()).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::NawsResize(80, 24));
 }
 
@@ -9119,7 +9162,7 @@ async fn test_gateway_event_naws_with_escaped_iac_in_body() {
         0x00, 0x18,
         IAC, SE,
     ];
-    let ev = read_gateway_event(&mut data, true).await.unwrap();
+    let ev = read_gateway_event(&mut data, true, &mut InboundTelnet::default()).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::NawsResize(0x00FF, 0x0018));
 }
 
@@ -9130,14 +9173,14 @@ async fn test_gateway_event_drops_non_naws_subneg() {
         IAC, SB, OPT_TTYPE, TTYPE_SEND, IAC, SE,
         b'Q',
     ];
-    let ev = read_gateway_event(&mut data, true).await.unwrap();
+    let ev = read_gateway_event(&mut data, true, &mut InboundTelnet::default()).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Data(b'Q'));
 }
 
 #[tokio::test]
 async fn test_gateway_event_eof() {
     let mut data: &[u8] = &[];
-    let ev = read_gateway_event(&mut data, true).await.unwrap();
+    let ev = read_gateway_event(&mut data, true, &mut InboundTelnet::default()).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Eof);
 }
 
@@ -9202,14 +9245,14 @@ async fn test_gateway_local_io_is_raw_unless_the_session_speaks_telnet() {
     let wire: &[u8] = &[IAC, WILL, OPT_ECHO, IAC, IAC, b'A'];
     let mut data = wire;
     let mut got = Vec::new();
-    while let Ok(GatewayInboundEvent::Data(b)) = read_gateway_event(&mut data, false).await {
+    while let Ok(GatewayInboundEvent::Data(b)) = read_gateway_event(&mut data, false, &mut InboundTelnet::default()).await {
         got.push(b);
     }
     assert_eq!(got, wire, "a raw link lost bytes to telnet framing");
     // Control: on telnet the same wire is one negotiation, one data 0xFF, 'A'.
     let mut data = wire;
     let mut got = Vec::new();
-    while let Ok(GatewayInboundEvent::Data(b)) = read_gateway_event(&mut data, true).await {
+    while let Ok(GatewayInboundEvent::Data(b)) = read_gateway_event(&mut data, true, &mut InboundTelnet::default()).await {
         got.push(b);
     }
     assert_eq!(got, vec![0xFF, b'A']);
@@ -9236,8 +9279,8 @@ async fn test_gateway_local_io_is_raw_unless_the_session_speaks_telnet() {
     ] {
         assert!(!src.contains(fixed), "gateway.rs writes or reads the local user with `{fixed}`");
     }
-    assert_eq!(src.matches("read_byte_iac_filtered(reader, local_telnet)").count(), 1);
-    assert_eq!(src.matches("read_gateway_event(reader, local_telnet)").count(), 2);
+    assert_eq!(src.matches("read_byte_iac_filtered(reader, local_telnet, &mut inbound)").count(), 1);
+    assert_eq!(src.matches("read_gateway_event(reader, local_telnet, &mut inbound)").count(), 2);
     assert_eq!(src.matches(", local_telnet).await").count(), 7, "a local write lost its flag");
 }
 
@@ -10187,7 +10230,7 @@ async fn test_read_gateway_event_sb_stall_times_out() {
     // Time is paused; tokio auto-advances to the SB_DRAIN_TIMEOUT deadline
     // once the stalled read is the only pending work, so this resolves
     // promptly instead of waiting the real 15s.
-    let ev = read_gateway_event(&mut reader, true).await.unwrap();
+    let ev = read_gateway_event(&mut reader, true, &mut InboundTelnet::default()).await.unwrap();
     assert_eq!(ev, GatewayInboundEvent::Eof);
 }
 
@@ -15491,4 +15534,156 @@ fn test_server_session_live_counts_every_connection_a_restart_drops() {
         let window = &src[at.saturating_sub(250)..(at + 250).min(src.len())];
         assert!(window.contains("LiveConnection::new()"), "{what} is not counted");
     }
+}
+
+/// **A telnet command split across reads survives a dropped read.**  The
+/// bridges read the local user inside `select!`, which drops the read future
+/// whenever remote output wins.  With the command state inside that future, a
+/// `IAC SB` read and then dropped left `NAWS w w h h IAC SE` to be typed into
+/// the remote as data, and a split `IAC IAC` lost a byte.  Here the first half
+/// arrives, the read is cancelled by a timeout, and the rest follows.
+#[tokio::test]
+async fn test_inbound_telnet_commands_survive_a_cancelled_read() {
+    use tokio::io::AsyncWriteExt;
+    let short = std::time::Duration::from_millis(50);
+
+    let (mut peer, mut local) = tokio::io::duplex(64);
+    let reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send) = &mut local;
+    let mut inbound = InboundTelnet::default();
+    peer.write_all(&[IAC, SB]).await.unwrap();
+    assert!(
+        tokio::time::timeout(short, read_gateway_event(reader, true, &mut inbound)).await.is_err(),
+        "half a command is not an event"
+    );
+    peer.write_all(&[OPT_NAWS, 0, 80, 0, 24, IAC, SE, b'x']).await.unwrap();
+    assert_eq!(
+        read_gateway_event(reader, true, &mut inbound).await.unwrap(),
+        GatewayInboundEvent::NawsResize(80, 24),
+        "the rest of the NAWS was read as data"
+    );
+    assert_eq!(read_gateway_event(reader, true, &mut inbound).await.unwrap(), GatewayInboundEvent::Data(b'x'));
+
+    // A typed 0xFF, doubled on the wire and split between the two IACs.
+    peer.write_all(&[IAC]).await.unwrap();
+    assert!(tokio::time::timeout(short, read_gateway_event(reader, true, &mut inbound)).await.is_err());
+    peer.write_all(&[IAC, b'y']).await.unwrap();
+    assert_eq!(read_gateway_event(reader, true, &mut inbound).await.unwrap(), GatewayInboundEvent::Data(IAC));
+    assert_eq!(read_gateway_event(reader, true, &mut inbound).await.unwrap(), GatewayInboundEvent::Data(b'y'));
+
+    // The byte reader the SSH bridge uses, the same way.
+    let mut inbound = InboundTelnet::default();
+    peer.write_all(&[IAC, SB, OPT_NAWS, 0]).await.unwrap();
+    assert!(
+        tokio::time::timeout(short, read_byte_iac_filtered(reader, true, &mut inbound)).await.is_err()
+    );
+    peer.write_all(&[80, 0, 24, IAC, SE, b'z']).await.unwrap();
+    assert_eq!(read_byte_iac_filtered(reader, true, &mut inbound).await.unwrap(), Some(b'z'));
+}
+
+/// **A long drop-down pages, and every option can be picked.**  A country list
+/// of 200 options was printed in one go and scrolled a C64's screen away.  Now
+/// each screen is one page that fits 22 rows, N moves on, and a number from
+/// any page picks from the whole list.
+#[tokio::test]
+async fn test_a_long_pick_list_pages_and_every_number_is_reachable() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for term in [TerminalType::Petscii, TerminalType::Ansi] {
+        let (mut sess, peer) = make_test_session_with_peer(term);
+        sess.color_enabled = false;
+        let (mut rd, mut wr) = tokio::io::split(peer);
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            let _ = rd.read_to_end(&mut out).await;
+            out
+        });
+        // Then end of input, so a refused number fails the test (its "Press
+        // any key" reads EOF) rather than hanging it.
+        wr.write_all(b"n\r150\r").await.unwrap();
+        wr.shutdown().await.unwrap();
+        let items: Vec<String> = (1..=200).map(|i| format!("Option {i}")).collect();
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            sess.web_pick_from_list("COUNTRY", "Pick", &items, Some(0)),
+        )
+        .await
+        .expect("the pick list hung")
+        .expect("the pick list failed -- a number refused?");
+        drop(sess);
+        drop(wr);
+        let out = collector.await.unwrap();
+        assert_eq!(got, Some(149), "{term:?}: a number off the first page was refused");
+        let text = String::from_utf8_lossy(&out).to_ascii_lowercase();
+        assert!(text.contains("page 2/15"), "{term:?}: N did not move to page 2");
+        assert!(text.contains("15.option 15"), "{term:?}: page 2 does not start at 15");
+        assert!(!text.contains("29.option 29"), "{term:?}: page 2 ran past 14 items");
+        // Each screen, from its clear to the prompt (echoed input included),
+        // fits 22 rows.  Two screens drawn: page 1, then page 2.
+        let clear: &[u8] = if term == TerminalType::Petscii { &[PETSCII_CLEAR] } else { ANSI_CLEAR.as_bytes() };
+        let starts: Vec<usize> =
+            out.windows(clear.len()).enumerate().filter(|(_, w)| *w == clear).map(|(i, _)| i).collect();
+        assert_eq!(starts.len(), 2, "{term:?}: expected two screens");
+        for (n, &at) in starts.iter().enumerate() {
+            let end = starts.get(n + 1).copied().unwrap_or(out.len());
+            // Up to the prompt's own row: what follows it is the typed answer.
+            let screen = &out[at..end];
+            let prompt = screen.windows(4).position(|w| w.eq_ignore_ascii_case(b"pick")).expect("the prompt");
+            let rows = screen[..prompt].iter().filter(|&&b| b == b'\n').count() + 1;
+            assert!(rows <= 22, "{term:?}: screen {n} is {rows} rows");
+            assert!(rows > 3 + 14, "{term:?}: screen {n} is only {rows} rows -- miscounted");
+        }
+    }
+}
+
+/// Bookmarks past the 13th are reachable: open and delete accept the whole
+/// list's numbers, not only the rows drawn.
+#[test]
+fn test_every_bookmark_number_is_accepted() {
+    let src = include_str!("web.rs").replace("\r\n", "\n");
+    let f = &src[src.find("async fn web_show_bookmarks(").expect("the screen")..];
+    let f = &f[..f.find("\n    }\n").expect("its end")];
+    assert_eq!(f.matches("(1..=total).contains(&num)").count(), 2, "open or delete is limited again");
+    assert!(!f.contains(".take(display_max)"), "the list is cut at the screen again");
+    assert!(f.contains("crate::webbrowser::remove_bookmark(num - 1) {"), "a failed delete says Deleted.");
+}
+
+/// **A bridge that ends mid-command reads the rest of it.**  Left half-read,
+/// the tail of a NAWS (or an option byte) was the next prompt's to read, and
+/// its reader starts in data -- so "Press any key" took it as the keypress.
+/// `finish` reads it out, bounded: a command that never completes is given up
+/// on in about half a second.
+#[tokio::test]
+async fn test_a_half_read_command_is_finished_not_left_for_the_prompt() {
+    use tokio::io::AsyncWriteExt;
+    let short = std::time::Duration::from_millis(50);
+    let (mut peer, mut local) = tokio::io::duplex(64);
+    let reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send) = &mut local;
+
+    let mut inbound = InboundTelnet::default();
+    peer.write_all(&[IAC, SB, OPT_NAWS, 0]).await.unwrap();
+    assert!(tokio::time::timeout(short, read_gateway_event(reader, true, &mut inbound)).await.is_err());
+    peer.write_all(&[80, 0, 24, IAC, SE, b'k']).await.unwrap();
+    inbound.finish(reader).await;
+    // What the prompt reads next, with a parser of its own, is the key.
+    let mut prompt = InboundTelnet::default();
+    assert_eq!(read_byte_iac_filtered(reader, true, &mut prompt).await.unwrap(), Some(b'k'));
+
+    // A command that never completes: given up on, not waited for.
+    let mut inbound = InboundTelnet::default();
+    peer.write_all(&[IAC, SB, OPT_NAWS]).await.unwrap();
+    assert!(tokio::time::timeout(short, read_gateway_event(reader, true, &mut inbound)).await.is_err());
+    let start = std::time::Instant::now();
+    inbound.finish(reader).await;
+    assert!(start.elapsed() < std::time::Duration::from_secs(2), "finish waited {:?}", start.elapsed());
+    peer.write_all(b"j").await.unwrap();
+    assert_eq!(
+        read_gateway_event(reader, true, &mut inbound).await.unwrap(),
+        GatewayInboundEvent::Data(b'j'),
+        "the state was not reset after giving up"
+    );
+
+    // Every bridge finishes its parser on the way out.
+    let gw = include_str!("gateway.rs");
+    assert_eq!(gw.matches("inbound.finish(&mut *self.reader).await;").count(), 3, "a gateway bridge");
+    let ser = include_str!("serial_ui.rs");
+    assert_eq!(ser.matches("inbound.finish(&mut *self.reader).await;").count(), 1, "the ring screen");
 }

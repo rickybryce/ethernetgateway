@@ -47,7 +47,7 @@ pub(in crate::telnet) use gateway::{GatewayTelnetIac, GatewayIacState, OptState,
     normalize_gateway_input, gateway_default_window,
     gateway_input_for_remote, is_gateway_leave_key};
 mod io;
-pub(crate) use io::{read_byte_iac_filtered, write_local_data, write_telnet_data};
+pub(crate) use io::{Inbound, InboundTelnet, read_byte_iac_filtered, write_local_data, write_telnet_data};
 
 /// Is this the ordinary end of a session rather than a fault?
 ///
@@ -2433,16 +2433,16 @@ impl TelnetSession {
             "",
             "  Or type a new question and",
             "  press Enter to ask again.",
-            "  The model keeps conversational",
-            "  context within a single AI Chat",
-            "  session.",
+            "  Each question is answered on",
+            "  its own: the model does not",
+            "  remember earlier ones.",
             "",
             "  About the service:",
             "  Powered by Groq (groq.com), a",
             "  free LLM inference API. The",
-            "  model is Llama 3.3 70B",
-            "  Versatile, a capable general-",
-            "  purpose assistant.",
+            "  model is a setting:",
+            "  Configuration > Other Settings",
+            "  > M.",
             "",
             "  Getting a key:",
             "  1. Visit console.groq.com and",
@@ -2450,10 +2450,11 @@ impl TelnetSession {
             "  2. Generate an API key (starts",
             "     with gsk_...).",
             "  3. Set it in Configuration >",
-            "     Other Settings > A, or paste",
+            "     Other Settings > A (no",
+            "     restart needed), or paste",
             "     into egateway.conf as",
-            "     groq_api_key = gsk_...",
-            "  4. Restart the server.",
+            "     groq_api_key = gsk_... and",
+            "     restart the server.",
             "",
             "  Rate limits:",
             "  Free-tier limits are generous",
@@ -2496,6 +2497,8 @@ impl TelnetSession {
         &[
             "  #    Enter bookmark number to open",
             "  D    Delete a bookmark by number",
+            "  N/P  Next/previous page (more",
+            "       than 13 bookmarks)",
             "  ESC  Cancel and go back",
         ]
     }
@@ -2506,6 +2509,8 @@ impl TelnetSession {
             "  #    Enter a field number to",
             "       edit its value",
             "  S    Submit the form",
+            "  N/P  Next/previous page of a",
+            "       long form",
             "  Q    Cancel and go back",
         ]
     }

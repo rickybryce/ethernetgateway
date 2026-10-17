@@ -681,7 +681,16 @@ mod tests {
             "the mask is published before its timestamp, so a reader can see a fresh press \
              beside a stale time and discard it",
         );
-        assert!(code.contains("Ordering::Release"), "and both stores must release");
+        // Each store on its own line: a whole-body `contains` passed with one
+        // of the two relaxed.  The mask's is the one the reader's Acquire
+        // pairs with.
+        for store in ["joystick_at.store(", "joystick.store("] {
+            let line = code
+                .lines()
+                .find(|l| l.contains(store) && !l.contains(&format!("_{store}")))
+                .unwrap_or_else(|| panic!("no {store}"));
+            assert!(line.contains("Ordering::Release"), "{store} must release: {line}");
+        }
 
         // The other half of the same race, and pinned here for the same reason:
         // a blind `store(0)` in the idle latch discards a press that arrives

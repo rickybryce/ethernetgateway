@@ -161,11 +161,25 @@ mod model_tests {
         assert!(!super::refused_reasoning_effort(&serde_json::json!({"choices": []})));
     }
 
+    /// The "change the model" hint is for a model error, not a rate limit
+    /// that happens to name the model.
+    #[test]
+    fn test_only_a_model_error_points_at_the_model_setting() {
+        assert!(super::is_model_error("The model `x` does not exist or you do not have access to it."));
+        assert!(super::is_model_error("model_not_found"));
+        assert!(super::is_model_error("The model `y` has been decommissioned"));
+        assert!(!super::is_model_error("Rate limit reached for model `x` in organization `o`"));
+        assert!(!super::is_model_error("Request too large for model `x`"));
+        assert!(!super::is_model_error("Invalid API Key"));
+    }
+
     /// A blank model name falls back rather than asking Groq for `""`.
     #[test]
     fn test_a_blank_model_is_the_default() {
-        // The resolution is in `ask_model`; this pins the rule it implements so
-        // the constant cannot quietly become the empty string.
+        assert_eq!(super::resolve_model(""), GROQ_MODEL);
+        assert_eq!(super::resolve_model("   "), GROQ_MODEL);
+        assert_eq!(super::resolve_model(" llama-x "), "llama-x");
+        // And the constant cannot quietly become the empty string.
         assert!(!GROQ_MODEL.trim().is_empty());
         assert!(GROQ_MODEL.contains('/') || !GROQ_MODEL.contains(' '), "{GROQ_MODEL}");
     }
@@ -192,10 +206,24 @@ fn strip_thoughts(text: &str) -> String {
     }
 }
 
+/// The model to ask: the operator's, trimmed, or [`GROQ_MODEL`] when blank.
+fn resolve_model(model: &str) -> &str {
+    if model.trim().is_empty() { GROQ_MODEL } else { model.trim() }
+}
+
+/// Whether a Groq error says the model itself is the problem -- retired,
+/// misspelled, or not available to this key -- so the operator is pointed at
+/// the model setting.  Not the bare word "model": a rate limit reads "Rate
+/// limit reached for model ...", and changing the model is not its remedy.
+pub(crate) fn is_model_error(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("does not exist") || m.contains("model_not_found") || m.contains("decommissioned")
+}
+
 /// Send a question to the Groq API and return the response text, asking `model`
 /// -- or [`GROQ_MODEL`] when the operator has named none.
 pub(crate) fn ask_model(api_key: &str, question: &str, model: &str) -> Result<String, String> {
-    let model = if model.trim().is_empty() { GROQ_MODEL } else { model.trim() };
+    let model = resolve_model(model);
     let effort = reasoning_effort_for(model);
 
     let mut json = post_question(api_key, question, model, effort)?;

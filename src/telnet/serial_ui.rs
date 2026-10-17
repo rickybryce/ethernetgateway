@@ -1659,6 +1659,8 @@ impl TelnetSession {
         // which signals the serial thread to abort).  Timeout if the
         // serial thread never picks up the request.
         let local_telnet = self.speaks_telnet();
+        // Telnet command state across the select! below (see `InboundTelnet`).
+        let mut inbound = InboundTelnet::default();
         // Encoded before `self` is split below, so the line gets the same
         // PETSCII case swap as everything else on this screen.
         let ring_line = self.screen_bytes("  RING...\r\n").into_owned();
@@ -1703,7 +1705,7 @@ impl TelnetSession {
                         _ => break, // channel closed
                     }
                 }
-                byte = read_byte_iac_filtered(reader, local_telnet) => {
+                byte = read_byte_iac_filtered(reader, local_telnet, &mut inbound) => {
                     match byte {
                         Ok(Some(b)) if is_esc_key(b, is_petscii)
                             || b == b'q' || b == b'Q' =>
@@ -1725,6 +1727,9 @@ impl TelnetSession {
         // and clear the slot in case the serial thread never picked it up.
         drop(rx);
         crate::serial::cancel_ring_request(id);
+        // A command the user's client was half-way through stays ours, not
+        // the "Press any key" prompt's (see `InboundTelnet::finish`).
+        inbound.finish(&mut *self.reader).await;
 
         self.send_line("").await?;
         if answered {

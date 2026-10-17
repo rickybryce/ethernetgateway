@@ -124,7 +124,7 @@ pub const ROM_CHOICES: &[RomChoice] = &[
     RomChoice { key: ROM_OFF, description: "Off - no monitor ROM", short: "off", rom: None },
     RomChoice {
         key: "cuter_vdm",
-        // 44 columns.  Fits the 80-column screens with room to spare and is
+        // 46 columns.  Fits the 80-column screens with room to spare and is
         // checked against the narrow ones by `test_every_rom_label_fits`.
         description: "CUTER for VDM-1 at 0xC000 (needs vdmcuter.hex)",
         short: "CUTER",
@@ -275,7 +275,11 @@ pub fn parse_intel_hex(text: &str) -> Result<Vec<(u16, Vec<u8>)>, String> {
 /// belongs.  Both are accepted because the one file this catalogue names is HEX
 /// and every other copy in circulation is not.
 pub fn image_from_bytes(f: &RomFile, raw: &[u8]) -> Result<RomImage, String> {
-    let chunks = match std::str::from_utf8(raw).map(|t| (t.trim_start().starts_with(':'), t)) {
+    // A UTF-8 BOM (Notepad's "UTF-8 with BOM") is not whitespace, so without
+    // stripping it a hand-saved HEX file was taken for a raw binary and refused
+    // as the wrong ROM.
+    let text = std::str::from_utf8(raw).map(|t| t.trim_start_matches('\u{FEFF}'));
+    let chunks = match text.map(|t| (t.trim_start().starts_with(':'), t)) {
         Ok((true, text)) => parse_intel_hex(text)?,
         _ => {
             if raw.is_empty() {
@@ -293,9 +297,10 @@ pub fn image_from_bytes(f: &RomFile, raw: &[u8]) -> Result<RomImage, String> {
             return Err(format!("a record at {at:04X} runs past the top of memory"));
         }
         if *at < lo || last > hi as usize {
+            // The verdict first: a C64 banner keeps 38 columns of
+            // "{file}: ...", and the addresses alone said nothing to act on.
             return Err(format!(
-                "it puts bytes at {at:04X}-{last:04X}, outside {lo:04X}-{hi:04X} — \
-                 this is not the ROM this setting expects"
+                "wrong ROM: bytes at {at:04X}-{last:04X}, need {lo:04X}-{hi:04X}"
             ));
         }
     }
@@ -549,17 +554,30 @@ mod tests {
         for (addr, what) in [(0x0000u16, "page zero"), (0xBFFF, "just below"), (0xC7FC, "the end")]
         {
             let text = format!("{}\n{}\n", record(addr, 0, &[0x11, 0x22]), eof());
+            // At 0xC7FC: two bytes at the last address run one past it.
             let got = image_from_bytes(f, text.as_bytes());
-            if addr == 0xC7FC {
-                // Two bytes at the last address run one past it.
-                assert!(got.is_err(), "{what}: a record may not overrun the window");
-            } else {
-                assert!(got.is_err(), "{what}: outside the window must be refused");
-            }
+            let why = got.expect_err(what);
+            assert!(why.starts_with("wrong ROM:"), "{what}: refused for another reason: {why}");
         }
         // And the honest edge: the last byte exactly at the top is fine.
         let text = format!("{}\n{}\n", record(0xC7FC, 0, &[0x11]), eof());
         assert!(image_from_bytes(f, text.as_bytes()).is_ok(), "the top byte is inside");
+    }
+
+    /// A HEX file saved with a UTF-8 BOM is still HEX, and the window error
+    /// leads with its verdict so a 38-column banner keeps it.
+    #[test]
+    fn test_a_bom_hex_file_loads_and_a_wrong_one_says_so_first() {
+        let f = file_for("cuter_vdm").expect("catalogue has it");
+        let text = format!("\u{FEFF}{}\n{}\n", record(0xC000, 0, &[0x7F]), eof());
+        // Decoded as HEX: one byte at C000.  (Taken for a raw binary it would
+        // also load -- the whole text at C000 -- so `is_ok` proves nothing.)
+        let image = image_from_bytes(f, text.as_bytes()).expect("a BOM file loads");
+        assert_eq!(image.chunks, vec![(0xC000, vec![0x7F])], "a BOM made it a raw binary");
+        let wrong = format!("{}\n{}\n", record(0x0100, 0, &[0x7F]), eof());
+        let why = format!("{}: {}", f.file, image_from_bytes(f, wrong.as_bytes()).unwrap_err());
+        let shown: String = why.chars().take(38).collect();
+        assert!(shown.contains("wrong ROM"), "a C64 sees {shown:?}");
     }
 
     /// A raw binary is taken at the window's start, and one too long for the

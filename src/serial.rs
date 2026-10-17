@@ -6576,11 +6576,7 @@ impl PetsciiLink {
     /// handler rather than doing the mapping itself.
     fn for_device(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut translated = Vec::with_capacity(bytes.len());
-        let host_text = &mut self.text;
-        let mut text = |b: u8, out: &mut Vec<u8>| host_text.feed(b, out);
-        for &b in bytes {
-            self.ansi.feed(b, &mut text, &mut translated);
-        }
+        crate::petscii::feed_petscii(&mut self.ansi, &mut self.text, bytes, &mut translated);
         translated
     }
 }

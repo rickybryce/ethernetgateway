@@ -67,6 +67,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The web page and the desktop editor now check first, and when someone is
   connected they say every connection will be lost and ask; Cancel saves
   nothing.  The telnet Restart server item already warned and asked.
+  Finishing the setup wizard asks the same way.
+- **Punter: a finished upload no longer waits minutes on a quiet C64.**
+  When the C64 stayed connected but stopped answering after the last block,
+  the gateway's end-off waited about 11 minutes (at the default settings)
+  before returning to the menu, with the file already complete.  It now
+  gives up after about a minute, as the download side already did.
+- **Punter: a file with too many blocks is refused before the transfer
+  starts**, rather than after the file-type exchange, which left the C64
+  waiting for data that never came.  Only reachable with a small Punter
+  block size.
+- **Punter: an upload with no file-type byte is saved without a type**
+  instead of being given `.usr`.
+- **Serial Gateway: the port picker fits a C64 again.**  With both local
+  ports, peer dial and more than five slave ports it was 23 rows, so its
+  title scrolled away; it now lists five slave ports and "+N more".  Long
+  `/dev/serial/by-id/...` paths keep their distinguishing end, and an IPv6
+  slave's row no longer runs past 40 columns.
+- **Serial Gateway: the connect screen describes ESC correctly.**  It said a
+  single ESC passes through "on the next keystroke"; it is sent at once, and
+  leaving is ESC twice *quickly*, as the other gateways say.
+- **Gateways: "Press any key" after a gateway closes no longer prints
+  "Disconnected: idle timeout." and then carries on.**  An idle session now
+  ends with the goodbye, as everywhere else.  A Telnet Gateway connection
+  that drops while starting says "Connection closed." instead of returning
+  to the menu silently.
+- **Telnet and SSH Gateways: a terminal resize or a typed 0xFF can no longer
+  be split into stray keystrokes.**  A telnet command from the user's
+  client that arrived in two pieces while the remote was sending could reach
+  the remote as typed characters.
+- **Web browser: every bookmark can be opened and deleted.**  Only the first
+  13 were listed and accepted; bookmarks 14 to 100 were saved but out of
+  reach.  The list now pages with N and P.  A delete that fails says so.
+- **Web browser: long drop-down lists and long forms page.**  A drop-down
+  with hundreds of options (a country list) printed them all and scrolled
+  the screen away on a C64; options, forms and form fields now show a page
+  at a time with N and P.
+- **AI Chat help is accurate.**  It said the model remembers the
+  conversation (each question is answered on its own), named a model Groq
+  has retired (the model is a setting), and said a key set from the
+  Configuration menu needs a server restart (it does not).  A rate-limit error no longer suggests changing
+  the model, and tabs in an answer no longer push it off the page.
+- **Weather errors are wrapped, not cut off, on a C64**, so "Try again
+  later" is shown, and a long or accented saved location fits the prompt.
+- **PETSCII: box drawing from a modern host keeps its columns.**  A UTF-8
+  box-drawing character (and any other three- or four-byte character a C64
+  cannot show) came out as one to four `?` depending on its bytes, which
+  knocked `tree`, `htop` and table output out of line; it is now always one.
+  CP437 box drawing from an ANSI BBS keeps one `?` per byte, as before, in
+  all but rare byte combinations.  A control character that cuts an escape
+  sequence short is no longer lost.
+- **Boot banner: the monitor ROM is named in a form that fits a C64**, and a
+  wrong ROM file says "wrong ROM" first.  A `.hex` ROM saved with a byte
+  order mark (Windows Notepad) loads.
 - **Setup wizard: "Enable SSH" can no longer reuse a port.**  The buttons on
   the role screens turned SSH on without the port check the SSH screen does,
   and Finish did not check again, so SSH and the web server could be saved on

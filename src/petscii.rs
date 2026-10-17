@@ -178,10 +178,10 @@ impl AnsiToPetscii {
     /// `text` is called for every byte that is *not* part of an escape
     /// sequence, so the caller keeps ownership of its own character
     /// translation — the PETSCII case swap, the `BS` mapping, and whatever
-    /// else that path does.  It is a closure rather than a `fn` because
-    /// `serial.rs`'s punctuation folder carries state of its own, and it may
-    /// emit nothing at all (the gateway drops `~`, which has no PETSCII
-    /// equivalent).
+    /// else that path does.  It is a closure rather than a `fn` because both
+    /// callers' text path, [`PetsciiText`], carries state of its own (a UTF-8
+    /// character split across reads), and it may emit nothing at all for a
+    /// byte (a continuation byte, or a dropped control-range one).
     ///
     /// Control bytes this module produces are pushed to `out` directly and
     /// never passed to `text`: they are already PETSCII, and a caller's case
@@ -199,6 +199,12 @@ impl AnsiToPetscii {
                 }
             }
             1 => match byte {
+                // A control byte cuts the sequence short and is still acted
+                // on (ECMA-48): `ESC CR` used to lose the CR.
+                0x00..=0x1A | 0x1C..=0x1F => {
+                    self.state = 0;
+                    text(byte, out);
+                }
                 b'[' => {
                     self.params.clear();
                     self.state = 2;
@@ -221,9 +227,15 @@ impl AnsiToPetscii {
                     // A truncated sequence followed by a new one.
                     self.params.clear();
                     self.state = 1;
-                } else if byte < 0x20 || byte == 0x7F || self.params.len() >= CSI_PARAM_CAP {
+                } else if byte < 0x20 {
                     // A control byte inside a CSI means the sequence was never
-                    // finished; recover rather than eat the rest of the stream.
+                    // finished; recover rather than eat the rest of the stream,
+                    // and act on the control (ECMA-48 executes it): `ESC [ 3 CR
+                    // LF` used to lose the CR.
+                    self.params.clear();
+                    self.state = 0;
+                    text(byte, out);
+                } else if byte == 0x7F || self.params.len() >= CSI_PARAM_CAP {
                     self.params.clear();
                     self.state = 0;
                 } else {
@@ -544,6 +556,45 @@ pub(crate) enum PetsciiPunctState {
     Normal,
     SawE2,   // got 0xE2, awaiting 0x80
     SawE280, // got 0xE2 0x80, awaiting the final byte
+    /// A three- or four-byte UTF-8 character under way: `have` of its `want`
+    /// bytes so far, held in `bytes`.  Shown as one `?` once complete; if a
+    /// byte that cannot continue it arrives first, it was not UTF-8 (a CP437
+    /// or Latin-1 host) and the held bytes are shown one `?` each, as any
+    /// high byte is, before that byte is read afresh.
+    ///
+    /// Not two-byte characters: CP437 box drawing (`C0`-`DF`) followed by
+    /// another box glyph (`B0`-`BF`) is a valid two-byte sequence -- `┌─┐` is
+    /// `DA C4 BF` -- so collapsing those merged an ANSI BBS's box edges.
+    Multi { bytes: [u8; 4], have: u8, want: u8 },
+}
+
+impl PetsciiPunctState {
+    /// Give up on a held character: its bytes as the old per-byte rule shows
+    /// them (an `E2` or `E2 80` is one `?`), and start afresh.
+    fn flush(&mut self, out: &mut Vec<u8>) {
+        match std::mem::take(self) {
+            PetsciiPunctState::Normal => {}
+            PetsciiPunctState::SawE2 | PetsciiPunctState::SawE280 => out.push(b'?'),
+            PetsciiPunctState::Multi { bytes, have, .. } => {
+                for &b in &bytes[..have as usize] {
+                    push_high_byte(b, out);
+                }
+            }
+        }
+    }
+}
+
+/// One held byte as a lone high byte is shown: `?`, or nothing for the
+/// control range (see `feed_ground`).
+fn push_high_byte(byte: u8, out: &mut Vec<u8>) {
+    if !(0x80..=0x9F).contains(&byte) {
+        out.push(b'?');
+    }
+}
+
+/// A UTF-8 continuation byte.
+fn is_continuation(byte: u8) -> bool {
+    (0x80..=0xBF).contains(&byte)
 }
 
 impl PetsciiPunctState {
@@ -555,6 +606,10 @@ impl PetsciiPunctState {
             PetsciiPunctState::SawE2 => {
                 if byte == 0x80 {
                     *self = PetsciiPunctState::SawE280;
+                } else if is_continuation(byte) {
+                    // Another U+2xxx character (box drawing, arrows): held
+                    // until its third byte says whether it is one.
+                    *self = PetsciiPunctState::Multi { bytes: [0xE2, byte, 0, 0], have: 2, want: 3 };
                 } else {
                     // The 0xE2 wasn't the lead of a U+2018-range glyph.
                     // Emit '?' for the orphaned lead byte and reprocess
@@ -571,9 +626,36 @@ impl PetsciiPunctState {
                     0x9C | 0x9D => out.push(0x22),         // “ ” → "
                     0x93 | 0x94 => out.push(b'-'),         // en/em dash → -
                     0xA6 => out.extend_from_slice(b"..."), // … → ...
-                    _ => out.push(b'?'),                   // other U+20xx
+                    _ if is_continuation(byte) => out.push(b'?'), // other U+20xx
+                    _ => {
+                        // Not UTF-8 after all: `?` for the lead pair, and this
+                        // byte is read afresh.
+                        out.push(b'?');
+                        *self = PetsciiPunctState::Normal;
+                        self.feed_ground(byte, out);
+                        return;
+                    }
                 }
                 *self = PetsciiPunctState::Normal;
+            }
+            PetsciiPunctState::Multi { bytes, have, want } => {
+                if is_continuation(byte) {
+                    bytes[*have as usize] = byte;
+                    *have += 1;
+                    if *have == *want {
+                        out.push(b'?');
+                        *self = PetsciiPunctState::Normal;
+                    }
+                } else {
+                    // Not UTF-8 after all: each held byte as itself, then this
+                    // one afresh, so a lone high byte never swallows the text
+                    // after it.
+                    for &b in &bytes[..*have as usize] {
+                        push_high_byte(b, out);
+                    }
+                    *self = PetsciiPunctState::Normal;
+                    self.feed_ground(byte, out);
+                }
             }
         }
     }
@@ -585,6 +667,12 @@ impl PetsciiPunctState {
             0x60 => out.push(0x27),        // back-tick → apostrophe
             0x7E => out.push(b'-'),        // tilde → dash
             0x80..=0x9F => {}              // PETSCII color/control — drop
+            // One `?` per three- or four-byte character, not per byte: `┤`
+            // (E2 94 A4) was `??` and `─` (E2 94 80) `?`, so a modern host's
+            // box drawing lost its column alignment on a C64.  Two-byte leads
+            // stay per byte -- see `Multi`.
+            0xE0..=0xEF => *self = PetsciiPunctState::Multi { bytes: [byte, 0, 0, 0], have: 1, want: 3 },
+            0xF0..=0xF4 => *self = PetsciiPunctState::Multi { bytes: [byte, 0, 0, 0], have: 1, want: 4 },
             0xA0..=0xFF => out.push(b'?'), // other high bytes
             _ => out.push(byte),
         }
@@ -611,6 +699,36 @@ impl PetsciiText {
             *v = translate_ascii_to_petscii_byte(*v);
         }
     }
+
+    /// Show whatever a half-received character is holding, one `?` per byte
+    /// as any high byte is.  For an escape sequence about to start: held
+    /// across one, the `?` would land where the sequence moved the cursor to,
+    /// in the colour it set.
+    fn flush_held(&mut self, out: &mut Vec<u8>) {
+        let start = out.len();
+        self.punct.flush(out);
+        for v in out[start..].iter_mut() {
+            *v = translate_ascii_to_petscii_byte(*v);
+        }
+    }
+}
+
+/// Host output to a C64: escape sequences through `ansi`, text through `text`.
+/// The one loop both callers (the gateway's PETSCII filter and the modem's
+/// `AT+PETSCII=1`) run, so the two cannot drift: in particular, text held
+/// mid-character is shown before an escape sequence, not after it.
+pub(crate) fn feed_petscii(
+    ansi: &mut AnsiToPetscii,
+    text: &mut PetsciiText,
+    input: &[u8],
+    out: &mut Vec<u8>,
+) {
+    for &b in input {
+        if b == 0x1B && ansi.state == 0 {
+            text.flush_held(out);
+        }
+        ansi.feed(b, &mut |b, out: &mut Vec<u8>| text.feed(b, out), out);
+    }
 }
 
 #[cfg(test)]
@@ -620,6 +738,26 @@ mod tests {
     /// Run a whole stream through, with a text handler that passes bytes
     /// through unchanged — the escape translation is what is under test here,
     /// not any caller's character mapping.
+    /// A held character split across reads still decodes as one: the state
+    /// is the caller's, kept between `feed_petscii` calls.
+    #[test]
+    fn test_a_held_character_split_across_reads_is_one_question_mark() {
+        let mut ansi = AnsiToPetscii::new();
+        let mut text = PetsciiText::default();
+        let mut out = Vec::new();
+        feed_petscii(&mut ansi, &mut text, "a\u{4E2D}".as_bytes().split_at(3).0, &mut out);
+        assert_eq!(out, vec![translate_ascii_to_petscii_byte(b'a')], "a held byte came out early");
+        feed_petscii(&mut ansi, &mut text, &[0xAD, b'b'], &mut out);
+        assert_eq!(
+            out,
+            vec![
+                translate_ascii_to_petscii_byte(b'a'),
+                b'?',
+                translate_ascii_to_petscii_byte(b'b'),
+            ]
+        );
+    }
+
     fn xlate(input: &[u8]) -> Vec<u8> {
         let mut st = AnsiToPetscii::new();
         let mut out = Vec::new();

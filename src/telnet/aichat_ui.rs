@@ -77,7 +77,12 @@ impl TelnetSession {
                     // ESC, and IAC per line so the LLM can't smuggle cursor
                     // moves, screen wipes, or telnet commands through the
                     // chat surface.
-                    let normalized = answer.replace("\r\n", "\n").replace('\r', "\n");
+                    // Tabs too, here and not in the shared sanitiser: the
+                    // wrap counts a tab as one column while a terminal draws
+                    // up to eight (and a C64 none -- CHR$(9) is a control
+                    // code), so a code block's tabs overran the page.
+                    let normalized =
+                        answer.replace("\r\n", "\n").replace('\r', "\n").replace('\t', "    ");
                     let lines: Vec<String> = normalized
                         .lines()
                         // Folded before wrapping, so the width is counted in
@@ -105,8 +110,10 @@ impl TelnetSession {
                     // That is exactly the failure this feature hit in the field:
                     // Groq retired the shipped default and the error said so, off
                     // the right-hand edge of the screen.
-                    let mut lines = crate::aichat::wrap_line(&crate::aichat::display_for_terminal(&e), max_w);
-                    if e.to_lowercase().contains("model") {
+                    // `remote_text`, as the answer gets: the message is Groq's,
+                    // and a C64 draws an accented byte as a graphics character.
+                    let mut lines = crate::aichat::wrap_line(&self.remote_text(&e), max_w);
+                    if crate::aichat::is_model_error(&e) {
                         lines.push(String::new());
                         lines.push("Change it: Configuration >".to_string());
                         lines.push("Other Settings, key M.".to_string());

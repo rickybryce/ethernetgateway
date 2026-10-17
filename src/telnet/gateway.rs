@@ -1,6 +1,6 @@
 //! Outbound gateways: SSH proxy, telnet proxy, and serial gateway,
 //! plus the shared gateway protocol plumbing (IAC-aware event reader,
-//! Q-method telnet option state machine, ANSI-strip output filter,
+//! Q-method telnet option state machine, terminal-title output filter,
 //! russh client handler).
 //!
 //! Split out of `telnet/mod.rs`; behaviour unchanged.
@@ -31,88 +31,23 @@ pub(in crate::telnet) enum GatewayInboundEvent {
 pub(in crate::telnet) async fn read_gateway_event(
     reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
     telnet: bool,
+    inbound: &mut InboundTelnet,
 ) -> std::io::Result<GatewayInboundEvent> {
-    let mut buf = [0u8; 1];
+    if !telnet {
+        let mut buf = [0u8; 1];
+        return match reader.read(&mut buf).await? {
+            0 => Ok(GatewayInboundEvent::Eof),
+            _ => Ok(GatewayInboundEvent::Data(buf[0])),
+        };
+    }
+    // One byte per read with the command state in `inbound`, so this is safe
+    // to drop inside the bridges' `select!` (see `InboundTelnet`).
     loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => return Ok(GatewayInboundEvent::Eof),
-            Ok(_) => {}
-            Err(e) => return Err(e),
-        }
-        let byte = buf[0];
-        if byte != IAC || !telnet {
-            return Ok(GatewayInboundEvent::Data(byte));
-        }
-        // Read the command byte.
-        match reader.read(&mut buf).await {
-            Ok(0) => return Ok(GatewayInboundEvent::Eof),
-            Ok(_) => {}
-            Err(e) => return Err(e),
-        }
-        let cmd = buf[0];
-        match cmd {
-            IAC => return Ok(GatewayInboundEvent::Data(IAC)),
-            SB => {
-                // Read the option code.
-                match reader.read(&mut buf).await {
-                    Ok(0) => return Ok(GatewayInboundEvent::Eof),
-                    Ok(_) => {}
-                    Err(e) => return Err(e),
-                }
-                let opt = buf[0];
-                // Read body until IAC SE, unescaping IAC IAC → single
-                // IAC.  Cap accumulated size so a malicious peer cannot
-                // drive memory unbounded by sending a giant SB without
-                // a terminating IAC SE; bytes past the cap are dropped
-                // but the loop still scans for IAC SE to stay in sync.
-                let mut body: Vec<u8> = Vec::new();
-                let mut in_iac = false;
-                loop {
-                    // Bound in-SB reads (slowloris guard); a stalled
-                    // subnegotiation is treated as a closed connection.
-                    match tokio::time::timeout(SB_DRAIN_TIMEOUT, reader.read(&mut buf)).await {
-                        Err(_) => return Ok(GatewayInboundEvent::Eof),
-                        Ok(Ok(0)) => return Ok(GatewayInboundEvent::Eof),
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => return Err(e),
-                    }
-                    let b = buf[0];
-                    if in_iac {
-                        if b == SE {
-                            break;
-                        } else if b == IAC {
-                            if body.len() < MAX_SB_BODY_BYTES {
-                                body.push(IAC);
-                            }
-                            in_iac = false;
-                        } else {
-                            in_iac = false;
-                        }
-                    } else if b == IAC {
-                        in_iac = true;
-                    } else if body.len() < MAX_SB_BODY_BYTES {
-                        body.push(b);
-                    }
-                }
-                if opt == OPT_NAWS && body.len() == 4 {
-                    let w = u16::from_be_bytes([body[0], body[1]]);
-                    let h = u16::from_be_bytes([body[2], body[3]]);
-                    return Ok(GatewayInboundEvent::NawsResize(w, h));
-                }
-                // Non-NAWS subnegotiation: drop and keep reading.
-            }
-            WILL | WONT | DO | DONT => {
-                // Consume the option byte; drop the negotiation.
-                match reader.read(&mut buf).await {
-                    Ok(0) => return Ok(GatewayInboundEvent::Eof),
-                    Ok(_) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            _ => {
-                // 2-byte command (NOP, DM, BRK, IP, AO, AYT, EC, EL, GA)
-                // — already fully consumed.
-            }
+        match inbound.next(reader).await? {
+            None => return Ok(GatewayInboundEvent::Eof),
+            Some(Inbound::Data(b)) => return Ok(GatewayInboundEvent::Data(b)),
+            Some(Inbound::Naws(w, h)) => return Ok(GatewayInboundEvent::NawsResize(w, h)),
+            Some(Inbound::Nothing) => {}
         }
     }
 }
@@ -356,11 +291,7 @@ pub(in crate::telnet) fn filter_gateway_output(
         // as a dash, and a high byte is dropped or shown as `?`.  This path
         // used to pass 0x80-0xFF raw, so UTF-8 from a modern host reached the
         // C64 as control codes -- an en dash cleared its screen.
-        let host_text = &mut st.petscii_text;
-        let mut text = |b: u8, out: &mut Vec<u8>| host_text.feed(b, out);
-        for &b in input {
-            st.petscii.feed(b, &mut text, out);
-        }
+        crate::petscii::feed_petscii(&mut st.petscii, &mut st.petscii_text, input, out);
         return;
     }
     let strip_all = st.mode != GatewayFilter::Ansi;
@@ -1123,12 +1054,9 @@ pub(in crate::telnet) fn is_gateway_leave_key(byte: u8, petscii: bool) -> bool {
 ///
 /// Three rules, which used to be two lines copied at three call sites:
 ///
-/// * A Commodore's **cursor keys** are single PETSCII control bytes, and were
-///   forwarded raw.  No ASCII host has ever understood them, and CRSR DOWN
-///   (0x11) is worse than meaningless -- it is XON, so a host with software
-///   flow control reads a cursor key as permission to resume sending.  They
-///   become the ANSI sequences a host does understand.
-/// * A Commodore's **cursor keys** become ANSI sequences, and its
+/// * A Commodore's **cursor keys** become ANSI sequences (they are single
+///   PETSCII control bytes no ASCII host understands, and CRSR DOWN, 0x11, is
+///   XON to one with software flow control), and its
 ///   **back-arrow becomes ESC** -- the key a C64 user calls ESC used to reach
 ///   the remote as an underscore.  Both rules, and why, live in
 ///   `crate::petscii::key_to_ansi_host`, which the modem's `AT+PETSCII=1`
@@ -1213,7 +1141,9 @@ pub(in crate::telnet) enum GatewayPick {
 /// Max remote (slave) ports shown in the Serial Gateway picker.  §9 #12
 /// allows "paging OR a cap"; a cap (like `SERVER_ADDR_DISPLAY_CAP`) keeps
 /// the picker inside the 22-row PETSCII budget without paging state.
-pub(in crate::telnet) const REMOTE_PORT_DISPLAY_CAP: usize = 6;
+/// Five, not six: with both local ports, peer dial and the local-echo tip
+/// line, six made the worst case 23 rows.
+pub(in crate::telnet) const REMOTE_PORT_DISPLAY_CAP: usize = 5;
 
 impl TelnetSession {
     // ─── SSH GATEWAY ────────────────────────────────────────
@@ -1269,10 +1199,10 @@ impl TelnetSession {
     /// not marked ESC.  Measured on Ricky's C64 on 2026-09-05: CCGMS emits
     /// 0x1B for CTRL+: and the gateway forwards it untouched, while the
     /// back-arrow -- which the line above this one names as the way *out* --
-    /// reaches the remote as an underscore.  Both facts were true before this
-    /// was written and neither was stated on any surface, which is most of why
-    /// "my ESC key does not work" was reported as a fault rather than as a
-    /// missing instruction.
+    /// then reached the remote as an underscore.  Neither was stated on any
+    /// surface, which is most of why "my ESC key does not work" was reported
+    /// as a fault rather than as a missing instruction.  A single back-arrow
+    /// now reaches the remote as ESC too (`key_to_ansi_host`).
     ///
     /// Kept to 33 columns so it fits a 40-column screen with its colour codes,
     /// which cost bytes but no columns.
@@ -1773,11 +1703,10 @@ impl TelnetSession {
             return Ok(());
         }
 
-        // Open channel and request PTY + shell.  Every error path from
-        // here forward must call `session.disconnect` before returning
-        // — otherwise the remote sees an orphaned, still-authenticated
-        // session and its connection slot stays occupied until a TCP
-        // timeout eventually reaps it.
+        // Open channel and request PTY + shell.  The error paths below call
+        // `session.disconnect` so the remote is told why; the `?` returns that
+        // skip it still end the session, because dropping the handle and the
+        // channel ends russh's client loop (measured against russh 0.63.3).
         let channel = match session.channel_open_session().await {
             Ok(ch) => ch,
             Err(e) => {
@@ -1849,6 +1778,8 @@ impl TelnetSession {
         let gw_filter = self.gateway_filter();
         // Whether the *local* user's link is telnet -- see `speaks_telnet`.
         let local_telnet = self.speaks_telnet();
+        // Telnet command state across the select! below (see `InboundTelnet`).
+        let mut inbound = InboundTelnet::default();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let erase_char = self.erase_char;
@@ -1928,7 +1859,7 @@ impl TelnetSession {
                         if w.flush().await.is_err() { break; }
                     }
                 }
-                byte = read_byte_iac_filtered(reader, local_telnet) => {
+                byte = read_byte_iac_filtered(reader, local_telnet, &mut inbound) => {
                     match byte {
                         Ok(Some(b)) => {
                             // ESC is forwarded like any other byte -- see
@@ -2036,6 +1967,9 @@ impl TelnetSession {
             let _ = write_local_data(&mut **w, &filter_buf, local_telnet).await;
             let _ = w.flush().await;
         }
+        // A command the user's client was half-way through stays ours, not
+        // the "Press any key" prompt's (see `InboundTelnet::finish`).
+        inbound.finish(&mut *self.reader).await;
 
         // Clean up SSH channel and session
         let _ = ssh_writer.shutdown().await;
@@ -2054,18 +1988,10 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
-        if idle_timeout.is_zero() {
-            self.wait_for_key().await?;
-        } else {
-            match tokio::time::timeout(idle_timeout, self.wait_for_key()).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    let _ = self
-                        .send_line("\r\nDisconnected: idle timeout.")
-                        .await;
-                }
-            }
-        }
+        // `wait_for_key` applies the idle timeout itself; its TimedOut ends
+        // the session with the goodbye (`run`).  A second timer around it
+        // fired first, printed "Disconnected" and then carried on to the menu.
+        self.wait_for_key().await?;
         Ok(())
     }
 
@@ -2203,6 +2129,8 @@ impl TelnetSession {
         let gw_filter = self.gateway_filter();
         // Whether the *local* user's link is telnet -- see `speaks_telnet`.
         let local_telnet = self.speaks_telnet();
+        // Telnet command state across the select! below (see `InboundTelnet`).
+        let mut inbound = InboundTelnet::default();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
@@ -2256,7 +2184,15 @@ impl TelnetSession {
         );
         if !raw && !initial_offers.is_empty() {
             if remote_writer.write_all(&initial_offers).await.is_err() {
+                // The user has already seen "Connected.", so say it ended,
+                // as the normal teardown does, rather than dropping back to
+                // the menu without a word.
                 let _ = remote_writer.shutdown().await;
+                self.send_line("").await?;
+                self.send_line(&format!("  {}", self.yellow("Connection closed."))).await?;
+                self.send("  Press any key to continue.").await?;
+                self.flush().await?;
+                self.wait_for_key().await?;
                 return Ok(());
             }
             let _ = remote_writer.flush().await;
@@ -2310,7 +2246,7 @@ impl TelnetSession {
                         if w.flush().await.is_err() { break; }
                     }
                 }
-                event = read_gateway_event(reader, local_telnet) => {
+                event = read_gateway_event(reader, local_telnet, &mut inbound) => {
                     match event {
                         Ok(GatewayInboundEvent::Data(b)) => {
                             // ESC is forwarded like any other byte -- see
@@ -2460,6 +2396,10 @@ impl TelnetSession {
             let _ = w.flush().await;
         }
 
+        // A command the user's client was half-way through stays ours, not
+        // the "Press any key" prompt's (see `InboundTelnet::finish`).
+        inbound.finish(&mut *self.reader).await;
+
         // Clean up
         let _ = remote_writer.shutdown().await;
 
@@ -2472,18 +2412,10 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
-        if idle_timeout.is_zero() {
-            self.wait_for_key().await?;
-        } else {
-            match tokio::time::timeout(idle_timeout, self.wait_for_key()).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    let _ = self
-                        .send_line("\r\nDisconnected: idle timeout.")
-                        .await;
-                }
-            }
-        }
+        // `wait_for_key` applies the idle timeout itself; its TimedOut ends
+        // the session with the goodbye (`run`).  A second timer around it
+        // fired first, printed "Disconnected" and then carried on to the menu.
+        self.wait_for_key().await?;
         Ok(())
     }
 
@@ -2613,7 +2545,9 @@ impl TelnetSession {
                     // 40 cols: 6 indent + path(<=23) + " " + baud(<=6) = 36.
                     self.send_line(&format!(
                         "      {} {}",
-                        self.amber(&truncate_to_width(&port.port, 23)),
+                        // The tail names the device (`/dev/serial/by-id/...`
+                        // paths share their front), so the front is elided.
+                        self.amber(&crate::webbrowser::truncate_path_to_width(&port.port, 23)),
                         port.baud
                     ))
                     .await?;
@@ -2648,11 +2582,14 @@ impl TelnetSession {
                     // omitted when the slave did not say -- one older than the
                     // protocol addition sends none, and a guessed default would
                     // put the wrong word beside a real port.
-                    let mut entry = truncate_to_width(&port.address(), 30);
-                    if let Some(mode) = port.mode_label() {
-                        entry.push_str(" - ");
-                        entry.push_str(mode);
-                    }
+                    //
+                    // The address gets what the row has left after "  [n] " and
+                    // the mode: a fixed 30 made an IPv6 slave's row 52 columns.
+                    let room = if self.terminal_type == TerminalType::Petscii { 33 } else { 73 };
+                    let suffix = port.mode_label().map(|m| format!(" - {m}")).unwrap_or_default();
+                    let mut entry =
+                        truncate_to_width(&port.address(), room - suffix.chars().count());
+                    entry.push_str(&suffix);
                     self.send_line(&format!(
                         "  {} {}",
                         self.cyan(&format!("[{}]", i + 1)),
@@ -2733,10 +2670,9 @@ impl TelnetSession {
     /// serial ports.  Always presents an A/B picker first; the chosen
     /// port must be `enabled = true` with `mode = "console"`.
     ///
-    /// The escape sequence is two consecutive ESC presses (PETSCII `<-`
-    /// on Commodore terminals).  A single ESC is forwarded to the wire
-    /// after one read cycle, so editors that need ESC (vi, ed) keep
-    /// working as long as the user types a normal key after each ESC.
+    /// The escape sequence is two consecutive ESC presses within 500 ms
+    /// (PETSCII `<-` on Commodore terminals).  A single ESC is forwarded to
+    /// the wire at once, so editors that need ESC (vi, ed) keep working.
     pub(in crate::telnet) async fn gateway_serial(&mut self) -> Result<(), std::io::Error> {
         // Always render a picker — even if only one port is eligible
         // — so the user can see both ports' status side-by-side and
@@ -2826,12 +2762,13 @@ impl TelnetSession {
         .await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
-        // Stack the port info so a long device path
-        // (e.g. /dev/ttyUSB10) can never overflow the 40-col
-        // PETSCII width.
+        // Stacked one value a row, and the path cut to fit: a by-id path
+        // (`/dev/serial/by-id/usb-FTDI_...-if00-port0`) is ordinary and runs
+        // past 40 columns.  The tail names the device, so the front goes.
+        let path_room = if self.terminal_type == TerminalType::Petscii { 31 } else { 71 };
         self.send_line(&format!(
             "  Port: {}",
-            self.amber(&port_cfg.port)
+            self.amber(&crate::webbrowser::truncate_path_to_width(&port_cfg.port, path_room))
         ))
         .await?;
         self.send_line(&format!(
@@ -2863,14 +2800,13 @@ impl TelnetSession {
         }
         self.send_line("").await?;
         self.send_line(&format!(
-            "  Press {} {} to disconnect.",
-            self.cyan(esc_label),
+            "  Press {} twice quickly to disconnect.",
             self.cyan(esc_label)
         ))
         .await?;
         self.send_gateway_esc_hint().await?;
-        self.send_line("  Single ESC passes through on the").await?;
-        self.send_line("  next keystroke.").await?;
+        self.send_line("  A single ESC is forwarded so").await?;
+        self.send_line("  editors like vi keep working.").await?;
         self.send_line("").await?;
         self.send(&format!(
             "  {} ",
@@ -2950,14 +2886,8 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
-        let idle_timeout = std::time::Duration::from_secs(
-            config::get_config().idle_timeout_secs,
-        );
-        if idle_timeout.is_zero() {
-            let _ = self.wait_for_key().await;
-        } else {
-            let _ = tokio::time::timeout(idle_timeout, self.wait_for_key()).await;
-        }
+        // Idle-timed by `wait_for_key` itself; a timeout ends the session.
+        self.wait_for_key().await?;
         result
     }
 
@@ -2984,8 +2914,7 @@ impl TelnetSession {
         self.send_line(&sep).await?;
         self.send_line("").await?;
         self.send_line(&format!(
-            "  Press {} {} to disconnect.",
-            self.cyan(esc_label),
+            "  Press {} twice quickly to disconnect.",
             self.cyan(esc_label)
         ))
         .await?;
@@ -3115,13 +3044,8 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
-        let idle_timeout =
-            std::time::Duration::from_secs(config::get_config().idle_timeout_secs);
-        if idle_timeout.is_zero() {
-            let _ = self.wait_for_key().await;
-        } else {
-            let _ = tokio::time::timeout(idle_timeout, self.wait_for_key()).await;
-        }
+        // Idle-timed by `wait_for_key` itself; a timeout ends the session.
+        self.wait_for_key().await?;
         result
     }
 
@@ -3139,6 +3063,8 @@ impl TelnetSession {
 
         // Whether the *local* user's link is telnet -- see `speaks_telnet`.
         let local_telnet = self.speaks_telnet();
+        // Telnet command state across the select! below (see `InboundTelnet`).
+        let mut inbound = InboundTelnet::default();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
@@ -3186,7 +3112,7 @@ impl TelnetSession {
                     // session and leak its max_sessions slot.
                     break;
                 }
-                event = read_gateway_event(reader, local_telnet) => {
+                event = read_gateway_event(reader, local_telnet, &mut inbound) => {
                     match event {
                         Ok(GatewayInboundEvent::Data(b)) => {
                             // ESC is forwarded like any other byte -- see
@@ -3237,6 +3163,9 @@ impl TelnetSession {
         }
 
         let _ = bridge_write.shutdown().await;
+        // A command the user's client was half-way through stays ours, not
+        // the caller's "Press any key" (see `InboundTelnet::finish`).
+        inbound.finish(&mut *self.reader).await;
         Ok(())
     }
 }

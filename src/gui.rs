@@ -1146,6 +1146,10 @@ struct App {
     /// A Save and Restart waiting on the operator: someone is connected, and
     /// a whole-server restart disconnects everyone.
     server_restart_prompt: bool,
+    /// The wizard's "download the sample disks", held while
+    /// `server_restart_prompt` asks: started on Save and restart, dropped on
+    /// Cancel.
+    wizard_fetch_pending: bool,
     /// When the user clicks the folder-browse button, the native dialog
     /// runs on a background OS thread so it can't block the egui event
     /// loop.  This channel carries back the chosen path (or None if
@@ -1422,6 +1426,7 @@ impl App {
             disable_ip_safety_warn_open: false,
             serial_restart_prompt: None,
             server_restart_prompt: false,
+            wizard_fetch_pending: false,
             pending_dir_pick: None,
             pending_boot_pick: None,
             wizard,
@@ -4309,8 +4314,8 @@ impl App {
     }
 
     /// Persist config and trigger a full server restart.  Used by the
-    /// Save and Restart buttons (through `request_save_and_restart`) and the
-    /// setup wizard's finish.
+    /// Save and Restart buttons and the setup wizard's finish, through
+    /// `request_save_and_restart`.
     fn save_and_restart_all(&mut self) {
         match self.persist_config() {
             Ok(()) => logger::log("Configuration saved — restarting server...".into()),
@@ -4600,13 +4605,28 @@ impl App {
                     // After `apply_to`, so the download lands in the transfer
                     // directory the operator just chose rather than the one
                     // that was in effect when the wizard opened.
-                    if fetch_disks {
-                        logger::log("CP/M sample disks: downloading…".into());
-                        self.start_cpm_fetch(&ctx);
+                    // Asks first when someone is connected, like the Save and
+                    // Restart buttons: the wizard can be re-run while the
+                    // server is up.  Cancel leaves the answers in the editor
+                    // as unsaved edits (`has_unsaved_edits` sees them).  The
+                    // disk download waits for the answer too: on Cancel the
+                    // transfer directory it would land in was never saved.
+                    self.wizard_fetch_pending = fetch_disks;
+                    self.request_save_and_restart();
+                    if !self.server_restart_prompt {
+                        self.start_wizard_fetch_if_pending(&ctx);
                     }
-                    self.save_and_restart_all();
                 }
             }
+        }
+    }
+
+    /// Start the sample-disk download the wizard asked for, once its save goes
+    /// ahead.
+    fn start_wizard_fetch_if_pending(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.wizard_fetch_pending) {
+            logger::log("CP/M sample disks: downloading…".into());
+            self.start_cpm_fetch(ctx);
         }
     }
 
@@ -7578,9 +7598,11 @@ impl eframe::App for App {
             });
             if go {
                 self.server_restart_prompt = false;
+                self.start_wizard_fetch_if_pending(&ctx);
                 self.save_and_restart_all();
             } else if cancel || !open {
                 self.server_restart_prompt = false;
+                self.wizard_fetch_pending = false;
             }
         }
 
