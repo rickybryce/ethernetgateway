@@ -15451,3 +15451,44 @@ async fn test_the_zmodem_autostart_leaves_a_transfer_note() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// **Save and Restart asks before it disconnects anyone.**  Every connection a
+/// whole-server restart drops holds a [`LiveConnection`] for its whole life:
+/// telnet sessions, SSH shells, all master-side relay tasks (the menu session,
+/// the outbound dial, Kermit and the peer crossbar -- none of the last three is
+/// in the shutdown-broadcast list, which is why the list is not what is read),
+/// and the standalone Kermit server's connections.  The serial ports run on
+/// threads of their own and are asked separately.
+#[test]
+fn test_server_session_live_counts_every_connection_a_restart_drops() {
+    // Other tests may hold a few at once; ten thousand is far past that, so
+    // a guard that failed to release would show.
+    let many: Vec<LiveConnection> = (0..10_000).map(|_| LiveConnection::new()).collect();
+    assert!(server_session_live(), "a counted connection must read as live");
+    assert!(LIVE_CONNECTIONS.load(Ordering::SeqCst) >= 10_000);
+    drop(many);
+    assert!(LIVE_CONNECTIONS.load(Ordering::SeqCst) < 5_000, "dropped guards were not released");
+
+    let src = include_str!("mod.rs").replace("\r\n", "\n");
+    let f = &src[src.find("pub fn server_session_live(").expect("the check")..];
+    let f = &f[..f.find("\n}\n").expect("its end")];
+    for needle in [
+        "LIVE_CONNECTIONS.load(Ordering::SeqCst) > 0",
+        "crate::serial::port_session_live(SerialPortId::A)",
+        "crate::serial::port_session_live(SerialPortId::B)",
+    ] {
+        assert!(f.contains(needle), "server_session_live no longer asks {needle:?}");
+    }
+    // Each spawn site, bounded to the text between its marker and the guard.
+    let ssh = include_str!("../ssh.rs").replace("\r\n", "\n");
+    for (src, marker, what) in [
+        (&src, "sw.lock().await.push(writer_arc.clone());", "a telnet session"),
+        (&src, "glog!(\"Kermit server: connection from {}\", addr);", "a Kermit server connection"),
+        (&ssh, "let mut sess = telnet::TelnetSession::new_ssh(", "an SSH shell"),
+        (&ssh, "if kermit_target {", "a master relay task"),
+    ] {
+        let at = src.find(marker).unwrap_or_else(|| panic!("{what}: marker gone"));
+        let window = &src[at.saturating_sub(250)..(at + 250).min(src.len())];
+        assert!(window.contains("LiveConnection::new()"), "{what} is not counted");
+    }
+}

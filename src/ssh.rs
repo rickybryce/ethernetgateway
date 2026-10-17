@@ -1662,6 +1662,8 @@ impl russh::server::Handler for SshHandler {
         let lockouts_for_task = self.lockouts.clone();
         let pty_term = self.pty_term.clone();
         tokio::spawn(async move {
+            // Counted for Save and Restart's warning.
+            let _live = telnet::LiveConnection::new();
             let mut sess = telnet::TelnetSession::new_ssh(
                 Box::new(gateway_read),
                 writer_for_task.clone(),
@@ -1974,6 +1976,9 @@ impl russh::server::Handler for SshHandler {
             // branch's early return, which used to skip the manual release at
             // the bottom and leak a slot per transfer.
             let _slot = SlotGuard(session_count);
+            // Counted for Save and Restart's warning: every branch below is a
+            // connection a restart drops.
+            let _live = telnet::LiveConnection::new();
             if kermit_target {
                 // The slave's port is in Kermit-server mode: serve OUR Kermit
                 // server on this channel, so its device's file operations

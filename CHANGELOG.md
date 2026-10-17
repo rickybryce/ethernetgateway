@@ -62,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A serial Save restarts only the port that changed.**  The web page's and
   desktop editor's serial Save restarted both ports every time, cutting off
   anyone on the port nobody had touched.
+- **Save and Restart warns before it disconnects anyone.**  It restarts the
+  whole server, dropping every telnet and SSH session and both serial ports.
+  The web page and the desktop editor now check first, and when someone is
+  connected they say every connection will be lost and ask; Cancel saves
+  nothing.  The telnet Restart server item already warned and asked.
 - **Setup wizard: "Enable SSH" can no longer reuse a port.**  The buttons on
   the role screens turned SSH on without the port check the SSH screen does,
   and Finish did not check again, so SSH and the web server could be saved on

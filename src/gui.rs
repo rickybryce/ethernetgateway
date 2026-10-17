@@ -1143,6 +1143,9 @@ struct App {
     /// Ports a serial Save is waiting to restart, held while the operator is
     /// asked: each has someone connected, who the restart will cut off.
     serial_restart_prompt: Option<Vec<crate::config::SerialPortId>>,
+    /// A Save and Restart waiting on the operator: someone is connected, and
+    /// a whole-server restart disconnects everyone.
+    server_restart_prompt: bool,
     /// When the user clicks the folder-browse button, the native dialog
     /// runs on a background OS thread so it can't block the egui event
     /// loop.  This channel carries back the chosen path (or None if
@@ -1418,6 +1421,7 @@ impl App {
                 .then(|| std::time::Instant::now() + std::time::Duration::from_millis(2500)),
             disable_ip_safety_warn_open: false,
             serial_restart_prompt: None,
+            server_restart_prompt: false,
             pending_dir_pick: None,
             pending_boot_pick: None,
             wizard,
@@ -4293,8 +4297,20 @@ impl App {
         ctx.open_url(egui::OpenUrl::new_tab(url));
     }
 
+    /// The Save and Restart buttons: asks first when someone is connected
+    /// ([`crate::telnet::server_session_live`]), since a whole-server restart
+    /// disconnects every session and both serial ports.
+    fn request_save_and_restart(&mut self) {
+        if crate::telnet::server_session_live() {
+            self.server_restart_prompt = true;
+        } else {
+            self.save_and_restart_all();
+        }
+    }
+
     /// Persist config and trigger a full server restart.  Used by the
-    /// Server frame's Save and Restart button.
+    /// Save and Restart buttons (through `request_save_and_restart`) and the
+    /// setup wizard's finish.
     fn save_and_restart_all(&mut self) {
         match self.persist_config() {
             Ok(()) => logger::log("Configuration saved — restarting server...".into()),
@@ -6054,7 +6070,7 @@ impl eframe::App for App {
                                             .color(AMBER_DIM),
                                     );
                                     if right_aligned_small_button(ui, "Save and Restart") {
-                                        self.save_and_restart_all();
+                                        self.request_save_and_restart();
                                     }
                                 });
                                 self.draw_server_controls(ui, true);
@@ -6600,7 +6616,7 @@ impl eframe::App for App {
                     ))
                     .clicked()
                 {
-                    self.save_and_restart_all();
+                    self.request_save_and_restart();
                 }
             });
         if wizard_requested {
@@ -6859,7 +6875,7 @@ impl eframe::App for App {
                 ))
                 .clicked()
             {
-                self.save_and_restart_all();
+                self.request_save_and_restart();
             }
         });
         self.general_popup_open = general_open;
@@ -7509,6 +7525,62 @@ impl eframe::App for App {
                 self.save_and_restart_serial();
             } else if cancel || !open {
                 self.serial_restart_prompt = None;
+            }
+        }
+
+        // A Save and Restart waiting on the operator: someone is connected,
+        // and the restart disconnects everyone.  Same choices as the serial
+        // prompt above.
+        if self.server_restart_prompt {
+            let mut open = true;
+            let mut go = false;
+            let mut cancel = false;
+            egui::Window::new(
+                egui::RichText::new("Restart the server?")
+                    .strong()
+                    .color(AMBER_BRIGHT),
+            )
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(440.0)
+            .frame(warn_frame)
+            .show(&ctx, |ui| {
+                ui.label(egui::RichText::new("Warning").strong().color(AMBER));
+                ui.add_space(4.0);
+                ui.label(
+                    "Saving restarts the whole server, and someone is connected \
+                     right now (telnet, SSH or a serial port). Every connection \
+                     will be lost.",
+                );
+                ui.add_space(6.0);
+                ui.label("Cancel saves nothing; your changes stay in the editor.");
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new(
+                            egui::RichText::new("Save and restart")
+                                .strong()
+                                .color(AMBER_BRIGHT),
+                        ))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    ui.add_space(8.0);
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new("Cancel").strong()))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+            if go {
+                self.server_restart_prompt = false;
+                self.save_and_restart_all();
+            } else if cancel || !open {
+                self.server_restart_prompt = false;
             }
         }
 

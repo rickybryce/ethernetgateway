@@ -1303,6 +1303,48 @@ pub async fn broadcast_to_sessions(writers: &SessionWriters, msg: &[u8], close: 
     }
 }
 
+/// How many connections a whole-server restart would cut off right now:
+/// telnet sessions, SSH shells, and every master-side relay task (menu
+/// session, outbound dial, Kermit, peer crossbar), plus the standalone Kermit
+/// server's connections.  Counted by [`LiveConnection`], held by each of
+/// those tasks for its whole life -- not read from the shutdown-broadcast
+/// list, which the relay dial/Kermit/crossbar tasks and the Kermit server
+/// never join, and which keeps a panicked session's entry.
+static LIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// One connection counted in [`LIVE_CONNECTIONS`] for as long as it lives.
+/// Dropped however its task ends -- return, error, panic, or the runtime
+/// being torn down by a restart -- so the count cannot leak.
+pub(crate) struct LiveConnection(());
+
+impl LiveConnection {
+    pub(crate) fn new() -> Self {
+        LIVE_CONNECTIONS.fetch_add(1, Ordering::SeqCst);
+        LiveConnection(())
+    }
+}
+
+impl Drop for LiveConnection {
+    fn drop(&mut self) {
+        LIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Someone a whole-server restart would disconnect: a counted connection
+/// ([`LiveConnection`]) or a serial port with a session on it
+/// ([`crate::serial::port_session_live`] -- those run on threads of their
+/// own and are asked separately).  Synchronous and lock-free, for the GUI
+/// thread and a web handler alike.
+///
+/// A telnet connection counts from the accept, before any login: whoever is
+/// sitting at the login prompt is dropped by a restart too.
+pub fn server_session_live() -> bool {
+    use crate::config::SerialPortId;
+    LIVE_CONNECTIONS.load(Ordering::SeqCst) > 0
+        || crate::serial::port_session_live(SerialPortId::A)
+        || crate::serial::port_session_live(SerialPortId::B)
+}
+
 // ─── TelnetSession ──────────────────────────────────────────
 
 /// The outcome of the last file transfer, shown once on the next menu draw.
@@ -2703,6 +2745,8 @@ pub fn start_server(
                                 let writer_box: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = Box::new(write_half);
                                 let writer_arc: SharedWriter = Arc::new(tokio::sync::Mutex::new(writer_box));
                                 sw.lock().await.push(writer_arc.clone());
+                                // Counted for Save and Restart's warning.
+                                let _live = LiveConnection::new();
                                 // Arm the panic-unwind backstop (F3) now that
                                 // the slot is claimed and the writer is
                                 // registered; `defuse()` below disables it once
@@ -2866,6 +2910,8 @@ pub fn start_kermit_server(
                         Ok((stream, addr)) => {
                             glog!("Kermit server: connection from {}", addr);
                             tokio::spawn(async move {
+                                // Counted for Save and Restart's warning.
+                                let _live = LiveConnection::new();
                                 let _ = stream.set_nodelay(true);
                                 let (mut read_half, mut write_half) = stream.into_split();
                                 // Single snapshot of the config for this

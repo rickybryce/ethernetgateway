@@ -609,6 +609,21 @@ async fn handle_connection(
             )
             .await?;
         }
+        ("GET", "/server-live") => {
+            // Whether a whole-server Save and Restart would disconnect
+            // someone -- asked by the page before it submits one, so it can
+            // warn first (`warn-server-restart`).
+            let body = format!("{{\"live\":{}}}", crate::telnet::server_session_live());
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
         ("GET", "/serial-ports") => {
             // Live serial-port re-scan for the refresh button.  The
             // JS picks up the result and rewrites the option list of
@@ -1151,12 +1166,6 @@ fn take_master_password_entry(fields: &HashMap<String, String>) -> Option<String
     )
 }
 
-/// Apply every recognized field from a `POST /save` body in a single
-/// read-modify-write of the config file.  Returns a human-readable
-/// notice + the action the operator's button asked for, so the
-/// caller can trigger the matching restart behavior after the
-/// response has flushed.  Synchronous because it does filesystem I/O
-/// — wrap in `spawn_blocking`.
 /// `{"a":true,"b":false}` -- [`crate::serial::port_session_live`] per port.
 fn serial_live_json() -> String {
     use crate::config::SerialPortId;
@@ -1167,6 +1176,12 @@ fn serial_live_json() -> String {
     )
 }
 
+/// Apply every recognized field from a `POST /save` body in a single
+/// read-modify-write of the config file.  Returns a human-readable
+/// notice + the action the operator's button asked for, so the
+/// caller can trigger the matching restart behavior after the
+/// response has flushed.  Synchronous because it does filesystem I/O
+/// — wrap in `spawn_blocking`.
 fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // Guard against a malformed submission (non-UTF-8 body, or a
     // chunked/empty body that read_request surfaced as zero-length): with
@@ -3293,6 +3308,13 @@ fn render_warning_popups() -> String {
         "Save and restart", true,
     ));
     out.push_str(&warn_modal(
+        "warn-server-restart", warn,
+        "Saving restarts the whole server, and someone is connected right now \
+         (telnet, SSH or a serial port). Every connection will be lost. \
+         Cancel saves nothing and keeps your changes on this page.",
+        "Save and restart", true,
+    ));
+    out.push_str(&warn_modal(
         "warn-ip-safety", sec,
         "Disabling IP safety removes the private-IP allowlist entirely. Anyone \
          on the public internet who can reach your telnet port will be able to \
@@ -5404,6 +5426,29 @@ document.querySelectorAll('.warn-cancel').forEach(function(b) {
       .catch(function() { ask(changed); });
   });
 })();
+// Save and Restart restarts the whole server and so drops every connection.
+// Before it submits, the page asks the gateway whether anyone is connected
+// (/server-live) and, when someone is, shows warn-server-restart.  Enter in a
+// text box presses this button too (DEFAULT_SUBMIT), so it is asked as well.
+(function() {
+  var form = document.getElementById('cfg-form');
+  if (!form) return;
+  var confirmed = false;
+  form.addEventListener('submit', function(e) {
+    var btn = e.submitter;
+    if (confirmed || !btn || btn.value !== 'save_and_restart') return;
+    e.preventDefault();
+    function go() {
+      confirmed = true;
+      if (form.requestSubmit) form.requestSubmit(btn); else btn.click();
+    }
+    fetch('/server-live', { cache: 'no-store' })
+      .then(function(r) { return r.json(); })
+      .then(function(s) { if (s.live) showWarn('warn-server-restart', null, go); else go(); })
+      // Could not tell: warn rather than risk dropping someone unasked.
+      .catch(function() { showWarn('warn-server-restart', null, go); });
+  });
+})();
 function warnIfDisablingWeb(cb) {
   if (!cb.checked) {
     showWarn('warn-web-disable', function() { cb.checked = true; });
@@ -5941,6 +5986,41 @@ mod tests {
         assert!(html.contains("warnOnEnable(this, 'warn-ip-safety')"));
         assert!(html.contains("warnOnEnable(this, 'warn-kermit-server')"));
         assert!(html.contains("warnOnEnable(this, 'warn-atdt-kermit')"));
+    }
+
+    /// **Save and Restart never drops a connection unasked.**  It restarts
+    /// the whole server, so the page asks `/server-live` first and shows
+    /// `warn-server-restart` when anyone is on; the desktop asks the same
+    /// `server_session_live` from every Save and Restart button.
+    #[test]
+    fn test_save_and_restart_warns_before_dropping_connections() {
+        let html = render_main_page(&Config::default(), None, false);
+        assert!(html.contains("id=\"warn-server-restart\""), "the warning modal is missing");
+        assert!(html.contains("Every connection will be lost."));
+        for needle in [
+            "btn.value !== 'save_and_restart') return;",
+            "fetch('/server-live', { cache: 'no-store' })",
+            "if (s.live) showWarn('warn-server-restart', null, go); else go();",
+            ".catch(function() { showWarn('warn-server-restart', null, go); });",
+        ] {
+            assert!(html.contains(needle), "the Save and Restart check lost {needle:?}");
+        }
+        let src = include_str!("webserver.rs").replace("\r\n", "\n");
+        let route = &src[src.find("(\"GET\", \"/server-live\") => {").expect("the endpoint")..];
+        let route = &route[..route.find("\n        }\n").expect("its end")];
+        assert!(route.contains("crate::telnet::server_session_live()"), "the endpoint asks nothing");
+
+        let src = include_str!("gui.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("\n#[cfg(test)]\nmod tests {").expect("the tests")];
+        assert_eq!(code.matches("self.request_save_and_restart();").count(), 3, "a button skips the ask");
+        assert_eq!(
+            code.matches("self.save_and_restart_all();").count(),
+            3,
+            "restarted only from request_save_and_restart, the window and the wizard"
+        );
+        let ask = &code[code.find("fn request_save_and_restart(").expect("the ask")..];
+        let ask = &ask[..ask.find("\n    }\n").expect("its end")];
+        assert!(ask.contains("if crate::telnet::server_session_live() {\n            self.server_restart_prompt = true;"));
     }
 
     /// **A serial Save never drops a connection unasked.**  The page asks
