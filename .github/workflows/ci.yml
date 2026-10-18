@@ -4,7 +4,9 @@ on:
   push:
     branches: [master, main]
   pull_request:
-    branches: [master, main]
+    # `dev` because Dependabot opens its PRs there (see dependabot.yml); a PR
+    # to a branch not listed here gets CodeQL and nothing else.
+    branches: [master, main, dev]
   # **Weekly, because two of these jobs answer questions that change while
   # nobody pushes.**  Every trigger above needs somebody to do something, so a
   # quiet fortnight means nothing here has been asked.  Two jobs go stale that

@@ -26,10 +26,18 @@
 # Grouped so a week's updates arrive as one PR to review rather than a dozen:
 # with a single maintainer, review attention is the scarce resource, and a
 # flood of separate PRs is how bumps stop being read.
+#
+# `target-branch: dev` because everything reaches `master` through `dev` and
+# the Pis; a bump PR against `master` could only be copied onto `dev` by hand.
+# Two things this does NOT do: Dependabot reads this file from the default
+# branch, so an edit here takes effect only once it is merged to `master`;
+# and security-update PRs ignore `target-branch` and still go to `master`.
+# ci.yml lists `dev` under `pull_request` so these PRs get the full CI run.
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: "/"
+    target-branch: dev
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -42,6 +50,7 @@ updates:
 
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: dev
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
