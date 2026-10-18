@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it enables neither Brotli certificate compression nor Encrypted Client
   Hello, and implements no session store of its own.  Updated so the
   advisories are not carried into a release.
+- **russh updated to 0.64.1** for two advisories.  GHSA-j7h2-66j4-ghjf
+  applies here: the SSH server did not check that a client's public-key
+  signature used the negotiated algorithm (no bypass, but a client could
+  quietly downgrade itself to SHA-1).  GHSA-4wc5-f2rc-q74m is in russh's
+  agent server, which this gateway does not run.  The SSH server, slave key
+  enrolment and key login, and the SSH Gateway to an OpenSSH server were all
+  re-tested live on the new version.
 
 ### Fixed
 
