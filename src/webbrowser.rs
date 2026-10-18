@@ -1160,7 +1160,7 @@ fn space_touching_elements(dom: &RcDom) {
             whole
         };
         // Inside a link, both edges are that link's.
-        if matches!(&node.data, Element { name, .. } if name.local.as_ref() == "a")
+        if matches!(&node.data, Element { name, .. } if &*name.local == "a")
             && get_attr(&node, "href").is_some()
         {
             if let Some(e) = own.as_mut() {
@@ -1269,7 +1269,7 @@ fn parse_meta_refresh(content: &str) -> Option<String> {
 fn meta_refresh_from_dom(dom: &RcDom) -> Option<String> {
     fn walk(node: &Handle) -> Option<String> {
         if let Element { ref name, .. } = node.data
-            && name.local.as_ref() == "meta"
+            && &*name.local == "meta"
             && get_attr(node, "http-equiv")
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("refresh"))
             && let Some(content) = get_attr(node, "content")
@@ -1319,7 +1319,7 @@ fn number_links(dom: &RcDom) -> Vec<String> {
     let mut stack = vec![dom.document.clone()];
     while let Some(node) = stack.pop() {
         if let Element { ref name, .. } = node.data {
-            if name.local.as_ref() == "a" {
+            if &*name.local == "a" {
                 if let Some(href) = get_attr(&node, "href") {
                     // An anchor on this page goes nowhere a number could take you.
                     let shown = if href.is_empty() || href.starts_with('#') { None } else { last_shown(&node) };
@@ -1432,7 +1432,7 @@ fn text_of(node: &Handle) -> Option<String> {
 }
 
 fn is_svg(node: &Handle) -> bool {
-    matches!(&node.data, Element { name, .. } if name.local.as_ref() == "svg")
+    matches!(&node.data, Element { name, .. } if &*name.local == "svg")
 }
 
 /// The text html2text draws for an inline SVG: its `<title>`, and only when
@@ -1440,7 +1440,7 @@ fn is_svg(node: &Handle) -> bool {
 fn svg_title(svg: &Handle) -> Option<String> {
     let children = svg.children.borrow();
     let first = children.iter().find(|c| matches!(c.data, Element { .. }))?;
-    let is_title = matches!(&first.data, Element { name, .. } if name.local.as_ref() == "title");
+    let is_title = matches!(&first.data, Element { name, .. } if &*name.local == "title");
     let text = get_text_content(first);
     (is_title && !text.is_empty()).then_some(text)
 }
@@ -1811,7 +1811,7 @@ fn dom_depth_exceeds(dom: &RcDom, limit: usize) -> bool {
 fn extract_title_from_dom(dom: &RcDom) -> Option<String> {
     fn find_title(node: &Handle) -> Option<String> {
         if let Element { ref name, .. } = node.data
-            && name.local.as_ref() == "title" {
+            && &*name.local == "title" {
                 // NB: parses html2text's *debug* DOM rendering for "Text:"
                 // lines — html2text 0.14 doesn't expose the Text node variant
                 // for a direct walk.  Pinned by test_dom_text_extraction_
@@ -1841,7 +1841,7 @@ fn extract_title_from_dom(dom: &RcDom) -> Option<String> {
 fn get_attr(node: &Handle, attr_name: &str) -> Option<String> {
     if let Element { ref attrs, .. } = node.data {
         attrs.borrow().iter().find_map(|a| {
-            if a.name.local.as_ref() == attr_name {
+            if &*a.name.local == attr_name {
                 Some(a.value.to_string())
             } else {
                 None
@@ -1880,7 +1880,7 @@ fn extract_forms_from_dom(dom: &RcDom) -> Vec<WebForm> {
 
 fn find_forms(node: &Handle, forms: &mut Vec<WebForm>) {
     if let Element { ref name, .. } = node.data
-        && name.local.as_ref() == "form" {
+        && &*name.local == "form" {
             let action = get_attr(node, "action").unwrap_or_default();
             let method = get_attr(node, "method")
                 .unwrap_or_else(|| "get".to_string())
@@ -2027,7 +2027,7 @@ fn label_own_text(node: &Handle) -> String {
 /// once per form so per-field label lookup is O(1) (round-6 F1).
 fn collect_field_labels(node: &Handle, labels: &mut std::collections::HashMap<String, String>) {
     if let Element { ref name, .. } = node.data
-        && name.local.as_ref() == "label"
+        && &*name.local == "label"
         && let Some(for_attr) = get_attr(node, "for")
     {
         let text = get_text_content(node);
@@ -2052,7 +2052,7 @@ fn extract_form_fields(
     let own;
     let mut enclosing = enclosing;
     if let Element { ref name, .. } = node.data
-        && name.local.as_ref() == "label"
+        && &*name.local == "label"
     {
         own = label_own_text(node);
         enclosing = Some(own.as_str());
@@ -2195,7 +2195,7 @@ fn extract_form_fields(
     }
     for child in node.children.borrow().iter() {
         if let Element { ref name, .. } = child.data
-            && name.local.as_ref() == "form" {
+            && &*name.local == "form" {
                 continue;
             }
         extract_form_fields(child, fields, submit_label, submit_taken, labels, enclosing);
@@ -2205,7 +2205,7 @@ fn extract_form_fields(
 fn extract_select_options(node: &Handle, options: &mut Vec<(String, String)>, selected: &mut usize) {
     for child in node.children.borrow().iter() {
         if let Element { ref name, .. } = child.data {
-            if name.local.as_ref() == "option" {
+            if &*name.local == "option" {
                 let value = get_attr(child, "value")
                     .unwrap_or_else(|| get_text_content(child));
                 let display = get_text_content(child);
@@ -2213,7 +2213,7 @@ fn extract_select_options(node: &Handle, options: &mut Vec<(String, String)>, se
                     *selected = options.len();
                 }
                 options.push((value, display));
-            } else if name.local.as_ref() == "optgroup" {
+            } else if &*name.local == "optgroup" {
                 extract_select_options(child, options, selected);
             }
         }
