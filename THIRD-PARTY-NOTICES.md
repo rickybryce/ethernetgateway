@@ -1317,7 +1317,7 @@ Used by:
 - [pageant 0.2.3](https://github.com/warp-tech/russh)
 - [russh-cryptovec 0.62.0](https://github.com/warp-tech/russh)
 - [russh-util 0.52.0](https://github.com/warp-tech/russh)
-- [russh 0.63.3](https://github.com/warp-tech/russh)
+- [russh 0.64.1](https://github.com/warp-tech/russh)
 - [spirv 0.4.0+sdk-1.4.341.0](https://github.com/gfx-rs/rspirv)
 
 ```
@@ -4408,7 +4408,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [signal-hook-registry 1.4.8](https://github.com/vorner/signal-hook)
-- [signal-hook 0.4.4](https://github.com/vorner/signal-hook)
+- [signal-hook 0.4.5](https://github.com/vorner/signal-hook)
 
 ```
 Copyright (c) 2017 tokio-jsonrpc developers
@@ -6794,7 +6794,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [libc 0.2.189](https://github.com/rust-lang/libc)
+- [libc 0.2.190](https://github.com/rust-lang/libc)
 
 ```
 Copyright (c) The Rust Project Developers
@@ -7998,7 +7998,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [tokio 1.53.1](https://github.com/tokio-rs/tokio)
+- [tokio 1.53.2](https://github.com/tokio-rs/tokio)
 
 ```
 MIT License
