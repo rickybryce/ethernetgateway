@@ -38,6 +38,22 @@ enum InboundState {
     SbIac,
 }
 
+/// Where [`TelnetSession::session_read_byte`] is inside a telnet command,
+/// kept on the session between calls so that any read of it may be dropped.
+/// The session's counterpart of [`InboundTelnet`]: it answers AYT, IP, EC, EL
+/// and the option negotiations itself, which the bridges' parser does not.
+#[derive(Default)]
+pub(in crate::telnet) enum SessionIac {
+    #[default]
+    Data,
+    /// `IAC` read; the command byte is next.
+    Cmd,
+    /// `IAC WILL/WONT/DO/DONT` read; the option byte is next.
+    Opt(u8),
+    /// Inside `IAC SB`: the payload so far, and whether its last byte was IAC.
+    Sb { payload: Vec<u8>, iac: bool },
+}
+
 /// One inbound byte's meaning once [`InboundTelnet`] has seen it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Inbound {
@@ -376,175 +392,191 @@ impl TelnetSession {
             return Ok(Some(b));
         }
         let filter_iac = self.speaks_telnet();
-        let mut buf = [0u8; 1];
         loop {
-            // `mid_iac_cmd` is a resume point: if a previous call was cancelled
-            // (e.g. the CP/M out-of-band drain, which polls this exactly once
-            // via `poll_once` and drops it) after consuming
-            // an IAC but before its command byte, skip re-reading the data byte
-            // and read the command directly — so the IAC isn't lost and telnet
-            // parsing stays in sync.  Normal (uncancelled) callers see the flag
-            // toggle within one call, so behavior is unchanged.
-            if !self.mid_iac_cmd {
-                if self.reader.read(&mut buf).await? == 0 {
-                    self.peer_eof = true;
-                    return Ok(None);
-                }
-                let byte = buf[0];
-                if !filter_iac {
-                    // Serial and SSH carry no NVT encoding: a bare CR is a bare
-                    // CR there, so a NUL after one is the peer's own byte --
-                    // and this path also carries a file being fed into a booted
-                    // guest's console, where dropping a 0x00 would corrupt it.
-                    self.last_was_cr = false;
-                    return Ok(Some(byte));
-                }
-                if byte != IAC {
-                    // Drop the NUL of an RFC 854 `CR NUL` pair.  It is how a
-                    // telnet client spells a bare CR, not a byte the user
-                    // typed, and passing it on printed `^@` at a booted CP/M
-                    // prompt.  Only ever one, and only straight after a CR:
-                    // a NUL anywhere else is the peer's own and is passed
-                    // through.
-                    //
-                    // The LF of a `CR LF` pair is deliberately NOT dropped.
-                    // That one is a real newline to plenty of guest software,
-                    // and no client sends it as padding.
-                    let was_cr = std::mem::replace(&mut self.last_was_cr, byte == b'\r');
-                    if was_cr && byte == 0 {
-                        continue;
-                    }
-                    return Ok(Some(byte));
-                }
-                // Committed to an IAC sequence: mark the resume point before
-                // the (cancellable) command-byte read.
-                self.mid_iac_cmd = true;
-            }
-            if self.reader.read(&mut buf).await? == 0 {
-                self.mid_iac_cmd = false;
-                self.peer_eof = true;
-                return Ok(None);
-            }
-            self.mid_iac_cmd = false;
-            let cmd = buf[0];
-            match cmd {
-                IAC => {
-                    // A byte delivered to the caller, so it decides what comes
-                    // "straight after a CR" — without this the flag survived
-                    // across it and a genuine NUL after an escaped 0xFF was
-                    // dropped as padding.  Same for the branches below that
-                    // return a byte.
-                    self.last_was_cr = false;
-                    return Ok(Some(IAC)); // escaped data 0xFF
-                }
-                SB => {
-                    self.telnet_negotiated = true;
-                    // Not marked `peer_eof`: `None` here is also a 15 s stall,
-                    // and a slow peer is not a gone one.  A real EOF is seen
-                    // by the next read, which does mark it.
-                    let Some(payload) = self.read_subneg_payload().await? else {
-                        return Ok(None);
-                    };
-                    if let Some((opt, body)) = payload.split_first() {
-                        self.handle_subnegotiation(*opt, body).await?;
-                    }
-                }
-                WILL | WONT | DO | DONT => {
-                    self.telnet_negotiated = true;
-                    if self.reader.read(&mut buf).await? == 0 {
-                        self.peer_eof = true;
-                        return Ok(None);
-                    }
-                    let opt = buf[0];
-                    self.handle_telnet_option(cmd, opt).await?;
-                }
-                AYT => {
-                    // Through send_line so PETSCII case-swap applies if the
-                    // terminal type is known.
-                    self.send_line("[Yes]").await?;
-                    self.flush().await?;
-                }
-                IP | BRK => {
-                    let esc = if self.terminal_type == TerminalType::Petscii {
-                        0x5F
-                    } else {
-                        0x1B
-                    };
-                    self.last_was_cr = false;
-                    return Ok(Some(esc));
-                }
-                EC => {
-                    // RFC 854: delete the last received character.  Our
-                    // architecture has no low-level input buffer, so
-                    // translate to DEL (0x7F); the line-input layer
-                    // already handles this as backspace.
-                    self.last_was_cr = false;
-                    return Ok(Some(0x7F));
-                }
-                EL => {
-                    // RFC 854: delete everything on the current line.
-                    // Translate to NAK (0x15); the line-input loop
-                    // treats this as "erase-line."
-                    self.last_was_cr = false;
-                    return Ok(Some(LINE_ERASE_BYTE));
-                }
-                _ => {
-                    // NOP (241), DM (242), AO (245), GA (249) — consumed.
-                    //
-                    // DM is the SYNCH marker (RFC 854 §3).  Proper SYNCH
-                    // requires reading TCP urgent-mode data; we do not
-                    // implement that, so DM is informational only.
-                }
+            if let Some(out) = self.iac_step(filter_iac).await? {
+                return Ok(out);
             }
         }
     }
 
-    /// Consume a subnegotiation payload up to (and including) the
-    /// terminating IAC SE. Returns the payload bytes with any escaped
-    /// `IAC IAC` unescaped. First byte is the option code. Returns
-    /// Ok(None) if the connection closes mid-sequence.
-    ///
-    /// Each read is bounded by `SB_DRAIN_TIMEOUT` (slowloris guard): a peer
-    /// that sends `IAC SB <opt>` and then stalls without `IAC SE` must not
-    /// pin the session task and its `max_sessions` slot indefinitely.  This
-    /// guard is independent of `idle_timeout_secs` (which can be 0 = off),
-    /// matching the two gateway-path SB readers, which bound the identical
-    /// loop the same way regardless of idle config.  A stalled drain is
-    /// treated as a closed connection (Ok(None)).
-    pub(in crate::telnet) async fn read_subneg_payload(&mut self) -> Result<Option<Vec<u8>>, std::io::Error> {
-        let mut payload = Vec::with_capacity(32);
+    /// One byte of [`TelnetSession::session_read_byte`]: `Some(answer)` when
+    /// the read is decided, `None` when it goes on (a byte of a telnet command,
+    /// a dropped NUL).  Its own function so [`TelnetSession::finish_iac`] can
+    /// step to the end of a command and no further.
+    async fn iac_step(&mut self, filter_iac: bool) -> Result<Option<Option<u8>>, std::io::Error> {
         let mut buf = [0u8; 1];
-        loop {
-            match tokio::time::timeout(SB_DRAIN_TIMEOUT, self.reader.read(&mut buf)).await {
-                Err(_) => return Ok(None),
-                Ok(Ok(0)) => return Ok(None),
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => return Err(e),
-            }
-            if buf[0] != IAC {
-                if payload.len() < 512 {
-                    payload.push(buf[0]);
+        // **Every await below reads one byte, and where it is in a telnet
+        // command lives on the session (`iac_resume`) between calls**, so a
+        // read dropped anywhere -- the 20 ms drain after Enter, the 50 ms
+        // drains, the idle and detection timeouts, the CP/M `poll_once`
+        // -- resumes exactly where it stopped.  Only the IAC-to-command
+        // split used to be resumable; a NAWS whose tail arrived after a
+        // drain gave up was read as `0 80 0 24 IAC SE` keystrokes, the
+        // defect the bridges' `InboundTelnet` was built to end.
+        let stage = match &self.iac_resume {
+            SessionIac::Data => 0,
+            SessionIac::Cmd => 1,
+            SessionIac::Opt(_) => 2,
+            SessionIac::Sb { .. } => 3,
+        };
+        match stage {
+            0 => {
+                if self.reader.read(&mut buf).await? == 0 {
+                    self.peer_eof = true;
+                    return Ok(Some(None));
                 }
-                continue;
+                let byte = buf[0];
+                if !filter_iac {
+                    // Serial and SSH carry no NVT encoding: a bare CR is a
+                    // bare CR there, so a NUL after one is the peer's own
+                    // byte -- and this path also carries a file being fed
+                    // into a booted guest's console, where dropping a 0x00
+                    // would corrupt it.
+                    self.last_was_cr = false;
+                    return Ok(Some(Some(byte)));
+                }
+                if byte != IAC {
+                    // Drop the NUL of an RFC 854 `CR NUL` pair.  It is how
+                    // a telnet client spells a bare CR, not a byte the user
+                    // typed, and passing it on printed `^@` at a booted
+                    // CP/M prompt.  Only ever one, and only straight after
+                    // a CR: a NUL anywhere else is the peer's own and is
+                    // passed through.
+                    //
+                    // The LF of a `CR LF` pair is deliberately NOT dropped.
+                    // That one is a real newline to plenty of guest
+                    // software, and no client sends it as padding.
+                    let was_cr = std::mem::replace(&mut self.last_was_cr, byte == b'\r');
+                    if was_cr && byte == 0 {
+                        return Ok(None);
+                    }
+                    return Ok(Some(Some(byte)));
+                }
+                self.iac_resume = SessionIac::Cmd;
             }
-            match tokio::time::timeout(SB_DRAIN_TIMEOUT, self.reader.read(&mut buf)).await {
-                Err(_) => return Ok(None),
-                Ok(Ok(0)) => return Ok(None),
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => return Err(e),
-            }
-            match buf[0] {
-                SE => return Ok(Some(payload)),
-                IAC => {
-                    if payload.len() < 512 {
-                        payload.push(IAC);
+            1 => {
+                if self.reader.read(&mut buf).await? == 0 {
+                    self.iac_resume = SessionIac::Data;
+                    self.peer_eof = true;
+                    return Ok(Some(None));
+                }
+                let cmd = buf[0];
+                self.iac_resume = SessionIac::Data;
+                match cmd {
+                    IAC => {
+                        // A byte delivered to the caller, so it decides
+                        // what comes "straight after a CR" -- without this
+                        // the flag survived across it and a genuine NUL
+                        // after an escaped 0xFF was dropped as padding.
+                        // Same for the branches below that return a byte.
+                        self.last_was_cr = false;
+                        return Ok(Some(Some(IAC))); // escaped data 0xFF
+                    }
+                    SB => {
+                        self.telnet_negotiated = true;
+                        self.iac_resume = SessionIac::Sb { payload: Vec::with_capacity(32), iac: false };
+                    }
+                    WILL | WONT | DO | DONT => {
+                        self.telnet_negotiated = true;
+                        self.iac_resume = SessionIac::Opt(cmd);
+                    }
+                    AYT => {
+                        // Through send_line so PETSCII case-swap applies if
+                        // the terminal type is known.
+                        self.send_line("[Yes]").await?;
+                        self.flush().await?;
+                    }
+                    IP | BRK => {
+                        let esc = if self.terminal_type == TerminalType::Petscii {
+                            0x5F
+                        } else {
+                            0x1B
+                        };
+                        self.last_was_cr = false;
+                        return Ok(Some(Some(esc)));
+                    }
+                    EC => {
+                        // RFC 854: delete the last received character.  Our
+                        // architecture has no low-level input buffer, so
+                        // translate to DEL (0x7F); the line-input layer
+                        // already handles this as backspace.
+                        self.last_was_cr = false;
+                        return Ok(Some(Some(0x7F)));
+                    }
+                    EL => {
+                        // RFC 854: delete everything on the current line.
+                        // Translate to NAK (0x15); the line-input loop
+                        // treats this as "erase-line."
+                        self.last_was_cr = false;
+                        return Ok(Some(Some(LINE_ERASE_BYTE)));
+                    }
+                    _ => {
+                        // NOP (241), DM (242), AO (245), GA (249) —
+                        // consumed.
+                        //
+                        // DM is the SYNCH marker (RFC 854 §3).  Proper
+                        // SYNCH requires reading TCP urgent-mode data; we
+                        // do not implement that, so DM is informational
+                        // only.
                     }
                 }
-                _ => {
-                    // Malformed — skip and keep scanning for IAC SE.
+            }
+            2 => {
+                let SessionIac::Opt(cmd) = self.iac_resume else { unreachable!("stage 2") };
+                if self.reader.read(&mut buf).await? == 0 {
+                    self.iac_resume = SessionIac::Data;
+                    self.peer_eof = true;
+                    return Ok(Some(None));
+                }
+                self.iac_resume = SessionIac::Data;
+                self.handle_telnet_option(cmd, buf[0]).await?;
+            }
+            _ => {
+                // Inside `IAC SB`: each read bounded by `SB_DRAIN_TIMEOUT`
+                // (slowloris guard).  A peer that sends `IAC SB <opt>` and
+                // stalls without `IAC SE` must not pin the session task
+                // and its `max_sessions` slot; independent of
+                // `idle_timeout_secs`, which can be 0.  A stall is treated
+                // as a closed connection -- but not marked `peer_eof`: a
+                // slow peer is not a gone one, and a real EOF is seen by
+                // the next read, which does mark it.
+                match tokio::time::timeout(SB_DRAIN_TIMEOUT, self.reader.read(&mut buf)).await {
+                    Err(_) | Ok(Ok(0)) => {
+                        self.iac_resume = SessionIac::Data;
+                        return Ok(Some(None));
+                    }
+                    Ok(Err(e)) => {
+                        self.iac_resume = SessionIac::Data;
+                        return Err(e);
+                    }
+                    Ok(Ok(_)) => {}
+                }
+                let b = buf[0];
+                let SessionIac::Sb { payload, iac } = &mut self.iac_resume else {
+                    unreachable!("stage 3")
+                };
+                if std::mem::take(iac) {
+                    match b {
+                        SE => {
+                            let payload = std::mem::take(payload);
+                            self.iac_resume = SessionIac::Data;
+                            if let Some((opt, body)) = payload.split_first() {
+                                self.handle_subnegotiation(*opt, body).await?;
+                            }
+                        }
+                        IAC if payload.len() < 512 => payload.push(IAC),
+                        // Malformed, or past the cap -- keep scanning for
+                        // IAC SE.
+                        _ => {}
+                    }
+                } else if b == IAC {
+                    *iac = true;
+                } else if payload.len() < 512 {
+                    payload.push(b);
                 }
             }
         }
+        Ok(None)
     }
 
     /// Reply to peer WILL/WONT/DO/DONT per RFC 855. Options we want
@@ -840,9 +872,52 @@ impl TelnetSession {
                     self.pushback = Some(b);
                     return;
                 }
-                _ => return,
+                _ => {
+                    self.finish_iac().await;
+                    return;
+                }
             }
         }
+    }
+
+    /// Settle a telnet command a dropped read left half-read.
+    ///
+    /// The drains end by dropping a read on a timeout, and their callers often
+    /// hand the raw reader straight on -- to a gateway bridge's
+    /// `InboundTelnet` or a transfer's `tnio`, which start from data.  Left
+    /// mid-command, the rest of it reached that parser as data (a NAWS body
+    /// into a remote shell or a protocol stream), and back at a prompt the
+    /// session resumed inside a subnegotiation that had already gone by, taking
+    /// keystrokes as its payload.  Bounded like `InboundTelnet::finish`: each
+    /// byte is waited for at most half a second, and then the command is given
+    /// up and reading starts afresh.
+    ///
+    /// **It reads to the end of the command and not one byte further.**  The
+    /// byte after it belongs to whoever reads next -- a transfer's first block,
+    /// a bridge's first keystroke -- and read here it would have been held in
+    /// the session's pushback, which neither of those reads.
+    pub(in crate::telnet) async fn finish_iac(&mut self) {
+        let wait = std::time::Duration::from_millis(500);
+        let filter_iac = self.speaks_telnet();
+        // More steps than a capped subnegotiation can take, so a peer feeding
+        // an endless one cannot hold this for ever either.
+        for _ in 0..512 + 8 {
+            if matches!(self.iac_resume, SessionIac::Data) {
+                return;
+            }
+            match tokio::time::timeout(wait, self.iac_step(filter_iac)).await {
+                // A step inside a command decides nothing, except a closed or
+                // stalled connection -- and AYT/IP/EC/EL, which end the
+                // command with a byte of their own, already in data state.
+                Ok(Ok(None)) => {}
+                Ok(Ok(Some(Some(b)))) => {
+                    self.pushback = Some(b);
+                    return;
+                }
+                _ => break,
+            }
+        }
+        self.iac_resume = SessionIac::Data;
     }
 
     pub(in crate::telnet) async fn echo_backspace(&mut self) -> Result<(), std::io::Error> {
@@ -1188,6 +1263,7 @@ impl TelnetSession {
                 burst.sequence = true;
             }
         }
+        self.finish_iac().await;
         burst
     }
 
@@ -1218,6 +1294,7 @@ impl TelnetSession {
                 break;
             }
         }
+        self.finish_iac().await;
     }
 
     /// Handle a detected ZMODEM autostart prefix (`**\x18[ABC]`) on the

@@ -225,7 +225,7 @@ pub(in crate::cpm) fn place_new(dir: &std::path::Path, name: &str, bytes: &[u8])
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!("{name}.{}.{n}.part", std::process::id()));
     let done = dir.join(name);
-    let placed = std::fs::write(&tmp, bytes).and_then(|()| match std::fs::hard_link(&tmp, &done) {
+    let placed = write_synced(&tmp, bytes).and_then(|()| match std::fs::hard_link(&tmp, &done) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
         // No hard links here (FAT, some network shares): the old way, with the
@@ -237,17 +237,51 @@ pub(in crate::cpm) fn place_new(dir: &std::path::Path, name: &str, bytes: &[u8])
     placed
 }
 
+/// Write `bytes` to a new file and make them durable before it is named.
+///
+/// **Synced, because the name is the only check anything makes later.**
+/// `missing()` and the ROM screen ask whether the file *exists*; a power cut
+/// after the link but before the data reached the card (ext4 delays it, and
+/// its rename safeguard does not cover a new link) left a zero-length or
+/// partial `DISKxx.DSK` that counted as "already here" for good -- under a
+/// never-overwrite rule, until an operator found and deleted it.  The SD-card
+/// Pis are where power cuts happen.
+///
+/// Truncated, not `create_new`: the name carries this process's id and a
+/// counter that never repeats inside it, so a file already there is a dead
+/// process's -- the same PID after a reboot, its download cut off by the power
+/// going.  `create_new` failed on it with `AlreadyExists`, which `place_new`'s
+/// callers read as "the disk is already here" about a disk that was not.
+fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
 /// Remove `.part` files an interrupted download left in `dir` -- unique names
 /// are never overwritten by the next run, so nothing else would.  Only ones
 /// more than an hour old: a download still running elsewhere writes its file
 /// and claims it within seconds, so an hour cannot take one from under it.
-/// And only names [`place_new`] makes (`<name>.<pid>.<n>.part`): these folders
-/// sit in the transfer tree, and an operator's own `something.part` is theirs.
+/// And only names [`place_new`] makes (`<name>.<pid>.<n>.part`, `<name>` a
+/// file this module fetches): these folders sit in the transfer tree, and an
+/// operator's own `backup.2024.10.part` is theirs, however much it looks like
+/// ours.
 fn sweep_stale_parts(dir: &std::path::Path) {
+    let ours = fetched_names();
+    sweep_stale_temp(dir, |name| is_our_part_name(name, ours));
+}
+
+/// Remove the files in `dir` that `ours` claims and that are more than an
+/// hour old.  One rule for every temporary file this program writes beside a
+/// finished one -- the downloads here and the printer's staging files: a
+/// writer stages and claims its file within seconds, so an hour cannot take
+/// one from under it, and `ours` keeps an operator's own files out of it.
+pub(in crate::cpm) fn sweep_stale_temp(dir: &std::path::Path, ours: impl Fn(&str) -> bool) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let hour = std::time::Duration::from_secs(3600);
     for e in entries.flatten() {
-        let stale = is_our_part_name(&e.file_name().to_string_lossy())
+        let stale = ours(&e.file_name().to_string_lossy())
             && e.metadata().ok().and_then(|m| m.modified().ok())
                 .and_then(|t| t.elapsed().ok())
                 .is_some_and(|age| age > hour);
@@ -257,13 +291,33 @@ fn sweep_stale_parts(dir: &std::path::Path) {
     }
 }
 
-/// Is `name` a temporary name [`place_new`] makes -- `<name>.<pid>.<n>.part`,
-/// two runs of digits before the suffix?
-fn is_our_part_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".part") else { return false };
+/// The `<stem>` of a temporary name `<stem>.<pid>.<n>.part` -- two runs of
+/// digits before the suffix -- or `None` for any other name.
+pub(in crate::cpm) fn temp_stem(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".part")?;
     let mut parts = stem.rsplitn(3, '.');
     let digits = |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
-    digits(parts.next()) && digits(parts.next()) && parts.next().is_some_and(|s| !s.is_empty())
+    if !(digits(parts.next()) && digits(parts.next())) {
+        return None;
+    }
+    parts.next().filter(|s| !s.is_empty())
+}
+
+/// Is `name` a temporary name [`place_new`] makes -- `<name>.<pid>.<n>.part`
+/// with `<name>` one of `ours`?
+fn is_our_part_name(name: &str, ours: &[String]) -> bool {
+    temp_stem(name).is_some_and(|s| ours.iter().any(|o| o == s))
+}
+
+/// Every name [`place_new`] is ever given: the catalogue's disks and the
+/// monitor ROMs' files.  Built once: the catalogue is compiled in, and a run
+/// places dozens of files.
+fn fetched_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let roms = super::rom::ROM_CHOICES.iter().filter_map(|c| c.rom.as_ref()).map(|r| r.file.to_string());
+        catalogue().into_iter().map(|d| d.name).chain(roms).collect()
+    })
 }
 
 /// How a download ended.
@@ -438,16 +492,28 @@ pub(in crate::cpm) fn sha256(data: &[u8]) -> String {
 /// How long [`get`] waits for a connection, as against the whole transfer.
 const CONNECT_TIMEOUT_SECS: u64 = 20;
 
+/// How long a file of `bytes` may take, start to finish.
+///
+/// **Scaled to the file.**  One 120 s budget for everything needed ~42 KB/s
+/// for a 5 MB 88-HDSK platter; on a slower uplink the seven platters, which
+/// sit together in the manifest, each timed out the same way -- and three
+/// identical failures stop the run ([`GiveUp`]), so the 256 KB disks after
+/// them, which would have arrived, were skipped.  The floor keeps the old
+/// budget for small files; the rate is a slow link's, 16 KiB/s.
+pub(in crate::cpm) fn transfer_timeout(bytes: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(120 + bytes / (16 << 10))
+}
+
 /// GET a pinned URL and return its body.
 ///
 /// One copy, because the sample disks and the monitor ROMs
 /// ([`super::rom`]) fetch from the same place on the same terms and a second
 /// agent would be a second set of timeouts to keep in step. The caller owns
 /// verification: this says only what arrived.
-pub(in crate::cpm) fn get(url: &str, user_agent: &str, limit: u64) -> Result<Vec<u8>, String> {
+pub(in crate::cpm) fn get(url: &str, user_agent: &str, limit: u64, expected: u64) -> Result<Vec<u8>, String> {
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            .timeout_global(Some(transfer_timeout(expected)))
             // A connect of its own, far shorter: a firewall that drops
             // outbound 443 silently makes every file wait out the whole global
             // timeout just to connect, where a reachable server answers a
@@ -470,13 +536,13 @@ pub(in crate::cpm) fn get(url: &str, user_agent: &str, limit: u64) -> Result<Vec
 /// rather than written. A truncated download and a changed upstream both land
 /// here, and both should stop.
 fn fetch_one(disk: &Disk) -> Result<Vec<u8>, String> {
-    let body = get(&disk.url(), "EthernetGateway (CP/M sample disks)", 64 << 20)?;
+    let body = get(&disk.url(), "EthernetGateway (CP/M sample disks)", 64 << 20, disk.bytes)?;
     if body.len() as u64 != disk.bytes {
         return Err(format!("expected {} bytes, got {}", disk.bytes, body.len()));
     }
     let got = sha256(&body);
     if got != disk.sha256 {
-        return Err(format!("checksum mismatch (got {}…)", &got[..12]));
+        return Err(format!("checksum mismatch (got {}...)", &got[..12]));
     }
     Ok(body)
 }
@@ -571,6 +637,13 @@ impl GiveUp {
     fn given_up(&self) -> bool {
         self.count >= GIVE_UP_AFTER
     }
+}
+
+/// The `progress` a surface with no screen of its own passes: one log line per
+/// file, so a run of many minutes on a slow link is visible on `/logs` as
+/// progress rather than as silence.
+pub fn log_progress(name: &str, at: usize, total: usize) {
+    crate::glog!("CP/M downloads: fetching {at}/{total} {name}");
 }
 
 /// Fetch every disk that is not already there.
@@ -902,7 +975,7 @@ mod tests {
         g.note(Some("timed out"));
         g.note(Some("timed out"));
         assert!(!g.given_up(), "a success in between starts the count again");
-        g.note(Some("checksum mismatch (got 0123456789ab…)"));
+        g.note(Some("checksum mismatch (got 0123456789ab...)"));
         g.note(Some("timed out"));
         g.note(Some("timed out"));
         assert!(!g.given_up(), "a different reason breaks the run");
@@ -943,14 +1016,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A dead process's temporary file with this process's id -- the same
+    /// PID after a reboot -- does not stop the download.  `create_new` failed
+    /// on it, and the failure read as "the disk is already here".  Asked of
+    /// the write itself: which counter value `place_new` reaches next depends
+    /// on what other tests ran first.
+    #[test]
+    fn test_a_dead_processs_part_file_does_not_block_a_download() {
+        let dir = std::env::temp_dir().join(format!("egw_place_stale_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join(format!("STALE.DSK.{}.0.part", std::process::id()));
+        std::fs::write(&tmp, b"cut off by a power cut, and longer than the download").unwrap();
+        write_synced(&tmp, b"downloaded").expect("a stale temp file blocked the write");
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"downloaded", "the old bytes were kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every file in the catalogue gets time to arrive over a slow link.  One
+    /// 120 s budget for all of them needed ~42 KB/s for an 88-HDSK platter,
+    /// and three platters timing out alike stopped the run before the small
+    /// disks behind them.
+    #[test]
+    fn test_every_file_has_time_to_arrive_on_a_slow_link() {
+        let slow = 16 * 1024; // bytes a second
+        for d in catalogue() {
+            let secs = transfer_timeout(d.bytes).as_secs();
+            assert!(d.bytes / secs <= slow, "{} needs {} B/s", d.name, d.bytes / secs);
+        }
+        assert!(transfer_timeout(0).as_secs() >= 120, "a small file keeps the old budget");
+        // And the download path uses it, not a constant of its own.
+        let src = include_str!("fetch.rs").replace("\r\n", "\n");
+        let get = &src[src.find("pub(in crate::cpm) fn get(").expect("get")..];
+        let get = &get[..get.find("\n}\n").expect("its end")];
+        assert!(get.contains(".timeout_global(Some(transfer_timeout(expected)))"), "get has its own budget again");
+    }
+
     /// The stale-file sweep only ever takes names `place_new` made; an
     /// operator's own `.part` file in the transfer tree is left alone.
     #[test]
     fn test_only_our_own_part_files_are_swept() {
-        assert!(is_our_part_name("DISK01.DSK.4242.0.part"));
-        assert!(is_our_part_name("CUTER.BIN.1.17.part"));
-        for theirs in ["notes.part", "x.part", "DISK01.DSK.part", "a.b.part", ".1.2.part", "DISK01.DSK.12.x.part"] {
-            assert!(!is_our_part_name(theirs), "{theirs} would be deleted");
+        let ours = fetched_names();
+        assert!(is_our_part_name("DISK01.DSK.4242.0.part", ours));
+        assert!(is_our_part_name("vdmcuter.hex.1.17.part", ours));
+        for theirs in [
+            "notes.part",
+            "x.part",
+            "DISK01.DSK.part",
+            "a.b.part",
+            ".1.2.part",
+            "DISK01.DSK.12.x.part",
+            // Our shape exactly, but not a name we fetch: an operator's file.
+            "backup.2024.10.part",
+            "MYDISK.DSK.1.2.part",
+        ] {
+            assert!(!is_our_part_name(theirs, ours), "{theirs} would be deleted");
         }
     }
 

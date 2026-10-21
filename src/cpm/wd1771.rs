@@ -206,7 +206,8 @@ pub struct Wd1771 {
     /// Head loaded, from the `h` flag of Type I commands. Reported in Type I
     /// status bit 5, and some drivers will not read until they see it.
     head_loaded: bool,
-    /// Alternates on every Type I status read; see the struct's doc comment.
+    /// Alternates on every Type I status read, so a driver that waits for the
+    /// index pulse to pass sees it pass.  Nothing here spins a disk.
     index: bool,
 
     // ---- the sector in flight -------------------------------------------
@@ -445,9 +446,10 @@ impl Wd1771 {
                 // way a driver acknowledges completion.
                 let s = self.status();
                 self.intrq = false;
-                if Kind::of(self.cmd) == Kind::One {
-                    // See `index`: a driver that waits for the index pulse to
-                    // pass needs it to pass.
+                // See `index`: a driver that waits for the index pulse to pass
+                // needs it to pass -- after an idle Force Interrupt too, whose
+                // status is Type I (`status` reports the bit for both).
+                if matches!(Kind::of(self.cmd), Kind::One | Kind::Four) {
                     self.index = !self.index;
                 }
                 s
@@ -550,13 +552,18 @@ impl Wd1771 {
         // the middle of a write moved the write onto the *new* track), and
         // the new command runs on an idle chip.  Ignoring it instead left a
         // Restore unperformed under a status a driver reads as "on track 0".
-        if self.busy {
-            self.busy = false;
-            self.drq = false;
-            self.moving = Move::None;
-            self.multi = false;
-            self.pos = 0;
-        }
+        //
+        // The transfer is dropped whether or not the chip was still busy: a
+        // Read Address finishes at once and *offers* its six bytes (see its
+        // arm), so it leaves DRQ up on an idle chip.  Cleared only when busy,
+        // that DRQ outlived the next command -- a seek after CDOS's uncollected
+        // probe still read DRQ, and a read of the data register then handed
+        // back the old ID bytes and raised a second interrupt.
+        self.busy = false;
+        self.drq = false;
+        self.moving = Move::None;
+        self.multi = false;
+        self.pos = 0;
 
         self.cmd = cmd;
         self.error = 0;
@@ -759,8 +766,10 @@ impl Wd1771 {
                     s |= type2::NOT_READY;
                 }
                 // Write Protect is reported on a write; on a read this bit is the
-                // record type, and a normal data mark reads as zero here.
-                if self.cmd & 0x20 != 0 && self.read_only {
+                // record type, and a normal data mark reads as zero here.  A
+                // write is Write Sector (Ah/Bh) or Write Track (Fh) -- not bit 5
+                // alone, which Read Track (E4h) has too.
+                if matches!(self.cmd >> 4, 0xA | 0xB | 0xF) && self.read_only {
                     s |= type2::WRITE_PROTECT;
                 }
                 s |= self.error
@@ -1148,5 +1157,46 @@ mod tests {
         assert_eq!(id[0], 12, "track");
         assert_eq!(id[2], 9, "sector");
         assert_eq!(id[3], 0, "128 bytes, the IBM 3740 length code");
+    }
+
+    /// A Read Address nobody collects does not haunt the next command.  It
+    /// ends at once and offers its bytes, so DRQ is up on an idle chip -- and
+    /// the next command only dropped a transfer when busy, so a seek after
+    /// CDOS's uncollected probe still showed DRQ and handed out old ID bytes.
+    #[test]
+    fn test_an_uncollected_read_address_leaves_no_drq_behind() {
+        let mut c = chip();
+        c.write(reg::COMMAND, 0xC4);
+        assert!(c.drq(), "the ID bytes are on offer");
+        c.write(reg::DATA, 5);
+        c.write(reg::COMMAND, 0x1B); // seek 5, reading none of them
+        assert!(!c.drq(), "DRQ outlived the Read Address");
+        let _ = c.read(reg::COMMAND); // acknowledge the seek's interrupt
+        let _ = c.read(reg::DATA);
+        assert!(!c.intrq(), "a stale ID byte raised a second interrupt");
+    }
+
+    /// After an idle Force Interrupt the status is Type I, Index included --
+    /// and the bit has to move, or a driver waiting for the pulse waits for
+    /// ever.
+    #[test]
+    fn test_the_index_bit_moves_after_an_idle_force_interrupt() {
+        let mut c = chip();
+        c.write(reg::COMMAND, 0xD0);
+        let a = c.read(reg::COMMAND).0 & type1::INDEX;
+        let b = c.read(reg::COMMAND).0 & type1::INDEX;
+        assert_ne!(a, b, "the index pulse never passes");
+    }
+
+    /// Write Protect is a write's bit.  Read Track has bit 5 set in its command
+    /// byte too, and was reported write-protected on a read-only disk.
+    #[test]
+    fn test_read_track_is_not_reported_write_protected() {
+        let mut c = Wd1771::new();
+        c.set_drive(true, true, 77);
+        c.write(reg::COMMAND, 0xE4);
+        assert_eq!(c.read(reg::COMMAND).0 & type2::WRITE_PROTECT, 0, "a read is not refused a write");
+        c.write(reg::COMMAND, 0xA8);
+        assert_ne!(c.read(reg::COMMAND).0 & type2::WRITE_PROTECT, 0, "a write still is");
     }
 }

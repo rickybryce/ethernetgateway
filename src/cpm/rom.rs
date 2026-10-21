@@ -260,7 +260,7 @@ pub fn parse_intel_hex(text: &str) -> Result<Vec<(u16, Vec<u8>)>, String> {
         }
     }
     if !saw_eof {
-        return Err("no end-of-file record — the file is incomplete".to_string());
+        return Err("no end-of-file record -- the file is incomplete".to_string());
     }
     if out.is_empty() {
         return Err("no data records".to_string());
@@ -357,15 +357,15 @@ pub(crate) fn download_outcome(cpm_base: &Path, key: &str) -> Result<(String, bo
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let done = dir.join(f.file);
     if done.exists() {
-        return Ok((format!("{} is already here — left untouched", f.file), false));
+        return Ok((format!("{} is already here -- left untouched", f.file), false));
     }
-    let body = super::fetch::get(f.url, "EthernetGateway (CP/M monitor ROM)", 1 << 20)?;
+    let body = super::fetch::get(f.url, "EthernetGateway (CP/M monitor ROM)", 1 << 20, f.bytes)?;
     if body.len() as u64 != f.bytes {
         return Err(format!("expected {} bytes, got {}", f.bytes, body.len()));
     }
     let got = super::fetch::sha256(&body);
     if got != f.sha256 {
-        return Err(format!("checksum mismatch (got {}…)", &got[..12]));
+        return Err(format!("checksum mismatch (got {}...)", &got[..12]));
     }
     // Parsed before it is kept, so a file that cannot be placed is never
     // written: the checksum says the bytes are the ones we tested, and this says
@@ -375,7 +375,7 @@ pub(crate) fn download_outcome(cpm_base: &Path, key: &str) -> Result<(String, bo
     match super::fetch::place_new(&dir, f.file, &body) {
         Ok(()) => Ok((format!("fetched {} ({} bytes)", f.file, f.bytes), true)),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            Ok((format!("{} is already here — left untouched", f.file), false))
+            Ok((format!("{} is already here -- left untouched", f.file), false))
         }
         Err(e) => Err(format!("{e}")),
     }

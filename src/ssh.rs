@@ -1423,6 +1423,20 @@ impl russh::server::Handler for SshHandler {
             glog!("SSH: auth rejected — configured SSH username/password is empty");
             return Ok(russh::server::Auth::reject());
         }
+        // This address's turn, held until a failure is counted -- see
+        // `telnet::auth_turn` -- and the lockout asked again inside it: the
+        // check above ran before the turn, and a guess that overlapped the
+        // last one's KDF must see the lockout that one set.
+        let _turn = match self.peer_addr {
+            Some(ip) => Some(telnet::auth_turn(ip).await),
+            None => None,
+        };
+        if let Some(ip) = self.peer_addr
+            && telnet::is_locked_out(&self.lockouts, ip)
+        {
+            glog!("SSH: auth from {} rejected (locked out)", ip);
+            return Ok(russh::server::Auth::reject());
+        }
         // Constant-time comparison to prevent timing attacks.
         let user_ok =
             telnet::constant_time_eq(user.as_bytes(), self.username.as_bytes());
@@ -1458,15 +1472,14 @@ impl russh::server::Handler for SshHandler {
             self.mark_logged_in();
             Ok(russh::server::Auth::Accept)
         } else {
-            if let Some(ip) = self.peer_addr {
-                let count = telnet::record_auth_failure(&self.lockouts, ip);
-                if count >= telnet::MAX_AUTH_ATTEMPTS {
-                    glog!(
-                        "SSH: {} exceeded {} failed attempts; locked out",
-                        ip,
-                        telnet::MAX_AUTH_ATTEMPTS,
-                    );
-                }
+            if let Some(ip) = self.peer_addr
+                && telnet::record_auth_failure(&self.lockouts, ip) >= telnet::MAX_AUTH_ATTEMPTS
+            {
+                glog!(
+                    "SSH: {} exceeded {} failed attempts; locked out",
+                    ip,
+                    telnet::MAX_AUTH_ATTEMPTS,
+                );
             }
             Ok(russh::server::Auth::reject())
         }

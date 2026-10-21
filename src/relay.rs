@@ -30,6 +30,47 @@ use std::sync::{Arc, Mutex as StdMutex};
 use crate::logger::glog;
 use crate::telnet::{LockoutMap, SessionWriters, SharedWriter, TelnetSession};
 
+/// Held across one relay password attempt; see `connect_master_relay_inner`.
+static PASSWORD_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The last password a master refused: a digest of master and password, and
+/// when.  Never the password itself.
+static REFUSED_PASSWORD: std::sync::Mutex<Option<([u8; 32], std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// How long a refused password is not offered again.  The master's lockout
+/// window and a little: a loop that waits that long cannot add to a lockout
+/// the first refusal started, and every loop's own auth backoff is longer.
+const REFUSED_PASSWORD_HOLD: std::time::Duration =
+    crate::telnet::LOCKOUT_DURATION.saturating_add(std::time::Duration::from_secs(30));
+
+/// The whole credential that was refused -- master, username and password.
+/// The username too: an operator who fixes a wrong `slave_master_username`
+/// changes nothing else, and a record that left it out held the corrected
+/// login back without asking the master.
+fn refused_digest(host: &str, port: u16, user: &str, password: &str) -> [u8; 32] {
+    use pbkdf2::sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(format!("{host}:{port}\0{user}\0").as_bytes());
+    h.update(password.as_bytes());
+    h.finalize().into()
+}
+
+fn note_refused_password(host: &str, port: u16, user: &str, password: &str) {
+    let mut g = REFUSED_PASSWORD.lock().unwrap_or_else(|e| e.into_inner());
+    *g = Some((refused_digest(host, port, user, password), std::time::Instant::now()));
+}
+
+/// Whether this master refused exactly this credential inside the hold.  Any
+/// change -- the password an operator just typed, a corrected username -- is
+/// always tried.
+fn recently_refused(host: &str, port: u16, user: &str, password: &str) -> bool {
+    let g = REFUSED_PASSWORD.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().is_some_and(|(d, at)| {
+        at.elapsed() < REFUSED_PASSWORD_HOLD && *d == refused_digest(host, port, user, password)
+    })
+}
+
 /// Run a master-side session over an accepted relay stream.
 ///
 /// `reader` / `write_half` are the two halves of the relay transport
@@ -603,7 +644,15 @@ static PENDING_MASTER_PASSWORD: std::sync::Mutex<Option<String>> = std::sync::Mu
 static RETRY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Ask the relay loops to stop waiting and try again now.
+///
+/// Also forgets the last refused password: an operator asking for a retry has
+/// changed something -- typed the password again after fixing the master, or
+/// cleared the problem -- and holding that password back for the rest of the
+/// lockout window would refuse it locally without ever asking the master.  The
+/// loops still take their turns, so a refusal on this retry is still not
+/// repeated by the next loop.
 pub fn request_retry_now() {
+    *REFUSED_PASSWORD.lock().unwrap_or_else(|e| e.into_inner()) = None;
     RETRY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
@@ -855,6 +904,15 @@ impl EnrolLatch {
     /// The master accepted the key: never offer it again.
     pub(crate) fn accepted(&mut self) {
         self.accepted = true;
+    }
+
+    /// The master refused a key it once accepted -- removed from its
+    /// `relay_authorized_keys`, or the master reinstalled.  "Never again" was
+    /// true of *that* enrolment; without this the next password login did not
+    /// offer the key, and the slave ran on an in-memory password until its
+    /// next restart asked for it all over again.
+    pub(crate) fn revoked(&mut self) {
+        self.accepted = false;
     }
 
     /// The master refused.  Returns whether to log it -- true only the first
@@ -1750,7 +1808,11 @@ async fn connect_master_relay_inner(
                 // working, so the claim comes down here as well as going up
                 // above -- the configuration screens must not go on saying
                 // "using key" about a slave that is back on its password.
-                Ok(_) => note_relay_key_auth(false),
+                Ok(_) => {
+                    note_relay_key_auth(false);
+                    // And an enrolment that no longer holds is offered again.
+                    enrol_latch().revoked();
+                }
                 Err(e) => {
                     return Err(RelayConnectError::Network(format!("key auth error: {}", e)))
                 }
@@ -1787,9 +1849,27 @@ async fn connect_master_relay_inner(
                 host, port, crate::ssh::RELAY_AUTHORIZED_KEYS_FILE
             )));
         }
+        // **One password guess at a time, and none the master already turned
+        // down.**  A slave runs a loop per relayed port plus the CP/M
+        // announcer, and a retry wakes them all at once -- so one wrong
+        // password was three failures in a burst, the master's per-IP lockout
+        // (shared with its telnet and web), and a *correct* password typed
+        // after that refused by the lockout and dropped as wrong.  In turn,
+        // the second loop sees the first one's refusal and does not repeat it.
+        let _turn = PASSWORD_TURN.lock().await;
+        if recently_refused(host, port, username, password) {
+            let _ = session
+                .disconnect(russh::Disconnect::ByApplication, "auth failed", "")
+                .await;
+            return Err(RelayConnectError::Auth(
+                "authentication rejected by master (that password was refused moments ago)"
+                    .to_string(),
+            ));
+        }
         match session.authenticate_password(username, password).await {
             Ok(russh::client::AuthResult::Success) => {}
             Ok(_) => {
+                note_refused_password(host, port, username, password);
                 let _ = session
                     .disconnect(russh::Disconnect::ByApplication, "auth failed", "")
                     .await;

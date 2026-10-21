@@ -453,7 +453,10 @@ fn run_check_inner(cycle: u64) -> usize {
 
     let mut found = Vec::new();
     for (name, port) in listeners {
-        // Resolved rather than parsed, so an IPv6 host address works too.
+        // Resolved rather than parsed, so a host *name* works as well as an
+        // address.  Not, today, an IPv6 one: `host` comes from
+        // `serial::primary_local_ip`, which answers IPv4 (or loopback), and
+        // every listener binds `0.0.0.0`.
         let reach = match (host.as_str(), port).to_socket_addrs() {
             Ok(mut addrs) => match addrs.next() {
                 Some(addr) => probe_addr(addr, PROBE_TIMEOUT),

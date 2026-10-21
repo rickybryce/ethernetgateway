@@ -557,7 +557,7 @@ pub struct SpoolJob {
     /// 900-page document to answer it would be the expensive way to learn
     /// nothing new.
     content: bool,
-    /// Where the last completed page ended, so `TAB` and wrapping are per page.
+    /// The distance between `TAB` stops, in columns: 8, as CP/M expands them.
     tab_stop: usize,
     /// The cost of every page before the current one -- see [`MAX_JOB_CELLS`].
     /// Kept as a sum so `is_full`, asked after every byte, never walks pages.
@@ -854,28 +854,44 @@ impl SpoolJob {
     }
 
     /// Bytes in the spool folder's files.  A folder that cannot be read counts as
-/// empty: the write that follows will fail with the real reason.
-fn spool_dir_bytes(dir: &Path) -> u64 {
-    std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter_map(|e| e.metadata().ok())
-                .filter(|m| m.is_file())
-                .map(|m| m.len())
-                .sum()
-        })
-        .unwrap_or(0)
-}
+    /// empty: the write that follows will fail with the real reason.
+    ///
+    /// Staging files a crash left behind are removed first, once they are an
+    /// hour old.  Nothing else ever would -- each has a name of its own -- and
+    /// they are counted here, so a power cut mid-write left up to a job's worth
+    /// of hidden dot-files edging the folder toward "full" while the operator
+    /// saw documents that did not add up to it.
+    fn spool_dir_bytes(dir: &Path) -> u64 {
+        Self::sweep_stale_staging(dir);
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| e.metadata().ok())
+                    .filter(|m| m.is_file())
+                    .map(|m| m.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
 
-/// `("PRINT-YYYYMMDD-HHMMSS", "odt")` from the host's own clock, without the
+    /// Remove `.PRINT-<stamp>.<pid>.<n>.part` files older than an hour, by
+    /// the downloads' rule ([`super::fetch::sweep_stale_temp`]).  Only names
+    /// [`SpoolJob::write`] makes are touched -- this folder is the operator's
+    /// to collect from.
+    fn sweep_stale_staging(dir: &Path) {
+        super::fetch::sweep_stale_temp(dir, is_staging_name);
+    }
+
+    /// `("PRINT-YYYYMMDD-HHMMSS", "odt")` from the host's own clock, without the
     /// folder — [`SpoolJob::write`] puts that in front of what it returns, and
     /// keeps the two apart so it can disambiguate a collision in the middle.
     ///
     /// A timestamp rather than a counter because a counter has to remember, and
     /// the thing it would have to remember lives across restarts. Seconds are
     /// enough to name a job; they are **not** enough to be unique, which is why
-    /// the caller probes — two sessions printing at once is ordinary, and the
-    /// idle close makes them likelier to finish together, not less.
+    /// the caller claims its name rather than assuming it — two sessions
+    /// printing at once is ordinary, and the idle close makes them likelier to
+    /// finish together, not less.
     fn file_stem_and_ext(&self, format: Format) -> (String, &'static str) {
         let (y, m, d, h, mi, s) = super::host_clock_parts();
         (
@@ -1222,6 +1238,12 @@ impl Zip {
 // =============================================================================
 // Tests
 // =============================================================================
+
+/// Is `name` a staging file [`SpoolJob::write`] makes --
+/// `.PRINT-<stamp>.<pid>.<n>.part`?
+fn is_staging_name(name: &str) -> bool {
+    super::fetch::temp_stem(name).is_some_and(|s| s.len() > ".PRINT-".len() && s.starts_with(".PRINT-"))
+}
 
 #[cfg(test)]
 mod tests {
@@ -1738,6 +1760,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
+    }
+
+    /// A staging file a crash left behind is swept once it is an hour old,
+    /// and stops counting against the folder; an operator's files, and a
+    /// staging file young enough to belong to a job in progress, stay.
+    #[test]
+    fn test_a_crashed_jobs_staging_file_is_swept() {
+        let dir = temp_dir("spool_orphan");
+        let spool = dir.join(SPOOL_DIR);
+        std::fs::create_dir_all(&spool).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        let make = |name: &str, when: std::time::SystemTime| {
+            let f = std::fs::File::create(spool.join(name)).unwrap();
+            f.set_len(1000).unwrap();
+            f.set_modified(when).unwrap();
+        };
+        make(".PRINT-20261020-101010.4242.7.part", old);
+        make(".PRINT-20261020-111111.4242.8.part", std::time::SystemTime::now());
+        make("notes.2024.10.part", old);
+        make("PRINT-20261020-101010.txt", old);
+        assert_eq!(SpoolJob::spool_dir_bytes(&spool), 3000, "the orphan still counts");
+        assert!(!spool.join(".PRINT-20261020-101010.4242.7.part").exists());
+        for kept in [".PRINT-20261020-111111.4242.8.part", "notes.2024.10.part", "PRINT-20261020-101010.txt"] {
+            assert!(spool.join(kept).exists(), "{kept} was taken");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A runaway is split into jobs by the bounds above but not stopped by

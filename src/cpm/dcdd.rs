@@ -297,7 +297,7 @@ impl Dcdd {
                     // only reads once it is asserted, so making the transfer
                     // start on the first read is a deadlock — the guest waits
                     // for a byte that will not exist until it asks for one.
-                    if !d.writing && d.disk.is_some() {
+                    if !d.writing {
                         s |= status::NRDA;
                     }
                     if d.writing {
@@ -451,10 +451,11 @@ impl Dcdd {
             self.interrupts = false;
             self.selected = None;
         } else {
+            // Four bits, so always one of the sixteen; a select of a drive
+            // with no disk in it is the case that needs care, and `cur()`
+            // answers it.
             let drive = value & 0x0F;
-            if drive as usize >= MAX_DRIVES {
-                return Request::None;
-            }
+            const _: () = assert!(MAX_DRIVES == 16, "the select field is four bits");
             // Selecting a *different* drive takes the bus away from the one
             // that was writing, and that sector is finished, not abandoned --
             // the same reason as the D7 branch above: the write circuit
@@ -544,6 +545,19 @@ impl Dcdd {
         };
         let read_only = d.disk.as_ref().is_some_and(|k| k.read_only);
         let pending = d.writing && d.dirty && !read_only;
+        // **A sector cut short is finished the way the hardware finishes it**:
+        // "the write circuit will continue writing the last byte outputted to
+        // the end of that sector".  Committed as it stood, the buffer's tail was
+        // whatever sector was last *read* -- another sector's bytes written
+        // into this one.  (`finish_all_writes`, for a guest that is gone,
+        // commits no partial sector at all.)
+        if pending
+            && let Some(n) = d.byte
+            && (1..SECTOR_LEN).contains(&n)
+        {
+            let last = d.buffer[n - 1];
+            d.buffer[n..].fill(last);
+        }
         let at = d.write_at;
         d.writing = false;
         d.dirty = false;
@@ -770,6 +784,24 @@ mod tests {
         // And the head really did move, so this is not a no-op test.  Status
         // is returned inverted, so the track-0 bit reads 0 while at track 0.
         assert_ne!(c.read_status() & status::TRACK0, 0, "the head stepped off track 0");
+    }
+
+    /// A sector cut short by a step is padded with the last byte written, as
+    /// the write circuit does -- not finished with the tail of whatever sector
+    /// was last read into the buffer.
+    #[test]
+    fn test_a_sector_cut_short_is_padded_with_the_last_byte() {
+        let mut c = ready();
+        // Something else in the buffer first, as a read would leave it.
+        c.drives[0].buffer = [0xAA; SECTOR_LEN];
+        c.port_out(0x09, control::WRITE_ENABLE);
+        for b in 1..=10u8 {
+            c.port_out(0x0A, b);
+        }
+        assert_eq!(c.port_out(0x09, control::STEP_IN), Request::Write { drive: 0, track: 0, sector: 0 });
+        let buf = c.sector_buffer(0).expect("the sector");
+        assert_eq!(&buf[..10], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert!(buf[10..].iter().all(|&b| b == 10), "the tail is another sector's bytes");
     }
 
     /// Selecting a different drive with D7 clear finishes the old drive's
@@ -1159,10 +1191,11 @@ mod tests {
         assert_eq!(seen.len(), MINI_SECTORS_PER_TRACK as usize);
     }
 
-    /// Selecting a drive that does not exist must not panic or leave the
-    /// controller pointing at one that does.
+    /// Selecting a drive with no disk in it must not panic, and reads as no
+    /// drive at all.  (Every four-bit select names one of the sixteen drives,
+    /// so there is no drive that "does not exist".)
     #[test]
-    fn test_selecting_a_missing_drive_is_inert() {
+    fn test_selecting_an_empty_drive_is_inert() {
         let mut c = Dcdd::new();
         c.port_out(0x08, 5);
         assert_eq!(c.port_in(0x09).0, 0xFF);

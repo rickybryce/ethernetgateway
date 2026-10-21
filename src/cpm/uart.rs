@@ -12,6 +12,8 @@
 //!   hardware-independent path RomWBW/SC126 comms software uses (a Z180 ASCI
 //!   *port* profile can't work: our Z80 core doesn't decode the Z180
 //!   `IN0`/`OUT0` instructions the ASCI needs).
+//! - `Hbios { unit }` — the modem is a RomWBW HBIOS character unit, reached
+//!   through the HBIOS call a RomWBW guest's own comms software makes.
 //! - `Off` — no virtual modem.
 //!
 //! **Polled-only.**  Every profile is a *polled* UART: the guest reads the

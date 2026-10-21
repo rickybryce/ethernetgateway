@@ -87,13 +87,16 @@ fn glyph(b: u8) -> char {
 /// last wrote to port `C8h`; its low four bits name the line shown at the top,
 /// and the sixteen lines are a ring from there.
 ///
-/// The upper bits of the scroll register are not ours to interpret — on the
-/// real card they are outside the beginning-line field — so they are masked off
-/// rather than guessed at.
+/// Its upper four bits are the first screen *row* shown: rows above it are
+/// blanked, which is how a driver hides the line it is about to scroll in.
+/// Read from z80pack's `proctec-vdm.c` (`first = (data & 0xf0) >> 4`, and a
+/// row `y < first` drawn as spaces); this used to mask them off as "not ours",
+/// and showed stale text in those rows.
 pub fn frame(window: &[u8; WINDOW], scroll: u8) -> Frame {
     let top = (scroll & 0x0F) as usize;
+    let first = (scroll >> 4) as usize;
     let mut out = [[Cell::BLANK; COLS]; ROWS];
-    for (r, row) in out.iter_mut().enumerate() {
+    for (r, row) in out.iter_mut().enumerate().skip(first) {
         // The ring: the line at the top is `top`, and the rest follow it round.
         let src = (top + r) % ROWS;
         for (c, cell) in row.iter_mut().enumerate() {
@@ -167,18 +170,22 @@ mod tests {
         assert!(text[ROWS - 1].starts_with("LINE2"));
     }
 
+    /// The upper nibble blanks the rows above it and moves nothing: the low
+    /// nibble alone picks the line at the top.  z80pack's `proctec-vdm.c`.
     #[test]
-    fn test_only_the_low_four_bits_of_the_scroll_register_are_ours() {
+    fn test_the_upper_nibble_blanks_the_rows_above_it() {
         let mut lines = Vec::new();
         for r in 0..ROWS {
             lines.push(format!("LINE{r}"));
         }
         let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
         let w = window_of(&refs);
-        // 0xF2 and 0x02 must agree: the upper nibble is outside the
-        // beginning-line field and guessing at it would rotate the screen for
-        // reasons the operator could not account for.
-        assert_eq!(frame_text(&frame(&w, 0xF2)), frame_text(&frame(&w, 0x02)));
+        let plain = frame_text(&frame(&w, 0x02));
+        let blanked = frame_text(&frame(&w, 0x32));
+        for (r, row) in blanked.iter().enumerate().take(3) {
+            assert!(row.trim().is_empty(), "row {r} still shows {row:?}");
+        }
+        assert_eq!(&blanked[3..], &plain[3..], "the rest did not move");
     }
 
     #[test]

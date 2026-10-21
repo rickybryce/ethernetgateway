@@ -301,16 +301,27 @@ fn summarize(entries: &[(&str, u16, Status)]) -> Vec<String> {
 
 /// The commands that actually answer "who has my port?".
 ///
-/// `windows` is a parameter rather than a `cfg!` so both wordings are reachable
+/// The OS is a parameter rather than a `cfg!` so every wording is reachable
 /// from a test on any host — the alternative cost a red Windows CI run for a
 /// message only Windows produces, which no amount of local testing would have
 /// caught.
-fn how_to_check_for(windows: bool) -> Vec<String> {
-    if windows {
+///
+/// **macOS has its own**: it has no `ss`, and its `pgrep -a` means "include
+/// ancestors" rather than "print the command line", so the Linux advice gave a
+/// Mac one command that was not found and one that printed bare numbers.
+fn how_to_check_for(os: &str) -> Vec<String> {
+    if os == "windows" {
         vec![
             "         Check:  netstat -ano | findstr :<port>".to_string(),
             "         Find it:  tasklist | findstr ethernetgateway".to_string(),
             "         Stop it:  taskkill /IM ethernetgateway.exe   then start this one again."
+                .to_string(),
+        ]
+    } else if os == "macos" {
+        vec![
+            "         Check:  pgrep -lx ethernetgateway     (and: lsof -nP -iTCP:<port> -sTCP:LISTEN)"
+                .to_string(),
+            "         Stop it with:  pkill -x ethernetgateway   then start this one again."
                 .to_string(),
         ]
     } else {
@@ -324,7 +335,7 @@ fn how_to_check_for(windows: bool) -> Vec<String> {
 }
 
 fn how_to_check() -> Vec<String> {
-    how_to_check_for(cfg!(windows))
+    how_to_check_for(std::env::consts::OS)
 }
 
 #[cfg(test)]
@@ -430,22 +441,23 @@ mod tests {
     /// which is exactly how this shipped red the first time.
     #[test]
     fn test_how_to_check_names_the_program_on_both_platforms() {
-        for windows in [false, true] {
-            let lines = how_to_check_for(windows);
+        for os in ["linux", "macos", "windows"] {
+            let lines = how_to_check_for(os);
             let text = lines.join("\n");
-            assert!(
-                text.contains("ethernetgateway"),
-                "windows={windows}: {text}"
-            );
+            assert!(text.contains("ethernetgateway"), "{os}: {text}");
             assert!(!lines.is_empty());
-            // Each platform names a way to look and a way to stop it.
-            let (look, stop) = if windows {
-                ("netstat", "taskkill")
-            } else {
-                ("pgrep", "pkill")
+            // Each platform names a way to look and a way to stop it -- with
+            // the tools that platform has.
+            let (look, stop) = match os {
+                "windows" => ("netstat", "taskkill"),
+                "macos" => ("lsof", "pkill"),
+                _ => ("ss -ltnp", "pkill"),
             };
-            assert!(text.contains(look), "windows={windows}: {text}");
-            assert!(text.contains(stop), "windows={windows}: {text}");
+            assert!(text.contains(look), "{os}: {text}");
+            assert!(text.contains(stop), "{os}: {text}");
+            if os == "macos" {
+                assert!(!text.contains("ss -ltnp") && !text.contains("pgrep -a"), "Linux-only advice: {text}");
+            }
         }
     }
 

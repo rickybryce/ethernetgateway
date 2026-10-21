@@ -513,7 +513,7 @@ async fn accept_code(
             // round" and let the caller re-probe, matching `read_block`'s
             // recoverable handling instead of aborting the whole transfer here
             // (P3).  Other read errors (EOF, real I/O) still abort.
-            Ok(Err(e)) if e.contains("IAC sequence timed out") => return Ok(None),
+            Ok(Err(e)) if e == crate::tnio::IAC_TIMEOUT_ERR => return Ok(None),
             Ok(Err(e)) => return Err(e),
             Err(_) => return Ok(None),
         };
@@ -541,7 +541,7 @@ async fn accept_code(
             match tokio::time::timeout(quiet, nvt_read_byte(reader, is_tcp, state)).await {
                 Err(_) => return Err("Transfer cancelled".into()),
                 Ok(Ok(next)) => carried = Some(next),
-                Ok(Err(e)) if e.contains("IAC sequence timed out") => return Ok(None),
+                Ok(Err(e)) if e == crate::tnio::IAC_TIMEOUT_ERR => return Ok(None),
                 Ok(Err(e)) => return Err(e),
             }
         }

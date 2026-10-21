@@ -169,11 +169,12 @@ fn main() {
     //
     // The lock is held for the life of the process, so it is bound to a name
     // here; `let _ = ` would drop it at once and let a second copy straight in.
+    let acquiring_since = std::time::SystemTime::now();
     let _instance_lock = match instance::acquire() {
         Ok(instance::Instance::Acquired(lock)) => {
-            // Ours cleanly, so any request file on disk was left by a copy that
-            // died mid-handover and is asking nobody.
-            instance::clear_stale_handover_request();
+            // Ours cleanly, so any request file on disk from before this was
+            // left by a copy that died mid-handover and is asking nobody.
+            instance::clear_stale_handover_request(acquiring_since);
             lock
         }
         Ok(instance::Instance::Busy { pid }) => {
@@ -286,7 +287,7 @@ fn main() {
             let mut lines = vec![
                 "       This is not another copy holding the ports — one started here".to_string(),
                 "       would have been offered a handover instead of this. The lock".to_string(),
-                "       file itself could not be opened.".to_string(),
+                "       file itself could not be opened or locked.".to_string(),
             ];
             let (uid, name) = config::current_owner_identity();
             // The file when it exists, the directory when it does not: a
@@ -304,13 +305,19 @@ fn main() {
             // nothing else is worse than the blunt line it replaced.
             if ownership.is_empty() {
                 lines.push(
-                    "       Check the file's permissions and that the volume is writable."
+                    "       Check the file's permissions, that the volume is writable,"
+                        .to_string(),
+                );
+                // Since `acquire` stopped calling every `flock` failure a
+                // holder: a network or FUSE volume that cannot lock lands here.
+                lines.push(
+                    "       and that it supports file locks (NFS needs its lock daemon)."
                         .to_string(),
                 );
             } else {
                 lines.extend(ownership);
             }
-            let headline = format!("FATAL: could not open '{}': {}", lock.display(), e);
+            let headline = format!("FATAL: could not open or lock '{}': {}", lock.display(), e);
             glog!("{}", headline);
             for line in &lines {
                 glog!("{}", line);

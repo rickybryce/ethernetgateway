@@ -2022,7 +2022,7 @@ impl App {
         self.cpm_fetch_note = String::new();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let msg = match crate::cpm::fetch::download_missing(&base, |_, _, _| {}) {
+            let msg = match crate::cpm::fetch::download_missing(&base, crate::cpm::fetch::log_progress) {
                 Ok(r) => {
                     let mut m = r.summary();
                     // Grouped by reason: with no internet this is one fact

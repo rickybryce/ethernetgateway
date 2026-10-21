@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A miscased `cpm_emu_uart = OFF` no longer turns the virtual modem on.**
+  The setting that keeps CP/M guest code off the network was matched exactly,
+  and anything it did not recognise fell back to the default, a port that
+  dials out.  Case and spaces are now ignored, and a value that names nothing
+  means `off`.  Only a missing key takes the default.
+- **The login lockout holds against guesses sent all at once.**  A guess was
+  counted only after its password check finished, which takes seconds on a
+  Pi, so guesses sent in parallel from one address all got past the
+  three-attempt limit.  Telnet, SSH and the web page now check one password
+  at a time per address, so each guess sees the failures before it.  Only
+  wrong passwords are counted, as before.
+
+### Fixed
+
+- **Master/slave: a console port follows a change of master.**  After the
+  master's host, port, username or password changed, a slave's console port
+  went on registering with the old master until a restart.
+- **Master/slave: "Forget the old key" reconnects at once**, rather than up
+  to six minutes later.
+- **Master/slave: a wrong master password no longer locks the slave out.**
+  The slave's relay loops tried it together, so one wrong password counted as
+  three failures and set off the master's lockout.  A correct password typed
+  afterwards was then refused and thrown away.  Attempts now take turns, and
+  a password the master has just refused is not tried again.
+- **Master/slave: a key removed on the master is enrolled again** at the next
+  password login, not only after the slave restarts.
+- **The CP/M emulator expands TAB** as CP/M's BDOS does (functions 2 and 9),
+  and never sends bytes with bit 7 set to the terminal.  On a C64 a TAB did
+  not move the cursor, so tabbed listings ran together, and a byte such as
+  0x93 cleared the screen.
+- **CP/M virtual modem:**
+  - A remote that stops reading now drops the call after 15 seconds instead
+    of freezing the session.
+  - A command line over 128 characters, `ATD` while a call is held, and an
+    out-of-range `ATX` or `AT&C` answer `ERROR`.
+- **CP/M disk screens fit the screen**: the drive picker (25 rows), the disks
+  list and the unmount list with many mounts, and the sample-disk download.
+  With a disk set to boot, the unmount and confirm screens name its slots,
+  not drive letters, and `U` is offered only when there is something to
+  unmount.
+- **Sample-disk downloads:**
+  - The time allowed now grows with the file, so a slow link no longer gives
+    up on the large hard-disk images and skips the small disks behind them.
+  - A downloaded file is written to disk before it is named, so a power cut
+    cannot leave an empty disk image that counts as already downloaded.
+  - Telnet shows progress, and the desktop and web pages log it.
+  - Clearing out stale partial downloads no longer touches the operator's own
+    `.part` files.
+- **Booted machines:**
+  - FD1771 (Cromemco, Tarbell): a Read Address nobody collects no longer
+    leaves DRQ set into the next command.  The Index bit moves after a Force
+    Interrupt, and Read Track is no longer reported as write-protected.
+  - 88-DCDD: a sector cut short is padded with its last byte, as on the real
+    controller.
+  - z80pack: common-memory write-protect applies before any memory bank is
+    allocated.
+  - VDM-1: the rows above the scroll register's first-row field are blanked.
+- **The terminal banner fits a C64** ("PETSCII (C64)", 41 columns before),
+  as do the master-password screen and the host-key confirmation screen.
+- **A caller who never answers terminal detection or the colour prompt** is
+  told goodbye and logged as a disconnect, not a session error.
+- **A telnet command split across packets** is no longer read as keystrokes
+  when the gateway stops reading partway through it.
+- **"Already running" is reported only when another copy really holds the
+  lock.**  On a volume that cannot lock files (NFS without its lock daemon,
+  some network and FUSE mounts) the gateway named a stale PID and offered to
+  take over from it; it now reports the real error.  A handover waits for a
+  copy that has agreed to stop, and a request made just as a copy starts is no
+  longer deleted as stale.
+- Printer: staging files left by a crash are cleared after an hour and no
+  longer count toward the spool folder's size limit.
+- Router detection: an IPv6-only answer names the IPv4 `x.x.x.1` rule still
+  in force.  On Windows, inactive persistent routes are ignored.
+- macOS: the advice on finding the copy that holds a port uses `lsof` and
+  `pgrep -l`.
+
 ## [1.0.5] - 2026-10-18
 
 ### Security

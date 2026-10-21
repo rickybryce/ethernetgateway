@@ -209,7 +209,9 @@ mod tests {
 
     #[test]
     fn test_file_media_round_trip() {
-        let dir = std::env::temp_dir().join("egw_media_test");
+        // Per process: two test runs at once (a worktree, a reviewer's build)
+        // shared one fixed folder and could remove each other's file.
+        let dir = std::env::temp_dir().join(format!("egw_media_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("img.dsk");
         std::fs::write(&path, vec![0u8; 512]).unwrap();
@@ -227,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_read_only_open_refuses_writes() {
-        let dir = std::env::temp_dir().join("egw_media_test_ro");
+        let dir = std::env::temp_dir().join(format!("egw_media_test_ro_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("img.dsk");
         std::fs::write(&path, vec![0u8; 256]).unwrap();

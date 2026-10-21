@@ -68,6 +68,12 @@ pub(crate) const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
 /// is made, so a caller can test for it by value.
 pub(crate) const PEER_CLOSED_ERR: &str = "connection closed by the peer";
 
+/// A committed IAC sequence stalled mid-way.  Its own constant, like
+/// [`PEER_CLOSED_ERR`], because a caller decides on it: Punter treats it as "no
+/// code this round" and re-probes, and it matched the *text* -- a rewording
+/// here would have silently turned a recoverable stall into an abort.
+pub(crate) const IAC_TIMEOUT_ERR: &str = "Telnet IAC sequence timed out";
+
 /// A read error as the protocols report it, with a hang-up made recognisable.
 pub(crate) fn read_error(e: std::io::Error) -> String {
     if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -214,8 +220,11 @@ async fn read_iac_continuation(
     )
     .await
     {
-        Err(_) => Err("Telnet IAC sequence timed out".into()),
-        Ok(r) => r.map(|_| ()).map_err(|e| e.to_string()),
+        Err(_) => Err(IAC_TIMEOUT_ERR.into()),
+        // Through `read_error`, like every other read here: a peer that hangs
+        // up between IAC and its command byte is a hang-up, not a generic
+        // error the caller cannot recognise.
+        Ok(r) => r.map(|_| ()).map_err(read_error),
     }
 }
 
@@ -235,12 +244,12 @@ pub(crate) async fn consume_telnet_command(
                     reader
                         .read_exact(&mut buf)
                         .await
-                        .map_err(|e| e.to_string())?;
+                        .map_err(read_error)?;
                     if buf[0] == IAC {
                         reader
                             .read_exact(&mut buf)
                             .await
-                            .map_err(|e| e.to_string())?;
+                            .map_err(read_error)?;
                         if buf[0] == SE {
                             break;
                         }
@@ -303,6 +312,23 @@ pub(crate) async fn raw_write_bytes(
 
 #[cfg(test)]
 mod tests {
+
+    /// A peer that hangs up straight after `IAC` is a hang-up, recognisable by
+    /// value -- it came back as the I/O library's own text, which no caller
+    /// tests for.
+    #[tokio::test]
+    async fn test_a_hang_up_mid_iac_is_peer_closed() {
+        use tokio::io::AsyncWriteExt;
+        let (mut near, mut far) = tokio::io::duplex(16);
+        near.write_all(&[IAC]).await.unwrap();
+        drop(near);
+        assert_eq!(raw_read_byte(&mut far, true).await, Err(PEER_CLOSED_ERR.to_string()));
+        let (mut near, mut far) = tokio::io::duplex(16);
+        near.write_all(&[IAC, SB, 24]).await.unwrap();
+        drop(near);
+        assert_eq!(raw_read_byte(&mut far, true).await, Err(PEER_CLOSED_ERR.to_string()));
+    }
+
     use super::*;
 
     /// N4: once an IAC sequence has started, a peer that sends the lead

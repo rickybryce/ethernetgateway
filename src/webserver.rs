@@ -323,11 +323,32 @@ async fn handle_connection(
     };
 
     if live_security {
+        // This address's turn at a credential check, held until a failure is
+        // counted -- `telnet::auth_turn`, the rule telnet and SSH follow -- and
+        // the lockout asked again inside it: the gate above ran before the
+        // request was read, so overlapping wrong guesses all passed it.  Only a
+        // request that presents a credential waits for a turn; the browser's
+        // first, credential-less request has nothing to check.
+        //
+        // Released the moment the answer is known (below), never held while
+        // a page is served: a browser sends its requests in parallel, and
+        // the polling screens would queue behind each other's responses.
+        let turn = if request_presented_credential(&request) {
+            Some(telnet::auth_turn(peer_ip).await)
+        } else {
+            None
+        };
+        if turn.is_some() && telnet::is_locked_out(&lockouts, peer_ip) {
+            let body = b"429 Too Many Requests\nToo many failed logins. Try again later.\n";
+            write_locked_out(&mut stream, body).await?;
+            return Ok(());
+        }
         if is_authorized(&request).await {
             // Successful auth clears the lockout entry so a legitimate
             // user who fat-fingered once or twice isn't stuck waiting
             // out the 5-minute window after typing the right password.
             telnet::clear_lockout(&lockouts, peer_ip);
+            drop(turn);
         } else {
             // Only a *present but wrong* credential counts toward the
             // brute-force limit.  A request with no Authorization header is
@@ -339,6 +360,7 @@ async fn handle_connection(
             // credential, so the lockout still bites the case that matters.
             if request_presented_credential(&request) {
                 let count = telnet::record_auth_failure(&lockouts, peer_ip);
+                drop(turn);
                 glog!(
                     "Web: auth failed for {} (attempt {}/{})",
                     peer_ip,
@@ -1238,7 +1260,7 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // one of sixteen, not the server.
     if fields.get("action").map(String::as_str) == Some("getdisks") {
         let base = crate::cpm::layout::cpm_dir(&old_cfg.transfer_dir);
-        let msg = match crate::cpm::fetch::download_missing(&base, |_, _, _| {}) {
+        let msg = match crate::cpm::fetch::download_missing(&base, crate::cpm::fetch::log_progress) {
             Ok(r) => {
                 let mut m = format!("Sample disks: {}.", r.summary());
                 // Named, not just counted: "3 failed" with no names leaves the

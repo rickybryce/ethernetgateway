@@ -1242,8 +1242,11 @@ fn test_cpm_announced_flag_roundtrips() {
     // touching config that isn't there (it reads the live config singleton).
     set_cpm_announced(true);
     log_slave_link_summary("192.0.2.10", 2223);
+    // Announced, the emulator alone is a working link to the master.
+    assert_eq!(super::slave_relay_status(), super::SlaveRelayStatus::Connected);
     set_cpm_announced(false);
     log_slave_link_summary("192.0.2.10", 2223);
+    assert!(!super::CPM_ANNOUNCED.load(std::sync::atomic::Ordering::SeqCst), "the flag stuck");
 }
 
 #[test]
@@ -1450,7 +1453,7 @@ async fn test_a_mode_the_slave_did_not_report_is_not_invented() {
 #[tokio::test]
 async fn test_remote_port_reregister_generation_guard() {
     use std::net::IpAddr;
-    let ip: IpAddr = "203.0.113.9".parse().unwrap();
+    let ip: IpAddr = "203.0.113.19".parse().unwrap();
 
     // First registration (old channel) -> gen0.
     let (master_old, _dev_old) = tokio::io::duplex(64);
@@ -2090,6 +2093,9 @@ async fn test_relay_onward_dial_zmodem_large() {
 /// rule can be wrong for every surface at once.
 #[test]
 fn test_the_master_credential_prompt_appears_and_withdraws() {
+    // The same process-wide state the key-auth tests and the session screens'
+    // tests change: without the lock their asserts saw this one's writes.
+    let _lock = super::key_auth_test_lock();
     super::clear_master_credential_needed();
     assert!(super::master_credential_needed().is_none(), "nothing wrong, nothing shown");
 
@@ -2564,6 +2570,15 @@ fn test_a_refused_key_offer_is_retried_later_and_logged_once() {
     // Accepted: final, however long passes.
     latch.accepted();
     assert!(!latch.should_offer(t1 + ENROL_RETRY_AFTER * 100), "an enrolled key is not re-offered");
+
+    // Until the master refuses that key: final was true of that enrolment,
+    // and a slave whose key was removed must be able to enrol again.
+    latch.revoked();
+    assert!(latch.should_offer(t1 + ENROL_RETRY_AFTER * 100), "a revoked key is never re-enrolled");
+    let src = include_str!("../relay.rs").replace("\r\n", "\n");
+    let refused = src.find("Ok(_) => {\n                    note_relay_key_auth(false);").expect("the refused-key arm");
+    let arm = &src[refused..refused + 400];
+    assert!(arm.contains("enrol_latch().revoked();"), "a refused key leaves the old enrolment standing");
 }
 
 /// A relay `exec` that could not be **sent** is a network fault.  A master's
@@ -2740,4 +2755,36 @@ async fn test_a_hangup_delivers_its_last_bytes_and_ends_a_chattering_survivor() 
         "a survivor that keeps talking held the bridge open"
     );
     chatter.abort();
+}
+
+/// **A password the master just refused is not tried again by the next loop.**
+/// Every relay loop woke at once on a retry, so one wrong password was three
+/// failures in a burst -- the master's lockout -- and a correct one typed after
+/// it was refused by the lockout and dropped as wrong.  Attempts take turns,
+/// and the loop whose turn comes second sees the first one's refusal.
+#[test]
+fn test_a_refused_password_is_not_retried_by_the_next_loop() {
+    use super::{note_refused_password, recently_refused};
+    // The hold is process-wide, and any test's `request_retry_now` clears it.
+    let _lock = super::key_auth_test_lock();
+    let (host, port) = ("203.0.113.88", 2222);
+    note_refused_password(host, port, "relay", "wrong");
+    assert!(recently_refused(host, port, "relay", "wrong"), "the burst would try it again");
+    assert!(!recently_refused(host, port, "relay", "right"), "a newly typed password must be tried");
+    assert!(!recently_refused(host, port, "admin", "wrong"), "a corrected username must be tried");
+    assert!(!recently_refused("203.0.113.89", port, "relay", "wrong"), "another master is another question");
+    // An operator's retry is tried, even with the same password: they may
+    // have fixed the master.
+    super::request_retry_now();
+    assert!(!recently_refused(host, port, "relay", "wrong"), "a retry asked for was refused locally");
+    const { assert!(super::REFUSED_PASSWORD_HOLD.as_secs() >= crate::telnet::LOCKOUT_DURATION.as_secs()) };
+
+    let src = include_str!("../relay.rs").replace("\r\n", "\n");
+    let f = &src[src.find("async fn connect_master_relay_inner(").expect("the connect")..];
+    let f = &f[..f.find("\n}\n").expect("its end")];
+    let turn = f.find("PASSWORD_TURN.lock().await").expect("attempts take no turns");
+    let check = f.find("recently_refused(host, port, username, password)").expect("no check");
+    let guess = f.find("authenticate_password(").expect("the guess");
+    assert!(turn < check && check < guess, "the turn and the check must come before the guess");
+    assert!(f.contains("note_refused_password(host, port, username, password);"), "a refusal is not recorded");
 }

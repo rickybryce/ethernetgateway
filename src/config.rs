@@ -2725,11 +2725,25 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .filter(|&v: &u32| v >= 1)
             .map(|v: u32| v.min(MAX_CPM_EMU_MAX_MINSTR))
             .unwrap_or(DEFAULT_CPM_EMU_MAX_MINSTR),
-        cpm_emu_uart: map
-            .get("cpm_emu_uart")
-            .filter(|v| crate::cpm::uart::is_valid_uart_key(v))
-            .cloned()
-            .unwrap_or_else(|| crate::cpm::uart::DEFAULT_UART.to_string()),
+        // Missing means the default; *present* but unrecognised means `off`.
+        // This is the key that closes the guest's way to the network, so a
+        // hand-edited `OFF` or a typo has to fail closed: it used to fall back
+        // to the default, a UART that dials out.  Case and spaces are forgiven
+        // first, as for the other hand-edited keys.
+        cpm_emu_uart: match map.get("cpm_emu_uart").map(|v| v.trim().to_ascii_lowercase()) {
+            None => crate::cpm::uart::DEFAULT_UART.to_string(),
+            Some(v) if crate::cpm::uart::is_valid_uart_key(&v) => v,
+            // Said in the log, because off is also what the operator sees: a
+            // profile name an older version wrote, or a typo, turns the modem
+            // off, and nothing else would say why `ATDT` stopped answering.
+            Some(v) => {
+                glog!(
+                    "Warning: cpm_emu_uart = {:?} names no modem profile; the CP/M virtual modem is off",
+                    v
+                );
+                "off".to_string()
+            }
+        },
         cpm_mounts: map.get("cpm_mounts").cloned().unwrap_or_default(),
         cpm_boot_image: map.get("cpm_boot_image").cloned().unwrap_or_default(),
         // Missing means `auto`: a config written before this key existed gets
@@ -4635,8 +4649,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             }
         }
         "cpm_emu_uart" => {
-            if crate::cpm::uart::is_valid_uart_key(value) {
-                cfg.cpm_emu_uart = value.to_string();
+            let value = value.trim().to_ascii_lowercase();
+            if crate::cpm::uart::is_valid_uart_key(&value) {
+                cfg.cpm_emu_uart = value;
             }
         }
         "cpm_emu_echo" => cfg.cpm_emu_modem.echo = value.eq_ignore_ascii_case("true"),
@@ -8505,6 +8520,31 @@ mod tests {
             apply_config_key(&mut cfg, "cpm_boot_image", bad);
             assert_eq!(cfg.cpm_boot_image, "good.dsk", "{bad:?} must be refused");
         }
+    }
+
+    /// `cpm_emu_uart = off` is the documented way to keep guest code off the
+    /// network, and it used to be matched exactly: `OFF` was "unknown", and
+    /// unknown fell back to the default -- a UART that dials out.  Case and
+    /// spaces are forgiven now, and a value that is present but names nothing
+    /// fails *closed*.  Only a missing key takes the default.
+    #[test]
+    fn test_a_miscased_or_unknown_uart_fails_closed() {
+        use crate::cpm::uart::{resolve_access, ModemAccess, DEFAULT_UART};
+        let dir = std::env::temp_dir().join(format!("egw_uart_parse_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("egateway.conf");
+        let read = |body: &str| {
+            std::fs::write(&path, body).unwrap();
+            read_config_file(&path.to_string_lossy()).cpm_emu_uart
+        };
+        for off in ["off", "OFF", "Off", " off "] {
+            let got = read(&format!("telnet_port = 2323\ncpm_emu_uart = {off}\n"));
+            assert_eq!(resolve_access(&got), ModemAccess::Off, "{off:?} read as {got:?}");
+        }
+        assert_eq!(read("telnet_port = 2323\ncpm_emu_uart = RC2014_2A\n"), "rc2014_2a");
+        assert_eq!(read("telnet_port = 2323\ncpm_emu_uart = of\n"), "off", "a typo must not dial out");
+        assert_eq!(read("telnet_port = 2323\n"), DEFAULT_UART, "missing still means the default");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

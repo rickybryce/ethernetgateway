@@ -472,6 +472,49 @@ async fn test_a_lockout_is_checked_before_every_guess() {
     assert_eq!(count, Some(MAX_AUTH_ATTEMPTS), "the guess was verified after the lockout tripped");
 }
 
+/// **One credential check at a time per address.**  The lockout check and the
+/// failure count sit either side of the KDF -- seconds on a Pi -- so guesses
+/// that overlapped it all passed the check before any was counted: twenty
+/// sessions at the prompt were twenty guesses a window, not three.  In turn,
+/// each sees the count the last one left.  And it is a turn, not a count up
+/// front, so a correct password is never counted while it is being checked.
+#[tokio::test]
+async fn test_credential_checks_take_turns_per_address() {
+    let a: IpAddr = "192.0.2.78".parse().unwrap();
+    let b: IpAddr = "192.0.2.79".parse().unwrap();
+    let held = auth_turn(a).await;
+    let short = std::time::Duration::from_millis(50);
+    assert!(tokio::time::timeout(short, auth_turn(a)).await.is_err(), "a second guess overlapped the first");
+    assert!(tokio::time::timeout(short, auth_turn(b)).await.is_ok(), "another address waited for this one");
+    drop(held);
+    assert!(tokio::time::timeout(short, auth_turn(a)).await.is_ok(), "the turn was never given back");
+
+    let telnet = include_str!("session.rs").replace("\r\n", "\n");
+    let ssh = include_str!("../ssh.rs").replace("\r\n", "\n");
+    let web = include_str!("../webserver.rs").replace("\r\n", "\n");
+    for (what, src, start, verify) in [
+        ("telnet", &telnet, "async fn authenticate(", "verify_off_runtime("),
+        ("ssh", &ssh, "async fn auth_password(", "verify_off_runtime("),
+        ("web", &web, "if live_security {", "is_authorized(&request)"),
+    ] {
+        let f = &src[src.find(start).expect(start)..];
+        let f = &f[..f.find("\n    }\n").expect("its end")];
+        let turn = f.find("auth_turn(").unwrap_or_else(|| panic!("{what}: no turn"));
+        let check = turn + f[turn..].find("is_locked_out(").unwrap_or_else(|| panic!("{what}: no check in the turn"));
+        let guess = f.find(verify).unwrap_or_else(|| panic!("{what}: no verify"));
+        let count = f.find("record_auth_failure(").unwrap_or_else(|| panic!("{what}: no count"));
+        assert!(turn < check && check < guess && guess < count, "{what}: the check and the count are not inside one turn");
+        // And given back once the count is made -- not held through the
+        // message and the pause after it, which every listener's checks from
+        // this address would wait on.
+        if what != "ssh" {
+            let back = count + f[count..].find("drop(turn)").unwrap_or_else(|| panic!("{what}: the turn is kept"));
+            let said = count + f[count..].find("send").unwrap_or(f.len() - count);
+            assert!(back < said, "{what}: the turn is held while the answer is sent");
+        }
+    }
+}
+
 #[test]
 fn test_lockout_different_ips() {
     let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
@@ -1064,7 +1107,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         is_ssh: false,
         idle_timeout: std::time::Duration::ZERO,
         pushback: None,
-        mid_iac_cmd: false,
+        iac_resume: crate::telnet::io::SessionIac::Data,
         peer_eof: false,
         last_was_cr: false,
         neg_sent_will: Box::new([false; 256]),
@@ -1130,7 +1173,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         is_ssh: false,
         idle_timeout: std::time::Duration::ZERO,
         pushback: None,
-        mid_iac_cmd: false,
+        iac_resume: crate::telnet::io::SessionIac::Data,
         peer_eof: false,
         last_was_cr: false,
         neg_sent_will: Box::new([false; 256]),
@@ -7020,6 +7063,12 @@ fn test_the_detection_prompts_fit_a_c64_screen() {
         // cannot rely on any translation on the way out.
         assert!(prompt.is_ascii(), "the {what} prompt must be ASCII: {prompt:?}");
     }
+    // And the line that answers it, on every terminal it can name.
+    for t in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+        let line = crate::telnet::session::detected_line(t);
+        let line = line.trim();
+        assert!(line.chars().count() <= PETSCII_COLS, "{line:?} is {} columns", line.chars().count());
+    }
     // The re-ask has to name the key it is refusing, or it reads as the same
     // question repeating for no reason.
     assert!(
@@ -7235,7 +7284,7 @@ async fn test_cpm_dir_operand_selects_directory_or_pattern() {
 
 /// What a terminal would show for `out`: SGR colour dropped, CR back to column
 /// 0, LF to a new row, and printable characters overwriting in place.
-fn render_rows(out: &[u8]) -> Vec<String> {
+pub(in crate::telnet) fn render_rows(out: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(out);
     let mut rows: Vec<Vec<char>> = vec![Vec::new()];
     let mut col = 0usize;
@@ -7908,6 +7957,41 @@ async fn test_a_prompt_client_gets_through_the_door_with_the_deadline_armed() {
     reader.abort();
 }
 
+/// Draw `offer_master_password` for `host:port` on a PETSCII session, answer
+/// it with `answer` and a key, and return the rows a terminal would hold.
+fn draw_master_password_screen(host: &str, port: u16, answer: &str) -> Vec<String> {
+    // The relay state this screen reads and writes is process-wide.
+    let _g = crate::relay::key_auth_test_lock();
+    crate::relay::note_master_credential_needed(host, port);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let out = rt.block_on(async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut session, peer) = make_test_session_with_peer(TerminalType::Petscii);
+        let (mut pr, mut pw) = tokio::io::split(peer);
+        let mut keys = answer.as_bytes().to_vec();
+        keys.push(b' ');
+        pw.write_all(&keys).await.unwrap();
+        let run = async move { session.offer_master_password().await.unwrap() };
+        let mut out = Vec::new();
+        let (_, r) = tokio::join!(run, pr.read_to_end(&mut out));
+        r.unwrap();
+        out
+    });
+    crate::relay::clear_master_credential_needed();
+    crate::relay::clear_pending_master_password();
+    // PETSCII: colour codes are single bytes, not UTF-8.  Shifted letters
+    // land outside ASCII, so the rows are compared case-blind.
+    let text: String = out
+        .iter()
+        .filter(|&&b| matches!(b, b'\r' | b'\n' | 0x20..=0x7F | 0xA0..=0xFF))
+        .map(|&b| crate::telnet::petscii_to_ascii_byte(b) as char)
+        .collect();
+    let rows = render_rows(text.as_bytes());
+    let rows: Vec<String> = rows.into_iter().skip_while(|r| r.trim().is_empty()).collect();
+    let end = rows.iter().rposition(|r| !r.trim().is_empty()).map_or(0, |i| i + 1);
+    rows[..end].to_vec()
+}
+
 /// **The master-password screen fits a C64.**
 ///
 /// 40 columns and 22 rows is the budget for every screen this gateway draws,
@@ -7933,10 +8017,20 @@ fn test_the_master_password_screen_fits_a_c64() {
                 line.chars().count() + 2
             );
         }
-        // 3 frame rows + a blank + the body + a blank + the prompt + 2 rows of
-        // confirmation + a blank + "press any key" — all inside 22.
-        let rows = 3 + 1 + body.len() + 1 + 1 + 2 + 1 + 1;
-        assert!(rows <= 22, "the screen is {rows} rows for {host}");
+        // Counted on the screen as drawn, for both answers.  This used to add
+        // up a model of it, which left out the blank the code drew after the
+        // prompt -- so a wrapped address made 23 rows while the sum said 22.
+        for answer in ["\r", "hunter2\r"] {
+            let rows = draw_master_password_screen(host, port, answer);
+            assert!(rows.len() <= 22, "{} rows for {host} answering {answer:?}", rows.len());
+            for r in &rows {
+                assert!(r.chars().count() <= 40, "{r:?} is too wide");
+            }
+            assert!(
+                rows.iter().any(|r| r.to_ascii_lowercase().contains("press any key")),
+                "the whole screen was drawn: {rows:#?}"
+            );
+        }
     }
     // A very long address wraps rather than being silently cut: it is on its
     // own line precisely so the rest of the screen cannot be pushed out.
@@ -15686,4 +15780,92 @@ async fn test_a_half_read_command_is_finished_not_left_for_the_prompt() {
     assert_eq!(gw.matches("inbound.finish(&mut *self.reader).await;").count(), 3, "a gateway bridge");
     let ser = include_str!("serial_ui.rs");
     assert_eq!(ser.matches("inbound.finish(&mut *self.reader).await;").count(), 1, "the ring screen");
+}
+
+/// **A caller who never answers detection is an abandoned session, not an
+/// error.**  Detection says goodbye and ends with `TimedOut`, and `run` used to
+/// pass that up through its `?` -- outside the arm that treats an idle timeout
+/// as a normal end -- so every probe that connected and sent nothing logged
+/// "session error".
+#[tokio::test(start_paused = true)]
+async fn test_a_silent_caller_at_detection_ends_normally() {
+    use tokio::io::AsyncReadExt;
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let (mut s, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+    let drain = async {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 512];
+        while let Ok(n) = peer.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        out
+    };
+    let (r, out) = tokio::join!(
+        async {
+            let r = s.run().await;
+            drop(s);
+            r
+        },
+        drain
+    );
+    assert!(r.is_ok(), "a silent caller ended as an error: {r:?}");
+    assert!(String::from_utf8_lossy(&out).contains("Disconnected"), "and was not told");
+}
+
+/// **A read dropped in the middle of a telnet command resumes there.**  The
+/// session reader kept its place only between `IAC` and the command byte, so a
+/// NAWS whose tail arrived after a 20 ms drain gave up -- or an option byte
+/// after a `WILL` -- was read afterwards as keystrokes.  Dropped at every byte
+/// here, in turn.
+#[tokio::test]
+async fn test_a_dropped_read_resumes_inside_a_telnet_command() {
+    use tokio::io::AsyncWriteExt;
+    let naws: &[u8] = &[IAC, SB, OPT_NAWS, 0, 80, 0, 24, IAC, SE];
+    let will: &[u8] = &[IAC, WILL, OPT_NAWS];
+    for cmd in [naws, will] {
+        for split in 1..cmd.len() {
+            let (mut s, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+            peer.write_all(&cmd[..split]).await.unwrap();
+            // The drain's short read, dropped with the command half-read.
+            let early = tokio::time::timeout(std::time::Duration::from_millis(20), s.session_read_byte()).await;
+            assert!(early.is_err(), "split {split}: a half command produced {early:?}");
+            peer.write_all(&cmd[split..]).await.unwrap();
+            peer.write_all(b"x").await.unwrap();
+            let next = tokio::time::timeout(std::time::Duration::from_secs(2), s.session_read_byte()).await;
+            assert_eq!(
+                next.expect("the read stalled").unwrap(),
+                Some(b'x'),
+                "split {split} of {cmd:02X?}: the rest of the command was read as a keystroke"
+            );
+        }
+    }
+}
+
+/// **A drain that gives up mid-command leaves the command settled.**  Its
+/// caller may hand the raw reader on to a bridge or a transfer, which start
+/// from data: left mid-NAWS, the rest of it went to them as data.  After the
+/// drain the command is finished and the byte after it is kept for whoever
+/// reads next.
+#[tokio::test]
+async fn test_a_drain_settles_a_half_read_command() {
+    use tokio::io::AsyncWriteExt;
+    let (mut s, peer) = make_test_session_with_peer(TerminalType::Ascii);
+    let (_r, mut w) = tokio::io::split(peer);
+    w.write_all(&[IAC, SB, OPT_NAWS, 0]).await.unwrap();
+    let late = async {
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        w.write_all(&[80, 0, 24, IAC, SE, b'x']).await.unwrap();
+        w
+    };
+    let (_, _w) = tokio::join!(s.drain_input(), late);
+    assert!(matches!(s.iac_resume, crate::telnet::io::SessionIac::Data), "the drain left a command half-read");
+    // The byte after the command is left on the wire for whoever reads next --
+    // a transfer or a bridge reads the raw reader, not the session's pushback.
+    assert_eq!(s.pushback, None, "the byte after the command was taken by the drain");
+    let mut next = [0u8; 1];
+    tokio::io::AsyncReadExt::read_exact(&mut s.reader, &mut next).await.unwrap();
+    assert_eq!(next, [b'x'], "the next reader did not get it");
 }

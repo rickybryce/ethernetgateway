@@ -63,6 +63,16 @@ impl Mmu {
         self.banks.is_empty()
     }
 
+    /// Must a write go through [`Mmu::write`]?  Not only when banks exist:
+    /// z80pack's `memwrt` refuses a write at or above the segment size whenever
+    /// the protect register is non-zero, before it looks at banks at all -- so
+    /// a guest that protects common memory and then writes it, with no bank
+    /// allocated yet, is refused there and was not here.
+    #[inline]
+    pub fn intercepts_writes(&self) -> bool {
+        !self.banks.is_empty() || self.wp_common != 0
+    }
+
     /// Does this address currently live in a bank other than 0?
     ///
     /// The whole mapping rule, and it is worth stating plainly: an address at or

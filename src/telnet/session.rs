@@ -189,6 +189,18 @@ pub(crate) fn master_password_screen_lines(host: &str, port: u16) -> Vec<String>
     lines
 }
 
+/// The line that confirms the detection.  Its own function so its width is
+/// tested: `PETSCII (Commodore 64)` made it 41 columns, and the one terminal it
+/// was too wide for was the one it named.
+pub(in crate::telnet) fn detected_line(terminal: TerminalType) -> String {
+    let name = match terminal {
+        TerminalType::Petscii => "PETSCII (C64)",
+        TerminalType::Ansi => "ANSI",
+        TerminalType::Ascii => "ASCII",
+    };
+    format!("\r\nTerminal detected: {name}\r\n")
+}
+
 /// The valid-key hint shown when the main menu gets a key it does not know.
 ///
 /// Built from a list rather than written out, because the variants multiply:
@@ -302,8 +314,11 @@ impl TelnetSession {
         self.flush().await?;
 
         let typed = self.get_password_input().await?.unwrap_or_default();
+        // No blank row before the answer: Enter has already ended the prompt
+        // row (the input loop echoes CR LF), so one here was a second blank --
+        // and the 23rd row of a screen whose body grows a line when the
+        // address wraps.  `test_the_master_password_screen_fits_a_c64` draws it.
         if typed.trim().is_empty() {
-            self.send_line("").await?;
             self.send_line("  Skipped. The relay stays down.").await?;
         } else {
             // **Held in memory, never written.** It is needed for exactly one
@@ -315,7 +330,6 @@ impl TelnetSession {
             // minutes away on a backoff, and a screen that goes on demanding a
             // password somebody just typed reads as "it did not take".
             crate::relay::clear_master_credential_needed();
-            self.send_line("").await?;
             self.send_line("  Held for the next attempt. It is").await?;
             self.send_line("  not written to the config.").await?;
         }
@@ -465,8 +479,11 @@ impl TelnetSession {
             let mut attempt = 0;
             loop {
                 // Read per attempt, not once before the loop: the name can
-                // land while we are waiting, and a client that announced one
-                // should not then be held for the full minute.
+                // land while we are waiting, and the attempt after it should
+                // wait the shorter time.  Not the attempt it lands in -- that
+                // timeout is already armed, so a name announced after the
+                // prompt still waits out the first one.  (Re-arming on a late
+                // TTYPE would be the fix if that ever matters; it has not.)
                 let detect_wait =
                     if self.ttype_matched { ANNOUNCED_WAIT } else { DETECT_WAIT };
                 let waited = tokio::time::timeout(detect_wait, self.read_byte_filtered()).await;
@@ -567,13 +584,7 @@ impl TelnetSession {
         // overwrite what the machine itself told us.
         self.ttype_matched = true;
 
-        let type_name = match self.terminal_type {
-            TerminalType::Petscii => "PETSCII (Commodore 64)",
-            TerminalType::Ansi => "ANSI",
-            TerminalType::Ascii => "ASCII",
-        };
-        self.send(&format!("\r\nTerminal detected: {}\r\n", type_name))
-            .await?;
+        self.send(&detected_line(self.terminal_type)).await?;
         self.flush().await?;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         self.drain_input().await;
@@ -597,6 +608,15 @@ impl TelnetSession {
             )
             .await
             {
+                // The idle timeout from inside the read is the same event as
+                // ours expiring, as in detection above: with
+                // `idle_timeout_secs` under 60 it fires first, and passing it
+                // up dropped the caller with no goodbye.
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    self.send_raw(b"\r\n\r\n  Disconnected: idle timeout.\r\n\r\n")
+                        .await?;
+                    return Err(e);
+                }
                 Ok(result) => match result? {
                     Some(b) => b,
                     None => return Ok(()),
@@ -911,9 +931,23 @@ impl TelnetSession {
             // extra guess per open session (and `conn_rate_max` allows twenty
             // a minute), and a correct one would log in from a locked-out
             // address.  Refused before the KDF runs, so it costs nothing.
+            //
+            // **Inside this address's turn** -- see `auth_turn` -- held until
+            // the failure is counted below, so guesses that overlap the KDF
+            // cannot all pass this check before any of them is counted.
+            //
+            // Given back the moment the outcome is known, never held through
+            // a message or the pause after one: SSH and the web listener's
+            // checks from this address wait on it, and a client that has
+            // stopped reading would keep it for as long as the send blocked.
+            let turn = match self.peer_addr {
+                Some(ip) => Some(auth_turn(ip).await),
+                None => None,
+            };
             if let Some(ip) = self.peer_addr
                 && is_locked_out(&self.lockouts, ip)
             {
+                drop(turn);
                 glog!("Telnet: auth rejected for {} (locked out mid-login)", ip);
                 self.send_line(&format!("  {}", self.red("Too many attempts. Try later.")))
                     .await?;
@@ -938,6 +972,7 @@ impl TelnetSession {
 
             if let Some(ip) = self.peer_addr {
                 let count = record_auth_failure(&self.lockouts, ip);
+                drop(turn);
                 if count >= MAX_AUTH_ATTEMPTS {
                     glog!("Telnet: {} locked out after {} failures", ip, count);
                     self.send_line(&format!(
@@ -1055,8 +1090,24 @@ impl TelnetSession {
             // `new_relay` sessions (also `is_serial`) were authenticated by
             // the SSH door they came through.
             let deadline = (!self.is_serial).then_some(crate::telnet::PRE_LOGIN_DEADLINE);
-            if !self.through_the_door(cfg.security_enabled, deadline).await? {
-                return Ok(());
+            match self.through_the_door(cfg.security_enabled, deadline).await {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                // Detection and the colour prompt time out on purpose, and say
+                // goodbye before they do: a probe that connects and sends
+                // nothing is an abandoned session, as on every later screen --
+                // not the "session error" the `?` here used to log it as.
+                // Logged with its reason, all the same: a socket's own
+                // ETIMEDOUT is this kind too, and a real network fault at the
+                // door must not vanish from the log.
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    glog!(
+                        "Telnet: {} disconnected before logging in ({e})",
+                        self.peer_addr.map_or_else(|| "a client".to_string(), |a| a.to_string())
+                    );
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
             }
             // **What happened at the door, written down at the door.**  The
             // power page needs to know whether this session proved anything,

@@ -356,6 +356,26 @@ pub fn tests_reset() {
     lock!(booted_images()).clear();
 }
 
+/// A read-only in-memory mount named `filename`, for screens' tests to fill
+/// the table with.
+#[cfg(test)]
+pub fn test_mount(filename: &str) -> Mount {
+    use super::format::by_token;
+    use super::media::MemMedia;
+    let fmt = by_token("ibm3740").unwrap();
+    let img = vec![0xE5u8; fmt.min_bytes() as usize];
+    let fs = ImageFs::mount(Box::new(MemMedia::new(img)), fmt, true).unwrap();
+    Mount {
+        path: PathBuf::from(format!("/nonexistent/{filename}")),
+        filename: filename.into(),
+        format: fmt.token,
+        read_only: true,
+        read_only_reason: String::new(),
+        host_read_only: false,
+        fs: Arc::new(Mutex::new(fs)),
+    }
+}
+
 /// The registry is process-global, so tests that touch it must not run beside
 /// each other.  Same pattern as the config tests.
 #[cfg(test)]
@@ -668,7 +688,13 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 for i in 0..3_000u32 {
                     let d = ((t as u32 + i) % NUM_DRIVES as u32) as u8;
-                    match i % 6 {
+                    match i % 7 {
+                        // The one entry point that takes all four locks: left
+                        // out, the inversion this test exists for could hide
+                        // in exactly the function most likely to have it.
+                        6 => {
+                            let _ = mount_exclusive(d, dummy_mount(), false);
+                        }
                         0 => {
                             let _ = lend_for_boot(d);
                         }

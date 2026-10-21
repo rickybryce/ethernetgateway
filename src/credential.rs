@@ -182,10 +182,10 @@ pub(crate) fn needs_rehash(stored: &str) -> bool {
 /// Hash a password for storage, as a PBKDF2-HMAC-SHA256 PHC string with a
 /// random per-password salt.
 ///
-/// Returns `None` if hashing fails, which the caller must treat as "do not
-/// store anything" rather than falling back to cleartext — silently writing
-/// the password in the clear because the hasher hiccuped is the one outcome
-/// this module exists to prevent.
+/// Returns `None` if hashing fails.  What a caller does then is its own
+/// decision and must be a deliberate one: `store_typed` and `hash_if_cleartext`
+/// keep the cleartext (a password the operator can still log in with beats one
+/// that was silently dropped), and say so in the log.
 pub(crate) fn hash(plain: &str) -> Option<String> {
     hash_with_rounds(plain, rounds())
 }

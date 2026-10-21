@@ -67,6 +67,10 @@ pub(in crate::telnet) struct Adm3a {
     /// column 0 but the C64 keeps the rows it wrapped onto linked, so its
     /// next `0x0D` still leaves from the end of them.
     petscii_wide: u16,
+    /// The BDOS's own idea of the console column, for TAB expansion -- see
+    /// [`Adm3a::bdos_conout`].  Not the terminal's: it is kept the way CP/M
+    /// 2.2 keeps it, and is only ever used the way CP/M uses it.
+    bdos_col: u8,
 }
 
 /// What a bare CR still owes the C64 once the byte after it shows it was not
@@ -96,6 +100,45 @@ enum Stage {
 }
 
 impl Adm3a {
+    /// BDOS console output (functions 2 and 9) as CP/M 2.2's `conout` does
+    /// it: a TAB becomes spaces to the next multiple of eight, and the column
+    /// it counts toward follows every byte -- printable bytes advance it, CR
+    /// returns it to 0, backspace takes one off.  "As in Function 1, tabs are
+    /// expanded" (CP/M 2.2 Interface Guide, function 2).
+    ///
+    /// The BDOS's job, not the terminal's: function 6 output and BIOS CONOUT
+    /// reach the screen raw, as on a real CP/M.  A TAB passed raw is a
+    /// terminal's to expand, and a Commodore cannot -- on a C64 0x09 enables
+    /// the case switch and moves nothing, so tabbed listings collapsed.
+    pub(in crate::telnet) fn bdos_conout(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            match b {
+                b'\t' => loop {
+                    out.push(b' ');
+                    self.bdos_col = self.bdos_col.wrapping_add(1);
+                    if self.bdos_col.is_multiple_of(8) {
+                        break;
+                    }
+                },
+                b'\r' => {
+                    out.push(b);
+                    self.bdos_col = 0;
+                }
+                0x08 => {
+                    out.push(b);
+                    self.bdos_col = self.bdos_col.saturating_sub(1);
+                }
+                b if b >= 0x20 => {
+                    out.push(b);
+                    self.bdos_col = self.bdos_col.wrapping_add(1);
+                }
+                _ => out.push(b),
+            }
+        }
+        out
+    }
+
     /// Feed one guest output byte, returning any completed operations.
     pub(in crate::telnet) fn feed(&mut self, b: u8) -> Vec<TermOp> {
         match self.stage {
@@ -165,8 +208,14 @@ impl Adm3a {
     /// scrolled the screen (near the bottom, by an amount a link would
     /// change), and once a CR LF has gone out, because where that landed is
     /// the C64's own business -- until the next jump says again.
+    ///
+    /// **Seven bits, as the ADM-3A is.**  Bit 7 is stripped first, as the
+    /// booted console does (`value & 0x7F`): passed through, 0x80-0x9F are C64
+    /// control codes -- 0x93 clears the screen, 0x8E switches to the graphics
+    /// set and breaks the case swap for the rest of the session -- and on an
+    /// ANSI terminal they are not valid UTF-8.
     pub(in crate::telnet) fn emit(&mut self, b: u8, term: TerminalType, out: &mut Vec<u8>) {
-        for op in self.feed(b) {
+        for op in self.feed(b & 0x7F) {
             if term != TerminalType::Petscii {
                 render_op(op, term, out);
                 continue;
@@ -409,6 +458,36 @@ mod tests {
     fn feed_all(bytes: &[u8]) -> Vec<TermOp> {
         let mut a = Adm3a::default();
         bytes.iter().flat_map(|&b| a.feed(b)).collect()
+    }
+
+    /// BDOS 2/9 expand a TAB to the next multiple of eight, counting from
+    /// the last CR, as CP/M 2.2's `conout` does.
+    #[test]
+    fn test_the_bdos_expands_tabs_to_columns_of_eight() {
+        let mut a = Adm3a::default();
+        assert_eq!(a.bdos_conout(b"AB\tC"), b"AB      C".to_vec());
+        assert_eq!(a.bdos_conout(b"\r\n\tX"), b"\r\n        X".to_vec());
+        // A TAB on a stop still moves a whole stop, and BS takes one back.
+        assert_eq!(a.bdos_conout(b"\r1234567\x08\t"), b"\r1234567\x08  ".to_vec());
+        // Every BDOS console write goes through it: functions 1 (its echo),
+        // 2 and 9, and function 10's echo, line end and erase.  BIOS CONOUT
+        // and function 6 stay raw, as on CP/M.
+        let emu = include_str!("cpm_emu.rs");
+        assert_eq!(emu.matches("term.bdos_conout(").count(), 6, "a BDOS write skips the tab rule");
+    }
+
+    /// Bit 7 never reaches a terminal: on a C64 0x93 would clear the screen.
+    #[test]
+    fn test_bit_seven_is_stripped_for_every_terminal() {
+        for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+            let (mut high, mut low) = (Vec::new(), Vec::new());
+            let (mut a, mut b) = (Adm3a::default(), Adm3a::default());
+            for byte in [0x93u8, 0xC1, 0xE8, 0x8E] {
+                a.emit(byte, term, &mut high);
+                b.emit(byte & 0x7F, term, &mut low);
+            }
+            assert_eq!(high, low, "{term:?}: bit 7 changed what reached the screen");
+        }
     }
 
     #[test]

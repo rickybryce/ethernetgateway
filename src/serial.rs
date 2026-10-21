@@ -1998,16 +1998,12 @@ fn console_slave_register_tick(
         return;
     }
 
-    let host = cfg.slave_master_host.clone();
-    let mport = cfg.slave_master_port;
-    let user = cfg.slave_master_username.clone();
-    let pass = cfg.slave_master_password.clone();
     let label = id.label();
     glog!(
         "Serial console (Port {}): slave mode — registering with master {}:{}",
         label,
-        host,
-        mport
+        cfg.slave_master_host,
+        cfg.slave_master_port
     );
 
     // Reconnect state (§9 #14): a capped exponential network backoff and a
@@ -2022,6 +2018,20 @@ fn console_slave_register_tick(
             crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Down);
             return;
         }
+        // Re-read every pass, as the Kermit tick does.  A change to the master
+        // (host, credentials, role) is not a port setting, so it reaches this
+        // loop as `Reconfigured` rather than as a restart -- and a copy taken
+        // before the loop re-registered with the *old* master, under a
+        // fingerprint formed from the new one, so nothing ever noticed again.
+        let cfg = config::get_config();
+        if !console_relayed_to_master(&cfg, id) || cfg.slave_master_host.is_empty() {
+            crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Down);
+            return; // the manager re-reads the config and re-dispatches
+        }
+        let host = cfg.slave_master_host.clone();
+        let mport = cfg.slave_master_port;
+        let user = cfg.slave_master_username.clone();
+        let pass = cfg.slave_master_password.clone();
         // Entering a connect attempt (covers the retry/backoff paths, which
         // all loop back here) — reflected as "connecting" until we register.
         crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Connecting);
@@ -2130,7 +2140,9 @@ fn console_slave_register_tick(
 
         // What this registration was made under; the idle wait below re-forms
         // it if any of it changes (see slave_link_fingerprint).
-        let registered_as = slave_link_fingerprint(&config::get_config(), id);
+        // Formed from the config this registration was *made* with: a read
+        // here would miss a change that landed during the connect.
+        let registered_as = slave_link_fingerprint(&cfg, id);
 
         let crate::relay::MasterRelay {
             _session,
@@ -8864,6 +8876,34 @@ mod tests {
         assert!(!peer_dial_target_eligible(&with(false, "modem", "/dev/ttyUSB0", true), SerialPortId::A));
         assert!(!peer_dial_target_eligible(&with(true, "modem", "", true), SerialPortId::A));
         assert!(!peer_dial_target_eligible(&with(true, "modem", "/dev/ttyUSB0", false), SerialPortId::A));
+    }
+
+    /// The console registration loop re-reads the master settings on every
+    /// pass.  It once copied host, port, user and password before its `loop`,
+    /// so a change to any of them (not a port setting, so no restart) reached
+    /// it as `Reconfigured` and re-registered with the *old* master -- while
+    /// the fingerprint it then waited on was formed from the new config, so
+    /// the change was never seen again.  The Kermit tick always re-read.
+    #[test]
+    fn test_the_console_register_loop_rereads_the_master_each_pass() {
+        let src = include_str!("serial.rs").replace("\r\n", "\n");
+        let tick = &src[src.find("fn console_slave_register_tick(").expect("the console tick")..];
+        let tick = &tick[..tick.find("\n}\n").expect("its end")];
+        // Spelled in pieces: `relay/tests.rs` counts the reconnect loops and
+        // relay calls in this file by these very strings, and a test that
+        // wrote them whole would be counted as one more of each.
+        let loop_at = concat!("\n    lo", "op {\n");
+        let body = &tick[tick.find(loop_at).expect("its loop")..];
+        let read = body.find("let cfg = config::get_config();").expect("no config read inside the loop");
+        let host = body.find("let host = cfg.slave_master_host.clone();").expect("host taken in the loop");
+        let connect = body.find(concat!("connect_master", "_register(")).expect("the connect");
+        assert!(read < host && host < connect, "the master is not re-read before each connect");
+        assert!(
+            body.contains("let registered_as = slave_link_fingerprint(&cfg, id);"),
+            "the fingerprint is not the config the registration was made with"
+        );
+        let before = &tick[..tick.find(loop_at).unwrap()];
+        assert!(!before.contains("let host ="), "a copy of the master is taken before the loop again");
     }
 
     /// A console port on a slave is dedicated to the master and must be

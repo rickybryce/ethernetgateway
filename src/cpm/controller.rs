@@ -84,7 +84,7 @@ pub enum HostRequest {
     /// because a surface is not contiguous in an image — one head's sectors sit
     /// once per cylinder, a cylinder apart — and it is expressed as arithmetic
     /// the controller does rather than as a list of ranges, so this stays a
-    /// plain `Copy` value like the other two.
+    /// plain `Copy` value like the other variants.
     Fill { drive: u8, offset: u64, chunk: usize, stride: u64, count: usize, byte: u8 },
 }
 
@@ -265,9 +265,10 @@ pub trait Controller: Send {
     /// Hand back every write the board is still holding, for the end of a
     /// session.
     ///
-    /// Only the 88-DCDD has any: it commits a sector when the sector passes
-    /// or the head moves, so a guest stopped between its last data byte and
-    /// either of those leaves a finished sector in the buffer.  The other
+    /// Only the 88-DCDD has any: it commits a sector when the sector passes,
+    /// the head moves or unloads, or the drive is deselected or switched, so a
+    /// guest stopped between its last data byte and any of those leaves a
+    /// finished sector in the buffer.  The other
     /// boards commit at a point the *guest* chooses -- the FD1771 when the
     /// sector's last byte arrives, the 88-HDSK on its write command -- so a
     /// buffer they hold at exit is a sector the guest never finished, and

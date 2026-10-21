@@ -75,22 +75,32 @@ impl Problem {
     /// have and they are told which they are choosing.
     pub fn explain(&self) -> Vec<String> {
         match self {
-            Problem::MasterHostKeyChanged { host, port } => vec![
-                format!("The master at {}:{}", host, port),
+            Problem::MasterHostKeyChanged { host, port } => {
+                // The address on a line of its own, cut to fit from the host
+                // side so the port survives: `The master at {host}:{port}` ran
+                // past 36 columns for any name longer than an IPv4 address,
+                // and wrapping on a C64 scrolled the title off a screen that
+                // is exactly full.  The next paragraph is a line shorter to
+                // pay for it.
+                let port = format!(":{port}");
+                let host = crate::webbrowser::truncate_to_width(host, 36 - port.len());
+                vec![
+                "The master at".to_string(),
+                format!("{host}{port}"),
                 "presents a different SSH host key".to_string(),
                 "than the one this slave pinned.".to_string(),
                 String::new(),
                 "This is normal if the master was".to_string(),
-                "reinstalled or its key was".to_string(),
-                "regenerated. It is also what a".to_string(),
-                "man-in-the-middle looks like, and".to_string(),
-                "nothing here can tell the two".to_string(),
-                "apart -- that is what pinning is".to_string(),
-                "for.".to_string(),
+                "reinstalled or its key regenerated.".to_string(),
+                "It is also what a man-in-the-middle".to_string(),
+                "looks like, and nothing here can".to_string(),
+                "tell the two apart -- that is what".to_string(),
+                "pinning is for.".to_string(),
                 String::new(),
                 "Only clear it if you know why the".to_string(),
                 "key changed.".to_string(),
-            ],
+                ]
+            }
         }
     }
 
@@ -116,7 +126,7 @@ impl Problem {
     pub fn action(&self) -> String {
         match self {
             Problem::MasterHostKeyChanged { .. } => {
-                "Forget the old key and pin the new one".to_string()
+                "Forget the key, pin the new one".to_string()
             }
         }
     }
@@ -128,7 +138,15 @@ impl Problem {
     fn apply(&self) -> Result<String, String> {
         match self {
             Problem::MasterHostKeyChanged { host, port } => {
-                match crate::telnet::forget_known_host(host, *port) {
+                let forgot = crate::telnet::forget_known_host(host, *port);
+                // A refused key put the relay on the six-minute auth backoff.
+                // Forgetting the key is the operator saying "try again", and an
+                // answer six minutes later reads as "it did not work" -- the
+                // reason a typed password asks for the same thing.
+                if forgot.is_ok() {
+                    crate::relay::request_retry_now();
+                }
+                match forgot {
                     // Re-pinning happens on the next connection, not here --
                     // saying "pinned" now would claim something that has not
                     // happened yet.
@@ -326,6 +344,22 @@ mod tests {
         assert_eq!(pending, vec![p]);
     }
 
+    /// Forgetting the key has to wake the relay: a changed key refused the
+    /// last login and put the slave on the six-minute auth backoff, and the
+    /// screen says the next connection will pin the new key.  Without a retry
+    /// that "next connection" was up to six minutes away.  TEST-NET-3 host, so
+    /// nothing is pinned for it and nothing is written.
+    #[test]
+    fn test_forgetting_the_key_retries_the_relay_now() {
+        // `request_retry_now` also clears the relay's refused-password hold,
+        // which the relay tests hold this lock to read.
+        let _lock = crate::relay::key_auth_test_lock();
+        let p = Problem::MasterHostKeyChanged { host: "203.0.113.77".to_string(), port: 2222 };
+        let before = crate::relay::retry_generation();
+        assert!(p.apply().is_ok());
+        assert!(crate::relay::retry_generation() > before, "the relay is left on its backoff");
+    }
+
     /// Resolving something that is not listed is an error, not a silent success:
     /// two operators on two surfaces can press the same button.
     #[test]
@@ -352,7 +386,11 @@ mod tests {
     /// problem added later is measured too.
     #[test]
     fn test_every_problem_fits_a_narrow_screen() {
-        for p in [key_problem()] {
+        let long = Problem::MasterHostKeyChanged {
+            host: "a-rather-long-master-hostname.example.lan".to_string(),
+            port: 22222,
+        };
+        for p in [key_problem(), long] {
             assert!(
                 p.title().chars().count() <= 36,
                 "title {:?} is {} columns",
@@ -366,9 +404,12 @@ mod tests {
                     line.chars().count()
                 );
             }
-            // The action is drawn on a wider surface (a button, a menu row with
-            // its own key) so it gets the 80-column budget.
-            assert!(p.action().chars().count() <= 60, "action {:?} is too long", p.action());
+            // The action is the text a C64 operator agrees to under "Do it?",
+            // drawn with the same indent (config_ui cuts it at 36 on PETSCII).
+            assert!(p.action().chars().count() <= 36, "action {:?} is too long", p.action());
+            // And the screen it sits on is exactly full: the explanation may
+            // not grow.  Header (4), explanation, blank, action, blank, prompt.
+            assert!(p.explain().len() <= 14, "explanation grew to {} rows", p.explain().len());
         }
     }
 }

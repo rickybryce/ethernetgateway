@@ -163,9 +163,9 @@ pub(in crate::telnet) fn idle_nap(idle_polls: u32) -> Option<std::time::Duration
 /// [`idle_nap`].  It follows that **every future passed here must be
 /// cancel-safe**, since a `Pending` one is dropped mid-flight. The two callers
 /// are: `AsyncReadExt::read` (documented cancel-safe — no data is consumed
-/// unless it completes) and [`TelnetSession::session_read_byte`], which carries
-/// a `mid_iac_cmd` resume point precisely so a cancel between an IAC and its
-/// command byte cannot desynchronise telnet parsing.
+/// unless it completes) and [`TelnetSession::session_read_byte`], which keeps
+/// its place in a telnet command on the session (`iac_resume`) precisely so a
+/// cancel at any byte of one cannot desynchronise telnet parsing.
 pub(in crate::telnet) fn poll_once<F: std::future::Future>(fut: F) -> Option<F::Output> {
     let mut fut = std::pin::pin!(fut);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -1882,7 +1882,11 @@ impl TelnetSession {
                                 .await?
                             {
                                 ConIn::Byte(b) => {
-                                    self.cpmemu_emit(&mut term, &[b]).await?;
+                                    // The echo is BDOS output too: a typed
+                                    // TAB expands, and the column it is
+                                    // counted from moves with what was typed.
+                                    let echo = term.bdos_conout(&[b]);
+                                    self.cpmemu_emit(&mut term, &echo).await?;
                                     cpm.bdos_return(b);
                                 }
                                 ConIn::BreakOut => {
@@ -1893,8 +1897,10 @@ impl TelnetSession {
                             }
                         }
                         2 => {
-                            // Console output: char in E.
-                            self.cpmemu_emit(&mut term, &[cpm.arg_e()]).await?;
+                            // Console output: char in E, TABs expanded as the
+                            // BDOS expands them (`Adm3a::bdos_conout`).
+                            let bytes = term.bdos_conout(&[cpm.arg_e()]);
+                            self.cpmemu_emit(&mut term, &bytes).await?;
                             cpm.bdos_return(0);
                         }
                         5 => {
@@ -1955,7 +1961,7 @@ impl TelnetSession {
                         9 => {
                             // Print $-terminated string at DE.
                             let de = cpm.arg_de();
-                            let s = cpm.read_dollar_string(de, 8192);
+                            let s = term.bdos_conout(&cpm.read_dollar_string(de, 8192));
                             self.cpmemu_emit(&mut term, &s).await?;
                             cpm.bdos_return(0);
                         }
@@ -2318,19 +2324,24 @@ impl TelnetSession {
                 ConIn::Disconnect => return Ok(LineRead::Disconnect),
                 ConIn::Byte(b) => match b {
                     b'\r' => {
-                        self.cpmemu_emit(term, b"\r\n").await?;
+                        let eol = term.bdos_conout(b"\r\n");
+                        self.cpmemu_emit(term, &eol).await?;
                         return Ok(LineRead::Line(buf));
                     }
                     b'\n' => {} // swallow a LF that trails a CR
                     0x08 | 0x7F => {
                         if buf.pop().is_some() {
-                            self.cpmemu_emit(term, b"\x08 \x08").await?; // erase
+                            let erase = term.bdos_conout(b"\x08 \x08");
+                            self.cpmemu_emit(term, &erase).await?; // erase
                         }
                     }
                     _ => {
                         if buf.len() < max {
                             buf.push(b);
-                            self.cpmemu_emit(term, &[b]).await?; // echo
+                            // Through the BDOS, as function 1's echo is: a
+                            // typed TAB expands, and the column follows.
+                            let echo = term.bdos_conout(&[b]);
+                            self.cpmemu_emit(term, &echo).await?; // echo
                         }
                     }
                 },
@@ -2525,15 +2536,11 @@ impl TelnetSession {
     /// question — is a byte ready right now? — in nanoseconds.
     ///
     /// Cancel-safety note: an unready read is dropped exactly as the zero
-    /// timeout dropped it, so the semantics are unchanged.  It is resumable
-    /// across the `IAC`→command split (via `session_read_byte`'s
-    /// `mid_iac_cmd`), which is the common case.  It is *not* resumable deeper
-    /// inside a telnet negotiation (a subnegotiation payload, or between a
-    /// `WILL/WONT/DO/DONT` command and its option byte).  A negotiation split
-    /// across TCP segments that lands exactly on a between-batch drain could
-    /// therefore desync the telnet parser — rare (LAN, mid-run, segment-split)
-    /// and non-fatal (no panic/security impact); the resume point is
-    /// intentionally shallow so this hot path stays simple.
+    /// timeout dropped it, so the semantics are unchanged.  It resumes at any
+    /// byte of a telnet command -- `session_read_byte` keeps its place on the
+    /// session (`iac_resume`) -- so a negotiation split across TCP segments
+    /// that lands on a between-batch drain is picked up where it stopped.
+    /// (Until 1.0.6 only the `IAC`-to-command split resumed.)
     async fn cpmemu_oob_drain(
         &mut self,
         pending: &mut VecDeque<u8>,

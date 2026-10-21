@@ -15,6 +15,28 @@ use super::*;
 use crate::cpm::image;
 use crate::cpm::image::registry::booted_not_already_lent;
 
+/// Fit a mount row's name and notes into `room` columns: the name keeps at
+/// least 8, the ` (R/O)` and busy notes give way after it.  One copy for the
+/// disks screen and the unmount screen, which bound their rows the same way.
+fn fit_row(name: &str, ro: &str, busy: &str, room: usize) -> (String, String, String) {
+    let tail = format!("{ro}{busy}");
+    let name_w = room.saturating_sub(tail.chars().count()).max(8);
+    let tail = truncate_to_width(&tail, room.saturating_sub(name_w));
+    // `ro` is ASCII, so any cut inside it falls on a character boundary.
+    let (ro, busy) = tail.split_at(ro.len().min(tail.len()));
+    (truncate_to_width(name, name_w), ro.to_string(), busy.to_string())
+}
+
+/// Every screen's row budget: the C64's 25 less the rows a terminal keeps.
+const MAX_SCREEN_ROWS: usize = 22;
+
+/// Whether `U` has anything to take out.  A drive lent to a running boot is
+/// not one -- the unmount list leaves those out -- so counting it, as the
+/// screen's `any` does for its listing, offered a key that did nothing.
+fn any_unmountable(mounts: &[Option<image::registry::Mount>], unrestored: &[(u8, String)]) -> bool {
+    mounts.iter().any(|m| m.is_some()) || !unrestored.is_empty()
+}
+
 impl TelnetSession {
     /// The `CPM/` container this gateway is configured for.
     pub(in crate::telnet) fn cpmmount_base(&self) -> std::path::PathBuf {
@@ -119,37 +141,78 @@ impl TelnetSession {
             return Ok(());
         }
 
+        // A screen of its own for the run.  Drawn under the offer, the two
+        // together came to 28 rows -- 18 of offer, 10 of outcome -- so the
+        // heading and the question were gone by the time the answer came.
+        self.clear_screen().await?;
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("DOWNLOAD SAMPLE DISKS"))).await?;
+        self.send_line(&sep).await?;
         self.send_line("").await?;
         self.send_line(&format!("  {}", self.dim("Fetching. This takes a minute."))).await?;
+        self.send("  ").await?;
         self.flush().await?;
 
         // Off the async runtime: this is a minute of blocking network and file
         // I/O, and doing it on the session's own task would stall every other
         // session's timers with it.
+        //
+        // **A dot per file**, so a run that takes many minutes on a slow link
+        // is visibly moving rather than silent.  Dots and not a rewritten
+        // counter: on a C64 a CR is a new line, so there is no rewriting one.
+        // Capped at the row's width -- the run counts its ROMs too.
         let dir = base.clone();
-        let report = tokio::task::spawn_blocking(move || {
-            fetch::download_missing(&dir, |_name, _i, _n| {})
-        })
-        .await
-        .map_err(std::io::Error::other)?;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut work = tokio::task::spawn_blocking(move || {
+            fetch::download_missing(&dir, |_name, _i, _n| {
+                let _ = tx.send(());
+            })
+        });
+        let room = if self.terminal_type == TerminalType::Petscii { 36 } else { 76 };
+        let mut dots = 0;
+        let report = loop {
+            tokio::select! {
+                done = &mut work => break done.map_err(std::io::Error::other)?,
+                Some(()) = rx.recv() => {
+                    if dots < room {
+                        dots += 1;
+                        self.send(".").await?;
+                        self.flush().await?;
+                    }
+                }
+            }
+        };
 
+        self.send_line("").await?;
         self.send_line("").await?;
         match report {
             Ok(r) => {
-                let colour = if r.failed.is_empty() { self.green(&r.summary()) } else { self.amber(&r.summary()) };
+                // Cut to the row like every line on this screen: the summary
+                // and the error below are built from counts and an OS's words.
+                let w = if self.terminal_type == TerminalType::Petscii { 36 } else { 76 };
+                let summary = truncate_to_width(&r.summary(), w);
+                let colour = if r.failed.is_empty() { self.green(&summary) } else { self.amber(&summary) };
                 self.send_line(&format!("  {colour}")).await?;
                 // Name what failed rather than only counting it: "3 failed" with
                 // no names leaves the operator unable to retry anything.
                 // Grouped by reason -- with no internet every disk fails the
                 // same way, and four identical truncated lines on a 40-column
                 // screen is four lines saying nothing.
+                // Through the terminal fold: a failure line carries the HTTP
+                // library's own text about a server on the internet, which
+                // is not ours to send to a terminal raw.
                 for line in r.failure_lines(4) {
                     let w = if self.terminal_type == TerminalType::Petscii { 34 } else { 70 };
+                    let line = crate::aichat::display_for_terminal(&line);
                     self.send_line(&format!("  {}", self.red(&truncate_to_width(&line, w))))
                         .await?;
                 }
             }
-            Err(e) => self.send_line(&format!("  {}", self.red(&e))).await?,
+            Err(e) => {
+                let w = if self.terminal_type == TerminalType::Petscii { 36 } else { 76 };
+                let e = truncate_to_width(&crate::aichat::display_for_terminal(&e), w);
+                self.send_line(&format!("  {}", self.red(&e))).await?
+            }
         }
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
@@ -203,6 +266,7 @@ impl TelnetSession {
             // disk that has slot 0, which is the state that prompted the
             // question (reported 2026-08-21).  One text for three surfaces, see
             // `MountContext::boot_slot_note`.
+            let mut fixed = 4; // frame, title, blank
             if let Some(note) = ctx.boot_slot_note() {
                 let width = if self.terminal_type == TerminalType::Petscii { 26 } else { 58 };
                 self.send_line("  Booting:").await?;
@@ -213,13 +277,21 @@ impl TelnetSession {
                 ))
                 .await?;
                 self.send_line("").await?;
+                fixed += 3;
             }
+            // **The rows are counted before any is drawn.**  The list grows a
+            // row per mount, lent drive, unrestored drive and booted image, and
+            // nothing bounded it: sixteen mounts, or seven with a disk set to
+            // boot, ran the screen past 22 rows and its heading off the top.
+            // The entries are built first, then cut to what the screen has
+            // left, the rest summed up on one row -- `U` lists every one.
+            let row_w = if self.terminal_type == TerminalType::Petscii { 37 } else { 77 };
+            // Each row with what it is: `Some(true)` an entry `U` can take out,
+            // `Some(false)` one it cannot (lent to a boot), `None` a note
+            // under the entry above it.
+            let mut listing: Vec<(String, Option<bool>)> = Vec::new();
+            fixed += 1; // "Mounted:" or "No images mounted."
             if any {
-                self.send_line(match naming {
-                    crate::cpm::boot::SlotNaming::Drives => "  Mounted:",
-                    crate::cpm::boot::SlotNaming::Boards => "  Mounted (for the booted disk):",
-                })
-                .await?;
                 for (i, m) in mounts.iter().enumerate() {
                     let Some(m) = m else { continue };
                     // Named by the booted disk's board, like every other slot
@@ -242,26 +314,26 @@ impl TelnetSession {
                         .and_then(|u| u.describe())
                         .map(|d| format!(" - {d}"))
                         .unwrap_or_default();
-                    let width = if self.terminal_type == TerminalType::Petscii { 28 } else { 60 };
-                    self.send_line(&format!(
-                        "   {} {}{}{}",
-                        self.cyan(&slot),
-                        self.amber(&truncate_to_width(&m.filename, width)),
-                        ro,
-                        self.dim(&busy),
-                    ))
-                    .await?;
+                    // The *row* is bounded, not only the filename: a board slot
+                    // label is up to 8 columns, and with " (R/O)" and the busy
+                    // text beside it a 28-column name came to 46 on a C64.  The
+                    // name keeps at least 8; the busy text gives way after it.
+                    let room = row_w - 1 - slot.chars().count() - 1;
+                    let (name, ro, busy) = fit_row(&m.filename, ro, &busy, room);
+                    listing.push((
+                        format!("   {} {}{}{}", self.cyan(&slot), self.amber(&name), ro, self.dim(&busy)),
+                        Some(true),
+                    ));
                     // Slot 0 belongs to the disk being booted, so a mount on A:
                     // is held but unreachable.  Said here, where it can still be
                     // changed, rather than only in the boot screen's notes after
                     // the operator has left.  Its own row: at 40 columns it does
                     // not fit beside a filename.
                     if i == 0 && ctx.booting() {
-                        self.send_line(&format!(
-                            "     {}",
-                            self.dim(crate::cpm::boot::BEHIND_BOOT_DISK_SHORT),
-                        ))
-                        .await?;
+                        listing.push((
+                            format!("     {}", self.dim(crate::cpm::boot::BEHIND_BOOT_DISK_SHORT)),
+                            None,
+                        ));
                     }
                 }
                 for (drive0, name) in &lent {
@@ -269,40 +341,34 @@ impl TelnetSession {
                     // session's hands, and a stat of it would name a board for
                     // bytes nobody can rely on.
                     let slot = ctx.slot(*drive0);
-                    let width = if self.terminal_type == TerminalType::Petscii { 20 } else { 52 };
-                    self.send_line(&format!(
-                        "   {} {} {}",
-                        self.cyan(&slot),
-                        self.amber(&truncate_to_width(name, width)),
-                        self.dim("(booted)"),
-                    ))
-                    .await?;
+                    // 19 on a C64: 3 + 8 (`unit 0.1`) + 1 + 19 + 1 + 8 is 40.
+                    // At 20 it was 41.
+                    let width = if self.terminal_type == TerminalType::Petscii { 19 } else { 52 };
+                    listing.push((
+                        format!(
+                            "   {} {} {}",
+                            self.cyan(&slot),
+                            self.amber(&truncate_to_width(name, width)),
+                            self.dim("(booted)"),
+                        ),
+                        Some(false),
+                    ));
                 }
                 for (drive0, name) in &unrestored {
                     let slot = ctx.slot(*drive0);
                     // 16 on a C64: a board slot label is up to 8 columns
                     // (`unit 0.1`), and 3 + 8 + 1 + 16 + 1 + 10 is 39.
                     let width = if self.terminal_type == TerminalType::Petscii { 16 } else { 50 };
-                    self.send_line(&format!(
-                        "   {} {} {}",
-                        self.cyan(&slot),
-                        self.amber(&truncate_to_width(name, width)),
-                        self.dim("(not back)"),
-                    ))
-                    .await?;
+                    listing.push((
+                        format!(
+                            "   {} {} {}",
+                            self.cyan(&slot),
+                            self.amber(&truncate_to_width(name, width)),
+                            self.dim("(not back)"),
+                        ),
+                        Some(true),
+                    ));
                 }
-            } else {
-                // "No *other*" when a disk has slot 0: plain "No images
-                // mounted." beside a Booting: line reads as a contradiction.
-                self.send_line(&format!(
-                    "  {}",
-                    self.dim(if ctx.booting() {
-                        "No other images mounted."
-                    } else {
-                        "No images mounted."
-                    })
-                ))
-                .await?;
             }
 
             // Booted images, listed *separately* and without a drive letter.
@@ -325,6 +391,49 @@ impl TelnetSession {
             // slot and a `(booted)` of its own, and repeating it here said the
             // same thing twice on a screen with no rows to spare.
             let booted = booted_not_already_lent(image::registry::booted_image_names(), &lent);
+            if !booted.is_empty() {
+                fixed += 4 + booted.len(); // blank, label, the names, two of prose
+            }
+            // The menu below: blank, M, N, D, U if offered, blank, the prompt.
+            let offer_u = any_unmountable(&mounts, &unrestored);
+            fixed += 6 + usize::from(offer_u);
+            let room = MAX_SCREEN_ROWS.saturating_sub(fixed);
+            if listing.len() > room {
+                let shown = room.saturating_sub(1);
+                let cut: Vec<Option<bool>> = listing.drain(shown..).map(|(_, k)| k).collect();
+                let more = cut.iter().filter(|k| k.is_some()).count();
+                // Only promise what `U` does: it lists mounts and drives not
+                // put back, never a drive lent to a running boot.
+                let all_listed = offer_u && cut.iter().all(|k| *k != Some(false));
+                let text = if all_listed {
+                    format!("...and {more} more (U lists them)")
+                } else {
+                    format!("...and {more} more")
+                };
+                listing.push((format!("   {}", self.dim(&text)), None));
+            }
+            if any {
+                self.send_line(match naming {
+                    crate::cpm::boot::SlotNaming::Drives => "  Mounted:",
+                    crate::cpm::boot::SlotNaming::Boards => "  Mounted (for the booted disk):",
+                })
+                .await?;
+                for (row, _) in &listing {
+                    self.send_line(row).await?;
+                }
+            } else {
+                // "No *other*" when a disk has slot 0: plain "No images
+                // mounted." beside a Booting: line reads as a contradiction.
+                self.send_line(&format!(
+                    "  {}",
+                    self.dim(if ctx.booting() {
+                        "No other images mounted."
+                    } else {
+                        "No images mounted."
+                    })
+                ))
+                .await?;
+            }
             if !booted.is_empty() {
                 self.send_line("").await?;
                 self.send_line("  Booted:").await?;
@@ -366,15 +475,19 @@ impl TelnetSession {
             // is why it says what it does and nothing more.
             self.send_line(&format!("  {}  Download sample disks", self.cyan("D")))
                 .await?;
-            if any {
+            // Offered only when there is something it can take: a drive lent
+            // to a running boot is not one (`cpmmount_pick_unmount` leaves
+            // those out), and a `U` that only redrew the screen read as broken.
+            if offer_u {
                 self.send_line(&format!("  {}  Unmount a drive", self.cyan("U")))
                     .await?;
             }
             self.send_line("").await?;
-            self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))
-                .await?;
-
-            let prompt = format!("{}> ", self.cyan("gateway/config/cpm/disks"));
+            let prompt = format!(
+                "  {}  {}> ",
+                self.action_prompt("Q", "Back"),
+                self.cyan("gateway/config/cpm/disks")
+            );
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -382,7 +495,7 @@ impl TelnetSession {
                 Some(s) if s == "m" => self.cpmmount_pick_image().await?,
                 Some(s) if s == "n" => self.cpmmount_new_blank().await?,
                 Some(s) if s == "d" => self.cpmmount_download().await?,
-                Some(s) if s == "u" && any => self.cpmmount_pick_unmount().await?,
+                Some(s) if s == "u" && offer_u => self.cpmmount_pick_unmount().await?,
                 // Q, the key this screen has always *displayed*.  It fell into
                 // the "anything else, ignore it" arm below and redrew the menu,
                 // so the one documented way out did nothing and only ESC or a
@@ -503,27 +616,40 @@ impl TelnetSession {
             return Ok(());
         }
 
+        // Named the way the disks screen names them: a board slot under a
+        // booted disk, a drive letter only where our BDOS makes it one.
+        let ctx = self.cpmmount_context();
         self.clear_screen().await?;
         let sep = self.separator();
+        // Six rows besides the list, so all sixteen drives fit in 22: no blank
+        // under the heading, and Back on the prompt's row.  It was nine, and
+        // sixteen mounts made 25.
         self.send_line(&sep).await?;
         self.send_line(&format!("  {}", self.yellow("UNMOUNT A DRIVE")))
             .await?;
         self.send_line(&sep).await?;
-        self.send_line("").await?;
+        // 39 columns at most on a C64, as on the disks screen: a row that
+        // reaches the 40th wraps, and the CR after it costs a second row.
+        let row_w = if self.terminal_type == TerminalType::Petscii { 37 } else { 78 };
         for (n, (drive0, name, ro)) in listed.iter().enumerate() {
-            let letter = (b'A' + drive0) as char;
+            let slot = ctx.slot(*drive0);
             let busy = usage
                 .get(*drive0 as usize)
                 .and_then(|u| u.describe())
                 .map(|d| format!("  [{d}]"))
                 .unwrap_or_default();
-            let width = if self.terminal_type == TerminalType::Petscii { 22 } else { 48 };
+            let ro = if *ro { " (R/O)" } else { "" };
+            let num = (n + 1).to_string();
+            // The whole row bounded, as on the disks screen: number, slot,
+            // name, then whatever of the notes still fits.
+            let room = row_w - num.len() - 2 - slot.chars().count() - 1;
+            let (name, ro, busy) = fit_row(name, ro, &busy, room);
             self.send_line(&format!(
-                "  {}  {}: {}{}{}",
-                self.cyan(&(n + 1).to_string()),
-                letter,
-                self.amber(&truncate_to_width(name, width)),
-                if *ro { " (R/O)" } else { "" },
+                "  {}  {} {}{}{}",
+                self.cyan(&num),
+                slot,
+                self.amber(&name),
+                ro,
                 self.dim(&busy),
             ))
             .await?;
@@ -531,13 +657,15 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send_line(&format!(
             "  {}",
-            self.dim("The drive folder's files come back")
+            self.dim(if ctx.booting() {
+                "The image file itself is kept."
+            } else {
+                "The drive folder's files come back"
+            })
         ))
         .await?;
-        self.send_line("").await?;
-        self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))
+        self.send(&format!("  {}  {}> ", self.action_prompt("Q", "Back"), self.cyan("unmount")))
             .await?;
-        self.send(&format!("{}> ", self.cyan("unmount"))).await?;
         self.flush().await?;
 
         let Some(input) = self.get_menu_input(false).await? else {
@@ -546,7 +674,7 @@ impl TelnetSession {
         let Ok(n) = input.trim().parse::<usize>() else {
             return Ok(());
         };
-        let Some((drive0, name, _)) = listed.get(n.wrapping_sub(1)) else {
+        let Some((drive0, _, _)) = listed.get(n.wrapping_sub(1)) else {
             return Ok(());
         };
 
@@ -557,7 +685,6 @@ impl TelnetSession {
             }
             Err(e) => self.cpmmount_report(&e, true).await?,
         }
-        let _ = name;
         Ok(())
     }
 
@@ -707,11 +834,14 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line(&sep).await?;
-        self.send_line("").await?;
+        // **Twenty-two rows exactly, with sixteen of them drives.**  The blank
+        // lines around the filename and the separate Back row made this 25, so
+        // the heading scrolled off every terminal before anyone read it; they
+        // are what gave way.  Pinned by
+        // `test_the_drive_picker_fits_the_screen`, which counts what it draws.
         let width = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
         self.send_line(&format!("  {}", self.amber(&truncate_to_width(filename, width))))
             .await?;
-        self.send_line("").await?;
 
         // Drives in use cannot be changed, and are shown saying why rather than
         // silently missing — a drive that vanished from the list would read as
@@ -768,9 +898,8 @@ impl TelnetSession {
             self.send_line(&line).await?;
         }
         self.send_line("").await?;
-        self.send_line(&format!("  {}", self.action_prompt("Q", "Back")))
+        self.send(&format!("  {}  {}> ", self.action_prompt("Q", "Back"), self.cyan("drive")))
             .await?;
-        self.send(&format!("{}> ", self.cyan("drive"))).await?;
         self.flush().await?;
 
         let Some(input) = self.get_menu_input(false).await? else {
@@ -811,6 +940,7 @@ impl TelnetSession {
         drive0: u8,
     ) -> Result<bool, std::io::Error> {
         let letter = (b'A' + drive0) as char;
+        let ctx = self.cpmmount_context();
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
@@ -824,6 +954,27 @@ impl TelnetSession {
             self.amber(&truncate_to_width(filename, width))
         ))
         .await?;
+        // **Under a booted disk this is a slot, not a drive.**  The picker
+        // before it already said so; this screen went on promising "drive B:"
+        // and our folder behind it, which is our BDOS's arrangement and not the
+        // guest's.  What a booted machine calls the slot is its own business.
+        if ctx.booting() {
+            self.send_line(&format!("  in {}", self.cyan(&ctx.slot(drive0)))).await?;
+            self.send_line("").await?;
+            if drive0 == 0 {
+                self.send_line(&format!("  {}", self.amber(crate::cpm::boot::BEHIND_BOOT_DISK_SHORT)))
+                    .await?;
+            } else {
+                self.send_line("  The booted disk's board holds it in").await?;
+                self.send_line("  that slot; whether its own CP/M").await?;
+                self.send_line("  reaches it is up to that CP/M.").await?;
+            }
+            self.send_line("").await?;
+            self.send(&format!("  Mount it? {}: ", self.cyan("y/N"))).await?;
+            self.flush().await?;
+            let answer = self.get_menu_input(false).await?.unwrap_or_default();
+            return Ok(answer.starts_with('y'));
+        }
         self.send_line(&format!("  on drive {}:", self.cyan(&letter.to_string())))
             .await?;
         self.send_line("").await?;
@@ -864,9 +1015,16 @@ impl TelnetSession {
         // gone after the next restart.  The web and desktop screens already
         // went through `current_mounts_value`; this was the same defect
         // surviving in a second copy of the rule.
-        let value = image::current_mounts_value();
-        std::thread::spawn(move || {
-            config::update_config_value("cpm_mounts", &value);
+        //
+        // **The table is read on the writer's thread, under one lock**, not
+        // here.  Read here and written by a thread per change, two quick
+        // changes could land in either order and leave the older table on
+        // disk.  Read under the lock, whichever writer runs last writes the
+        // table as it is then -- the newest.
+        static PERSIST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        std::thread::spawn(|| {
+            let _turn = PERSIST.lock().unwrap_or_else(|e| e.into_inner());
+            config::update_config_value("cpm_mounts", &image::current_mounts_value());
         });
     }
 
@@ -900,16 +1058,136 @@ mod tests {
     /// refused on Save as "being run by a booted session", and accounted for
     /// nowhere (reported 2026-08-21). The function now lives in the registry;
     /// this holds that all three surfaces ask it.
+    ///
+    /// Each surface is looked for a *call*, and the telnet one inside the
+    /// screen that draws it: searched as a whole file, this one always passed,
+    /// because the file holds the name in its `use` line and in this very test.
     #[test]
     fn test_every_mount_surface_reports_a_booted_image() {
-        for (surface, src) in [
-            ("telnet", include_str!("cpm_mount_ui.rs")),
-            ("desktop", include_str!("../gui.rs")),
-            ("web", include_str!("../webserver.rs")),
-        ] {
+        let telnet = include_str!("cpm_mount_ui.rs").replace("\r\n", "\n");
+        let wizard = &telnet[telnet.find("async fn cpm_mount_wizard(").expect("the disks screen")..];
+        let wizard = &wizard[..wizard.find("\n    }\n").expect("its end")];
+        assert!(
+            wizard.contains("booted_not_already_lent(image::registry::booted_image_names()"),
+            "the telnet disks screen never asks which images are booted"
+        );
+        for (surface, src) in
+            [("desktop", include_str!("../gui.rs")), ("web", include_str!("../webserver.rs"))]
+        {
             assert!(
-                src.contains("booted_to_report") || src.contains("booted_not_already_lent"),
+                src.contains("crate::cpm::image::registry::booted_to_report()"),
                 "the {surface} mount screen never asks which images are booted"
+            );
+        }
+    }
+
+    /// Render what `draw` sends on a `term` session answering `keys`, as the
+    /// rows a terminal holds (PETSCII decoded, leading and trailing blanks off).
+    fn rendered<F>(term: crate::telnet::TerminalType, keys: &[u8], draw: F) -> Vec<String>
+    where
+        F: AsyncFnOnce(&mut crate::telnet::TelnetSession),
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut out = rt.block_on(async {
+            let (mut session, peer) = crate::telnet::tests::make_test_session_with_peer(term);
+            let (mut pr, mut pw) = tokio::io::split(peer);
+            pw.write_all(keys).await.unwrap();
+            let run = async move { draw(&mut session).await };
+            let mut out = Vec::new();
+            let (_, r) = tokio::join!(run, pr.read_to_end(&mut out));
+            r.unwrap();
+            out
+        });
+        if term == crate::telnet::TerminalType::Petscii {
+            out = out
+                .iter()
+                .filter(|&&b| matches!(b, b'\r' | b'\n' | 0x20..=0x7F | 0xA0..=0xFF))
+                .map(|&b| b as char)
+                .collect::<String>()
+                .into_bytes();
+        }
+        let rows = crate::telnet::tests::render_rows(&out);
+        let rows: Vec<String> = rows.into_iter().skip_while(|r| r.trim().is_empty()).collect();
+        let end = rows.iter().rposition(|r| !r.trim().is_empty()).map_or(0, |i| i + 1);
+        rows[..end].to_vec()
+    }
+
+    /// Sixteen mounts with long names: the disks screen and the unmount screen
+    /// both still fit.  The disks screen had no row budget at all -- one row
+    /// per mount -- and the unmount screen was nine rows plus one per drive,
+    /// so a full table drew 25 or more and scrolled each heading away.
+    #[test]
+    fn test_a_full_mount_table_fits_both_screens() {
+        use crate::cpm::image::registry;
+        use crate::telnet::TerminalType;
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        for d in 0..crate::cpm::NUM_DRIVES {
+            let name = format!("A-RATHER-LONG-IMAGE-NAME-NUMBER-{d:02}.DSK");
+            registry::mount(d, registry::test_mount(&name)).unwrap();
+        }
+        for term in [TerminalType::Petscii, TerminalType::Ansi] {
+            // 39 on a C64: a row that reaches the 40th column wraps, and the CR
+            // after it takes a second row -- which `render_rows` cannot see.
+            let cols = if term == TerminalType::Petscii { 39 } else { 80 };
+            let disks = rendered(term, b"q\r", async |s| s.cpm_mount_wizard().await.unwrap());
+            let unmount = rendered(term, b"q\r", async |s| s.cpmmount_pick_unmount().await.unwrap());
+            for (what, rows) in [("disks", &disks), ("unmount", &unmount)] {
+                assert!(rows.len() <= 22, "{term:?} {what}: {} rows\n{rows:#?}", rows.len());
+                for r in rows {
+                    assert!(r.chars().count() <= cols, "{term:?} {what}: {r:?} is too wide");
+                }
+            }
+            // Every drive can still be unmounted from its screen.
+            assert!(unmount.iter().any(|r| r.contains("16")), "{term:?}: a drive was cut from the unmount list");
+            assert!(disks.iter().any(|r| r.to_ascii_lowercase().contains("more")), "{term:?}: nothing says the list was cut");
+        }
+        registry::tests_reset();
+    }
+
+    /// The drive picker draws sixteen drives, and drew them on a 25-row screen
+    /// -- the heading scrolled off every terminal.  Counted on what it actually
+    /// sends, not on a model of it, for both widths.
+    #[tokio::test]
+    async fn test_the_drive_picker_fits_the_screen() {
+        use crate::telnet::TerminalType;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+            let (mut session, peer) = crate::telnet::tests::make_test_session_with_peer(term);
+            let (mut pr, mut pw) = tokio::io::split(peer);
+            pw.write_all(b"q\r").await.unwrap();
+            let run = async move {
+                session.cpmmount_pick_drive("SOMEDISK.DSK").await.unwrap();
+            };
+            let mut out = Vec::new();
+            let (_, r) = tokio::join!(run, pr.read_to_end(&mut out));
+            r.unwrap();
+            // The screen is drawn once; the clear (codes, or blank lines on a
+            // plain terminal) and the cursor's row after the prompt are not rows
+            // the screen spends.
+            // PETSCII colour and cursor codes are single bytes in 0x80-0x9F and
+            // below 0x20, not UTF-8: drop them, and read the rest as Latin-1.
+            if term == TerminalType::Petscii {
+                out = out
+                    .iter()
+                    .filter(|&&b| matches!(b, b'\r' | b'\n' | 0x20..=0x7F | 0xA0..=0xFF))
+                    .map(|&b| b as char)
+                    .collect::<String>()
+                    .into_bytes();
+            }
+            let rows = crate::telnet::tests::render_rows(&out);
+            let rows: Vec<&String> = rows.iter().skip_while(|r| r.trim().is_empty()).collect();
+            let rows: Vec<&String> = rows.into_iter().rev().skip_while(|r| r.trim().is_empty()).collect();
+            assert!(rows.len() <= 22, "{term:?}: the drive picker is {} rows", rows.len());
+            let cols = if term == TerminalType::Petscii { 40 } else { 80 };
+            for r in &rows {
+                assert!(r.chars().count() <= cols, "{term:?}: {r:?} is too wide");
+            }
+            // Case-blind: PETSCII swaps case on the wire.
+            assert!(
+                rows.iter().any(|r| r.to_ascii_lowercase().contains("drive>")),
+                "{term:?}: the prompt is on the screen"
             );
         }
     }

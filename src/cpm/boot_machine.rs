@@ -1422,7 +1422,7 @@ impl BootMachine {
     /// Write guest memory the way this machine's own CPU would. See
     /// [`BootMachine::mem_read`].
     fn mem_write(&mut self, address: u16, value: u8) {
-        if !self.mmu.is_idle() {
+        if self.mmu.intercepts_writes() {
             self.mmu.write(&mut self.mem, address, value);
             return;
         }
@@ -2105,6 +2105,24 @@ pub(crate) mod tests {
         assert_eq!(m.peek(0x2000), 0xAA, "bank 0 kept its own byte");
         m.port_out(PORT as u16, 0x02);
         assert_eq!(m.peek(0x2000), 0xBB, "and bank 1 kept its own");
+    }
+
+    /// **z80pack's common-memory protect holds before any bank exists.**  Its
+    /// `memwrt` refuses a write at or above the segment size whenever the
+    /// protect register is non-zero, banks or none; here the MMU was skipped
+    /// until a bank was allocated, so the same write landed.
+    #[test]
+    fn test_z80pack_protects_common_memory_with_no_banks() {
+        let mut m = BootMachine::new();
+        m.set_machine("z80pack");
+        m.port_out(0x16, 0x80); // 32 KB segments: 8000h up is common
+        m.poke(0x9000, 0xAA);
+        m.port_out(0x17, 0x01); // protect common memory
+        m.poke(0x9000, 0xBB);
+        assert_eq!(m.peek(0x9000), 0xAA, "a protected common write landed");
+        assert_ne!(m.port_in(0x17) & 0x80, 0, "and the attempt was not recorded");
+        m.poke(0x1000, 0xCC);
+        assert_eq!(m.peek(0x1000), 0xCC, "below the segment is not protected");
     }
 
     /// **A machine without Cromemco boards does not have the port.**

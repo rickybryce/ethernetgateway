@@ -75,7 +75,8 @@ fn handover_path() -> PathBuf {
 ///
 /// Dropping it releases the lock, so it must be kept alive in `main` — a
 /// `let _ = acquire()` would unlock immediately and let a second copy in.
-/// `#[must_use]` on the enum below is what stops that being silent.
+/// Nothing in the type stops that (`let _ =` silences `#[must_use]`); the
+/// named binding in `main`, `_instance_lock`, is what keeps it.
 pub struct InstanceLock {
     _file: File,
 }
@@ -118,13 +119,27 @@ pub fn acquire() -> std::io::Result<Instance> {
     // call and touches no memory of ours.  LOCK_NB makes it return rather than
     // block, which is the whole point -- a launch must not hang behind another
     // copy.
-    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    if locked {
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         write_pid(&mut file);
-        Ok(Instance::Acquired(InstanceLock { _file: file }))
-    } else {
-        Ok(Instance::Busy { pid: read_pid(&path) })
+        return Ok(Instance::Acquired(InstanceLock { _file: file }));
     }
+    // Only "would block" is another copy -- the rule the Windows arm learned.
+    // A volume that cannot lock at all (NFS without lockd: ENOLCK; some FUSE
+    // and SMB mounts: ENOTSUP) used to read as a holder too, naming whatever
+    // stale PID the file still held and offering a takeover from nobody.
+    let err = std::io::Error::last_os_error();
+    if is_lock_held(err.raw_os_error()) {
+        Ok(Instance::Busy { pid: read_pid(&path) })
+    } else {
+        Err(err)
+    }
+}
+
+/// `EWOULDBLOCK` (`EAGAIN` on every Unix we ship): the lock is held by someone
+/// else.  Pure, like [`is_sharing_violation`], so the rule is tested by itself.
+#[cfg(unix)]
+fn is_lock_held(raw: Option<i32>) -> bool {
+    raw == Some(libc::EWOULDBLOCK) || raw == Some(libc::EAGAIN)
 }
 
 /// Windows counterpart: the open *is* the lock.
@@ -214,30 +229,76 @@ fn read_pid(path: &std::path::Path) -> Option<u32> {
 /// Returns the lock on success. On timeout the request file is removed again —
 /// leaving it behind would tell the *next* launch's holder to stand down for a
 /// handover nobody is waiting for.
+///
+/// **A holder that agreed is waited for.**  Its watcher consumes the request
+/// file the moment it agrees, and from then it *will* stop -- so giving up at
+/// the deadline while it was still flushing a booted disk to an SD card left
+/// nobody serving: this copy exited, and a moment later so did the old one.
+/// The deadline is for a holder that never answered; one that answered gets
+/// [`HANDOVER_AGREED_WAIT`] more.
 pub fn request_handover() -> std::io::Result<Option<InstanceLock>> {
     std::fs::write(handover_path(), b"stand down\n")?;
-    let deadline = std::time::Instant::now() + HANDOVER_TIMEOUT;
-    while std::time::Instant::now() < deadline {
+    let start = std::time::Instant::now();
+    let mut said_still_stopping = false;
+    loop {
         std::thread::sleep(POLL);
-        if let Ok(Instance::Acquired(lock)) = acquire() {
+        // An error is not "still held": it is a fault to report now, not to
+        // retry for fifteen seconds and then call a timeout.
+        if let Instance::Acquired(lock) = acquire()? {
             // Ours now.  Clear the request so our own watcher does not read it
             // as an instruction to stand down the moment it starts.
             let _ = std::fs::remove_file(handover_path());
             return Ok(Some(lock));
         }
+        let waited = start.elapsed();
+        let agreed = !handover_path().exists();
+        if waited < HANDOVER_TIMEOUT {
+            continue;
+        }
+        if agreed && waited < HANDOVER_TIMEOUT + HANDOVER_AGREED_WAIT {
+            if !std::mem::replace(&mut said_still_stopping, true) {
+                glog!("The running copy agreed and is still stopping; waiting for it...");
+            }
+            continue;
+        }
+        let _ = std::fs::remove_file(handover_path());
+        return Ok(None);
     }
-    let _ = std::fs::remove_file(handover_path());
-    Ok(None)
 }
+
+/// How much longer a holder that has agreed to stand down is waited for.
+const HANDOVER_AGREED_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Clear a request file left behind by a copy that died mid-handover.
 ///
 /// Called by a launch that acquired the lock cleanly: whatever that file was
 /// asking for, the process it was asking is gone.
-pub fn clear_stale_handover_request() {
-    if handover_path().exists() {
-        let _ = std::fs::remove_file(handover_path());
+///
+/// **Only a request older than our own lock.**  A newcomer launched a moment
+/// after us can write its request between our `acquire` and this call, and it
+/// is addressed to *us*; deleted as stale, it timed out against a gateway that
+/// never saw it.  `since` is taken before `acquire`, so anything written after
+/// it is a live request.
+pub fn clear_stale_handover_request(since: std::time::SystemTime) {
+    let path = handover_path();
+    let written = std::fs::metadata(&path).and_then(|m| m.modified());
+    if let Ok(written) = written
+        && is_stale_request(written, since)
+    {
+        let _ = std::fs::remove_file(path);
     }
+}
+
+/// A request is stale when it was written before we began to acquire --
+/// clearly before, by more than a filesystem's timestamp can be off.  File
+/// times come from a coarse clock (ext4's is a tick; FAT's is two seconds), so
+/// a request written just after `since` can carry an earlier time, and a
+/// strict comparison deleted the very request this rule protects.  A dead
+/// copy's request is never that young: its newcomer would have taken the lock
+/// itself and removed the file.
+fn is_stale_request(written: std::time::SystemTime, since: std::time::SystemTime) -> bool {
+    const CLOCK_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+    written + CLOCK_SLACK < since
 }
 
 /// Watch for a newcomer asking us to stand down, and shut down when one does.
@@ -324,6 +385,36 @@ mod tests {
             assert!(!is_sharing_violation(other), "{other:?} is not another copy");
         }
         const { assert!(SHARING_RETRIES >= 2, "a scanner's brief hold must be asked about again") };
+    }
+
+    /// The Unix half of the same rule: only a held lock is another copy.  A
+    /// filesystem that cannot lock is an error for `main` to explain, not a
+    /// stale PID to blame.
+    #[cfg(unix)]
+    #[test]
+    fn test_only_a_held_flock_reads_as_another_copy() {
+        assert!(is_lock_held(Some(libc::EWOULDBLOCK)));
+        assert!(is_lock_held(Some(libc::EAGAIN)));
+        for other in [libc::ENOLCK, libc::ENOTSUP, libc::EBADF, libc::EINVAL] {
+            assert!(!is_lock_held(Some(other)), "errno {other} is not another copy");
+        }
+        assert!(!is_lock_held(None));
+    }
+
+    /// A request written after we began to acquire is addressed to us and
+    /// survives the stale-file sweep; one from before is a dead copy's.
+    #[test]
+    fn test_only_a_request_from_before_our_lock_is_stale() {
+        let t = std::time::SystemTime::now();
+        let s = std::time::Duration::from_secs(1);
+        assert!(is_stale_request(t - 3 * s, t), "a dead copy's request stays on disk");
+        assert!(!is_stale_request(t + s, t), "a live request is deleted as stale");
+        // A request written just after `since`, stamped by a coarse clock as
+        // just before it, is still live.
+        assert!(!is_stale_request(t - std::time::Duration::from_millis(900), t));
+        assert!(!is_stale_request(t, t));
+        // And the agreed holder is waited for well past the plain deadline.
+        const { assert!(HANDOVER_AGREED_WAIT.as_secs() >= 4 * HANDOVER_TIMEOUT.as_secs()) };
     }
 
     /// The paths must sit inside the data directory, not beside the binary —

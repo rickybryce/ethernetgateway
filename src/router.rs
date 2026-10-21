@@ -100,7 +100,11 @@ pub(crate) fn probe_in_background() {
     // A detached thread: nothing waits on this, and the worst case of it dying
     // is that the cache keeps its previous value (or stays empty, which is the
     // documented fallback).
-    std::thread::spawn(|| {
+    //
+    // Built, not `thread::spawn`, which panics when a thread cannot be made --
+    // on the connection-accept path, and with `in_flight` left set so that no
+    // later probe could ever start.  A failure here is the fallback instead.
+    let spawned = std::thread::Builder::new().name("router-probe".into()).spawn(|| {
         let found = detect();
         let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
         let changed = guard.addrs != found;
@@ -121,16 +125,29 @@ pub(crate) fn probe_in_background() {
             }
         }
     });
+    if let Err(e) = spawned {
+        cache().lock().unwrap_or_else(|e| e.into_inner()).in_flight = false;
+        glog!("Router address: could not start the probe ({e}); using the x.x.x.1 rule");
+    }
 }
 
 /// Human-readable form of the detected router(s) for the config UIs: the
 /// address, or the fallback rule's name when we don't know.  Never blocks.
 pub(crate) fn describe() -> String {
-    let addrs = cached_addrs();
+    describe_addrs(&cached_addrs())
+}
+
+/// [`describe`] for a given answer.  The IPv4 rule falls back to `x.x.x.1`
+/// whenever no IPv4 router is known -- including when an IPv6 one is -- so an
+/// IPv6-only answer names the fallback too, or every surface said the router
+/// was `fe80::1` while `.1` hosts were the ones being refused.
+fn describe_addrs(addrs: &[IpAddr]) -> String {
     if addrs.is_empty() {
         "x.x.x.1".to_string()
+    } else if !addrs.iter().any(IpAddr::is_ipv4) {
+        format!("x.x.x.1, {}", join(addrs))
     } else {
-        join(&addrs)
+        join(addrs)
     }
 }
 
@@ -431,12 +448,16 @@ fn parse_bsd_route_get(text: &str) -> Vec<IpAddr> {
 /// destination and netmask are both `0.0.0.0`; the third column is the next
 /// hop, or the literal `On-link`.  Matching on those addresses rather than on
 /// the column headings is what makes this work on a non-English Windows.
+///
+/// Five columns or more: an active route has an interface and a metric.  The
+/// "Persistent Routes" section below it has four (no interface), and a
+/// persistent default that is not active is not this machine's router.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_windows_route_print_v4(text: &str) -> Vec<Ipv4Addr> {
     let mut out = Vec::new();
     for line in text.lines() {
         let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 3 || cols[0] != "0.0.0.0" || cols[1] != "0.0.0.0" {
+        if cols.len() < 5 || cols[0] != "0.0.0.0" || cols[1] != "0.0.0.0" {
             continue;
         }
         if let Ok(ip) = cols[2].parse::<Ipv4Addr>() {
@@ -635,6 +656,31 @@ Network Destination        Netmask          Gateway       Interface  Metric
             parse_windows_route_print_v4(WIN_ROUTE_V4),
             vec![Ipv4Addr::new(192, 168, 1, 1)]
         );
+    }
+
+    /// The section after the active routes lists persistent ones, which may
+    /// include a default that is not in use: not a router.
+    #[test]
+    fn test_parse_windows_route_print_v4_ignores_persistent_routes() {
+        let text = format!(
+            "{WIN_ROUTE_V4}Persistent Routes:
+  Network Address          Netmask  Gateway Address  Metric
+          0.0.0.0          0.0.0.0    192.168.1.254  Default
+===========================================================================
+"
+        );
+        assert_eq!(parse_windows_route_print_v4(&text), vec![Ipv4Addr::new(192, 168, 1, 1)]);
+    }
+
+    /// An IPv6-only answer still names the IPv4 fallback in force.
+    #[test]
+    fn test_describe_names_the_ipv4_fallback_beside_an_ipv6_router() {
+        let v6: IpAddr = "fe80::1".parse().unwrap();
+        let v4: IpAddr = "192.168.1.1".parse().unwrap();
+        assert_eq!(describe_addrs(&[]), "x.x.x.1");
+        assert_eq!(describe_addrs(&[v6]), "x.x.x.1, fe80::1");
+        assert_eq!(describe_addrs(&[v4]), "192.168.1.1");
+        assert!(!describe_addrs(&[v4, v6]).contains("x.x.x.1"));
     }
 
     #[test]

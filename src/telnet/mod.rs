@@ -785,6 +785,34 @@ pub(crate) fn record_auth_failure(lockouts: &LockoutMap, ip: IpAddr) -> u32 {
     entry.0
 }
 
+/// Take this address's turn at checking a credential.
+///
+/// **One check at a time per address**, held from the lockout check until the
+/// failure is counted.  The check and the count sit either side of the KDF,
+/// which is seconds on a Pi and runs off the runtime -- so before this,
+/// sessions whose guesses overlapped all passed the check before any of them
+/// was counted, and one address holding twenty connections at the password
+/// prompt (the rate limit allows that a minute) had twenty guesses a window,
+/// not three.  In turn, the fourth finds the lockout the third set.
+///
+/// A turn rather than counting each guess up front: that counted a *correct*
+/// password too until its check finished, so a second login from the same
+/// address in that window was refused although nothing had failed -- and the
+/// lockout counts failed credentials only.  Shared by telnet, SSH and the web
+/// listener, as the lockout map is.
+pub(crate) async fn auth_turn(ip: IpAddr) -> tokio::sync::OwnedMutexGuard<()> {
+    type Turns = Mutex<HashMap<IpAddr, Arc<tokio::sync::Mutex<()>>>>;
+    static TURNS: std::sync::OnceLock<Turns> = std::sync::OnceLock::new();
+    let turn = {
+        let mut map = TURNS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        // Nobody holds or waits on an entry whose only reference is the map's,
+        // so it can go: the map does not grow one entry per address for ever.
+        map.retain(|_, t| Arc::strong_count(t) > 1);
+        map.entry(ip).or_default().clone()
+    };
+    turn.lock_owned().await
+}
+
 /// Constant-time byte slice comparison to prevent timing attacks on credentials.
 /// Iterates over both slices fully regardless of length difference so that
 /// neither the length relationship nor the content is leaked via timing.
@@ -1554,11 +1582,11 @@ pub(crate) struct TelnetSession {
     // One-byte pushback used by drain_trailing_eol to safely return any
     // non-CR/LF byte it reads back to the next real input call.
     pushback: Option<u8>,
-    // Cancel-safety for `session_read_byte`: set true after an IAC byte is
-    // consumed but before its command byte is read, so a cancelled read (e.g.
-    // the CP/M out-of-band drain's zero-timeout) resumes at the command byte
-    // instead of losing the IAC and desyncing telnet parsing.
-    mid_iac_cmd: bool,
+    // Cancel-safety for `session_read_byte`: where it is inside a telnet
+    // command, so a read dropped at any byte -- a drain's timeout, the CP/M
+    // out-of-band `poll_once` -- resumes there instead of reading the rest of
+    // the command as keystrokes.  See `io::SessionIac`.
+    iac_resume: io::SessionIac,
     /// The client's side of the connection has ended: a read returned EOF.
     /// (Not a stalled subnegotiation -- a slow peer is not a gone one.)  Sticky,
     /// because a closed reader keeps answering EOF -- and every prompt maps
@@ -1725,7 +1753,7 @@ impl TelnetSession {
             is_ssh: false,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
-            mid_iac_cmd: false,
+            iac_resume: io::SessionIac::Data,
             peer_eof: false,
             last_was_cr: false,
             neg_sent_will: Box::new([false; 256]),
@@ -1811,7 +1839,7 @@ impl TelnetSession {
             is_ssh: true,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
-            mid_iac_cmd: false,
+            iac_resume: io::SessionIac::Data,
             peer_eof: false,
             last_was_cr: false,
             neg_sent_will: Box::new([false; 256]),
@@ -1917,7 +1945,7 @@ impl TelnetSession {
             is_ssh: false,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
-            mid_iac_cmd: false,
+            iac_resume: io::SessionIac::Data,
             peer_eof: false,
             last_was_cr: false,
             neg_sent_will: Box::new([false; 256]),
@@ -2810,7 +2838,7 @@ pub fn start_server(
                                     is_ssh: false,
                                     idle_timeout: std::time::Duration::from_secs(cfg.idle_timeout_secs),
                                     pushback: None,
-                                    mid_iac_cmd: false,
+                                    iac_resume: io::SessionIac::Data,
                                     peer_eof: false,
             last_was_cr: false,
                                     neg_sent_will: Box::new([false; 256]),

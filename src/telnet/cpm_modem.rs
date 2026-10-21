@@ -29,6 +29,12 @@ const ANSWER_WAIT: Duration = Duration::from_secs(30);
 const READ_POLL: Duration = Duration::from_millis(3);
 /// RING cadence for an inbound call while the guest hasn't answered.
 const RING_EVERY: Duration = Duration::from_secs(3);
+/// How long one write to the far end may make no progress before the call is
+/// dropped.  A write only waits when the peer has stopped reading and its
+/// window is shut, and the whole emulator loop waits with it -- the double ESC
+/// that leaves, and the telnet hang-up, are both read after this returns -- so
+/// a remote that hung mid-upload used to freeze the session for good.
+const WRITE_STALL: Duration = Duration::from_secs(15);
 
 /// Any async byte stream can back a live call (a peer `DuplexStream`, a
 /// `TcpStream`, …).
@@ -49,6 +55,11 @@ pub(in crate::telnet) struct CpmModem {
     mode: Mode,
     /// Command-line accumulator (command mode).
     line: Vec<u8>,
+    /// The line outgrew the buffer: its tail was dropped, so it is refused
+    /// rather than run.  `ATDT` and a long name cut short would dial whatever
+    /// the first 128 bytes spelled -- through a search domain, perhaps another
+    /// machine entirely.
+    line_overflow: bool,
     /// The live connection while online.
     conn: Option<Box<dyn ModemStream>>,
     echo: bool,
@@ -120,6 +131,7 @@ impl CpmModem {
             enabled,
             mode: Mode::Command,
             line: Vec::new(),
+            line_overflow: false,
             conn: None,
             echo: true,
             plus_run: 0,
@@ -271,7 +283,17 @@ impl CpmModem {
         for b in guest_tx {
             match self.mode {
                 Mode::Command => self.feed_command_byte(b, &mut out).await,
-                Mode::Online => self.feed_online_byte(b, &mut out).await,
+                Mode::Online => {
+                    self.feed_online_byte(b, &mut out).await;
+                    // **The call died under this batch**: the rest of it was
+                    // data for a peer that is gone, not commands.  Fed on, a
+                    // dropped upload's next kilobyte was echoed back into the
+                    // guest after its NO CARRIER and filled the command line.
+                    // (An escape leaves the call held, so `+++` is not this.)
+                    if self.conn.is_none() {
+                        break;
+                    }
+                }
             }
         }
         // Drain anything the peer has sent us while online, up to what the
@@ -313,7 +335,11 @@ impl CpmModem {
         match b {
             b'\r' => {
                 let line = std::mem::take(&mut self.line);
-                self.dispatch(&line, out).await;
+                if std::mem::take(&mut self.line_overflow) {
+                    self.result(out, "ERROR");
+                } else {
+                    self.dispatch(&line, out).await;
+                }
             }
             // Ignore LF and NUL; CR alone terminates a command.  NUL matters
             // as much as LF: an NVT telnet client writes a bare Return as
@@ -327,6 +353,8 @@ impl CpmModem {
             _ => {
                 if self.line.len() < 128 {
                     self.line.push(b);
+                } else {
+                    self.line_overflow = true;
                 }
             }
         }
@@ -363,6 +391,15 @@ impl CpmModem {
             match c {
                 b' ' => {}
                 b'D' => {
+                    // A call held by `+++` is still up: dialling over it left
+                    // the old connection (a relay call keeps an SSH session
+                    // to the master) alive and unreachable until the next
+                    // hang-up.  Refused, as a held line refuses a new number;
+                    // ATH first, or ATO to go back to it.
+                    if self.conn.is_some() {
+                        self.result(out, "ERROR");
+                        return;
+                    }
                     // Dial consumes the rest of the line.
                     self.dial(&body[i..], out).await;
                     return;
@@ -385,7 +422,17 @@ impl CpmModem {
                 b'E' => self.echo = read_digit(b, &mut i) != 0,
                 b'Q' => self.quiet = read_digit(b, &mut i) != 0,
                 b'V' => self.verbose = read_digit(b, &mut i) != 0,
-                b'X' => self.x_level = read_digit(b, &mut i),
+                // Range-checked here as `apply_profile` does on reload: a value
+                // accepted with OK and saved by AT&W came back clamped, so the
+                // guest's setting did not survive the round trip it was told it
+                // had made.
+                b'X' => match read_digit(b, &mut i) {
+                    n @ 0..=4 => self.x_level = n,
+                    _ => {
+                        self.result(out, "ERROR");
+                        return;
+                    }
+                },
                 b'H' => {
                     let _ = read_digit(b, &mut i);
                     self.hangup(out, false);
@@ -408,7 +455,11 @@ impl CpmModem {
                     i += 1;
                     let n = read_digit(b, &mut i);
                     match sub {
-                        b'C' => self.dcd_mode = n, // &C DCD handling
+                        b'C' if n <= 1 => self.dcd_mode = n, // &C DCD handling
+                        b'C' => {
+                            self.result(out, "ERROR");
+                            return;
+                        }
                         b'D' => {}                 // &D DTR: accepted, not modeled
                         b'F' => self.reset_defaults(), // &F factory reset
                         // &W used to fall into the catch-all below: it
@@ -667,11 +718,9 @@ impl CpmModem {
         let held = std::mem::replace(&mut self.plus_run, 0) as usize;
         let mut bytes = vec![b'+'; held];
         bytes.push(b);
-        if let Some(conn) = self.conn.as_mut() {
-            if conn.write_all(&bytes).await.is_err() {
-                self.hangup(out, true);
-                return;
-            }
+        if !self.write_to_peer(&bytes).await {
+            self.hangup(out, true);
+            return;
         }
         self.last_online_at = Some(now);
     }
@@ -697,11 +746,16 @@ impl CpmModem {
         let held = std::mem::replace(&mut self.plus_run, 0) as usize;
         // They were data, and the last of them is the last data byte.
         self.last_online_at = Some(at);
-        if let Some(conn) = self.conn.as_mut()
-            && conn.write_all(&vec![b'+'; held]).await.is_err()
-        {
+        if !self.write_to_peer(&vec![b'+'; held]).await {
             self.hangup(out, true);
         }
+    }
+
+    /// Write to the far end, if there is one.  False means the call is dead:
+    /// the write failed, or made no progress for [`WRITE_STALL`].
+    async fn write_to_peer(&mut self, bytes: &[u8]) -> bool {
+        let Some(conn) = self.conn.as_mut() else { return true };
+        matches!(tokio::time::timeout(WRITE_STALL, conn.write_all(bytes)).await, Ok(Ok(())))
     }
 
     /// The `+++` escape guard time from S12 (in 1/50-second units; default
@@ -1275,6 +1329,30 @@ mod tests {
         assert!(out.windows(2).any(|w| w == b"yo"));
     }
 
+    /// A far end that stops reading drops the call instead of freezing the
+    /// session.  The write waited for ever: the emulator loop waits with it,
+    /// so neither the double ESC nor a telnet hang-up was ever read again.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_peer_that_stops_reading_drops_the_call() {
+        let (_near, far) = tokio::io::duplex(8); // `_near` is never read
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let mut m = CpmModem::new(true);
+        m.accept_incoming(CpmIncomingCall { bridge: far, progress: tx });
+        let _ = m.service(vec![], 65536, false).await; // ring
+        let _ = m.service(b"ATA\r".to_vec(), 65536, false).await; // answer -> online
+        let started = Instant::now();
+        let out = m.service(vec![b'x'; 64], 65536, false).await;
+        assert!(String::from_utf8_lossy(&out).contains("NO CARRIER"), "{:?}", String::from_utf8_lossy(&out));
+        assert!(started.elapsed() >= WRITE_STALL && started.elapsed() < WRITE_STALL * 2);
+        assert!(m.conn.is_none(), "the dead call is still held");
+        // And the rest of that batch was not taken as commands: one NO CARRIER,
+        // no echo of the upload's remaining bytes, no command line left over.
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(text.matches("NO CARRIER").count(), 1, "{text:?}");
+        assert!(!text.contains('x'), "the rest of the upload was echoed: {text:?}");
+        assert!(m.line.is_empty(), "the rest of the upload became a command line");
+    }
+
     #[tokio::test]
     async fn test_rx_budget_zero_applies_backpressure() {
         use tokio::io::AsyncWriteExt;
@@ -1492,6 +1570,42 @@ mod tests {
         // `+++` with the guard satisfied (no preceding online data) escapes.
         let out = m.service(b"+++".to_vec(), 65536, false).await;
         assert!(String::from_utf8_lossy(&out).contains("OK"));
+    }
+
+    /// A call held by `+++` is not dialled over: the old connection would
+    /// live on, unreachable, until the next hang-up.
+    #[tokio::test]
+    async fn test_a_held_call_refuses_a_new_dial() {
+        let (_near, far) = tokio::io::duplex(1024);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let mut m = CpmModem::new(true);
+        m.accept_incoming(CpmIncomingCall { bridge: far, progress: tx });
+        let _ = m.service(vec![], 65536, false).await;
+        let _ = m.service(b"ATA\r".to_vec(), 65536, false).await;
+        let _ = m.service(b"+++".to_vec(), 65536, false).await; // held, command mode
+        let out = m.service(b"ATDT 192.0.2.1:23\r".to_vec(), 65536, false).await;
+        assert!(String::from_utf8_lossy(&out).contains("ERROR"), "{:?}", String::from_utf8_lossy(&out));
+        assert!(m.conn.is_some(), "the held call was dropped or replaced");
+    }
+
+    /// An overlong line is refused, not cut short and run; out-of-range `X`
+    /// and `&C` are refused rather than accepted and then clamped on reload.
+    #[tokio::test]
+    async fn test_bad_command_lines_answer_error() {
+        let mut m = CpmModem::new(true);
+        let _ = m.service(b"ATE0\r".to_vec(), 65536, false).await;
+        let mut long = b"ATDT ".to_vec();
+        long.extend(std::iter::repeat_n(b'x', 200));
+        long.push(b'\r');
+        let out = m.service(long, 65536, false).await;
+        assert!(String::from_utf8_lossy(&out).contains("ERROR"), "an overlong dial was run");
+        let out = m.service(b"AT\r".to_vec(), 65536, false).await;
+        assert!(String::from_utf8_lossy(&out).contains("OK"), "the overflow outlived its line");
+        for (cmd, want) in [("ATX9", "ERROR"), ("ATX3", "OK"), ("AT&C5", "ERROR"), ("AT&C1", "OK")] {
+            let out = m.service(format!("{cmd}\r").into_bytes(), 65536, false).await;
+            assert!(String::from_utf8_lossy(&out).contains(want), "{cmd}: {:?}", String::from_utf8_lossy(&out));
+        }
+        assert_eq!((m.x_level, m.dcd_mode), (3, 1));
     }
 
     #[tokio::test]
