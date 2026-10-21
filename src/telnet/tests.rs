@@ -15869,3 +15869,29 @@ async fn test_a_drain_settles_a_half_read_command() {
     tokio::io::AsyncReadExt::read_exact(&mut s.reader, &mut next).await.unwrap();
     assert_eq!(next, [b'x'], "the next reader did not get it");
 }
+
+/// **Settling a half-read command is bounded as a whole.**  Bounded per
+/// byte, a peer that trickled a subnegotiation one byte under the limit at a
+/// time held the drain -- and the screen behind it -- for minutes.
+#[tokio::test(start_paused = true)]
+async fn test_settling_a_trickled_command_is_bounded() {
+    use tokio::io::AsyncWriteExt;
+    let (mut s, peer) = make_test_session_with_peer(TerminalType::Ascii);
+    let (_r, mut w) = tokio::io::split(peer);
+    w.write_all(&[IAC, SB, OPT_NAWS]).await.unwrap();
+    let trickle = async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            if w.write_all(b"x").await.is_err() {
+                break;
+            }
+        }
+    };
+    let started = tokio::time::Instant::now();
+    tokio::select! {
+        _ = s.drain_input() => {}
+        _ = trickle => {}
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "held for {:?}", started.elapsed());
+    assert!(matches!(s.iac_resume, crate::telnet::io::SessionIac::Data), "the command was left half-read");
+}

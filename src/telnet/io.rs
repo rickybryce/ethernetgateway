@@ -888,36 +888,38 @@ impl TelnetSession {
     /// mid-command, the rest of it reached that parser as data (a NAWS body
     /// into a remote shell or a protocol stream), and back at a prompt the
     /// session resumed inside a subnegotiation that had already gone by, taking
-    /// keystrokes as its payload.  Bounded like `InboundTelnet::finish`: each
-    /// byte is waited for at most half a second, and then the command is given
-    /// up and reading starts afresh.
+    /// keystrokes as its payload.  Bounded as a whole -- one second for the
+    /// rest of the command, however it arrives -- and then given up, reading
+    /// starting afresh.  (A bound per byte let a peer that trickled a
+    /// subnegotiation hold a drain for minutes.)
     ///
     /// **It reads to the end of the command and not one byte further.**  The
     /// byte after it belongs to whoever reads next -- a transfer's first block,
     /// a bridge's first keystroke -- and read here it would have been held in
     /// the session's pushback, which neither of those reads.
     pub(in crate::telnet) async fn finish_iac(&mut self) {
-        let wait = std::time::Duration::from_millis(500);
         let filter_iac = self.speaks_telnet();
-        // More steps than a capped subnegotiation can take, so a peer feeding
-        // an endless one cannot hold this for ever either.
-        for _ in 0..512 + 8 {
-            if matches!(self.iac_resume, SessionIac::Data) {
-                return;
-            }
-            match tokio::time::timeout(wait, self.iac_step(filter_iac)).await {
-                // A step inside a command decides nothing, except a closed or
-                // stalled connection -- and AYT/IP/EC/EL, which end the
-                // command with a byte of their own, already in data state.
-                Ok(Ok(None)) => {}
-                Ok(Ok(Some(Some(b)))) => {
-                    self.pushback = Some(b);
-                    return;
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !matches!(self.iac_resume, SessionIac::Data) {
+                match self.iac_step(filter_iac).await {
+                    // A step inside a command decides nothing.
+                    Ok(None) => {}
+                    // AYT/IP/EC/EL end the command with a byte of their own;
+                    // it is the command's meaning, so it is kept.
+                    Ok(Some(Some(b))) => {
+                        self.pushback = Some(b);
+                        return true;
+                    }
+                    // Closed, stalled or failed: nothing left to finish.
+                    _ => return false,
                 }
-                _ => break,
             }
+            true
+        })
+        .await;
+        if settled != Ok(true) {
+            self.iac_resume = SessionIac::Data;
         }
-        self.iac_resume = SessionIac::Data;
     }
 
     pub(in crate::telnet) async fn echo_backspace(&mut self) -> Result<(), std::io::Error> {
