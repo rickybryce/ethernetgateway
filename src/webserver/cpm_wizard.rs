@@ -6,7 +6,12 @@
 //! machine that could boot it, its board, slot count and slot names -- and
 //! walks the steps in the browser, so a step back costs nothing.
 //!
-//! **The browser decides nothing.**  The order of the steps is
+//! **The browser decides nothing.**  Its plan starts as the gateway's, and
+//! each answer goes to `/cpm-wizard/choose`, which applies it with
+//! [`Plan`]'s own `choose_*` and sends the plan back -- what an answer keeps
+//! and what it starts afresh is decided in one place for all three surfaces.
+//! The page only *sets* the drives and slots it shows, which are values, not
+//! rules.  The order of the steps is
 //! [`wizard::Step::next`]'s, sent as a table; at a disks step and on the way
 //! to Ready the answers so far go to `/cpm-wizard/check`, which runs
 //! [`wizard::check_plan`] and sends back [`Plan::describe`]'s lines for the
@@ -39,8 +44,86 @@ pub(super) fn disks_json(transfer_dir: &str) -> String {
         }
         out.push_str(&disk_json(d, &disks));
     }
-    out.push_str("]}");
+    // The plan the page starts from, so it has no idea of its own of what
+    // an untouched wizard holds.
+    out.push_str(&format!("],\"plan\":{}}}", plan_json(&Plan::emulator(), &disks)));
     out
+}
+
+/// A plan as the page holds it, with the two things the page draws from it
+/// that are rules rather than values: the machine in force (`auto` resolved by
+/// [`Plan::machine_in_force`]) and whether the next step is the ROM's.
+pub(super) fn plan_json(plan: &Plan, all: &[DiskFacts]) -> String {
+    let boot = plan.boot_in(all);
+    let in_force = boot.map(|b| plan.machine_in_force(b));
+    let disks: Vec<String> =
+        plan.disks.iter().map(|(n, name)| format!("\"{n}\":\"{}\"", json_escape(name))).collect();
+    let opt = |v: Option<&str>| v.map(|s| format!("\"{}\"", json_escape(s))).unwrap_or_else(|| "null".into());
+    format!(
+        "{{\"runs\":\"{}\",\"boot\":{},\"machine\":\"{}\",\"inForce\":{},\"cpu\":\"{}\",\"rom\":\"{}\",\
+         \"needsRom\":{},\"disks\":{{{}}}}}",
+        match plan.runs {
+            Runs::Emulator => "emulator",
+            Runs::Boot => "boot",
+        },
+        opt(plan.boot_disk.as_deref()),
+        json_escape(&plan.machine),
+        opt(in_force.as_deref()),
+        json_escape(&plan.cpu),
+        json_escape(&plan.rom),
+        plan.needs_rom(all),
+        disks.join(",")
+    )
+}
+
+/// One answer applied to the plan the page holds -- by [`Plan`]'s own rules,
+/// so the page has none to drift.  `what` names the question, `value` the
+/// answer; anything a picker would not have offered is refused.
+pub(super) fn choose(
+    form: &std::collections::HashMap<String, String>,
+    all: &[DiskFacts],
+) -> Result<Plan, String> {
+    let mut plan = parse_form(form, false)?;
+    let value = form.get("value").map(|s| s.trim()).unwrap_or_default();
+    let boot = |plan: &Plan| plan.boot_in(all).cloned().ok_or_else(|| "choose the disk to boot".to_string());
+    match form.get("what").map(String::as_str).unwrap_or_default() {
+        "runs" => plan.choose_runs(match value {
+            "emulator" => Runs::Emulator,
+            "boot" if all.iter().any(|d| d.boots) => Runs::Boot,
+            _ => return Err("Choose one of the two.".to_string()),
+        }),
+        "boot" => {
+            let d = all.iter().find(|d| d.name == value && d.boots).ok_or("Choose the disk to boot.")?;
+            plan.choose_boot_disk(d);
+        }
+        "machine" => {
+            let b = boot(&plan)?;
+            if !wizard::machine_choices(&b).iter().any(|m| m.key == value) {
+                return Err("Choose the machine.".to_string());
+            }
+            plan.choose_machine(value, &b);
+        }
+        "rom" => {
+            let b = boot(&plan)?;
+            plan.choose_rom(value == "yes", &b);
+        }
+        "cpu" => {
+            if !matches!(value, "z80" | "8080") {
+                return Err("Choose the processor.".to_string());
+            }
+            plan.cpu = value.to_string();
+        }
+        _ => return Err("an answer to no question".to_string()),
+    }
+    Ok(plan)
+}
+
+/// The outcome of a choice, as JSON for the page: the plan to hold now.
+pub(super) fn choose_json(result: Result<Plan, String>, all: &[DiskFacts]) -> String {
+    match result {
+        Ok(plan) => format!("{{\"ok\":true,\"plan\":{}}}", plan_json(&plan, all)),
+        Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", json_escape(&e)),
+    }
 }
 
 /// One disk, and how each machine that takes it would carry it -- including
@@ -92,17 +175,26 @@ fn disk_json(d: &DiskFacts, all: &[DiskFacts]) -> String {
 /// the form came from a browser -- and the plan as a whole by
 /// [`wizard::check_plan`], which the check route and [`wizard::apply`] run.
 pub(super) fn plan_from_form(form: &std::collections::HashMap<String, String>) -> Result<Plan, String> {
+    parse_form(form, true)
+}
+
+/// [`plan_from_form`], or -- `finished` false -- a plan still being answered,
+/// which may be booting a disk not yet chosen (Boot picked, the disk next).
+fn parse_form(form: &std::collections::HashMap<String, String>, finished: bool) -> Result<Plan, String> {
     let get = |k: &str| form.get(k).map(|s| s.trim().to_string()).unwrap_or_default();
     let mut plan = match get("runs").as_str() {
         "emulator" => Plan::emulator(),
         "boot" => {
             let disk = get("boot");
-            if !crate::cpm::image::is_safe_image_name(&disk) {
-                return Err("choose a boot disk".to_string());
-            }
             let mut p = Plan::emulator();
             p.runs = Runs::Boot;
-            p.boot_disk = Some(disk);
+            if !finished && disk.is_empty() {
+                p.boot_disk = None;
+            } else if !crate::cpm::image::is_safe_image_name(&disk) {
+                return Err("choose a boot disk".to_string());
+            } else {
+                p.boot_disk = Some(disk);
+            }
             p
         }
         _ => return Err("choose what CP/M runs".to_string()),
@@ -244,10 +336,7 @@ pub(super) const SCRIPT: &str = r#"<script>
   var D = null, plan = null, trail = [], step = null, view = null, saved = false, lines = [];
   // Where each step leads: `wizard::Step::next`, sent as a table.
   var N = JSON.parse(T.dataset.next);
-  function nextOf(s) {
-    var rom = plan.runs === 'boot' && plan.boot && disk(plan.boot).rom ? 1 : 0;
-    return N[s + '|' + plan.runs + '|' + rom] || null;
-  }
+  function nextOf(s) { return N[s + '|' + plan.runs + '|' + (plan.needsRom ? 1 : 0)] || null; }
   // **After a save, the page reloads however the wizard is closed** -- Close,
   // the x, a click outside.  The page's one form still holds the CP/M fields as
   // they were before the wizard, and its next Save would write every one of
@@ -265,7 +354,7 @@ pub(super) const SCRIPT: &str = r#"<script>
   }
   function say(s) { msg.textContent = s || ''; }
   function disk(n) { return D.disks.filter(function(x) { return x.name === n; })[0]; }
-  function machineInForce() { var d = disk(plan.boot); return plan.machine === 'auto' ? d.machine : plan.machine; }
+  function machineInForce() { return plan.inForce; }
   function machineLabel(k) { var m = D.machines.filter(function(x) { return x.key === k; })[0]; return m ? m.label : k; }
   function listing(d) {
     return '<div class="cpmw-files"><b>' + esc(d.name) + '</b> <span class="sub">' + esc(d.summary) +
@@ -323,10 +412,8 @@ pub(super) const SCRIPT: &str = r#"<script>
       wire('runs', function() {});
       return function() {
         var v = picked('runs');
-        // As `Plan::choose_runs`: only a chosen boot disk is forgotten.
-        if (v === 'emulator') { if (plan.boot) plan = fresh('emulator'); else plan.runs = 'emulator'; return nextOf('runs'); }
-        if (v === 'boot') { plan.runs = 'boot'; return nextOf('runs'); }
-        say('Choose one of the two.'); return null;
+        if (!v) { say('Choose one of the two.'); return null; }
+        return chose('runs', v, 'runs');
       };
     },
     drives: function() {
@@ -352,11 +439,7 @@ pub(super) const SCRIPT: &str = r#"<script>
       return function() {
         var n = picked('boot');
         if (!n) { say('Choose the disk to boot.'); return null; }
-        if (n !== plan.boot) {
-          var d = disk(n);
-          plan.boot = n; plan.machine = 'auto'; plan.cpu = d.cpu; plan.rom = d.rom || 'off'; plan.disks = {};
-        }
-        return nextOf('bootdisk');
+        return chose('boot', n, 'bootdisk');
       };
     },
     machine: function() {
@@ -365,14 +448,12 @@ pub(super) const SCRIPT: &str = r#"<script>
         return [k, machineLabel(k), (k === d.machine ? 'what the disk was read as; ' : '') + d.on[k].board];
       });
       box.innerHTML = T.dataset.machine + '<p>The disk reads as <b>' + esc(machineLabel(d.machine)) + '</b>.</p>' +
-        choices('machine', items, plan.machine === 'auto' ? d.machine : plan.machine);
+        choices('machine', items, plan.inForce);
       wire('machine', function() {});
       return function() {
         var v = picked('machine');
         if (!v) { say('Choose the machine.'); return null; }
-        var m = v === d.machine ? 'auto' : v;
-        if (m !== plan.machine) plan.disks = {};
-        plan.machine = m; return nextOf('machine');
+        return chose('machine', v, 'machine');
       };
     },
     cpu: function() {
@@ -384,7 +465,7 @@ pub(super) const SCRIPT: &str = r#"<script>
       return function() {
         var v = picked('cpu');
         if (!v) { say('Choose the processor.'); return null; }
-        plan.cpu = v; return nextOf('cpu');
+        return chose('cpu', v, 'cpu');
       };
     },
     rom: function() {
@@ -392,8 +473,7 @@ pub(super) const SCRIPT: &str = r#"<script>
         choices('rom', [['yes', 'Load the ROM', 'advised'], ['off', 'No ROM', '']], plan.rom === 'off' ? 'off' : 'yes');
       wire('rom', function() {});
       return function() {
-        plan.rom = picked('rom') === 'yes' ? (disk(plan.boot).rom || 'off') : 'off';
-        return nextOf('rom');
+        return chose('rom', picked('rom') === 'yes' ? 'yes' : 'no', 'rom');
       };
     },
     extra: function() {
@@ -423,7 +503,6 @@ pub(super) const SCRIPT: &str = r#"<script>
     },
     done: function() { return function() { closeModal('cpm-wizard'); location.href = '/'; return null; }; }
   };
-  function fresh(runs) { return { runs: runs, boot: null, machine: 'auto', cpu: 'z80', rom: 'off', disks: {} }; }
   function go(s) {
     step = s; say(''); next.textContent = 'Next';
     view = steps[s]();
@@ -432,14 +511,24 @@ pub(super) const SCRIPT: &str = r#"<script>
   function form() {
     var body = 'runs=' + encodeURIComponent(plan.runs) + '&cpu=' + encodeURIComponent(plan.cpu);
     if (plan.runs === 'boot') {
-      body += '&boot=' + encodeURIComponent(plan.boot) + '&machine=' + encodeURIComponent(plan.machine) +
+      body += '&boot=' + encodeURIComponent(plan.boot || '') + '&machine=' + encodeURIComponent(plan.machine) +
         '&rom=' + encodeURIComponent(plan.rom);
     }
     return body + '&disks=' + encodeURIComponent(Object.keys(plan.disks).map(function(k) { return k + '=' + plan.disks[k]; }).join(';'));
   }
-  function post(url) {
-    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form() })
+  function post(url, extra) {
+    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form() + (extra || '') })
       .then(function(r) { return r.json(); });
+  }
+  // An answer, applied by the gateway (`Plan::choose_*`): what it keeps and
+  // what it starts afresh is decided there, once, for all three surfaces.
+  // Resolves to the step after `from`, or null when the answer was refused.
+  function chose(what, value, from) {
+    return post('/cpm-wizard/choose', '&what=' + encodeURIComponent(what) + '&value=' + encodeURIComponent(value))
+      .then(function(j) {
+        if (!j.ok) { say(j.error); return null; }
+        plan = j.plan; return nextOf(from);
+      });
   }
   // On from `step` to `to`, the plan checked first where the disks were
   // chosen or the summary is next: the gateway's rules, said while the
@@ -469,8 +558,11 @@ pub(super) const SCRIPT: &str = r#"<script>
   }
   next.addEventListener('click', function() {
     if (!view) return;
-    var to = view();
-    if (to) advance(to);
+    // A step answers with the next step, or a promise of it when the gateway
+    // has the answer to apply; a Back pressed meanwhile wins.
+    var from = step;
+    Promise.resolve(view()).then(function(to) { if (to && step === from) advance(to); })
+      .catch(function() { say('The gateway did not answer.'); });
   });
   back.addEventListener('click', function() { if (trail.length) go(trail.pop()); });
   document.querySelectorAll('button.more[data-target="cpm-wizard"]').forEach(function(b) {
@@ -478,7 +570,7 @@ pub(super) const SCRIPT: &str = r#"<script>
       box.innerHTML = '<p class="sub">Reading the disk images…</p>';
       view = null; trail = []; say('');
       fetch('/cpm-wizard/disks').then(function(r) { return r.json(); }).then(function(j) {
-        D = j; plan = fresh('emulator'); go('runs');
+        D = j; plan = j.plan; go('runs');
       }).catch(function() { say('The gateway did not answer.'); });
     });
   });
@@ -547,7 +639,7 @@ mod tests {
             let lit = format!("return '{}'", step.key());
             assert!(!SCRIPT.contains(&lit), "the script decides a step itself: {lit}");
         }
-        assert!(SCRIPT.contains("nextOf('cpu')"), "positive control: the script asks the table");
+        assert!(SCRIPT.contains("return nextOf(from);"), "positive control: the script asks the table");
         let modal = render_modal();
         assert!(modal.contains("data-next=\"{&quot;runs|emulator|0&quot;:&quot;drives&quot;"), "the table is sent");
         assert!(SCRIPT.contains("'/cpm-wizard/check'"), "the page asks the gateway to check");
@@ -559,7 +651,7 @@ mod tests {
     /// page holding the old CP/M fields for its next ordinary Save.
     #[test]
     fn test_each_answer_is_parsed_once() {
-        let post = &SCRIPT[SCRIPT.find("function post(url)").expect("post")..];
+        let post = &SCRIPT[SCRIPT.find("function post(url, extra)").expect("post")..];
         let post = &post[..post.find("\n  }\n").expect("its end")];
         assert!(post.contains(".json()"), "positive control: post parses the answer");
         assert_eq!(SCRIPT.matches(".json()").count(), 2, "parsed outside post (and the disks fetch)");
@@ -572,6 +664,107 @@ mod tests {
     fn test_the_check_answers_as_json() {
         assert_eq!(check_json(Ok(vec!["Boot \"A\".DSK".into()])), "{\"ok\":true,\"lines\":[\"Boot \\\"A\\\".DSK\"]}");
         assert_eq!(check_json(Err("no".into())), "{\"ok\":false,\"error\":\"no\"}");
+    }
+
+    fn facts(name: &str, boots: bool, files: bool, needs_rom: bool) -> DiskFacts {
+        DiskFacts {
+            name: name.into(),
+            bytes: 337_568,
+            boots,
+            files: files.then(|| vec!["PIP.COM".to_string()]),
+            summary: String::new(),
+            machine: "altair_2sio".into(),
+            machine_why: None,
+            board: Some("MITS 88-DCDD floppy"),
+            slots: Some(16),
+            altair_basic: false,
+            needs_rom,
+        }
+    }
+
+    /// Each answer is applied by `Plan`'s own rules, and what no picker
+    /// offers is refused.
+    #[test]
+    fn test_an_answer_is_applied_by_the_wizards_rules() {
+        let all = vec![facts("BOOT.DSK", true, true, false), facts("ROM.DSK", true, false, true), facts("DATA.DSK", false, true, false)];
+        let ask = |plan: &[(&str, &str)], what: &str, value: &str| {
+            let mut f = form(plan);
+            f.insert("what".into(), what.into());
+            f.insert("value".into(), value.into());
+            choose(&f, &all)
+        };
+        // Boot looked at and backed out of keeps the emulator's drives.
+        let p = ask(&[("runs", "emulator"), ("cpu", "z80"), ("disks", "2=DATA.DSK")], "runs", "boot").unwrap();
+        assert_eq!((p.runs, p.boot_disk.as_deref(), p.disks.len()), (Runs::Boot, None, 1));
+        let p = ask(&[("runs", "boot"), ("cpu", "z80"), ("machine", "auto"), ("rom", "off"), ("disks", "2=DATA.DSK")], "runs", "emulator")
+            .unwrap();
+        assert_eq!((p.runs, p.disks.len()), (Runs::Emulator, 1), "a look at Boot lost the drives");
+        // A boot disk starts from its recommendations; the ROM it wants.
+        let p = ask(&[("runs", "boot"), ("cpu", "z80"), ("machine", "auto"), ("rom", "off")], "boot", "ROM.DSK").unwrap();
+        assert_eq!((p.boot_disk.as_deref(), p.rom.as_str()), (Some("ROM.DSK"), "cuter_vdm"));
+        let boot = [("runs", "boot"), ("boot", "BOOT.DSK"), ("cpu", "z80"), ("machine", "auto"), ("rom", "off"), ("disks", "1=DATA.DSK")];
+        // The machine the disk was read as is kept as auto, with its disks.
+        let p = ask(&boot, "machine", "altair_2sio").unwrap();
+        assert_eq!((p.machine.as_str(), p.disks.len()), ("auto", 1));
+        let p = ask(&boot, "machine", "altair_sio").unwrap();
+        assert_eq!((p.machine.as_str(), p.disks.len()), ("altair_sio", 0), "another machine kept the old board's disks");
+        assert_eq!(ask(&boot, "cpu", "8080").unwrap().cpu, "8080");
+        assert_eq!(ask(&boot, "rom", "yes").unwrap().rom, "off", "a ROM for a disk that wants none");
+        for (why, what, value) in [
+            ("a disk never seen to boot", "boot", "DATA.DSK"),
+            ("a disk not here", "boot", "GONE.DSK"),
+            ("a machine with no board for the disk", "machine", "cromemco"),
+            ("a machine that does not exist", "machine", "pdp11"),
+            ("a processor", "cpu", "6502"),
+            ("a third way to run", "runs", "sideways"),
+            ("no question", "colour", "blue"),
+        ] {
+            assert!(ask(&boot, what, value).is_err(), "{why} was accepted");
+        }
+        // Boot is no answer when nothing here boots.
+        let none = vec![facts("DATA.DSK", false, true, false)];
+        let mut f = form(&[("runs", "emulator"), ("cpu", "z80"), ("what", "runs"), ("value", "boot")]);
+        assert!(choose(&f, &none).is_err());
+        f.insert("value".into(), "emulator".into());
+        assert!(choose(&f, &none).is_ok());
+    }
+
+    /// The page is sent the two things it draws that are rules: the machine
+    /// in force, and whether the ROM step comes next.
+    #[test]
+    fn test_the_plan_sent_carries_what_the_page_would_otherwise_work_out() {
+        let all = vec![facts("ROM.DSK", true, false, true)];
+        let p = Plan::boot(&all[0]);
+        let j = plan_json(&p, &all);
+        assert!(j.contains("\"machine\":\"auto\"") && j.contains("\"inForce\":\"altair_2sio\""), "{j}");
+        assert!(j.contains("\"needsRom\":true") && j.contains("\"boot\":\"ROM.DSK\""), "{j}");
+        let e = plan_json(&Plan::emulator(), &all);
+        assert!(e.contains("\"boot\":null") && e.contains("\"inForce\":null") && e.contains("\"needsRom\":false"), "{e}");
+        assert!(serde_json::from_str::<serde_json::Value>(&j).is_ok(), "not JSON: {j}");
+    }
+
+    /// The page holds no rule about what an answer keeps: the only parts of
+    /// the plan it writes are the drives and slots it shows (values), and the
+    /// whole plan only as the gateway sends it.
+    #[test]
+    fn test_the_page_applies_no_answer_itself() {
+        let mut writes = 0;
+        for (i, _) in SCRIPT.match_indices("plan.") {
+            let rest = &SCRIPT[i + "plan.".len()..];
+            let field: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+            let after = rest[field.len()..].trim_start();
+            if after.starts_with('=') && !after.starts_with("==") {
+                writes += 1;
+                assert!(rest.starts_with("disks = readRows("), "the page sets plan.{field} itself");
+            }
+        }
+        assert_eq!(writes, 2, "positive control: the drives and the slots");
+        for (i, _) in SCRIPT.match_indices("plan = ") {
+            let at = &SCRIPT[i..];
+            assert!(at.starts_with("plan = j.plan;") || at.starts_with("plan = null,"), "the page builds a plan of its own");
+        }
+        assert!(SCRIPT.contains("'/cpm-wizard/choose'"), "the answers go to the gateway");
+        assert!(!SCRIPT.contains("'auto'"), "the page resolves the detected machine itself");
     }
 
     /// Nothing the wizard draws is ever submitted with the page's one form:

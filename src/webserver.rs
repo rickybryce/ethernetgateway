@@ -636,6 +636,29 @@ async fn handle_connection(
             )
             .await?;
         }
+        ("POST", "/cpm-wizard/choose") => {
+            // One answer, applied to the page's plan by the wizard's own rules
+            // (`cpm_wizard::choose`); the plan to hold now comes back.  Writes
+            // nothing.  Off the runtime: it reads the images (cached).
+            let text = String::from_utf8_lossy(&request.body).to_string();
+            let form = parse_form(&text);
+            let dir = config::get_config().transfer_dir;
+            let body = tokio::task::spawn_blocking(move || {
+                let all = crate::cpm::wizard::all_disks(&crate::cpm::wizard::cpm_base(&dir));
+                cpm_wizard::choose_json(cpm_wizard::choose(&form, &all), &all)
+            })
+            .await
+            .unwrap_or_else(|e| cpm_wizard::choose_json(Err(e.to_string()), &[]));
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
         ("POST", "/cpm-wizard/check") => {
             // The answers so far, checked by the gateway's rules and described
             // for the Ready screen.  Writes nothing.  Off the runtime: it reads

@@ -519,6 +519,12 @@ impl Plan {
         self.machine = m.to_string();
     }
 
+    /// The monitor ROM: the one the boot disk wants ([`rom_for`]), or none.
+    pub fn choose_rom(&mut self, load: bool, boot: &DiskFacts) {
+        let rom = rom_for(boot).filter(|_| load);
+        self.rom = rom.unwrap_or(super::rom::ROM_OFF).to_string();
+    }
+
     /// The machine the boot will use: the plan's, or the disk's own when the
     /// plan says to detect it.
     pub fn machine_in_force(&self, boot: &DiskFacts) -> String {

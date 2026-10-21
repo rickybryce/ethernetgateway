@@ -308,9 +308,16 @@ impl CpmWizard {
             Step::Rom => {
                 ui.heading("Monitor ROM");
                 Self::para(ui, wizard::ROM_HELP);
-                let want = self.plan.boot_in(disks).and_then(wizard::rom_for).unwrap_or(crate::cpm::rom::ROM_OFF);
-                ui.radio_value(&mut self.plan.rom, want.to_string(), "Load the ROM (advised)");
-                ui.radio_value(&mut self.plan.rom, crate::cpm::rom::ROM_OFF.to_string(), "No ROM");
+                // Through `choose_rom`, which knows which ROM the disk wants.
+                let was = self.plan.rom != crate::cpm::rom::ROM_OFF;
+                let mut load = was;
+                ui.radio_value(&mut load, true, "Load the ROM (advised)");
+                ui.radio_value(&mut load, false, "No ROM");
+                if load != was
+                    && let Some(boot) = self.plan.boot_in(disks).cloned()
+                {
+                    self.plan.choose_rom(load, &boot);
+                }
             }
             Step::ExtraDisks => {
                 let Some(boot) = self.plan.boot_in(disks).cloned() else { return };

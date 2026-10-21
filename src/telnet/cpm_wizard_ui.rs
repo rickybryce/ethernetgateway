@@ -164,9 +164,7 @@ impl TelnetSession {
                 }
                 Step::Rom => match self.wiz_rom().await? {
                     Some(yes) => {
-                        let disk = boot_disk(&disks, &plan);
-                        let rom = wizard::rom_for(&disk).filter(|_| yes);
-                        plan.rom = rom.unwrap_or(crate::cpm::rom::ROM_OFF).to_string();
+                        plan.choose_rom(yes, &boot_disk(&disks, &plan));
                         Move::On
                     }
                     None => Move::Back,
