@@ -50,6 +50,13 @@ pub(super) fn disks_json(transfer_dir: &str) -> String {
     out
 }
 
+/// What `/cpm-wizard/disks` answers when reading the images failed: no disks,
+/// and still the plan the page starts from -- without one the page has
+/// nothing to draw and stays on "Reading the disk images".
+pub(super) fn disks_fallback() -> String {
+    format!("{{\"machines\":[],\"disks\":[],\"plan\":{}}}", plan_json(&Plan::emulator(), &[]))
+}
+
 /// A plan as the page holds it, with the two things the page draws from it
 /// that are rules rather than values: the machine in force (`auto` resolved by
 /// [`Plan::machine_in_force`]) and whether the next step is the ROM's.
@@ -86,7 +93,12 @@ pub(super) fn choose(
     let mut plan = parse_form(form, false)?;
     let value = form.get("value").map(|s| s.trim()).unwrap_or_default();
     let boot = |plan: &Plan| plan.boot_in(all).cloned().ok_or_else(|| "choose the disk to boot".to_string());
-    match form.get("what").map(String::as_str).unwrap_or_default() {
+    let what = form.get("what").map(String::as_str).unwrap_or_default();
+    // The disk questions belong to a boot: the page asks them only there.
+    if matches!(what, "boot" | "machine" | "rom") && plan.runs != Runs::Boot {
+        return Err("choose to boot a disk first".to_string());
+    }
+    match what {
         "runs" => plan.choose_runs(match value {
             "emulator" => Runs::Emulator,
             "boot" if all.iter().any(|d| d.boots) => Runs::Boot,
@@ -104,15 +116,15 @@ pub(super) fn choose(
             plan.choose_machine(value, &b);
         }
         "rom" => {
+            let load = match value {
+                "yes" => true,
+                "no" => false,
+                _ => return Err("Load the ROM, or not.".to_string()),
+            };
             let b = boot(&plan)?;
-            plan.choose_rom(value == "yes", &b);
+            plan.choose_rom(load, &b);
         }
-        "cpu" => {
-            if !matches!(value, "z80" | "8080") {
-                return Err("Choose the processor.".to_string());
-            }
-            plan.cpu = value.to_string();
-        }
+        "cpu" => plan.choose_cpu(value).map_err(|_| "Choose the processor.".to_string())?,
         _ => return Err("an answer to no question".to_string()),
     }
     Ok(plan)
@@ -199,11 +211,7 @@ fn parse_form(form: &std::collections::HashMap<String, String>, finished: bool) 
         }
         _ => return Err("choose what CP/M runs".to_string()),
     };
-    let cpu = get("cpu");
-    if !matches!(cpu.as_str(), "z80" | "8080") {
-        return Err("choose a processor".to_string());
-    }
-    plan.cpu = cpu;
+    plan.choose_cpu(&get("cpu"))?;
     if plan.runs == Runs::Boot {
         let machine = get("machine");
         if !crate::cpm::console::is_valid_machine_key(&machine) {
@@ -334,6 +342,12 @@ pub(super) const SCRIPT: &str = r#"<script>
   var back = document.getElementById('cpmw-back');
   var next = document.getElementById('cpmw-next');
   var D = null, plan = null, trail = [], step = null, view = null, saved = false, lines = [];
+  // **Only the newest question's answer is taken.**  Each request to the
+  // gateway is numbered, and Back, a reopen or a later request moves the
+  // number on: a reply to anything older is dropped, so an answer backed out
+  // of cannot land in the plan afterwards, and two quick Nexts cannot apply
+  // out of order.
+  var asked = 0, saving = false;
   // Where each step leads: `wizard::Step::next`, sent as a table.
   var N = JSON.parse(T.dataset.next);
   function nextOf(s) { return N[s + '|' + plan.runs + '|' + (plan.needsRom ? 1 : 0)] || null; }
@@ -354,7 +368,6 @@ pub(super) const SCRIPT: &str = r#"<script>
   }
   function say(s) { msg.textContent = s || ''; }
   function disk(n) { return D.disks.filter(function(x) { return x.name === n; })[0]; }
-  function machineInForce() { return plan.inForce; }
   function machineLabel(k) { var m = D.machines.filter(function(x) { return x.key === k; })[0]; return m ? m.label : k; }
   function listing(d) {
     return '<div class="cpmw-files"><b>' + esc(d.name) + '</b> <span class="sub">' + esc(d.summary) +
@@ -477,7 +490,7 @@ pub(super) const SCRIPT: &str = r#"<script>
       };
     },
     extra: function() {
-      var d = disk(plan.boot), m = machineInForce(), on = d.on[m];
+      var d = disk(plan.boot), m = plan.inForce, on = d.on[m];
       var room = on ? on.room : 0;
       // Decided by the gateway (`wizard::extra_disk_choices`), not here.
       var list = (on ? on.extra : []).map(disk).filter(function(x) { return x; });
@@ -524,8 +537,10 @@ pub(super) const SCRIPT: &str = r#"<script>
   // what it starts afresh is decided there, once, for all three surfaces.
   // Resolves to the step after `from`, or null when the answer was refused.
   function chose(what, value, from) {
+    var mine = ++asked;
     return post('/cpm-wizard/choose', '&what=' + encodeURIComponent(what) + '&value=' + encodeURIComponent(value))
       .then(function(j) {
+        if (mine !== asked) return null;
         if (!j.ok) { say(j.error); return null; }
         plan = j.plan; return nextOf(from);
       });
@@ -535,18 +550,21 @@ pub(super) const SCRIPT: &str = r#"<script>
   // operator can still change the answer.
   function advance(to) {
     if (to !== 'ready' && step !== 'drives' && step !== 'extra') { trail.push(step); go(to); return; }
-    var from = step;
+    var mine = ++asked;
     say('Checking…');
     post('/cpm-wizard/check').then(function(j) {
-      if (step !== from) return;
+      if (mine !== asked) return;
       if (!j.ok) { say(j.error); return; }
       lines = j.lines; trail.push(step); go(to);
     }).catch(function() { say('The gateway did not answer.'); });
   }
   function save() {
+    if (saving) return;
+    saving = true; ++asked;
     say('Saving…');
     post('/cpm-wizard/apply')
       .then(function(j) {
+        saving = false;
         if (!j.ok) { say('Not saved: ' + j.error); return; }
         say(''); trail = []; saved = true;
         box.innerHTML = '<p><b>Saved.</b></p>' +
@@ -554,7 +572,7 @@ pub(super) const SCRIPT: &str = r#"<script>
           '<p><b>' + esc(T.dataset.finish) + '</b></p>';
         step = 'done'; view = steps.done(); next.textContent = 'Close'; back.style.visibility = 'hidden';
       })
-      .catch(function() { say('The gateway did not answer.'); });
+      .catch(function() { saving = false; say('The gateway did not answer.'); });
   }
   next.addEventListener('click', function() {
     if (!view) return;
@@ -564,11 +582,11 @@ pub(super) const SCRIPT: &str = r#"<script>
     Promise.resolve(view()).then(function(to) { if (to && step === from) advance(to); })
       .catch(function() { say('The gateway did not answer.'); });
   });
-  back.addEventListener('click', function() { if (trail.length) go(trail.pop()); });
+  back.addEventListener('click', function() { if (trail.length && !saving) { ++asked; go(trail.pop()); } });
   document.querySelectorAll('button.more[data-target="cpm-wizard"]').forEach(function(b) {
     b.addEventListener('click', function() {
       box.innerHTML = '<p class="sub">Reading the disk images…</p>';
-      view = null; trail = []; say('');
+      view = null; trail = []; say(''); ++asked;
       fetch('/cpm-wizard/disks').then(function(r) { return r.json(); }).then(function(j) {
         D = j; plan = j.plan; go('runs');
       }).catch(function() { say('The gateway did not answer.'); });
@@ -716,10 +734,16 @@ mod tests {
             ("a machine with no board for the disk", "machine", "cromemco"),
             ("a machine that does not exist", "machine", "pdp11"),
             ("a processor", "cpu", "6502"),
+            ("a ROM answer that is neither", "rom", "YES"),
             ("a third way to run", "runs", "sideways"),
             ("no question", "colour", "blue"),
         ] {
             assert!(ask(&boot, what, value).is_err(), "{why} was accepted");
+        }
+        // The disk questions belong to a boot.
+        let emu = [("runs", "emulator"), ("cpu", "z80")];
+        for (what, value) in [("boot", "BOOT.DSK"), ("machine", "altair_2sio"), ("rom", "no")] {
+            assert!(ask(&emu, what, value).is_err(), "{what} was answered for the emulator");
         }
         // Boot is no answer when nothing here boots.
         let none = vec![facts("DATA.DSK", false, true, false)];
@@ -741,6 +765,10 @@ mod tests {
         let e = plan_json(&Plan::emulator(), &all);
         assert!(e.contains("\"boot\":null") && e.contains("\"inForce\":null") && e.contains("\"needsRom\":false"), "{e}");
         assert!(serde_json::from_str::<serde_json::Value>(&j).is_ok(), "not JSON: {j}");
+        // Reading the images failed: the page still gets a plan to start from.
+        let f: serde_json::Value = serde_json::from_str(&disks_fallback()).expect("the fallback is JSON");
+        assert_eq!(f["plan"]["runs"], "emulator", "{f}");
+        assert_eq!(f["disks"].as_array().map(Vec::len), Some(0));
     }
 
     /// The page holds no rule about what an answer keeps: the only parts of
@@ -765,6 +793,27 @@ mod tests {
         }
         assert!(SCRIPT.contains("'/cpm-wizard/choose'"), "the answers go to the gateway");
         assert!(!SCRIPT.contains("'auto'"), "the page resolves the detected machine itself");
+    }
+
+    /// Only the newest question's answer is taken: a reply to a request that
+    /// Back, a reopen or a later request has passed is dropped.  Without it an
+    /// answer backed out of landed in the plan afterwards, and two quick Nexts
+    /// on the boot-disk step left the plan booting the first disk picked.
+    #[test]
+    fn test_a_stale_answer_is_dropped() {
+        let body = |name: &str| {
+            let f = &SCRIPT[SCRIPT.find(name).unwrap_or_else(|| panic!("{name}"))..];
+            f[..f.find("\n  }\n").expect("its end")].to_string()
+        };
+        for f in ["function chose(", "function advance("] {
+            let b = body(f);
+            let ask = b.find("var mine = ++asked;").unwrap_or_else(|| panic!("{f} does not number its request"));
+            let drop = b.find("if (mine !== asked) return").unwrap_or_else(|| panic!("{f} takes a stale reply"));
+            assert!(ask < drop);
+        }
+        let back = &SCRIPT[SCRIPT.find("back.addEventListener(").expect("Back")..];
+        assert!(back[..back.find('\n').unwrap()].contains("++asked"), "Back does not pass the request in flight");
+        assert!(body("function save(").contains("if (saving) return;"), "a second Save sends a second apply");
     }
 
     /// Nothing the wizard draws is ever submitted with the page's one form:

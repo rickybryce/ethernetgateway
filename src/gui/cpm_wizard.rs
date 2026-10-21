@@ -313,10 +313,11 @@ impl CpmWizard {
                 let mut load = was;
                 ui.radio_value(&mut load, true, "Load the ROM (advised)");
                 ui.radio_value(&mut load, false, "No ROM");
-                if load != was
-                    && let Some(boot) = self.plan.boot_in(disks).cloned()
-                {
-                    self.plan.choose_rom(load, &boot);
+                if load != was {
+                    match self.plan.boot_in(disks).cloned() {
+                        Some(boot) => self.plan.choose_rom(load, &boot),
+                        None => self.msg = "The boot disk is no longer in the images folder.".to_string(),
+                    }
                 }
             }
             Step::ExtraDisks => {

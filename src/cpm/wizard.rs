@@ -369,6 +369,9 @@ pub fn advised_cpu(runs: Runs, boot: Option<&DiskFacts>) -> (&'static str, &'sta
     }
 }
 
+/// The processors the wizard offers, by config key.
+pub const CPUS: [&str; 2] = ["z80", "8080"];
+
 /// The processor the wizard recommends for the emulator.
 pub const EMULATOR_CPU: &str = "z80";
 
@@ -482,9 +485,26 @@ impl Plan {
             boot_disk: Some(disk.name.clone()),
             machine: super::console::AUTO_MACHINE.to_string(),
             cpu: recommended_cpu(disk).0.to_string(),
-            rom: rom_for(disk).unwrap_or(super::rom::ROM_OFF).to_string(),
+            rom: super::rom::ROM_OFF.to_string(),
             disks: Vec::new(),
         }
+        .with_rom_for(disk)
+    }
+
+    /// [`Plan::choose_rom`] with the ROM taken, for a plan being built.
+    fn with_rom_for(mut self, disk: &DiskFacts) -> Plan {
+        self.choose_rom(true, disk);
+        self
+    }
+
+    /// The processor, by key.  The one rule for what a processor may be:
+    /// the web form's, the web answer's and [`check_plan`]'s.
+    pub fn choose_cpu(&mut self, cpu: &str) -> Result<(), String> {
+        if !CPUS.contains(&cpu) {
+            return Err("choose a processor".to_string());
+        }
+        self.cpu = cpu.to_string();
+        Ok(())
     }
 
     /// The first answer.  Only a chosen boot disk is forgotten: coming back
@@ -621,7 +641,7 @@ impl Plan {
 ///   ones looks like a hang to a guest that picks it;
 /// * no image twice, no drive or slot twice.
 pub fn check_plan(plan: &Plan, all: &[DiskFacts]) -> Result<(), String> {
-    if !matches!(plan.cpu.as_str(), "z80" | "8080") {
+    if !CPUS.contains(&plan.cpu.as_str()) {
         return Err("choose a processor".to_string());
     }
     if !super::rom::is_valid_rom_key(&plan.rom) {

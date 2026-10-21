@@ -625,7 +625,7 @@ async fn handle_connection(
             let dir = config::get_config().transfer_dir;
             let body = tokio::task::spawn_blocking(move || cpm_wizard::disks_json(&dir))
                 .await
-                .unwrap_or_else(|_| "{\"machines\":[],\"disks\":[]}".to_string());
+                .unwrap_or_else(|_| cpm_wizard::disks_fallback());
             write_response(
                 &mut stream,
                 200,
