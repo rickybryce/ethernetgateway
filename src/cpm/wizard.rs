@@ -355,9 +355,9 @@ fn summary(boots: bool, files: Option<&[String]>) -> String {
 /// The processor the wizard recommends for a disk, and why, in one line.
 pub fn recommended_cpu(disk: &DiskFacts) -> (&'static str, &'static str) {
     if disk.altair_basic {
-        ("8080", "Altair BASIC was written for the 8080")
+        (super::cpu::CPU_8080, "Altair BASIC was written for the 8080")
     } else {
-        ("z80", Z80_WHY)
+        (super::cpu::CPU_Z80, Z80_WHY)
     }
 }
 
@@ -369,11 +369,15 @@ pub fn advised_cpu(runs: Runs, boot: Option<&DiskFacts>) -> (&'static str, &'sta
     }
 }
 
-/// The processors the wizard offers, by config key.
-pub const CPUS: [&str; 2] = ["z80", "8080"];
+/// Is this a processor `cpm_cpu` takes?  The settings screens' own list
+/// ([`super::cpu::CPU_CHOICES`]), so the wizard can never refuse one they
+/// accept, or the other way round.
+pub fn is_cpu(cpu: &str) -> bool {
+    super::cpu::CPU_CHOICES.iter().any(|(v, _)| *v == cpu)
+}
 
 /// The processor the wizard recommends for the emulator.
-pub const EMULATOR_CPU: &str = "z80";
+pub const EMULATOR_CPU: &str = super::cpu::CPU_Z80;
 
 /// The machines a disk could be booted on -- those with a board that takes an
 /// image its size -- detected one first.
@@ -480,27 +484,21 @@ impl Plan {
 
     /// A plan that boots `disk` with every recommendation taken.
     pub fn boot(disk: &DiskFacts) -> Plan {
-        Plan {
+        let mut plan = Plan {
             runs: Runs::Boot,
             boot_disk: Some(disk.name.clone()),
             machine: super::console::AUTO_MACHINE.to_string(),
             cpu: recommended_cpu(disk).0.to_string(),
             rom: super::rom::ROM_OFF.to_string(),
             disks: Vec::new(),
-        }
-        .with_rom_for(disk)
+        };
+        plan.choose_rom(true, disk);
+        plan
     }
 
-    /// [`Plan::choose_rom`] with the ROM taken, for a plan being built.
-    fn with_rom_for(mut self, disk: &DiskFacts) -> Plan {
-        self.choose_rom(true, disk);
-        self
-    }
-
-    /// The processor, by key.  The one rule for what a processor may be:
-    /// the web form's, the web answer's and [`check_plan`]'s.
+    /// The processor, by key, if it is one ([`is_cpu`]).
     pub fn choose_cpu(&mut self, cpu: &str) -> Result<(), String> {
-        if !CPUS.contains(&cpu) {
+        if !is_cpu(cpu) {
             return Err("choose a processor".to_string());
         }
         self.cpu = cpu.to_string();
@@ -641,7 +639,7 @@ impl Plan {
 ///   ones looks like a hang to a guest that picks it;
 /// * no image twice, no drive or slot twice.
 pub fn check_plan(plan: &Plan, all: &[DiskFacts]) -> Result<(), String> {
-    if !CPUS.contains(&plan.cpu.as_str()) {
+    if !is_cpu(&plan.cpu) {
         return Err("choose a processor".to_string());
     }
     if !super::rom::is_valid_rom_key(&plan.rom) {
@@ -910,6 +908,11 @@ mod tests {
         let mut p = boot(&[]);
         p.cpu = "6502".into();
         assert!(check_plan(&p, &all).is_err(), "a processor");
+        // Every processor the settings screens take, the wizard takes.
+        for (cpu, _) in crate::cpm::cpu::CPU_CHOICES {
+            p.cpu = cpu.to_string();
+            assert_eq!(check_plan(&p, &all), Ok(()), "{cpu} is a setting the wizard refuses");
+        }
 
         let emu = |disks: &[(u8, &str)]| {
             let mut p = Plan::emulator();

@@ -52,10 +52,19 @@ pub(super) fn disks_json(transfer_dir: &str) -> String {
 
 /// What `/cpm-wizard/disks` answers when reading the images failed: no disks,
 /// and still the plan the page starts from -- without one the page has
-/// nothing to draw and stays on "Reading the disk images".
+/// nothing to draw and stays on "Reading the disk images" -- with the reason
+/// to show.
 pub(super) fn disks_fallback() -> String {
-    format!("{{\"machines\":[],\"disks\":[],\"plan\":{}}}", plan_json(&Plan::emulator(), &[]))
+    format!(
+        "{{\"machines\":[],\"disks\":[],\"plan\":{},\"error\":\"{}\"}}",
+        plan_json(&Plan::emulator(), &[]),
+        json_escape(DISKS_UNREAD)
+    )
 }
+
+/// What the page says when the images could not be read -- not the "no disk
+/// can boot" an empty list would otherwise suggest.
+pub(super) const DISKS_UNREAD: &str = "The disk images could not be read; the gateway's log says why.";
 
 /// A plan as the page holds it, with the two things the page draws from it
 /// that are rules rather than values: the machine in force (`auto` resolved by
@@ -342,12 +351,14 @@ pub(super) const SCRIPT: &str = r#"<script>
   var back = document.getElementById('cpmw-back');
   var next = document.getElementById('cpmw-next');
   var D = null, plan = null, trail = [], step = null, view = null, saved = false, lines = [];
-  // **Only the newest question's answer is taken.**  Each request to the
-  // gateway is numbered, and Back, a reopen or a later request moves the
-  // number on: a reply to anything older is dropped, so an answer backed out
-  // of cannot land in the plan afterwards, and two quick Nexts cannot apply
-  // out of order.
-  var asked = 0, saving = false;
+  // **One request at a time, and only for the wizard that asked.**  Every
+  // request goes through `request`.  While one is out, Next and Back do
+  // nothing, so no answer can land after the operator has moved on and two
+  // quick Nexts cannot cross.  Each opening of the wizard is a generation of
+  // its own (`opened`): a reply to an earlier opening -- the disk list, an
+  // answer, a failure -- is never delivered.  The one exception is a save,
+  // which has changed the settings whatever is open by then (see `save`).
+  var opened = 0, busy = false;
   // Where each step leads: `wizard::Step::next`, sent as a table.
   var N = JSON.parse(T.dataset.next);
   function nextOf(s) { return N[s + '|' + plan.runs + '|' + (plan.needsRom ? 1 : 0)] || null; }
@@ -529,18 +540,30 @@ pub(super) const SCRIPT: &str = r#"<script>
     }
     return body + '&disks=' + encodeURIComponent(Object.keys(plan.disks).map(function(k) { return k + '=' + plan.disks[k]; }).join(';'));
   }
-  function post(url, extra) {
-    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form() + (extra || '') })
-      .then(function(r) { return r.json(); });
+  function setBusy(b) { busy = b; next.disabled = b; back.disabled = b; }
+  // A request to the gateway, answered as JSON.  `late` is what to do with an
+  // answer that arrives after the wizard was opened again; without it such an
+  // answer, or failure, never settles at all, so nothing after it runs.
+  function request(url, body, late) {
+    var mine = opened;
+    setBusy(true);
+    var opt = body === null ? undefined :
+      { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body };
+    return fetch(url, opt).then(function(r) { return r.json(); }).then(function(j) {
+      if (mine !== opened) { if (late) late(j); return new Promise(function() {}); }
+      setBusy(false); return j;
+    }, function(e) {
+      if (mine !== opened) return new Promise(function() {});
+      setBusy(false); throw e;
+    });
   }
+  function post(url, extra) { return request(url, form() + (extra || '')); }
   // An answer, applied by the gateway (`Plan::choose_*`): what it keeps and
   // what it starts afresh is decided there, once, for all three surfaces.
   // Resolves to the step after `from`, or null when the answer was refused.
   function chose(what, value, from) {
-    var mine = ++asked;
     return post('/cpm-wizard/choose', '&what=' + encodeURIComponent(what) + '&value=' + encodeURIComponent(value))
       .then(function(j) {
-        if (mine !== asked) return null;
         if (!j.ok) { say(j.error); return null; }
         plan = j.plan; return nextOf(from);
       });
@@ -550,45 +573,46 @@ pub(super) const SCRIPT: &str = r#"<script>
   // operator can still change the answer.
   function advance(to) {
     if (to !== 'ready' && step !== 'drives' && step !== 'extra') { trail.push(step); go(to); return; }
-    var mine = ++asked;
     say('Checking…');
     post('/cpm-wizard/check').then(function(j) {
-      if (mine !== asked) return;
       if (!j.ok) { say(j.error); return; }
       lines = j.lines; trail.push(step); go(to);
     }).catch(function() { say('The gateway did not answer.'); });
   }
+  function isOpen() { return document.getElementById('cpm-wizard').classList.contains('open'); }
+  // **A save reloads the page once it has saved, however the wizard went** --
+  // the page's one form still holds the CP/M fields as they were, and its next
+  // Save would write them back.  Closed while saving: reload at once.  Opened
+  // again meanwhile: the answer is late, and the page reloads then.
   function save() {
-    if (saving) return;
-    saving = true; ++asked;
     say('Saving…');
-    post('/cpm-wizard/apply')
+    request('/cpm-wizard/apply', form(), function(j) { if (j.ok) location.href = '/'; })
       .then(function(j) {
-        saving = false;
         if (!j.ok) { say('Not saved: ' + j.error); return; }
+        if (!isOpen()) { location.href = '/'; return; }
         say(''); trail = []; saved = true;
         box.innerHTML = '<p><b>Saved.</b></p>' +
           (j.notes || []).map(function(n) { return '<p class="sub">' + esc(n) + '</p>'; }).join('') +
           '<p><b>' + esc(T.dataset.finish) + '</b></p>';
         step = 'done'; view = steps.done(); next.textContent = 'Close'; back.style.visibility = 'hidden';
       })
-      .catch(function() { saving = false; say('The gateway did not answer.'); });
+      .catch(function() { say('The gateway did not answer.'); });
   }
   next.addEventListener('click', function() {
-    if (!view) return;
+    if (!view || busy) return;
     // A step answers with the next step, or a promise of it when the gateway
-    // has the answer to apply; a Back pressed meanwhile wins.
-    var from = step;
-    Promise.resolve(view()).then(function(to) { if (to && step === from) advance(to); })
+    // has the answer to apply.
+    Promise.resolve(view()).then(function(to) { if (to) advance(to); })
       .catch(function() { say('The gateway did not answer.'); });
   });
-  back.addEventListener('click', function() { if (trail.length && !saving) { ++asked; go(trail.pop()); } });
+  back.addEventListener('click', function() { if (trail.length && !busy) go(trail.pop()); });
   document.querySelectorAll('button.more[data-target="cpm-wizard"]').forEach(function(b) {
     b.addEventListener('click', function() {
       box.innerHTML = '<p class="sub">Reading the disk images…</p>';
-      view = null; trail = []; say(''); ++asked;
-      fetch('/cpm-wizard/disks').then(function(r) { return r.json(); }).then(function(j) {
+      opened++; setBusy(false); view = null; trail = []; say('');
+      request('/cpm-wizard/disks', null).then(function(j) {
         D = j; plan = j.plan; go('runs');
+        if (j.error) say(j.error);
       }).catch(function() { say('The gateway did not answer.'); });
     });
   });
@@ -663,19 +687,19 @@ mod tests {
         assert!(SCRIPT.contains("'/cpm-wizard/check'"), "the page asks the gateway to check");
     }
 
-    /// Every answer is parsed once, in `post`.  A second `.json()` on what
+    /// Every answer is parsed once, in `request`.  A second `.json()` on what
     /// `post` already parsed threw in `save`, so every web Save wrote the
     /// settings and then said the gateway had not answered -- and left the
     /// page holding the old CP/M fields for its next ordinary Save.
     #[test]
     fn test_each_answer_is_parsed_once() {
-        let post = &SCRIPT[SCRIPT.find("function post(url, extra)").expect("post")..];
-        let post = &post[..post.find("\n  }\n").expect("its end")];
-        assert!(post.contains(".json()"), "positive control: post parses the answer");
-        assert_eq!(SCRIPT.matches(".json()").count(), 2, "parsed outside post (and the disks fetch)");
+        let req = &SCRIPT[SCRIPT.find("function request(").expect("request")..];
+        let req = &req[..req.find("\n  }\n").expect("its end")];
+        assert!(req.contains(".json()"), "positive control: request parses the answer");
+        assert_eq!(SCRIPT.matches(".json()").count(), 1, "an answer parsed outside request()");
         let save = &SCRIPT[SCRIPT.find("function save()").expect("save")..];
         let save = &save[..save.find("\n  }\n").expect("its end")];
-        assert!(save.contains("post('/cpm-wizard/apply')") && !save.contains(".json()"), "{save}");
+        assert!(save.contains("request('/cpm-wizard/apply'") && !save.contains(".json()"), "{save}");
     }
 
     #[test]
@@ -769,6 +793,7 @@ mod tests {
         let f: serde_json::Value = serde_json::from_str(&disks_fallback()).expect("the fallback is JSON");
         assert_eq!(f["plan"]["runs"], "emulator", "{f}");
         assert_eq!(f["disks"].as_array().map(Vec::len), Some(0));
+        assert_eq!(f["error"], DISKS_UNREAD, "the page is not told the images were not read");
     }
 
     /// The page holds no rule about what an answer keeps: the only parts of
@@ -795,25 +820,40 @@ mod tests {
         assert!(!SCRIPT.contains("'auto'"), "the page resolves the detected machine itself");
     }
 
-    /// Only the newest question's answer is taken: a reply to a request that
-    /// Back, a reopen or a later request has passed is dropped.  Without it an
-    /// answer backed out of landed in the plan afterwards, and two quick Nexts
-    /// on the boot-disk step left the plan booting the first disk picked.
+    /// One request at a time, and only for the wizard that asked.  Every
+    /// request goes through `request`; while one is out Next and Back do
+    /// nothing; and a reply -- or a failure -- to an earlier opening of the
+    /// wizard is never delivered, except a save's, which reloads the page.
+    /// Without this an answer backed out of landed in the plan, two quick
+    /// Nexts left it booting the first disk picked, and a slow disk list from
+    /// an earlier opening threw the operator back to the first step.
     #[test]
     fn test_a_stale_answer_is_dropped() {
         let body = |name: &str| {
             let f = &SCRIPT[SCRIPT.find(name).unwrap_or_else(|| panic!("{name}"))..];
             f[..f.find("\n  }\n").expect("its end")].to_string()
         };
-        for f in ["function chose(", "function advance("] {
-            let b = body(f);
-            let ask = b.find("var mine = ++asked;").unwrap_or_else(|| panic!("{f} does not number its request"));
-            let drop = b.find("if (mine !== asked) return").unwrap_or_else(|| panic!("{f} takes a stale reply"));
-            assert!(ask < drop);
-        }
-        let back = &SCRIPT[SCRIPT.find("back.addEventListener(").expect("Back")..];
-        assert!(back[..back.find('\n').unwrap()].contains("++asked"), "Back does not pass the request in flight");
-        assert!(body("function save(").contains("if (saving) return;"), "a second Save sends a second apply");
+        let line = |start: &str| {
+            let f = &SCRIPT[SCRIPT.find(start).unwrap_or_else(|| panic!("{start}"))..];
+            f[..f.find('\n').unwrap()].to_string()
+        };
+        assert_eq!(SCRIPT.matches("fetch(").count(), 1, "a request that does not go through request()");
+        let req = body("function request(");
+        assert!(req.contains("fetch("), "positive control: request is where the fetch is");
+        assert_eq!(req.matches("if (mine !== opened)").count(), 2, "an answer or a failure from an earlier opening gets through");
+        assert_eq!(req.matches("return new Promise(function() {})").count(), 2, "a stale reply settles");
+        assert!(req.contains("setBusy(true)"), "a request does not hold Next and Back");
+        let next = &SCRIPT[SCRIPT.find("next.addEventListener(").expect("Next")..];
+        let next = &next[..next.find("\n  });").expect("its end")];
+        assert!(next.contains("if (!view || busy) return;"), "Next runs while a request is out");
+        assert!(line("back.addEventListener(").contains("!busy"), "Back runs while a request is out");
+        let open = &SCRIPT[SCRIPT.find("button.more[data-target=\"cpm-wizard\"]").expect("the opener")..];
+        let open = &open[..open.find("\n    });").expect("its end")];
+        assert!(open.contains("opened++"), "reopening does not start a generation");
+        assert!(open.contains("request('/cpm-wizard/disks'"), "the disk list is not asked through request()");
+        let save = body("function save(");
+        assert!(save.contains("if (j.ok) location.href = '/'"), "a late save does not reload the page");
+        assert!(save.contains("if (!isOpen()) { location.href = '/'"), "a save after the wizard closed does not reload");
     }
 
     /// Nothing the wizard draws is ever submitted with the page's one form:

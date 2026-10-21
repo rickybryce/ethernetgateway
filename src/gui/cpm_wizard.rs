@@ -302,8 +302,9 @@ impl CpmWizard {
                     egui::RichText::new(format!("Advised: {}, {why}.", crate::cpm::cpu::cpu_short(adv))).color(AMBER),
                 );
                 let mark = |k: &str| if k == adv { " (advised)" } else { "" };
-                ui.radio_value(&mut self.plan.cpu, "z80".to_string(), format!("Z80{}", mark("z80")));
-                ui.radio_value(&mut self.plan.cpu, "8080".to_string(), format!("8080{}", mark("8080")));
+                use crate::cpm::cpu::{CPU_8080, CPU_Z80};
+                ui.radio_value(&mut self.plan.cpu, CPU_Z80.to_string(), format!("Z80{}", mark(CPU_Z80)));
+                ui.radio_value(&mut self.plan.cpu, CPU_8080.to_string(), format!("8080{}", mark(CPU_8080)));
             }
             Step::Rom => {
                 ui.heading("Monitor ROM");
@@ -313,11 +314,12 @@ impl CpmWizard {
                 let mut load = was;
                 ui.radio_value(&mut load, true, "Load the ROM (advised)");
                 ui.radio_value(&mut load, false, "No ROM");
-                if load != was {
-                    match self.plan.boot_in(disks).cloned() {
-                        Some(boot) => self.plan.choose_rom(load, &boot),
-                        None => self.msg = "The boot disk is no longer in the images folder.".to_string(),
-                    }
+                // The step is reached only with a boot disk that wants a ROM
+                // (`Plan::needs_rom`), so it is there.
+                if load != was
+                    && let Some(boot) = self.plan.boot_in(disks).cloned()
+                {
+                    self.plan.choose_rom(load, &boot);
                 }
             }
             Step::ExtraDisks => {

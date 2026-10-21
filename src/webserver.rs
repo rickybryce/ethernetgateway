@@ -625,7 +625,12 @@ async fn handle_connection(
             let dir = config::get_config().transfer_dir;
             let body = tokio::task::spawn_blocking(move || cpm_wizard::disks_json(&dir))
                 .await
-                .unwrap_or_else(|_| cpm_wizard::disks_fallback());
+                .unwrap_or_else(|e| {
+                    // Said in the log, or the page's "could not be read" leads
+                    // nowhere: a disk that panics the reader is the likely cause.
+                    glog!("Web: CP/M wizard could not read the disk images: {e}");
+                    cpm_wizard::disks_fallback()
+                });
             write_response(
                 &mut stream,
                 200,

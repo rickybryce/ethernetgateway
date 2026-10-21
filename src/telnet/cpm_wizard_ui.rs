@@ -668,15 +668,16 @@ impl TelnetSession {
             }
             self.send_line("").await?;
             let star = |k: &str| if k == advised { " (advised)" } else { "" };
-            self.send_line(&format!("  {}  Z80{}", self.cyan("Z"), star("z80"))).await?;
-            self.send_line(&format!("  {}  8080{}", self.cyan("8"), star("8080"))).await?;
+            use crate::cpm::cpu::{CPU_8080, CPU_Z80};
+            self.send_line(&format!("  {}  Z80{}", self.cyan("Z"), star(CPU_Z80))).await?;
+            self.send_line(&format!("  {}  8080{}", self.cyan("8"), star(CPU_8080))).await?;
             self.send_line("").await?;
             let Some(input) = self.wiz_prompt_digits(&[("Q", "Back")], true).await? else {
                 return Ok(None);
             };
             match input.as_str() {
-                "z" => return Ok(Some("z80".to_string())),
-                "8" => return Ok(Some("8080".to_string())),
+                "z" => return Ok(Some(CPU_Z80.to_string())),
+                "8" => return Ok(Some(CPU_8080.to_string())),
                 "q" | "" => return Ok(None),
                 _ => {}
             }
