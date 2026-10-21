@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **rustls-webpki updated to 0.103.16 and webpki-roots to 1.0.10** for
+  RUSTSEC-2026-0382 and RUSTSEC-2026-0381 (CVE-2026-111943): certificate
+  paths through the distrusted emSign intermediates, whose private keys are
+  now public, could be accepted.  Both are in the HTTPS client the gateway
+  uses for sample-disk downloads, weather, AI chat and the web browser.
+
 - **A miscased `cpm_emu_uart = OFF` no longer turns the virtual modem on.**
   The setting that keeps CP/M guest code off the network was matched exactly,
   and anything it did not recognise fell back to the default, a port that
