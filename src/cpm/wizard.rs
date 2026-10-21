@@ -369,13 +369,6 @@ pub fn advised_cpu(runs: Runs, boot: Option<&DiskFacts>) -> (&'static str, &'sta
     }
 }
 
-/// Is this a processor `cpm_cpu` takes?  The settings screens' own list
-/// ([`super::cpu::CPU_CHOICES`]), so the wizard can never refuse one they
-/// accept, or the other way round.
-pub fn is_cpu(cpu: &str) -> bool {
-    super::cpu::CPU_CHOICES.iter().any(|(v, _)| *v == cpu)
-}
-
 /// The processor the wizard recommends for the emulator.
 pub const EMULATOR_CPU: &str = super::cpu::CPU_Z80;
 
@@ -496,9 +489,11 @@ impl Plan {
         plan
     }
 
-    /// The processor, by key, if it is one ([`is_cpu`]).
+    /// The processor, by key, if it is one the settings take
+    /// ([`super::cpu::is_choice`]): the wizard can never refuse a processor
+    /// the settings screens accept, or the other way round.
     pub fn choose_cpu(&mut self, cpu: &str) -> Result<(), String> {
-        if !is_cpu(cpu) {
+        if !super::cpu::is_choice(cpu) {
             return Err("choose a processor".to_string());
         }
         self.cpu = cpu.to_string();
@@ -639,7 +634,7 @@ impl Plan {
 ///   ones looks like a hang to a guest that picks it;
 /// * no image twice, no drive or slot twice.
 pub fn check_plan(plan: &Plan, all: &[DiskFacts]) -> Result<(), String> {
-    if !is_cpu(&plan.cpu) {
+    if !super::cpu::is_choice(&plan.cpu) {
         return Err("choose a processor".to_string());
     }
     if !super::rom::is_valid_rom_key(&plan.rom) {

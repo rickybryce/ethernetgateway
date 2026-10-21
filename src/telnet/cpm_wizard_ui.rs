@@ -662,24 +662,30 @@ impl TelnetSession {
             self.wiz_heading("PROCESSOR").await?;
             self.wiz_text(wizard::CPU_HELP).await?;
             self.send_line("").await?;
-            let line = format!("Advised: {}, {why}.", crate::cpm::cpu::cpu_short(advised));
+            use crate::cpm::cpu::{CPU_CHOICES, choice_name};
+            let advised_name = CPU_CHOICES.iter().find(|(v, _)| *v == advised).map_or(advised, |(_, l)| choice_name(l));
+            let line = format!("Advised: {advised_name}, {why}.");
             for l in crate::aichat::wrap_line(&line, w).into_iter().take(2) {
                 self.send_line(&format!("  {}", self.amber(&l))).await?;
             }
             self.send_line("").await?;
-            let star = |k: &str| if k == advised { " (advised)" } else { "" };
-            use crate::cpm::cpu::{CPU_8080, CPU_Z80};
-            self.send_line(&format!("  {}  Z80{}", self.cyan("Z"), star(CPU_Z80))).await?;
-            self.send_line(&format!("  {}  8080{}", self.cyan("8"), star(CPU_8080))).await?;
+            // Every processor the settings take, keyed by its name's first
+            // character: `Z` for the Z80, `8` for the 8080.
+            let key = |l: &str| choice_name(l).chars().next().unwrap_or('?').to_ascii_lowercase();
+            for (v, l) in CPU_CHOICES {
+                let star = if *v == advised { " (advised)" } else { "" };
+                let k = key(l).to_ascii_uppercase().to_string();
+                self.send_line(&format!("  {}  {}{star}", self.cyan(&k), choice_name(l))).await?;
+            }
             self.send_line("").await?;
             let Some(input) = self.wiz_prompt_digits(&[("Q", "Back")], true).await? else {
                 return Ok(None);
             };
-            match input.as_str() {
-                "z" => return Ok(Some(CPU_Z80.to_string())),
-                "8" => return Ok(Some(CPU_8080.to_string())),
-                "q" | "" => return Ok(None),
-                _ => {}
+            if matches!(input.as_str(), "q" | "") {
+                return Ok(None);
+            }
+            if let Some((v, _)) = CPU_CHOICES.iter().find(|(_, l)| input.chars().eq([key(l)])) {
+                return Ok(Some(v.to_string()));
             }
         }
     }

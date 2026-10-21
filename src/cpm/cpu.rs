@@ -80,6 +80,18 @@ pub const CPU_CHOICES: &[(&str, &str)] = &[
     (CPU_8080, "8080 (what MITS shipped)"),
 ];
 
+/// Is `value` one of [`CPU_CHOICES`]?  The one test of a `cpm_cpu` value:
+/// the config parser's and the setup wizard's.
+pub fn is_choice(value: &str) -> bool {
+    CPU_CHOICES.iter().any(|(v, _)| *v == value)
+}
+
+/// A choice's name alone -- its label's first word, `Z80` or `8080` -- for a
+/// list with no room for the reason beside it.
+pub fn choice_name(label: &str) -> &str {
+    label.split(' ').next().unwrap_or(label)
+}
+
 /// Whether `value` selects the 8080.
 ///
 /// Anything unrecognised reads as the Z80 rather than refusing: this is

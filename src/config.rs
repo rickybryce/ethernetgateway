@@ -4633,7 +4633,7 @@ pub(crate) fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             // the two above: `is_8080` reads anything it does not recognise as
             // the Z80, so an unchecked write would leave the file claiming an
             // 8080 while both machines ran a Z80.
-            if crate::cpm::cpu::CPU_CHOICES.iter().any(|(v, _)| *v == value) {
+            if crate::cpm::cpu::is_choice(value) {
                 cfg.cpm_cpu = value.to_string();
             }
         }

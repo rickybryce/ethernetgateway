@@ -301,10 +301,12 @@ impl CpmWizard {
                 ui.label(
                     egui::RichText::new(format!("Advised: {}, {why}.", crate::cpm::cpu::cpu_short(adv))).color(AMBER),
                 );
-                let mark = |k: &str| if k == adv { " (advised)" } else { "" };
-                use crate::cpm::cpu::{CPU_8080, CPU_Z80};
-                ui.radio_value(&mut self.plan.cpu, CPU_Z80.to_string(), format!("Z80{}", mark(CPU_Z80)));
-                ui.radio_value(&mut self.plan.cpu, CPU_8080.to_string(), format!("8080{}", mark(CPU_8080)));
+                // Every processor the settings take.
+                for (v, l) in crate::cpm::cpu::CPU_CHOICES {
+                    let mark = if *v == adv { " (advised)" } else { "" };
+                    let name = crate::cpm::cpu::choice_name(l);
+                    ui.radio_value(&mut self.plan.cpu, v.to_string(), format!("{name}{mark}"));
+                }
             }
             Step::Rom => {
                 ui.heading("Monitor ROM");
@@ -317,9 +319,9 @@ impl CpmWizard {
                 // The step is reached only with a boot disk that wants a ROM
                 // (`Plan::needs_rom`), so it is there.
                 if load != was
-                    && let Some(boot) = self.plan.boot_in(disks).cloned()
+                    && let Some(boot) = self.plan.boot_in(disks)
                 {
-                    self.plan.choose_rom(load, &boot);
+                    self.plan.choose_rom(load, boot);
                 }
             }
             Step::ExtraDisks => {

@@ -37,6 +37,15 @@ pub(super) fn disks_json(transfer_dir: &str) -> String {
             json_escape(m.description)
         ));
     }
+    // The processors the settings take, so the page offers no other list.
+    out.push_str("],\"cpus\":[");
+    let cpus: Vec<String> = crate::cpm::cpu::CPU_CHOICES
+        .iter()
+        .map(|(v, l)| {
+            format!("{{\"key\":\"{}\",\"name\":\"{}\"}}", json_escape(v), json_escape(crate::cpm::cpu::choice_name(l)))
+        })
+        .collect();
+    out.push_str(&cpus.join(","));
     out.push_str("],\"disks\":[");
     for (i, d) in disks.iter().enumerate() {
         if i > 0 {
@@ -56,7 +65,7 @@ pub(super) fn disks_json(transfer_dir: &str) -> String {
 /// to show.
 pub(super) fn disks_fallback() -> String {
     format!(
-        "{{\"machines\":[],\"disks\":[],\"plan\":{},\"error\":\"{}\"}}",
+        "{{\"machines\":[],\"cpus\":[],\"disks\":[],\"plan\":{},\"error\":\"{}\"}}",
         plan_json(&Plan::emulator(), &[]),
         json_escape(DISKS_UNREAD)
     )
@@ -321,7 +330,7 @@ pub(super) fn render_modal() -> String {
          <template id=\"cpmw-text\" \
           data-runs=\"{runs}\" data-drives=\"{drives}\" data-bootdisk=\"{bootdisk}\" \
           data-machine=\"{machine}\" data-cpu=\"{cpu}\" data-extra=\"{extra}\" data-rom=\"{rom}\" \
-          data-z80why=\"{z80why}\" data-next=\"{next}\" \
+          data-z80why=\"{z80why}\" data-emucpu=\"{emucpu}\" data-next=\"{next}\" \
           data-finish=\"{finish}\" data-emulator=\"{emu}\" data-boot=\"{boot}\"></template>",
         runs = html_escape(&para(wizard::RUNS_HELP)),
         drives = html_escape(&para(wizard::EMULATOR_DRIVES_HELP)),
@@ -331,6 +340,7 @@ pub(super) fn render_modal() -> String {
         extra = html_escape(&para(wizard::EXTRA_DISKS_HELP)),
         rom = html_escape(&para(wizard::ROM_HELP)),
         z80why = html_escape(wizard::Z80_WHY),
+        emucpu = html_escape(wizard::EMULATOR_CPU),
         next = html_escape(&steps_json()),
         finish = html_escape(wizard::FINISH_LINE),
         emu = html_escape(wizard::EMULATOR_LABEL),
@@ -481,10 +491,12 @@ pub(super) const SCRIPT: &str = r#"<script>
       };
     },
     cpu: function() {
-      var adv = plan.runs === 'boot' ? disk(plan.boot).cpu : 'z80';
+      var adv = plan.runs === 'boot' ? disk(plan.boot).cpu : T.dataset.emucpu;
       var why = plan.runs === 'boot' ? disk(plan.boot).cpuWhy : T.dataset.z80why;
-      box.innerHTML = T.dataset.cpu + '<p><b>Advised: ' + (adv === '8080' ? '8080' : 'Z80') + '</b>, ' + esc(why) + '.</p>' +
-        choices('cpu', [['z80', 'Z80', adv === 'z80' ? 'advised' : ''], ['8080', '8080', adv === '8080' ? 'advised' : '']], plan.cpu);
+      // The processors the settings take (`cpu::CPU_CHOICES`), sent with the disks.
+      var name = function(k) { var c = D.cpus.filter(function(x) { return x.key === k; })[0]; return c ? c.name : k; };
+      box.innerHTML = T.dataset.cpu + '<p><b>Advised: ' + esc(name(adv)) + '</b>, ' + esc(why) + '.</p>' +
+        choices('cpu', D.cpus.map(function(c) { return [c.key, c.name, c.key === adv ? 'advised' : '']; }), plan.cpu);
       wire('cpu', function() {});
       return function() {
         var v = picked('cpu');
@@ -540,20 +552,26 @@ pub(super) const SCRIPT: &str = r#"<script>
     }
     return body + '&disks=' + encodeURIComponent(Object.keys(plan.disks).map(function(k) { return k + '=' + plan.disks[k]; }).join(';'));
   }
-  function setBusy(b) { busy = b; next.disabled = b; back.disabled = b; }
-  // A request to the gateway, answered as JSON.  `late` is what to do with an
-  // answer that arrives after the wizard was opened again; without it such an
-  // answer, or failure, never settles at all, so nothing after it runs.
-  function request(url, body, late) {
+  // Busy holds every control, the step's choices included: a pick changed
+  // while its answer is out would be shown and then not be the one applied.
+  function setBusy(b) {
+    busy = b; next.disabled = b; back.disabled = b;
+    box.querySelectorAll('button, select').forEach(function(c) { c.disabled = b; });
+  }
+  // A request to the gateway, answered as JSON.  An answer, or failure, that
+  // arrives after the wizard was opened again never settles, so nothing after
+  // it runs -- unless `always`: a save's outcome is the operator's whatever
+  // has opened since (see `save`).
+  function request(url, body, always) {
     var mine = opened;
     setBusy(true);
     var opt = body === null ? undefined :
       { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body };
     return fetch(url, opt).then(function(r) { return r.json(); }).then(function(j) {
-      if (mine !== opened) { if (late) late(j); return new Promise(function() {}); }
+      if (mine !== opened && !always) return new Promise(function() {});
       setBusy(false); return j;
     }, function(e) {
-      if (mine !== opened) return new Promise(function() {});
+      if (mine !== opened && !always) return new Promise(function() {});
       setBusy(false); throw e;
     });
   }
@@ -579,24 +597,32 @@ pub(super) const SCRIPT: &str = r#"<script>
       lines = j.lines; trail.push(step); go(to);
     }).catch(function() { say('The gateway did not answer.'); });
   }
-  function isOpen() { return document.getElementById('cpm-wizard').classList.contains('open'); }
-  // **A save reloads the page once it has saved, however the wizard went** --
-  // the page's one form still holds the CP/M fields as they were, and its next
-  // Save would write them back.  Closed while saving: reload at once.  Opened
-  // again meanwhile: the answer is late, and the page reloads then.
+  // **A save's outcome is always shown, and the page reloads only when the
+  // wizard is closed after one.**  The page's one form still holds the CP/M
+  // fields as they were, and its next Save would write them back -- but a
+  // reload the moment a save answers would take whatever the operator has
+  // typed in that form since.  So a save that answers after the wizard was
+  // closed opens it again on the outcome; one that answers after it was
+  // opened again replaces the new wizard with it (the settings it started
+  // from are gone).  Saved or not, nothing goes unsaid, and the reload is the
+  // observer's, on the close that follows.
   function save() {
     say('Saving…');
-    request('/cpm-wizard/apply', form(), function(j) { if (j.ok) location.href = '/'; })
+    request('/cpm-wizard/apply', form(), true)
       .then(function(j) {
+        if (!document.getElementById('cpm-wizard').classList.contains('open')) openModal('cpm-wizard');
         if (!j.ok) { say('Not saved: ' + j.error); return; }
-        if (!isOpen()) { location.href = '/'; return; }
+        opened++;
         say(''); trail = []; saved = true;
         box.innerHTML = '<p><b>Saved.</b></p>' +
           (j.notes || []).map(function(n) { return '<p class="sub">' + esc(n) + '</p>'; }).join('') +
           '<p><b>' + esc(T.dataset.finish) + '</b></p>';
         step = 'done'; view = steps.done(); next.textContent = 'Close'; back.style.visibility = 'hidden';
       })
-      .catch(function() { say('The gateway did not answer.'); });
+      .catch(function() {
+        if (!document.getElementById('cpm-wizard').classList.contains('open')) openModal('cpm-wizard');
+        say('The gateway did not answer: the settings may not have been saved.');
+      });
   }
   next.addEventListener('click', function() {
     if (!view || busy) return;
@@ -611,8 +637,11 @@ pub(super) const SCRIPT: &str = r#"<script>
       box.innerHTML = '<p class="sub">Reading the disk images…</p>';
       opened++; setBusy(false); view = null; trail = []; say('');
       request('/cpm-wizard/disks', null).then(function(j) {
+        // Unread images are said, and nothing else is drawn: an empty list
+        // would advise downloading disks that are there, and its emulator
+        // plan, saved, would take every mounted disk off.
+        if (j.error) { box.innerHTML = '<p>' + esc(j.error) + '</p>'; return; }
         D = j; plan = j.plan; go('runs');
-        if (j.error) say(j.error);
       }).catch(function() { say('The gateway did not answer.'); });
     });
   });
@@ -840,7 +869,7 @@ mod tests {
         assert_eq!(SCRIPT.matches("fetch(").count(), 1, "a request that does not go through request()");
         let req = body("function request(");
         assert!(req.contains("fetch("), "positive control: request is where the fetch is");
-        assert_eq!(req.matches("if (mine !== opened)").count(), 2, "an answer or a failure from an earlier opening gets through");
+        assert_eq!(req.matches("if (mine !== opened && !always)").count(), 2, "an answer or a failure from an earlier opening gets through");
         assert_eq!(req.matches("return new Promise(function() {})").count(), 2, "a stale reply settles");
         assert!(req.contains("setBusy(true)"), "a request does not hold Next and Back");
         let next = &SCRIPT[SCRIPT.find("next.addEventListener(").expect("Next")..];
@@ -851,9 +880,47 @@ mod tests {
         let open = &open[..open.find("\n    });").expect("its end")];
         assert!(open.contains("opened++"), "reopening does not start a generation");
         assert!(open.contains("request('/cpm-wizard/disks'"), "the disk list is not asked through request()");
+        assert!(req.matches("&& !always").count() == 2, "a save's outcome is dropped after a reopen");
+        let busy = body("function setBusy(");
+        assert!(busy.contains("box.querySelectorAll('button, select')"), "a pick can change while its answer is out");
+        // A save's outcome is always shown -- the wizard opened again on it
+        // if it was closed -- and the page reloads only on the close after a
+        // save, never under an operator typing in the page's form.
         let save = body("function save(");
-        assert!(save.contains("if (j.ok) location.href = '/'"), "a late save does not reload the page");
-        assert!(save.contains("if (!isOpen()) { location.href = '/'"), "a save after the wizard closed does not reload");
+        assert!(save.contains("request('/cpm-wizard/apply', form(), true)"), "a save's outcome can be dropped");
+        assert_eq!(save.matches("openModal('cpm-wizard')").count(), 2, "an outcome is said into a closed wizard");
+        assert!(!save.contains("location.href"), "a save reloads the page under the operator");
+        assert!(save.contains("saved = true"), "positive control: the close after a save reloads");
+    }
+
+    /// Unread images are said, and the steps are not drawn: an empty list
+    /// would advise downloading disks that are there, and its emulator plan,
+    /// saved, would take every mounted disk off.
+    #[test]
+    fn test_unread_images_stop_the_wizard() {
+        let open = &SCRIPT[SCRIPT.find("button.more[data-target=\"cpm-wizard\"]").expect("the opener")..];
+        let open = &open[..open.find("\n    });").expect("its end")];
+        let err = open.find("if (j.error) {").expect("the error is not looked at");
+        let rest = &open[err..];
+        assert!(rest[..rest.find('}').unwrap()].contains("return;"), "the steps are drawn after the error");
+        assert!(err < open.find("go('runs')").unwrap());
+    }
+
+    /// The processors the page offers are the settings' own list, sent with
+    /// the disks; the script names none of its own.
+    #[test]
+    fn test_the_page_offers_the_settings_processors() {
+        let body = disks_json("/nonexistent-transfer-dir");
+        let j: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let keys: Vec<&str> = j["cpus"].as_array().expect("cpus").iter().map(|c| c["key"].as_str().unwrap()).collect();
+        let want: Vec<&str> = crate::cpm::cpu::CPU_CHOICES.iter().map(|(v, _)| *v).collect();
+        assert_eq!(keys, want);
+        assert_eq!(j["cpus"][1]["name"], "8080");
+        for lit in ["'z80'", "'8080'", "'Z80'"] {
+            assert!(!SCRIPT.contains(lit), "the script names a processor itself: {lit}");
+        }
+        let f: serde_json::Value = serde_json::from_str(&disks_fallback()).unwrap();
+        assert!(f["cpus"].is_array());
     }
 
     /// Nothing the wizard draws is ever submitted with the page's one form:
