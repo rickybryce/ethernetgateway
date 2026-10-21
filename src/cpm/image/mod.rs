@@ -714,7 +714,6 @@ pub fn available_images(cpm_base: &Path) -> Vec<String> {
 /// boot sweep in [`crate::cpm::boot_machine`] uses it as an *oracle* — the
 /// list a booted guest's own `DIR` is checked against.  Those two must never
 /// be able to disagree about what is on a disk.
-#[cfg(test)]
 pub(crate) fn files_on(path: &std::path::Path) -> Option<Vec<String>> {
     use crate::cpm::image::{fs::ImageFs, identify, media::FileMedia, media::Media};
     let size = std::fs::metadata(path).ok()?.len();

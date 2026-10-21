@@ -243,12 +243,23 @@ fn why_not_from(path: &std::path::Path, bytes: &[u8]) -> Option<String> {
 /// [`Bootability`], which is where that distinction is drawn once so that the
 /// list, the picker and the manifest generator cannot each draw it differently.
 pub fn image_can_boot(path: &std::path::Path) -> bool {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
     let cfg = crate::config::get_config();
     let (machine, cpu) = (cfg.cpm_boot_machine.clone(), cfg.cpm_cpu.clone());
     drop(cfg);
+    image_can_boot_on(path, &machine, &cpu)
+}
+
+/// [`image_can_boot`] under a machine and processor of the caller's choosing.
+///
+/// For the CP/M setup wizard, which is about to *replace* those two settings:
+/// measured under the configured ones, a gateway left set to a Cromemco, or to
+/// the 8080, would hide the very disks an operator opened the wizard to boot.
+/// The same cache, keyed on both, so the two callers never disagree about a
+/// disk asked the same question.
+pub fn image_can_boot_on(path: &std::path::Path, machine: &str, cpu: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    let (machine, cpu) = (machine.to_string(), cpu.to_string());
 
     let Ok(meta) = std::fs::metadata(path) else {
         return false;

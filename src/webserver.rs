@@ -25,6 +25,8 @@ use crate::config::{self, Config};
 use crate::logger::{self, glog};
 use crate::telnet::{self, LockoutMap};
 
+mod cpm_wizard;
+
 /// Maximum size of a request line + headers we'll accept.  Plenty for
 /// the small form posts we handle; bounds the worst case for a
 /// misbehaving / malicious client.
@@ -605,6 +607,52 @@ async fn handle_connection(
                 "{\"typed\":true}".to_string()
             } else {
                 "{\"typed\":false,\"why\":\"gone\"}".to_string()
+            };
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
+        ("GET", "/cpm-wizard/disks") => {
+            // What the CP/M setup wizard needs to know about every disk.  Off
+            // the runtime: it reads every image, and the first bootability
+            // answer for a file cold-starts it.
+            let dir = config::get_config().transfer_dir;
+            let body = tokio::task::spawn_blocking(move || cpm_wizard::disks_json(&dir))
+                .await
+                .unwrap_or_else(|_| "{\"machines\":[],\"disks\":[]}".to_string());
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
+        ("POST", "/cpm-wizard/apply") => {
+            // The wizard's answers, as one form, checked before anything is
+            // written (`cpm_wizard::plan_from_form`).
+            let text = String::from_utf8_lossy(&request.body).to_string();
+            let form = parse_form(&text);
+            let dir = config::get_config().transfer_dir;
+            let body = match cpm_wizard::plan_from_form(&form) {
+                Ok(plan) => {
+                    let outcome = tokio::task::spawn_blocking(move || crate::cpm::wizard::apply(&plan, &dir))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                    if outcome.is_ok() {
+                        glog!("Web: CP/M settings saved by the setup wizard");
+                    }
+                    cpm_wizard::apply_json(outcome)
+                }
+                Err(e) => cpm_wizard::apply_json(Err(e)),
             };
             write_response(
                 &mut stream,
@@ -2682,6 +2730,7 @@ fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool)
     out.push_str("</form>");
     out.push_str(&render_console());
     out.push_str(SCRIPT);
+    out.push_str(cpm_wizard::SCRIPT);
     out.push_str("</body></html>");
     out
 }
@@ -4445,7 +4494,9 @@ fn render_more_popups(cfg: &Config) -> String {
             };
             format!(
                 "{get}<button type=\"button\" class=\"more\" \
-                 data-target=\"more-cpm-disks\">Mount CP/M drives&hellip;</button>"
+                 data-target=\"more-cpm-disks\">Mount CP/M drives&hellip;</button> \
+                 <button type=\"button\" class=\"more\" \
+                 data-target=\"cpm-wizard\">CP/M setup wizard&hellip;</button>"
             )
         },
 
@@ -4453,6 +4504,7 @@ fn render_more_popups(cfg: &Config) -> String {
     ));
 
     out.push_str(&render_cpm_disks_modal(cfg));
+    out.push_str(&cpm_wizard::render_modal());
 
     // File-transfer More — XMODEM-family retry interval (moved off
     // the primary frame to mirror the GUI's draw_file_transfer_-

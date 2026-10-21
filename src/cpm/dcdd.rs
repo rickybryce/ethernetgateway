@@ -624,6 +624,11 @@ impl Dcdd {
 // without the machine changing.  See `crate::cpm::controller`.
 
 impl super::controller::Controller for Dcdd {
+    /// The four-bit select field, all of it.
+    fn slots(&self) -> u8 {
+        MAX_DRIVES as u8
+    }
+
     fn name(&self) -> &'static str {
         "MITS 88-DCDD floppy"
     }

@@ -246,6 +246,10 @@ impl Z80pack {
 }
 
 impl Controller for Z80pack {
+    fn slots(&self) -> u8 {
+        DRIVES as u8
+    }
+
     fn name(&self) -> &'static str {
         "z80pack cpmsim disk"
     }

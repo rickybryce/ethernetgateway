@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CP/M setup wizard** -- the CP/M settings needed to boot a disk (or run
+  the emulator), asked one at a time in the order each answer makes the next
+  relevant, each explained as it is asked.  Telnet/SSH: Configuration ->
+  CP/M Settings -> `W`.  Web and desktop: **CP/M setup wizard...** in the
+  "AI, Browser, Weather & CP/M -- More" panel.
+  - The emulator path asks for disk images on drive letters and the
+    processor; the boot path asks for the disk, the machine (read from the
+    disk, and marked), the processor -- the 8080 is advised for Altair BASIC
+    disks, measured to be exactly the nine MITS BASIC disks across the
+    collections -- the CUTER monitor ROM when a disk needs it, and more disks
+    for the board's other slots, up to what that controller holds.
+  - A chosen disk's summary and directory are shown with it; on telnet,
+    `L` opens the whole listing on paged screens and returns to the step.
+  - Nothing is saved until the summary is confirmed.  It ends: press `K` on
+    the main menu.
+
 ### Security
 
 - **rustls-webpki updated to 0.103.16 and webpki-roots to 1.0.10** for

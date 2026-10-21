@@ -59,6 +59,7 @@ pub mod wd1771;
 pub mod cromemco;
 pub mod cromemco_bank;
 pub mod z80pack;
+pub mod wizard;
 
 pub use fcb::{
     is_host_device_name, parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Fcb, FCB_SIZE,

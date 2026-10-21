@@ -15,6 +15,7 @@ use crate::config::{self, Config};
 use crate::logger;
 
 mod wizard;
+mod cpm_wizard;
 
 // ── Retro amber-on-dark color palette (telnetbible.com inspired) ──
 
@@ -999,6 +1000,8 @@ struct App {
     /// CP/M group rather than more rows in it: sixteen drives do not fit
     /// beside the other settings, and mounting is an occasional operation.
     cpm_mount_popup_open: bool,
+    /// The CP/M setup wizard, while its window is open.
+    cpm_wizard: Option<cpm_wizard::CpmWizard>,
     /// A sample-disk download running on its own thread, and what it last said.
     ///
     /// A thread rather than a blocking call: this is a minute of network I/O
@@ -1388,6 +1391,7 @@ impl App {
             general_popup_open: false,
             ai_browser_popup_open: false,
             cpm_mount_popup_open: false,
+            cpm_wizard: None,
             cpm_fetch: None,
             cpm_fetch_note: String::new(),
             cpm_mount_draft: vec![String::new(); crate::cpm::NUM_DRIVES as usize],
@@ -2472,6 +2476,23 @@ impl App {
         }
     }
 
+    /// Take the keys the CP/M setup wizard writes from the global config into
+    /// this window's copy and its last-synced snapshot, leaving every other
+    /// field -- including any the operator is in the middle of editing -- as
+    /// it is.
+    fn take_cpm_keys_from_global(&mut self) {
+        let g = config::get_config();
+        for cfg in [&mut self.cfg, &mut self.last_synced_cfg] {
+            cfg.cpm_emu_enabled = g.cpm_emu_enabled;
+            cfg.cpm_boot_image = g.cpm_boot_image.clone();
+            cfg.cpm_boot_machine = g.cpm_boot_machine.clone();
+            cfg.cpm_cpu = g.cpm_cpu.clone();
+            cfg.cpm_boot_rom = g.cpm_boot_rom.clone();
+            cfg.cpm_mounts = g.cpm_mounts.clone();
+        }
+        self.cpm_mount_reload_draft();
+    }
+
     /// Apply the draft, then write the resulting table to `cpm_mounts`.
     ///
     /// The *resulting* table, not the request: a drive that refused keeps its
@@ -2716,6 +2737,18 @@ impl App {
             {
                 self.cpm_mount_reload_draft();
                 self.cpm_mount_popup_open = true;
+            }
+            // Beside the mount window: the wizard asks the same questions in
+            // order, mounts included, and is where somebody unsure starts.
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("CP/M Setup Wizard…").color(AMBER_BRIGHT),
+                ))
+                .on_hover_text("Step by step: what CP/M runs, the disk to boot, its machine and processor, and the disks to go with it.")
+                .clicked()
+                && self.cpm_wizard.is_none()
+            {
+                self.cpm_wizard = Some(cpm_wizard::CpmWizard::new(&self.cfg.transfer_dir));
             }
             let n = crate::cpm::image::registry::all()
                 .iter()
@@ -6748,6 +6781,37 @@ impl eframe::App for App {
             });
         });
         self.cpm_mount_popup_open = cpm_mount_open;
+
+        // The CP/M setup wizard.  Saving writes the global config itself, so
+        // the CP/M keys are taken from there into this window's copy: left
+        // alone, the next Save of anything else here would write the old
+        // values back over the wizard's.
+        if let Some(mut w) = self.cpm_wizard.take() {
+            let mut open = true;
+            let mut outcome = cpm_wizard::Outcome::Continue;
+            egui::Window::new(egui::RichText::new("CP/M Setup Wizard").strong().color(AMBER_BRIGHT))
+                .open(&mut open)
+                .resizable(true)
+                .collapsible(false)
+                .default_width(760.0)
+                .max_width(POPUP_CONTENT_W)
+                .frame(popup_frame)
+                .show(&ctx, |ui| {
+                    ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+                    outcome = w.draw(ui);
+                });
+            match outcome {
+                cpm_wizard::Outcome::Saved => {
+                    self.take_cpm_keys_from_global();
+                    self.cpm_wizard = Some(w);
+                }
+                cpm_wizard::Outcome::Close => {}
+                // Kept while a save runs even if the window was closed, so the
+                // save's answer still reaches `take_cpm_keys_from_global`.
+                cpm_wizard::Outcome::Continue if open || w.busy() => self.cpm_wizard = Some(w),
+                cpm_wizard::Outcome::Continue => {}
+            }
+        }
 
         // One independent popup per port — each shows that port's
         // mode selector, framing/flow row, AT/S-register state, stored

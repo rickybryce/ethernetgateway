@@ -183,6 +183,16 @@ pub trait Controller: Send {
         format!("drive {slot}")
     }
 
+    /// How many slots the guest can select on this board -- the most disks it
+    /// can carry, the boot disk in slot 0 included.  What the board's select
+    /// field reaches, which is not always what its connector has room for:
+    /// the Tarbell's carries four drives and selects two.
+    ///
+    /// No default, on purpose: the CP/M setup wizard offers "this many more
+    /// disks" from it, and a board that inherited a guess would offer slots
+    /// nothing answers.
+    fn slots(&self) -> u8;
+
     /// Every medium this board takes.
     fn media(&self) -> Vec<Medium>;
 

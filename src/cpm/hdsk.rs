@@ -832,6 +832,11 @@ impl Hdsk {
 }
 
 impl Controller for Hdsk {
+    /// Four drives of four platters -- see [`Hdsk::slot_label`].
+    fn slots(&self) -> u8 {
+        SLOTS as u8
+    }
+
     /// `unit U.P` — the drive, then the platter on it.
     ///
     /// Both coordinates, because a bare slot number says neither: slot 5 is the

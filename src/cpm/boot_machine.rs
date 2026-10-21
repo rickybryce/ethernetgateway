@@ -69,6 +69,22 @@ fn boards_to_controller(board: super::console::Board) -> Box<dyn Controller> {
     }
 }
 
+/// The boards `key`'s machine carries, or every board here for `None`.
+///
+/// One copy for [`BootMachine::board_for`], [`BootMachine::slot_label`] and
+/// [`BootMachine::slot_count`]: three answers about the board an image lands
+/// on, which must be about the same board.
+fn boards_on(key: Option<&str>) -> Vec<Box<dyn Controller>> {
+    match key {
+        Some(k) => super::console::resolve_machine(k)
+            .boards
+            .iter()
+            .map(|b| boards_to_controller(*b))
+            .collect(),
+        None => all_controllers(),
+    }
+}
+
 /// Every board any machine here can carry, for the questions that are about the
 /// gateway rather than about one machine.
 ///
@@ -1140,21 +1156,7 @@ impl BootMachine {
     /// Cromemco single-density disk was "on the Tarbell 1011, not the booted
     /// disk's board" — about a disk the guest reads perfectly.
     pub fn board_for(key: Option<&str>, image_len: u64) -> Option<&'static str> {
-        let all;
-        let boards: &[Box<dyn Controller>] = match key {
-            Some(k) => {
-                all = super::console::resolve_machine(k)
-                    .boards
-                    .iter()
-                    .map(|b| boards_to_controller(*b))
-                    .collect::<Vec<_>>();
-                &all
-            }
-            None => {
-                all = all_controllers();
-                &all
-            }
-        };
+        let boards = boards_on(key);
         boards
             .iter()
             .find(|c| c.accepts(image_len).is_some())
@@ -1167,22 +1169,16 @@ impl BootMachine {
     /// its tuple because a label is *computed* — the 88-HDSK's names a drive
     /// and a platter — so it cannot be a `&'static str`.
     pub fn slot_label(key: Option<&str>, image_len: u64, slot: u8) -> Option<String> {
-        let all;
-        let boards: &[Box<dyn Controller>] = match key {
-            Some(k) => {
-                all = super::console::resolve_machine(k)
-                    .boards
-                    .iter()
-                    .map(|b| boards_to_controller(*b))
-                    .collect::<Vec<_>>();
-                &all
-            }
-            None => {
-                all = all_controllers();
-                &all
-            }
-        };
+        let boards = boards_on(key);
         boards.iter().find(|c| c.accepts(image_len).is_some()).map(|c| c.slot_label(slot))
+    }
+
+    /// How many disks the board taking an image this size can carry, on the
+    /// machine `key` names -- the boot disk included.  `None` when no board
+    /// there takes it.
+    pub fn slot_count(key: Option<&str>, image_len: u64) -> Option<u8> {
+        let boards = boards_on(key);
+        boards.iter().find(|c| c.accepts(image_len).is_some()).map(|c| c.slots())
     }
 
     /// Can the machine `key` names carry an image this size at all?
@@ -1782,6 +1778,9 @@ pub(crate) mod tests {
     impl Controller for FakeBoard {
         fn name(&self) -> &'static str {
             "test board"
+        }
+        fn slots(&self) -> u8 {
+            2
         }
         fn owns_port(&self, port: u8) -> bool {
             // Ports no real board here claims: 0xA0-0xA7 belong to the 88-HDSK

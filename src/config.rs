@@ -4284,7 +4284,7 @@ pub fn serial_key(id: SerialPortId, suffix: &str) -> String {
 }
 
 /// Apply a single key-value pair to a Config struct.
-fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
+pub(crate) fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
     match key {
         "telnet_enabled" => cfg.telnet_enabled = value.eq_ignore_ascii_case("true"),
         "telnet_port" => {

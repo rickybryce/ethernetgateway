@@ -652,6 +652,164 @@ fn write_repo_disks(images: &Path) {
     }
 }
 
+/// What a disk *is*, worked out from the files that are on it.
+///
+/// Outside the generator since the CP/M setup wizard: it describes the disk an
+/// operator just picked in the same words `repodisks.txt` uses for it.
+///
+/// The catalogue used to print a name and a directory listing and nothing
+/// else, so finding the disk you wanted meant reading 98 listings. This is
+/// the one line that saves that -- and it is derived from the disk's own
+/// directory, never from a catalogue or from the filename, so it cannot
+/// claim something the disk does not carry.
+///
+/// Two rules keep it from stating plausible falsehoods, and both were
+/// written after a first version stated them:
+///
+/// * **A system is claimed only on the files that ARE the system.**
+///   `CDOSCPM.COM` is a CDOS-to-CP/M converter that lives on *CP/M* disks;
+///   matching it labelled four CP/M disks "Cromemco CDOS". The system
+///   markers are the kernel and its generator -- `CDOS.COM` **and**
+///   `CDOSGEN.COM`, `CPM3.SYS`, `MPM.SYS` -- not a utility that mentions
+///   one.
+/// * **A passenger is a proportion, not a count.** `hd-tools.dsk` carries
+///   345 files including all six Zork files, and calling it "Infocom
+///   adventures" would describe a tools disk by its smallest corner. A flat
+///   "needs two matches" does **not** stop that -- six clears two easily,
+///   and the first version of this rule printed the very label its own
+///   comment said it prevented. What separates a subject from a passenger
+///   is the share of the disk it occupies: measured over all 94 disks, the
+///   three labels this rejects on `hd-tools` are its lowest shares (games
+///   0.6%, Infocom 1.8%, assembler 2.4%) and every label worth keeping sits
+///   at 3.8% or above, so a theme must be **two matches and a
+///   thirty-second of the disk**. Nothing at 2% of 345 files is what a disk
+///   *is*; that disk gets the honest fallback instead.
+///
+///   A *defining* file is exempt from both tests -- one `COMAL.COM` or
+///   `TURBO.COM` is what that disk is for -- and those are ranked first for
+///   the same reason.
+///
+/// Deliberately card-neutral: `KSCOPE.COM` and `MICRO80.COM` are graphics
+/// demos on both an Altair and a Cromemco, but the card they drive is a
+/// VDM-1 on one and a Dazzler on the other, and the disk does not say
+/// which. "graphics demos" is what the directory supports.
+///
+/// `None` for a disk with no CP/M filesystem: there are no contents to
+/// derive from, and the entry says it boots its own system instead.
+pub(crate) fn describe_contents(files: &[String]) -> Option<String> {
+    if files.iter().any(|f| f.starts_with("(no CP/M")) {
+        return None;
+    }
+    // The user-area suffix is ours, not the disk's -- match the real name.
+    let names: std::collections::BTreeSet<&str> =
+        files.iter().map(|f| f.split("  (user ").next().unwrap_or(f)).collect();
+    let n = names.len();
+    let has = |m: &[&str]| m.iter().filter(|f| names.contains(**f)).count();
+
+    // (markers, how many must be present, label)
+    const SYSTEM: &[(&[&str], usize, &str)] = &[
+        (&["CPM3.SYS", "CPMLDR.COM"], 1, "CP/M 3.0"),
+        (&["MPM.SYS", "MPMLDR.COM"], 1, "MP/M"),
+        (&["SYSTEM.PASCAL"], 1, "UCSD p-System"),
+        (&["CDOS.COM", "CDOSGEN.COM"], 2, "Cromemco CDOS"),
+        (&["BDOS.SYS", "BIOS.SYS"], 2, "IMDOS (IMSAI CP/M)"),
+        (&["CPM62.SYS"], 1, "CP/M 2.2 (62K)"),
+        (&["MOVCPM.COM", "SYSGEN.COM", "CPM64.SYS", "CPM.COM"], 1, "CP/M 2.2"),
+    ];
+    // (markers, defining, label)
+    //
+    // **The labels are short because they are read on one line.** A summary
+    // is `marker -- system, theme, theme, N files` and must fit 80 columns
+    // beside a readme that is held to 80 -- and it is the LABEL that pays,
+    // because a system name and a file count cannot be shortened without
+    // becoming wrong. `terminal and file-transfer tools` (32 characters)
+    // alone put four entries over, and the worst line at 96. Two of these
+    // got more accurate in the process: `comms tools` covers both the
+    // terminals and the transfer programs the markers actually list, and
+    // `development tools` covers the debuggers -- `SID`/`ZSID` are not
+    // linkers, which the old label implied.
+    const THEMES: &[(&[&str], bool, &str)] = &[
+        (&["FELIX.COM"], true, "the Felix system"),
+        (&["COMAL.COM"], true, "COMAL"),
+        (&["TURBO.COM"], true, "Turbo Pascal"),
+        (&["DBASE.COM", "DBASE.OVL"], true, "dBASE"),
+        (&["WS.COM", "SPELSTAR.OVR", "SPELSTAR.DCT", "MAILMRGE.OVR", "WSOVLY1.OVR"], true, "WordStar"),
+        (&["SUPERCLC.COM", "BUDGET.CAL", "BRKEVN.CAL", "ARCS-DEP.CAL"], true, "SuperCalc worksheets"),
+        (&["ADEXER.COM"], true, "the Altair hard-disk exerciser"),
+        (&["MBASIC.COM", "BASIC.COM", "BASIC5.COM", "BASCOM.COM", "XYCPM95.COM", "VBASIC.COM",
+           "BASIC-E.COM", "CBASIC.COM"], true, "BASIC"),
+        (&["ZORK1.DAT", "ZORK2.DAT", "ZORK3.DAT", "ZORK1.COM", "ZORK2.COM", "ZORK3.COM"], false,
+         "Infocom adventures"),
+        (&["KSCOPE.COM", "MICRO80.COM", "SKETCH.COM", "COLOR.COM", "BARPLOT.COM", "DAZCHESS.COM",
+           "DAZZLE.COM", "DAZZPLOT.COM", "GDEMO.COM", "GRAPHX.COM", "BOUNCE.COM", "LIFE.COM"], false,
+         "graphics demos"),
+        (&["8080EXM.COM", "8080PRE.COM", "EX8080.COM", "EXZ80DOC.COM", "PRELIM.COM", "CPUTEST.COM",
+           "ZEXALL.COM", "ZEXDOC.COM"], false, "CPU exercisers"),
+        (&["KERMIT.COM", "KERMIT3.COM", "QTERM.COM", "QT-IMSAI.COM", "PCGET.COM", "PCPUT.COM",
+           "MODEM.COM", "XMODEM.COM"], false, "comms tools"),
+        (&["M80.COM", "L80.COM", "MAC.COM", "RMAC.COM", "CREF80.COM", "LINK.COM", "ZSID.COM",
+           "SID.COM"], false, "development tools"),
+        (&["CHESS.COM", "CHASE.COM", "CATCHUM.COM", "DEFLECT.COM", "ALIENS.COM", "PACMAN.COM",
+           "DOGFIGHT.COM", "4DTICTAC.COM", "AMBUSH.COM", "CHECKERS.COM", "MYCHESSN.COM",
+           "CRAWL.COM", "LADDER.COM", "ADVENT.COM", "STARTREK.COM", "OTHELLO.COM"], false, "games"),
+    ];
+    const SOURCE_EXT: &[&str] =
+        &["ASM", "MAC", "Z80", "PRN", "REL", "LIB", "FOR", "PAS", "SRC"];
+    /// A non-defining theme must be at least one part in this many of the
+    /// disk. Measured, not chosen: see the passenger rule above.
+    const THEME_SHARE: usize = 32;
+
+    let system = SYSTEM.iter().find(|(m, need, _)| has(m) >= *need).map(|(_, _, l)| *l);
+
+    let mut themes: Vec<(bool, usize, &str)> = THEMES
+        .iter()
+        .filter_map(|(m, defining, label)| {
+            let hits = has(m);
+            // A small disk is exempt from the share test as well as the
+            // count: two files out of six IS what that disk is, and the
+            // proportion says so anyway -- but a dozen-file disk with one
+            // match would fail a share test that a reader would not.
+            let small = n <= 12;
+            let enough = hits >= 2 && hits * THEME_SHARE >= n;
+            (hits > 0 && (*defining || small || enough)).then_some((*defining, hits, *label))
+        })
+        .collect();
+    // Defining first, then by weight of evidence.  A stable sort keeps the
+    // table's own order for ties, so the list above is the tie-break and
+    // the output cannot depend on hash order.
+    themes.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    themes.truncate(2);
+
+    let source = names
+        .iter()
+        .filter(|f| {
+            f.rsplit_once('.').is_some_and(|(_, e)| SOURCE_EXT.contains(&e))
+        })
+        .count();
+
+    let mut parts: Vec<String> = Vec::new();
+    // The system it carries, named and nothing more. It used to read
+    // "{sys} system disk" when no theme followed it, and the marker on the
+    // line now says whether it boots -- which showed that suffix up:
+    // `cpm22-2.dsk` carries CPM64.SYS with the BIOS and BOOT sources beside
+    // it and does NOT boot, being a disk for *building* a system. Naming
+    // the system is the fact; calling it a system disk was an inference on
+    // top of it, and the CDOSCPM.COM category error one step along.
+    if let Some(sys) = system {
+        parts.push(sys.to_string());
+    }
+    parts.extend(themes.iter().map(|(_, _, l)| l.to_string()));
+    if parts.is_empty() {
+        parts.push(
+            if source >= 3.max(n / 2) { "source and listings" } else { "assorted CP/M files" }
+                .to_string(),
+        );
+    } else if source >= 6.max(n * 2 / 3) {
+        parts.push("with source".to_string());
+    }
+    Some(parts.join(", "))
+}
+
 #[cfg(test)]
 mod generate {
     //! Building `repodisks.txt` from the real collections.
@@ -664,160 +822,6 @@ mod generate {
 
     use super::*;
 
-    /// What a disk *is*, worked out from the files that are on it.
-    ///
-    /// The catalogue used to print a name and a directory listing and nothing
-    /// else, so finding the disk you wanted meant reading 98 listings. This is
-    /// the one line that saves that -- and it is derived from the disk's own
-    /// directory, never from a catalogue or from the filename, so it cannot
-    /// claim something the disk does not carry.
-    ///
-    /// Two rules keep it from stating plausible falsehoods, and both were
-    /// written after a first version stated them:
-    ///
-    /// * **A system is claimed only on the files that ARE the system.**
-    ///   `CDOSCPM.COM` is a CDOS-to-CP/M converter that lives on *CP/M* disks;
-    ///   matching it labelled four CP/M disks "Cromemco CDOS". The system
-    ///   markers are the kernel and its generator -- `CDOS.COM` **and**
-    ///   `CDOSGEN.COM`, `CPM3.SYS`, `MPM.SYS` -- not a utility that mentions
-    ///   one.
-    /// * **A passenger is a proportion, not a count.** `hd-tools.dsk` carries
-    ///   345 files including all six Zork files, and calling it "Infocom
-    ///   adventures" would describe a tools disk by its smallest corner. A flat
-    ///   "needs two matches" does **not** stop that -- six clears two easily,
-    ///   and the first version of this rule printed the very label its own
-    ///   comment said it prevented. What separates a subject from a passenger
-    ///   is the share of the disk it occupies: measured over all 94 disks, the
-    ///   three labels this rejects on `hd-tools` are its lowest shares (games
-    ///   0.6%, Infocom 1.8%, assembler 2.4%) and every label worth keeping sits
-    ///   at 3.8% or above, so a theme must be **two matches and a
-    ///   thirty-second of the disk**. Nothing at 2% of 345 files is what a disk
-    ///   *is*; that disk gets the honest fallback instead.
-    ///
-    ///   A *defining* file is exempt from both tests -- one `COMAL.COM` or
-    ///   `TURBO.COM` is what that disk is for -- and those are ranked first for
-    ///   the same reason.
-    ///
-    /// Deliberately card-neutral: `KSCOPE.COM` and `MICRO80.COM` are graphics
-    /// demos on both an Altair and a Cromemco, but the card they drive is a
-    /// VDM-1 on one and a Dazzler on the other, and the disk does not say
-    /// which. "graphics demos" is what the directory supports.
-    ///
-    /// `None` for a disk with no CP/M filesystem: there are no contents to
-    /// derive from, and the entry says it boots its own system instead.
-    fn describe_contents(files: &[String]) -> Option<String> {
-        if files.iter().any(|f| f.starts_with("(no CP/M")) {
-            return None;
-        }
-        // The user-area suffix is ours, not the disk's -- match the real name.
-        let names: std::collections::BTreeSet<&str> =
-            files.iter().map(|f| f.split("  (user ").next().unwrap_or(f)).collect();
-        let n = names.len();
-        let has = |m: &[&str]| m.iter().filter(|f| names.contains(**f)).count();
-
-        // (markers, how many must be present, label)
-        const SYSTEM: &[(&[&str], usize, &str)] = &[
-            (&["CPM3.SYS", "CPMLDR.COM"], 1, "CP/M 3.0"),
-            (&["MPM.SYS", "MPMLDR.COM"], 1, "MP/M"),
-            (&["SYSTEM.PASCAL"], 1, "UCSD p-System"),
-            (&["CDOS.COM", "CDOSGEN.COM"], 2, "Cromemco CDOS"),
-            (&["BDOS.SYS", "BIOS.SYS"], 2, "IMDOS (IMSAI CP/M)"),
-            (&["CPM62.SYS"], 1, "CP/M 2.2 (62K)"),
-            (&["MOVCPM.COM", "SYSGEN.COM", "CPM64.SYS", "CPM.COM"], 1, "CP/M 2.2"),
-        ];
-        // (markers, defining, label)
-        //
-        // **The labels are short because they are read on one line.** A summary
-        // is `marker -- system, theme, theme, N files` and must fit 80 columns
-        // beside a readme that is held to 80 -- and it is the LABEL that pays,
-        // because a system name and a file count cannot be shortened without
-        // becoming wrong. `terminal and file-transfer tools` (32 characters)
-        // alone put four entries over, and the worst line at 96. Two of these
-        // got more accurate in the process: `comms tools` covers both the
-        // terminals and the transfer programs the markers actually list, and
-        // `development tools` covers the debuggers -- `SID`/`ZSID` are not
-        // linkers, which the old label implied.
-        const THEMES: &[(&[&str], bool, &str)] = &[
-            (&["FELIX.COM"], true, "the Felix system"),
-            (&["COMAL.COM"], true, "COMAL"),
-            (&["TURBO.COM"], true, "Turbo Pascal"),
-            (&["DBASE.COM", "DBASE.OVL"], true, "dBASE"),
-            (&["WS.COM", "SPELSTAR.OVR", "SPELSTAR.DCT", "MAILMRGE.OVR", "WSOVLY1.OVR"], true, "WordStar"),
-            (&["SUPERCLC.COM", "BUDGET.CAL", "BRKEVN.CAL", "ARCS-DEP.CAL"], true, "SuperCalc worksheets"),
-            (&["ADEXER.COM"], true, "the Altair hard-disk exerciser"),
-            (&["MBASIC.COM", "BASIC.COM", "BASIC5.COM", "BASCOM.COM", "XYCPM95.COM", "VBASIC.COM",
-               "BASIC-E.COM", "CBASIC.COM"], true, "BASIC"),
-            (&["ZORK1.DAT", "ZORK2.DAT", "ZORK3.DAT", "ZORK1.COM", "ZORK2.COM", "ZORK3.COM"], false,
-             "Infocom adventures"),
-            (&["KSCOPE.COM", "MICRO80.COM", "SKETCH.COM", "COLOR.COM", "BARPLOT.COM", "DAZCHESS.COM",
-               "DAZZLE.COM", "DAZZPLOT.COM", "GDEMO.COM", "GRAPHX.COM", "BOUNCE.COM", "LIFE.COM"], false,
-             "graphics demos"),
-            (&["8080EXM.COM", "8080PRE.COM", "EX8080.COM", "EXZ80DOC.COM", "PRELIM.COM", "CPUTEST.COM",
-               "ZEXALL.COM", "ZEXDOC.COM"], false, "CPU exercisers"),
-            (&["KERMIT.COM", "KERMIT3.COM", "QTERM.COM", "QT-IMSAI.COM", "PCGET.COM", "PCPUT.COM",
-               "MODEM.COM", "XMODEM.COM"], false, "comms tools"),
-            (&["M80.COM", "L80.COM", "MAC.COM", "RMAC.COM", "CREF80.COM", "LINK.COM", "ZSID.COM",
-               "SID.COM"], false, "development tools"),
-            (&["CHESS.COM", "CHASE.COM", "CATCHUM.COM", "DEFLECT.COM", "ALIENS.COM", "PACMAN.COM",
-               "DOGFIGHT.COM", "4DTICTAC.COM", "AMBUSH.COM", "CHECKERS.COM", "MYCHESSN.COM",
-               "CRAWL.COM", "LADDER.COM", "ADVENT.COM", "STARTREK.COM", "OTHELLO.COM"], false, "games"),
-        ];
-        const SOURCE_EXT: &[&str] =
-            &["ASM", "MAC", "Z80", "PRN", "REL", "LIB", "FOR", "PAS", "SRC"];
-        /// A non-defining theme must be at least one part in this many of the
-        /// disk. Measured, not chosen: see the passenger rule above.
-        const THEME_SHARE: usize = 32;
-
-        let system = SYSTEM.iter().find(|(m, need, _)| has(m) >= *need).map(|(_, _, l)| *l);
-
-        let mut themes: Vec<(bool, usize, &str)> = THEMES
-            .iter()
-            .filter_map(|(m, defining, label)| {
-                let hits = has(m);
-                // A small disk is exempt from the share test as well as the
-                // count: two files out of six IS what that disk is, and the
-                // proportion says so anyway -- but a dozen-file disk with one
-                // match would fail a share test that a reader would not.
-                let small = n <= 12;
-                let enough = hits >= 2 && hits * THEME_SHARE >= n;
-                (hits > 0 && (*defining || small || enough)).then_some((*defining, hits, *label))
-            })
-            .collect();
-        // Defining first, then by weight of evidence.  A stable sort keeps the
-        // table's own order for ties, so the list above is the tie-break and
-        // the output cannot depend on hash order.
-        themes.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-        themes.truncate(2);
-
-        let source = names
-            .iter()
-            .filter(|f| {
-                f.rsplit_once('.').is_some_and(|(_, e)| SOURCE_EXT.contains(&e))
-            })
-            .count();
-
-        let mut parts: Vec<String> = Vec::new();
-        // The system it carries, named and nothing more. It used to read
-        // "{sys} system disk" when no theme followed it, and the marker on the
-        // line now says whether it boots -- which showed that suffix up:
-        // `cpm22-2.dsk` carries CPM64.SYS with the BIOS and BOOT sources beside
-        // it and does NOT boot, being a disk for *building* a system. Naming
-        // the system is the fact; calling it a system disk was an inference on
-        // top of it, and the CDOSCPM.COM category error one step along.
-        if let Some(sys) = system {
-            parts.push(sys.to_string());
-        }
-        parts.extend(themes.iter().map(|(_, _, l)| l.to_string()));
-        if parts.is_empty() {
-            parts.push(
-                if source >= 3.max(n / 2) { "source and listings" } else { "assorted CP/M files" }
-                    .to_string(),
-            );
-        } else if source >= 6.max(n * 2 / 3) {
-            parts.push("with source".to_string());
-        }
-        Some(parts.join(", "))
-    }
 
     /// One catalogue row, before it is rendered.
     ///

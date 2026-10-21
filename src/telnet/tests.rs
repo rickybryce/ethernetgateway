@@ -3684,16 +3684,39 @@ fn test_modem_emulator_row_count() {
 /// calls plus the prompt.
 #[test]
 fn test_cpm_settings_row_count() {
-    let header = 3;
-    let warning = 1 + 2; // blank + "be sure you trust..." over two lines
-    // Emulator+ceiling share a row: the printer needed a key and the screen was
-    // already exactly on budget.  Emulator/Modem/Images/Runs.
-    let status = 1 + 4;
-    let actions = 1 + 7; // blank + E, C, U, D, I, B, P
-    let footer = 1 + 1 + 1; // blank + Back + prompt
-    let rows = header + warning + status + actions + footer;
-    assert_eq!(rows, 22, "the CP/M settings screen is {rows} rows");
-    assert!(rows <= 22, "CP/M settings is {rows} rows, exceeds 22");
+    // Drawn, not modelled: an arithmetic model of a screen is right only for as
+    // long as somebody keeps it in step, and this one had to be told about
+    // every row the wizard's `W` moved.  Both terminal widths, both states of
+    // the conditional `G` row.
+    let _cfg = crate::config::CONFIG_TEST_LOCK.blocking_lock();
+    for term in [TerminalType::Petscii, TerminalType::Ansi] {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let out = rt.block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut session, peer) = make_test_session_with_peer(term);
+            let (mut pr, mut pw) = tokio::io::split(peer);
+            pw.write_all(b"q").await.unwrap();
+            let run = async move { session.cpm_settings().await.unwrap() };
+            let mut out = Vec::new();
+            let (_, r) = tokio::join!(run, pr.read_to_end(&mut out));
+            r.unwrap();
+            out
+        });
+        let text: Vec<u8> = if term == TerminalType::Petscii {
+            out.iter()
+                .filter(|&&b| matches!(b, b'\r' | b'\n' | 0x20..=0x7F | 0xA0..=0xFF))
+                .map(|&b| b as char)
+                .collect::<String>()
+                .into_bytes()
+        } else {
+            out
+        };
+        let rows: Vec<String> = render_rows(&text).into_iter().skip_while(|r| r.trim().is_empty()).collect();
+        let end = rows.iter().rposition(|r| !r.trim().is_empty()).map_or(0, |i| i + 1);
+        let rows = &rows[..end];
+        assert_eq!(rows.len(), 22, "{term:?}: the CP/M settings screen is {} rows\n{rows:#?}", rows.len());
+        assert!(rows.iter().any(|r| r.to_ascii_lowercase().contains("setup wizard")), "{term:?}: W is not drawn");
+    }
 }
 
 /// **The Security and Gateway screens hint every key they draw.**  Security
@@ -3747,7 +3770,8 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
     let end = src[start..].find("\n    /// Log-file submenu").expect("the next fn") + start;
     let body = &src[start..end];
 
-    let hint = "Press E, C, D, M, U, I, B, P, G, or Q.";
+    let hint = "Press E C D M U I B P W G or Q.";
+    assert!(hint.len() + 2 <= 38, "the hint wraps a C64 once show_error indents it");
     assert!(body.contains(hint), "the error hint changed: it must list every key");
     // `G` is shown only while the images folder is empty — a conditional row,
     // because this screen is at its 22-row budget and the offer replaces the
@@ -3759,7 +3783,7 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
     // `D` is now the same shape for a different reason: it moved to the modem
     // screen when the Hayes profile needed a home and this one had no spare
     // row, and it is still accepted here so an operator's habit keeps working.
-    for key in ["E", "C", "U", "M", "I", "B", "P", "G"] {
+    for key in ["E", "C", "U", "M", "I", "B", "P", "W", "G"] {
         assert!(
             body.contains(&format!("self.cyan(\"{key}\")")),
             "{key} must be a displayed menu item"
@@ -3773,10 +3797,9 @@ fn test_cpm_settings_keys_are_displayed_handled_and_hinted() {
 
     // `D` is no longer *displayed* here but must still be accepted and hinted,
     // so an operator who learned it before it moved keeps working. Pinning its
-    // absence from the display is the half that matters: putting it back would
-    // put this screen over its 22-row budget again, and the row-count test
-    // above counts an arithmetic model rather than the real `send_line` calls,
-    // so it would not notice.
+    // absence from the display says why: putting it back would put this screen
+    // over its 22-row budget again (which `test_cpm_settings_row_count`, drawing
+    // the real screen, would also catch).
     assert!(
         !body.contains("self.cyan(\"D\")"),
         "D moved to the modem screen; displaying it here again exceeds 22 rows"
@@ -5685,6 +5708,7 @@ fn test_every_menu_prompt_fits_petscii_and_shares_the_main_menu_root() {
     }
 
     const NEEDLE: &str = r#"format!("{}> ", self.cyan(""#;
+    const NEEDLE_WITH_BACK: &str = r#""  {}  {}> ","#;
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/telnet");
     let mut inline_prompts = 0;
     let mut path_literals = 0;
@@ -5718,6 +5742,31 @@ fn test_every_menu_prompt_fits_petscii_and_shares_the_main_menu_root() {
             let lit = &code[lit_at..lit_at + close];
             inline_prompts += 1;
             fits(&name, lit);
+            if path_shaped(lit) {
+                rooted(&name, lit);
+            }
+        }
+
+        // Pass one and a half: the same prompt with Back on its row
+        // (`"  {}  {}> "`, the key hint then the path), the shape a screen
+        // takes when it has no row to spare for Back.  The literal is the
+        // first `self.cyan("...")` after the format string, and the width
+        // that matters is the whole row: indent, `Q=Back`, gap, path, `> `.
+        let mut at = 0;
+        while let Some(i) = code[at..].find(NEEDLE_WITH_BACK) {
+            let from = at + i + NEEDLE_WITH_BACK.len();
+            at = from;
+            let Some(c) = code[from..from + 300.min(code.len() - from)].find("self.cyan(\"") else {
+                continue;
+            };
+            let lit_at = from + c + "self.cyan(\"".len();
+            let Some(close) = code[lit_at..].find('"') else {
+                panic!("{name}: unterminated prompt literal at byte {lit_at}");
+            };
+            let lit = &code[lit_at..lit_at + close];
+            inline_prompts += 1;
+            let row = format!("  Q=Back  {lit}> ");
+            assert!(row.len() <= PETSCII_WIDTH, "{name}: prompt row '{row}' is {} chars", row.len());
             if path_shaped(lit) {
                 rooted(&name, lit);
             }

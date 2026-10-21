@@ -241,6 +241,11 @@ fn trace() -> bool {
 }
 
 impl Controller for Tarbell {
+    /// What the select field reaches, not the four the cable carries.
+    fn slots(&self) -> u8 {
+        SELECTABLE
+    }
+
     fn name(&self) -> &'static str {
         "Tarbell 1011 floppy"
     }

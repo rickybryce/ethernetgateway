@@ -263,6 +263,54 @@ pub fn image_needs_monitor_rom(image: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// Does this disk carry MITS Altair BASIC as its own operating system?
+///
+/// For the CP/M setup wizard, which recommends the 8080 for these: MITS BASIC
+/// was written for the 8080 and the Z80 is not a perfect stand-in for it.
+/// `has_cpm_fs` is whether the disk has a CP/M filesystem -- on these, BASIC
+/// *is* the system, so they have none.
+///
+/// **Measured across all 98 images in the seven collections** (2026-10-21),
+/// and every part of the rule is there because a simpler one was wrong:
+///
+/// * A MITS copyright line (`BY MITS`) with `BASIC` in the 200 bytes before
+///   it finds the seven MITS disk-BASIC disks -- Disk Extended, Time-Sharing,
+///   Mini-Disk and Hard Disk BASIC, `DISK0A`'s sign-on included, which a
+///   sector header splits as `ALTAIR T` / `IMESHARING BASIC`.  `BY MITS INC`
+///   alone also fires on CP/M hard disks whose BIOS carries it.
+/// * A MITS BASIC product name (`ALTAIR BASIC`, `ALTAIR DISK BASIC`, ...)
+///   adds z80pack's `mits-basic40` and `mits-basic50`, whose copyright line
+///   sits further from the name.
+/// * **No CP/M filesystem**, because both texts also turn up *inside files*:
+///   `HDSK05` is a CP/M disk carrying a BASIC program whose comments say
+///   "MODIFIED FOR 'ALTAIR BASIC 4.0'", and the CP/M hard disks' BIOS source
+///   has "ALTAIR SECTOR SKEW LIKE DISK BASIC".
+///
+/// Nine disks, and none of the 89 others.  Describes a disk, never gates one.
+pub fn image_carries_altair_basic(image: &[u8], has_cpm_fs: bool) -> bool {
+    if has_cpm_fs {
+        return false;
+    }
+    let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+    let mut at = 0;
+    while let Some(i) = image[at..].windows(7).position(|w| w == b"BY MITS") {
+        let hit = at + i;
+        if find(&image[hit.saturating_sub(200)..hit], b"BASIC") {
+            return true;
+        }
+        at = hit + 1;
+    }
+    const NAMES: &[&[u8]] = &[
+        b"ALTAIR BASIC",
+        b"ALTAIR DISK BASIC",
+        b"ALTAIR MINI-DISK BASIC",
+        b"ALTAIR T/S DISK BASIC",
+        b"ALTAIR HARD DISK BASIC",
+        b"ALTAIR DISK EXTENDED BASIC",
+    ];
+    NAMES.iter().any(|n| find(image, n))
+}
+
 /// Which machine this image is for, if it says so plainly.
 pub fn detect_machine(image: &[u8]) -> Detected {
     // The controller from the boot sector alone, the console from the system
@@ -345,6 +393,72 @@ pub fn detect_machine(image: &[u8]) -> Detected {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The Altair BASIC rule, pinned to what it was measured on.**  Walks
+    /// every collection the catalogue does and requires exactly the nine MITS
+    /// BASIC disks -- so a change to the rule that adds a false positive (a
+    /// CP/M disk with a BASIC program on it) or loses one is seen here, not by
+    /// an operator handed the wrong processor.
+    ///
+    /// Ignored -- it needs the collections:
+    ///     REPODISKS_HOME=~ cargo test --bin ethernetgateway \
+    ///         test_altair_basic_is_found_on_exactly_the_measured_disks -- --ignored
+    #[test]
+    #[ignore]
+    fn test_altair_basic_is_found_on_exactly_the_measured_disks() {
+        let home = std::env::var("REPODISKS_HOME").or_else(|_| std::env::var("HOME")).expect("a home");
+        let mut found = Vec::new();
+        let mut looked = 0;
+        for (tag, _name, rel, _from, only) in crate::cpm::layout::REPOS {
+            let dir = std::path::Path::new(&home).join(rel);
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                let file = p.file_name().unwrap().to_string_lossy().to_string();
+                if !file.to_ascii_lowercase().ends_with(".dsk") || (!only.is_empty() && !only.contains(&file.as_str())) {
+                    continue;
+                }
+                looked += 1;
+                let bytes = std::fs::read(&p).unwrap();
+                let fs = crate::cpm::image::files_on(&p).is_some();
+                if image_carries_altair_basic(&bytes, fs) {
+                    found.push(format!("{tag}/{file}"));
+                }
+            }
+        }
+        assert!(looked >= 90, "only {looked} images found -- set REPODISKS_HOME");
+        found.sort();
+        let want = [
+            "altairsim/mits-basic40.dsk",
+            "altairsim/mits-basic50.dsk",
+            "hansel/DISK03.DSK",
+            "hansel/DISK04.DSK",
+            "hansel/DISK09.DSK",
+            "hansel/DISK0A.DSK",
+            "hansel/DISK0C.DSK",
+            "hansel/HDSK01.DSK",
+            "hansel/HDSK02.DSK",
+        ];
+        assert_eq!(found, want, "over {looked} images");
+    }
+
+    /// The rule's three parts, without the collections.
+    #[test]
+    fn test_altair_basic_needs_its_signon_and_no_cpm_filesystem() {
+        let pad = |text: &[u8]| {
+            let mut v = vec![0u8; 4096];
+            v[1000..1000 + text.len()].copy_from_slice(text);
+            v
+        };
+        // A MITS copyright line with BASIC before it -- even split by a header.
+        assert!(image_carries_altair_basic(&pad(b"IMESHARING BASIC\r\nCOPYRIGHT 1978 BY MITS INC."), false));
+        // A product name on its own.
+        assert!(image_carries_altair_basic(&pad(b"ALTAIR BASIC REV. 4.0"), false));
+        // The same text inside a file on a CP/M disk is not the system.
+        assert!(!image_carries_altair_basic(&pad(b"MODIFIED FOR 'ALTAIR BASIC 4.0'"), true));
+        // A MITS copyright with no BASIC near it (a CP/M BIOS) is not BASIC.
+        assert!(!image_carries_altair_basic(&pad(b"COPYRIGHT 1980 BY MITS INC."), false));
+    }
 
     /// Build an image whose first bytes touch the given ports, the way a loader
     /// and a BIOS would.

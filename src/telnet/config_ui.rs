@@ -831,14 +831,20 @@ impl TelnetSession {
                 self.cyan("P")
             ))
             .await?;
-            self.send_line("").await?;
+            // The wizard took the row Back had: Back is on the prompt's row
+            // now, as on the mount screens, and the screen is still 22.
             self.send_line(&format!(
-                "  {}",
-                self.action_prompt("Q", "Back")
+                "  {}  Setup wizard, step by step",
+                self.cyan("W")
             ))
             .await?;
+            self.send_line("").await?;
 
-            let prompt = format!("{}> ", self.cyan("gateway/config/cpm"));
+            let prompt = format!(
+                "  {}  {}> ",
+                self.action_prompt("Q", "Back"),
+                self.cyan("gateway/config/cpm")
+            );
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -895,6 +901,7 @@ impl TelnetSession {
                 }
                 "b" => self.cpm_boot_settings().await?,
                 "p" => self.cpm_printer_settings().await?,
+                "w" => self.cpm_wizard().await?,
                 "i" => {
                     // Displayed on this screen since the mount feature shipped,
                     // but only ever handled on the parent menu — so pressing it
@@ -910,7 +917,9 @@ impl TelnetSession {
                 _ => {
                     // Every displayed key belongs in this hint; I and B were
                     // each missing from it once.
-                    self.show_error("Press E, C, D, M, U, I, B, P, G, or Q.").await?;
+                    // No commas since `W`: with them the hint is 41 columns
+                    // on a C64, and `show_error` indents it two more.
+                    self.show_error("Press E C D M U I B P W G or Q.").await?;
                 }
             }
         }

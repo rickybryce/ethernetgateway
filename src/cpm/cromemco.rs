@@ -510,6 +510,10 @@ fn trace() -> bool {
 }
 
 impl Controller for Cromemco {
+    fn slots(&self) -> u8 {
+        DRIVES as u8
+    }
+
     fn name(&self) -> &'static str {
         "Cromemco 4FDC/16FDC floppy"
     }
