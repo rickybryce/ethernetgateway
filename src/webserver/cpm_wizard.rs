@@ -323,8 +323,8 @@ pub(super) const SCRIPT: &str = r#"<script>
       wire('runs', function() {});
       return function() {
         var v = picked('runs');
-        // As `Plan::choose_runs`: the emulator again keeps its drives.
-        if (v === 'emulator') { if (plan.runs !== 'emulator') plan = fresh('emulator'); return nextOf('runs'); }
+        // As `Plan::choose_runs`: only a chosen boot disk is forgotten.
+        if (v === 'emulator') { if (plan.boot) plan = fresh('emulator'); else plan.runs = 'emulator'; return nextOf('runs'); }
         if (v === 'boot') { plan.runs = 'boot'; return nextOf('runs'); }
         say('Choose one of the two.'); return null;
       };
@@ -457,7 +457,6 @@ pub(super) const SCRIPT: &str = r#"<script>
   function save() {
     say('Saving…');
     post('/cpm-wizard/apply')
-      .then(function(r) { return r.json(); })
       .then(function(j) {
         if (!j.ok) { say('Not saved: ' + j.error); return; }
         say(''); trail = []; saved = true;
@@ -552,6 +551,21 @@ mod tests {
         let modal = render_modal();
         assert!(modal.contains("data-next=\"{&quot;runs|emulator|0&quot;:&quot;drives&quot;"), "the table is sent");
         assert!(SCRIPT.contains("'/cpm-wizard/check'"), "the page asks the gateway to check");
+    }
+
+    /// Every answer is parsed once, in `post`.  A second `.json()` on what
+    /// `post` already parsed threw in `save`, so every web Save wrote the
+    /// settings and then said the gateway had not answered -- and left the
+    /// page holding the old CP/M fields for its next ordinary Save.
+    #[test]
+    fn test_each_answer_is_parsed_once() {
+        let post = &SCRIPT[SCRIPT.find("function post(url)").expect("post")..];
+        let post = &post[..post.find("\n  }\n").expect("its end")];
+        assert!(post.contains(".json()"), "positive control: post parses the answer");
+        assert_eq!(SCRIPT.matches(".json()").count(), 2, "parsed outside post (and the disks fetch)");
+        let save = &SCRIPT[SCRIPT.find("function save()").expect("save")..];
+        let save = &save[..save.find("\n  }\n").expect("its end")];
+        assert!(save.contains("post('/cpm-wizard/apply')") && !save.contains(".json()"), "{save}");
     }
 
     #[test]

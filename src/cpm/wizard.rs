@@ -279,6 +279,9 @@ impl DiskFacts {
     /// [`DiskFacts::read`] uncached: the file is read once, and those bytes
     /// answer every question that needs them, the bootability one included.
     fn measure(path: &Path, name: &str) -> Option<DiskFacts> {
+        // Before the read, so a file still being written is remembered under
+        // the identity it had *then*: the next look sees it changed.
+        let meta = std::fs::metadata(path).ok()?;
         let bytes = std::fs::read(path).ok()?;
         let len = bytes.len() as u64;
         let files = super::image::files_on(path);
@@ -302,7 +305,7 @@ impl DiskFacts {
         // force, which are the ones the operator came here to change: left on a
         // Cromemco, or on the 8080, those hid the disks the wizard is for.
         let cpu = recommended_cpu(&facts).0;
-        facts.boots = super::boot::image_can_boot_on_with(path, bytes, super::console::AUTO_MACHINE, cpu);
+        facts.boots = super::boot::image_can_boot_on_with(path, &meta, bytes, super::console::AUTO_MACHINE, cpu);
         facts.summary = summary(facts.boots, facts.files.as_deref());
         Some(facts)
     }
@@ -425,12 +428,6 @@ pub fn extra_disk_room(boot: &DiskFacts, machine: &str) -> u8 {
         .saturating_sub(1)
 }
 
-/// What a slot is called for `boot` on `machine` -- the board's own words.
-pub fn slot_name(boot: &DiskFacts, machine: &str, slot: u8) -> String {
-    super::boot_machine::BootMachine::slot_label(Some(machine), boot.bytes, slot)
-        .unwrap_or_else(|| format!("slot {slot}"))
-}
-
 /// What every slot is called for `boot` on `machine`, the boot disk's first
 /// and then the [`extra_disk_room`] it leaves -- the board built once.
 pub fn slot_names(boot: &DiskFacts, machine: &str) -> Vec<String> {
@@ -490,12 +487,14 @@ impl Plan {
         }
     }
 
-    /// The first answer.  Choosing the emulator again keeps the drives
-    /// already picked for it; coming to it from a boot starts it afresh.  A
-    /// boot keeps what it has until its disk is chosen.
+    /// The first answer.  Only a chosen boot disk is forgotten: coming back
+    /// to the emulator from one starts it afresh, but looking at Boot and
+    /// backing out before a disk was picked keeps the drives already chosen
+    /// -- nothing boot-specific was set.  A boot keeps what it has until its
+    /// disk is chosen ([`Plan::choose_boot_disk`] starts it afresh).
     pub fn choose_runs(&mut self, runs: Runs) {
         match runs {
-            Runs::Emulator if self.runs != Runs::Emulator => *self = Plan::emulator(),
+            Runs::Emulator if self.boot_disk.is_some() => *self = Plan::emulator(),
             _ => self.runs = runs,
         }
     }
@@ -811,6 +810,10 @@ mod tests {
         p.disks = vec![(2, "TOOLS.DSK".into())];
         p.choose_runs(Runs::Emulator);
         assert_eq!(p.disks.len(), 1, "choosing the emulator again lost its drives");
+        // Boot looked at, backed out of before a disk was picked.
+        p.choose_runs(Runs::Boot);
+        p.choose_runs(Runs::Emulator);
+        assert_eq!((p.runs, p.disks.len()), (Runs::Emulator, 1), "a look at Boot lost the drives");
         let d = disk("DISK01.DSK", false, false);
         p.choose_runs(Runs::Boot);
         p.choose_boot_disk(&d);
@@ -973,7 +976,8 @@ mod tests {
         let hd = DiskFacts::read(&base, "HDSK01.DSK").unwrap();
         assert_eq!((hd.board, hd.slots), (Some("MITS 88-HDSK hard disk"), Some(16)), "{hd:?}");
         assert_eq!(extra_disk_room(&hd, &hd.machine), 15);
-        assert_eq!(slot_name(&hd, &hd.machine, 1), "unit 0.1");
+        assert_eq!(slot_names(&hd, &hd.machine)[1], "unit 0.1");
+        assert_eq!(slot_names(&hd, &hd.machine).len(), 16, "the boot disk's slot and fifteen more");
 
         let all = all_disks(&base);
         let extra = extra_disk_choices(&cpm, &cpm.machine, &all);
@@ -1005,6 +1009,20 @@ mod tests {
         let f = &f[..f.find("\n    }\n").expect("its end")];
         assert!(f.contains("image_can_boot_on_with("), "bootability is not asked of the plan's machine");
         assert!(!f.contains(concat!("image_can_", "boot(path)")), "asked under the configured machine and CPU");
+    }
+
+    /// A file's identity is taken before it is read: taken after, a disk
+    /// caught mid-write would be remembered by its partial bytes under its
+    /// finished identity, and stay hidden until it changed again.
+    #[test]
+    fn test_a_disk_is_stat_before_it_is_read() {
+        let src = include_str!("wizard.rs").replace('\r', "");
+        let f = &src[src.find("fn measure(path: &Path, name: &str)").expect("measure")..];
+        let f = &f[..f.find("\n    }\n").expect("its end")];
+        let stat = f.find("metadata(path)").expect("measure takes the file's identity");
+        let read = f.find("fs::read(path)").expect("measure reads the file");
+        assert!(stat < read, "the identity is taken after the read");
+        assert!(f.contains("image_can_boot_on_with(path, &meta,"), "bootability is not keyed by that identity");
     }
 
     /// The summary line reads as the catalogue's does.

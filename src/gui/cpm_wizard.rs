@@ -222,11 +222,6 @@ impl CpmWizard {
         self.disks = Some(disks);
     }
 
-    /// The boot disk, looked up in `disks` while they are lent out.
-    fn boot_in(&self, disks: &[DiskFacts]) -> Option<DiskFacts> {
-        self.plan.boot_in(disks).cloned()
-    }
-
     fn draw_step_with(&mut self, ui: &mut egui::Ui, disks: &[DiskFacts]) {
         if self.done {
             self.draw_done(ui);
@@ -286,7 +281,7 @@ impl CpmWizard {
                 });
             }
             Step::Machine => {
-                let Some(boot) = self.boot_in(disks) else { return };
+                let Some(boot) = self.plan.boot_in(disks).cloned() else { return };
                 ui.heading("Which machine?");
                 Self::para(ui, wizard::MACHINE_HELP);
                 ui.label(format!("The disk reads as: {}", crate::cpm::console::machine_label(&boot.machine)));
@@ -313,21 +308,25 @@ impl CpmWizard {
             Step::Rom => {
                 ui.heading("Monitor ROM");
                 Self::para(ui, wizard::ROM_HELP);
-                let want = self.boot_in(disks).and_then(|b| wizard::rom_for(&b)).unwrap_or(crate::cpm::rom::ROM_OFF);
+                let want = self.plan.boot_in(disks).and_then(wizard::rom_for).unwrap_or(crate::cpm::rom::ROM_OFF);
                 ui.radio_value(&mut self.plan.rom, want.to_string(), "Load the ROM (advised)");
                 ui.radio_value(&mut self.plan.rom, crate::cpm::rom::ROM_OFF.to_string(), "No ROM");
             }
             Step::ExtraDisks => {
-                let Some(boot) = self.boot_in(disks) else { return };
+                let Some(boot) = self.plan.boot_in(disks).cloned() else { return };
                 let machine = self.plan.machine_in_force(&boot);
                 let room = wizard::extra_disk_room(&boot, &machine);
+                // Every slot's name with the board built once: this runs
+                // every frame.
+                let names = wizard::slot_names(&boot, &machine);
+                let name = |s: u8| names.get(s as usize).cloned().unwrap_or_else(|| format!("slot {s}"));
                 ui.heading("More disks for the machine");
                 Self::para(ui, wizard::EXTRA_DISKS_HELP);
                 ui.label(egui::RichText::new(format!(
                     "{} is in {} of the {}, which has room for {room} more. Fill them in order: an empty slot \
                      between two full ones looks like a hang to a guest that picks it.",
                     boot.name,
-                    wizard::slot_name(&boot, &machine, 0),
+                    name(0),
                     // The chosen machine's board, as the room and slot names
                     // beside it are -- not the one the disk was read as.
                     crate::cpm::boot_machine::BootMachine::board_for(Some(&machine), boot.bytes).unwrap_or("board"),
@@ -341,7 +340,7 @@ impl CpmWizard {
                         if list.is_empty() {
                             break;
                         }
-                        let label = format!("{}:", wizard::slot_name(&boot, &machine, slot));
+                        let label = format!("{}:", name(slot));
                         self.slot_combo(ui, slot, &label, "(empty)", &list);
                     }
                 });

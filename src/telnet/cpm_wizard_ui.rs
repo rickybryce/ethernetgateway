@@ -573,11 +573,16 @@ impl TelnetSession {
         room: u8,
         all: &[DiskFacts],
     ) -> Result<bool, std::io::Error> {
+        // Every slot's name with the board built once, not once a row.
+        let names = wizard::slot_names(boot, machine);
         loop {
             let rows: Vec<String> = plan
                 .disks
                 .iter()
-                .map(|(s, n)| format!("{}: {n}", wizard::slot_name(boot, machine, *s)))
+                .map(|(s, n)| {
+                    let at = names.get(*s as usize).cloned().unwrap_or_else(|| format!("slot {s}"));
+                    format!("{at}: {n}")
+                })
                 .collect();
             let left = (room as usize).saturating_sub(plan.disks.len());
             let free: Vec<&&DiskFacts> =
@@ -798,9 +803,8 @@ impl TelnetSession {
 /// picked from `disks`, so it is there; a stand-in keeps a later step from
 /// panicking if the folder changed under the wizard.
 fn boot_disk(disks: &[DiskFacts], plan: &Plan) -> DiskFacts {
-    let name = plan.boot_disk.as_deref().unwrap_or_default();
-    disks.iter().find(|d| d.name == name).cloned().unwrap_or(DiskFacts {
-        name: name.to_string(),
+    plan.boot_in(disks).cloned().unwrap_or_else(|| DiskFacts {
+        name: plan.boot_disk.clone().unwrap_or_default(),
         bytes: 0,
         boots: true,
         files: None,

@@ -257,24 +257,41 @@ pub fn image_can_boot(path: &std::path::Path) -> bool {
 /// The same cache, keyed on both, so the two callers never disagree about a
 /// disk asked the same question.
 pub fn image_can_boot_on(path: &std::path::Path, machine: &str, cpu: &str) -> bool {
-    can_boot_on(path, None, machine, cpu)
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    can_boot_on(path, &meta, None, machine, cpu)
 }
 
 /// [`image_can_boot_on`] for a caller that has read the image already -- the
 /// wizard, which reads each disk once for every question it asks of it.  On a
 /// cache hit the bytes are simply dropped.
-pub fn image_can_boot_on_with(path: &std::path::Path, bytes: Vec<u8>, machine: &str, cpu: &str) -> bool {
-    can_boot_on(path, Some(bytes), machine, cpu)
+///
+/// **`meta` must be taken before `bytes` were read.**  The verdict is
+/// remembered under it; stat'd after, a file still being written would pin
+/// the verdict of its partial bytes under its finished identity, and a disk
+/// that boots would stay hidden until somebody touched it again.
+pub fn image_can_boot_on_with(
+    path: &std::path::Path,
+    meta: &std::fs::Metadata,
+    bytes: Vec<u8>,
+    machine: &str,
+    cpu: &str,
+) -> bool {
+    can_boot_on(path, meta, Some(bytes), machine, cpu)
 }
 
-fn can_boot_on(path: &std::path::Path, bytes: Option<Vec<u8>>, machine: &str, cpu: &str) -> bool {
+fn can_boot_on(
+    path: &std::path::Path,
+    meta: &std::fs::Metadata,
+    bytes: Option<Vec<u8>>,
+    machine: &str,
+    cpu: &str,
+) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     let (machine, cpu) = (machine.to_string(), cpu.to_string());
 
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
     let key = (
         path.to_path_buf(),
         meta.len(),
