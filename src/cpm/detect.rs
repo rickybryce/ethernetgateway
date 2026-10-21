@@ -287,29 +287,39 @@ pub fn image_needs_monitor_rom(image: &[u8]) -> bool {
 ///   has "ALTAIR SECTOR SKEW LIKE DISK BASIC".
 ///
 /// Nine disks, and none of the 89 others.  Describes a disk, never gates one.
+///
+/// **One pass over the image**, not one per text: every product name begins
+/// `ALTAIR `, so a position is tested only when its first byte could start
+/// one of the two, and a 4.9 MB hard disk is walked once rather than seven
+/// times.
 pub fn image_carries_altair_basic(image: &[u8], has_cpm_fs: bool) -> bool {
     if has_cpm_fs {
         return false;
     }
     let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
-    let mut at = 0;
-    while let Some(i) = image[at..].windows(7).position(|w| w == b"BY MITS") {
-        let hit = at + i;
-        if find(&image[hit.saturating_sub(200)..hit], b"BASIC") {
-            return true;
+    for at in 0..image.len() {
+        let rest = &image[at..];
+        match rest[0] {
+            b'B' if rest.starts_with(b"BY MITS") && find(&image[at.saturating_sub(200)..at], b"BASIC") => {
+                return true;
+            }
+            b'A' if rest.starts_with(b"ALTAIR ") && NAMES.iter().any(|n| rest.starts_with(n)) => return true,
+            _ => {}
         }
-        at = hit + 1;
     }
-    const NAMES: &[&[u8]] = &[
-        b"ALTAIR BASIC",
-        b"ALTAIR DISK BASIC",
-        b"ALTAIR MINI-DISK BASIC",
-        b"ALTAIR T/S DISK BASIC",
-        b"ALTAIR HARD DISK BASIC",
-        b"ALTAIR DISK EXTENDED BASIC",
-    ];
-    NAMES.iter().any(|n| find(image, n))
+    false
 }
+
+/// The MITS BASIC product names [`image_carries_altair_basic`] looks for; each
+/// begins `ALTAIR `, which is what lets that be one pass.
+const NAMES: &[&[u8]] = &[
+    b"ALTAIR BASIC",
+    b"ALTAIR DISK BASIC",
+    b"ALTAIR MINI-DISK BASIC",
+    b"ALTAIR T/S DISK BASIC",
+    b"ALTAIR HARD DISK BASIC",
+    b"ALTAIR DISK EXTENDED BASIC",
+];
 
 /// Which machine this image is for, if it says so plainly.
 pub fn detect_machine(image: &[u8]) -> Detected {

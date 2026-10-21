@@ -636,9 +636,34 @@ async fn handle_connection(
             )
             .await?;
         }
+        ("POST", "/cpm-wizard/check") => {
+            // The answers so far, checked by the gateway's rules and described
+            // for the Ready screen.  Writes nothing.  Off the runtime: it reads
+            // the images (cached after the wizard's first look).
+            let text = String::from_utf8_lossy(&request.body).to_string();
+            let form = parse_form(&text);
+            let dir = config::get_config().transfer_dir;
+            let outcome = match cpm_wizard::plan_from_form(&form) {
+                Ok(plan) => tokio::task::spawn_blocking(move || cpm_wizard::check(&plan, &dir))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string())),
+                Err(e) => Err(e),
+            };
+            let body = cpm_wizard::check_json(outcome);
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
         ("POST", "/cpm-wizard/apply") => {
-            // The wizard's answers, as one form, checked before anything is
-            // written (`cpm_wizard::plan_from_form`).
+            // The wizard's answers, as one form: their shape checked here
+            // (`cpm_wizard::plan_from_form`), the plan by `wizard::apply`
+            // itself before anything is written.
             let text = String::from_utf8_lossy(&request.body).to_string();
             let form = parse_form(&text);
             let dir = config::get_config().transfer_dir;

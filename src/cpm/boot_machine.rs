@@ -1173,6 +1173,13 @@ impl BootMachine {
         boards.iter().find(|c| c.accepts(image_len).is_some()).map(|c| c.slot_label(slot))
     }
 
+    /// [`BootMachine::slot_label`] for slots `0..=last`, the board built once.
+    pub fn slot_labels(key: Option<&str>, image_len: u64, last: u8) -> Option<Vec<String>> {
+        let boards = boards_on(key);
+        let board = boards.iter().find(|c| c.accepts(image_len).is_some())?;
+        Some((0..=last).map(|s| board.slot_label(s)).collect())
+    }
+
     /// How many disks the board taking an image this size can carry, on the
     /// machine `key` names -- the boot disk included.  `None` when no board
     /// there takes it.

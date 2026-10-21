@@ -4,9 +4,14 @@
 //! this is the modal that draws it.  The page asks `/cpm-wizard/disks` once
 //! when the wizard opens -- what each disk is, its listing, and for every
 //! machine that could boot it, its board, slot count and slot names -- and
-//! walks the steps in the browser, so a step back costs nothing.  The answers
-//! go to `/cpm-wizard/apply` as one form, which is where they are checked:
-//! nothing the browser sends is trusted to be a key the settings accept.
+//! walks the steps in the browser, so a step back costs nothing.
+//!
+//! **The browser decides nothing.**  The order of the steps is
+//! [`wizard::Step::next`]'s, sent as a table; at a disks step and on the way
+//! to Ready the answers so far go to `/cpm-wizard/check`, which runs
+//! [`wizard::check_plan`] and sends back [`Plan::describe`]'s lines for the
+//! Ready screen; and `/cpm-wizard/apply` checks them all again, because a
+//! form is only what a browser chose to send.
 
 use super::{html_escape, json_escape};
 use crate::cpm::wizard::{self, DiskFacts, Plan, Runs};
@@ -48,9 +53,8 @@ fn disk_json(d: &DiskFacts, all: &[DiskFacts]) -> String {
     for m in wizard::machine_choices(d) {
         let board = crate::cpm::boot_machine::BootMachine::board_for(Some(m.key), d.bytes).unwrap_or("");
         let room = wizard::extra_disk_room(d, m.key);
-        let names: Vec<String> = (0..=room)
-            .map(|s| format!("\"{}\"", json_escape(&wizard::slot_name(d, m.key, s))))
-            .collect();
+        let names: Vec<String> =
+            wizard::slot_names(d, m.key).iter().map(|n| format!("\"{}\"", json_escape(n))).collect();
         let extra: Vec<String> = if d.boots {
             wizard::extra_disk_choices(d, m.key, all)
                 .iter()
@@ -84,9 +88,9 @@ fn disk_json(d: &DiskFacts, all: &[DiskFacts]) -> String {
     )
 }
 
-/// The answers, checked, as a plan.  Every field is validated here: the form
-/// came from a browser, and a value a key would refuse is refused before
-/// anything is written.
+/// The answers, parsed, as a plan.  Every field's shape is checked here --
+/// the form came from a browser -- and the plan as a whole by
+/// [`wizard::check_plan`], which the check route and [`wizard::apply`] run.
 pub(super) fn plan_from_form(form: &std::collections::HashMap<String, String>) -> Result<Plan, String> {
     let get = |k: &str| form.get(k).map(|s| s.trim().to_string()).unwrap_or_default();
     let mut plan = match get("runs").as_str() {
@@ -137,6 +141,32 @@ pub(super) fn plan_from_form(form: &std::collections::HashMap<String, String>) -
     Ok(plan)
 }
 
+/// The outcome of a check, as JSON for the page: the Ready screen's lines.
+pub(super) fn check_json(result: Result<Vec<String>, String>) -> String {
+    match result {
+        Ok(lines) => {
+            let lines: Vec<String> = lines.iter().map(|l| format!("\"{}\"", json_escape(l))).collect();
+            format!("{{\"ok\":true,\"lines\":[{}]}}", lines.join(","))
+        }
+        Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", json_escape(&e)),
+    }
+}
+
+/// Check a plan against the disks as they are, and describe it.  Blocking.
+pub(super) fn check(plan: &Plan, transfer_dir: &str) -> Result<Vec<String>, String> {
+    wizard::check_plan(plan, &wizard::all_disks(&wizard::cpm_base(transfer_dir)))?;
+    Ok(plan.describe(transfer_dir))
+}
+
+/// [`wizard::Step::table`] as a JSON object for the page.
+fn steps_json() -> String {
+    let pairs: Vec<String> = wizard::Step::table()
+        .iter()
+        .map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)))
+        .collect();
+    format!("{{{}}}", pairs.join(","))
+}
+
 /// The outcome of applying, as JSON for the page.
 pub(super) fn apply_json(result: Result<Vec<String>, String>) -> String {
     match result {
@@ -181,7 +211,8 @@ pub(super) fn render_modal() -> String {
          </div></div>\
          <template id=\"cpmw-text\" \
           data-runs=\"{runs}\" data-drives=\"{drives}\" data-bootdisk=\"{bootdisk}\" \
-          data-machine=\"{machine}\" data-cpu=\"{cpu}\" data-extra=\"{extra}\" \
+          data-machine=\"{machine}\" data-cpu=\"{cpu}\" data-extra=\"{extra}\" data-rom=\"{rom}\" \
+          data-z80why=\"{z80why}\" data-next=\"{next}\" \
           data-finish=\"{finish}\" data-emulator=\"{emu}\" data-boot=\"{boot}\"></template>",
         runs = html_escape(&para(wizard::RUNS_HELP)),
         drives = html_escape(&para(wizard::EMULATOR_DRIVES_HELP)),
@@ -189,6 +220,9 @@ pub(super) fn render_modal() -> String {
         machine = html_escape(&para(wizard::MACHINE_HELP)),
         cpu = html_escape(&para(wizard::CPU_HELP)),
         extra = html_escape(&para(wizard::EXTRA_DISKS_HELP)),
+        rom = html_escape(&para(wizard::ROM_HELP)),
+        z80why = html_escape(wizard::Z80_WHY),
+        next = html_escape(&steps_json()),
         finish = html_escape(wizard::FINISH_LINE),
         emu = html_escape(wizard::EMULATOR_LABEL),
         boot = html_escape(wizard::BOOT_LABEL),
@@ -207,7 +241,13 @@ pub(super) const SCRIPT: &str = r#"<script>
   var msg = document.getElementById('cpmw-msg');
   var back = document.getElementById('cpmw-back');
   var next = document.getElementById('cpmw-next');
-  var D = null, plan = null, trail = [], step = null, view = null, saved = false;
+  var D = null, plan = null, trail = [], step = null, view = null, saved = false, lines = [];
+  // Where each step leads: `wizard::Step::next`, sent as a table.
+  var N = JSON.parse(T.dataset.next);
+  function nextOf(s) {
+    var rom = plan.runs === 'boot' && plan.boot && disk(plan.boot).rom ? 1 : 0;
+    return N[s + '|' + plan.runs + '|' + rom] || null;
+  }
   // **After a save, the page reloads however the wizard is closed** -- Close,
   // the x, a click outside.  The page's one form still holds the CP/M fields as
   // they were before the wizard, and its next Save would write every one of
@@ -217,7 +257,12 @@ pub(super) const SCRIPT: &str = r#"<script>
       saved = false; location.href = '/';
     }
   }).observe(document.getElementById('cpm-wizard'), { attributes: true, attributeFilter: ['class'] });
-  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  // Quotes too: names go inside attribute values (`data-v`, `<option value>`),
+  // and an image's file name may hold either.
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
   function say(s) { msg.textContent = s || ''; }
   function disk(n) { return D.disks.filter(function(x) { return x.name === n; })[0]; }
   function machineInForce() { var d = disk(plan.boot); return plan.machine === 'auto' ? d.machine : plan.machine; }
@@ -259,16 +304,13 @@ pub(super) const SCRIPT: &str = r#"<script>
     }
     return rows;
   }
-  function readRows(attr, orderMatters) {
-    var seen = {}, out = {}, clash = null, gap = false, empty = false;
+  // The rows as chosen.  Whether they may be is the gateway's question
+  // (`/cpm-wizard/check`), asked when Next leaves the step.
+  function readRows(attr) {
+    var out = {};
     box.querySelectorAll('select[data-' + attr + ']').forEach(function(s) {
-      if (!s.value) { empty = true; return; }
-      if (empty) gap = true;
-      if (seen[s.value]) clash = s.value;
-      seen[s.value] = true; out[s.dataset[attr]] = s.value;
+      if (s.value) out[s.dataset[attr]] = s.value;
     });
-    if (clash) { say(clash + ' is chosen twice; one image can be in one place.'); return null; }
-    if (orderMatters && gap) { say('Fill the slots in order, with no empty slot between two disks.'); return null; }
     return out;
   }
   var steps = {
@@ -281,8 +323,9 @@ pub(super) const SCRIPT: &str = r#"<script>
       wire('runs', function() {});
       return function() {
         var v = picked('runs');
-        if (v === 'emulator') { if (plan.runs !== 'emulator') plan = fresh('emulator'); return 'drives'; }
-        if (v === 'boot') { plan.runs = 'boot'; return 'bootdisk'; }
+        // As `Plan::choose_runs`: the emulator again keeps its drives.
+        if (v === 'emulator') { if (plan.runs !== 'emulator') plan = fresh('emulator'); return nextOf('runs'); }
+        if (v === 'boot') { plan.runs = 'boot'; return nextOf('runs'); }
         say('Choose one of the two.'); return null;
       };
     },
@@ -296,9 +339,7 @@ pub(super) const SCRIPT: &str = r#"<script>
         s.addEventListener('change', function() { show(disk(s.value)); });
       });
       return function() {
-        var out = readRows('drive', false);
-        if (!out) return null;
-        plan.disks = out; return 'cpu';
+        plan.disks = readRows('drive'); return nextOf('drives');
       };
     },
     bootdisk: function() {
@@ -315,7 +356,7 @@ pub(super) const SCRIPT: &str = r#"<script>
           var d = disk(n);
           plan.boot = n; plan.machine = 'auto'; plan.cpu = d.cpu; plan.rom = d.rom || 'off'; plan.disks = {};
         }
-        return 'machine';
+        return nextOf('bootdisk');
       };
     },
     machine: function() {
@@ -331,31 +372,28 @@ pub(super) const SCRIPT: &str = r#"<script>
         if (!v) { say('Choose the machine.'); return null; }
         var m = v === d.machine ? 'auto' : v;
         if (m !== plan.machine) plan.disks = {};
-        plan.machine = m; return 'cpu';
+        plan.machine = m; return nextOf('machine');
       };
     },
     cpu: function() {
       var adv = plan.runs === 'boot' ? disk(plan.boot).cpu : 'z80';
-      var why = plan.runs === 'boot' ? disk(plan.boot).cpuWhy : 'the Z80 runs nearly all 8080 software';
+      var why = plan.runs === 'boot' ? disk(plan.boot).cpuWhy : T.dataset.z80why;
       box.innerHTML = T.dataset.cpu + '<p><b>Advised: ' + (adv === '8080' ? '8080' : 'Z80') + '</b>, ' + esc(why) + '.</p>' +
         choices('cpu', [['z80', 'Z80', adv === 'z80' ? 'advised' : ''], ['8080', '8080', adv === '8080' ? 'advised' : '']], plan.cpu);
       wire('cpu', function() {});
       return function() {
         var v = picked('cpu');
         if (!v) { say('Choose the processor.'); return null; }
-        plan.cpu = v;
-        if (plan.runs === 'emulator') return 'ready';
-        return disk(plan.boot).rom ? 'rom' : 'extra';
+        plan.cpu = v; return nextOf('cpu');
       };
     },
     rom: function() {
-      box.innerHTML = '<p>This disk looks for the CUTER monitor at C000 and stops without it. ' +
-        'The ROM is fetched with the sample disks, from its author\'s collection.</p>' +
+      box.innerHTML = T.dataset.rom +
         choices('rom', [['yes', 'Load the ROM', 'advised'], ['off', 'No ROM', '']], plan.rom === 'off' ? 'off' : 'yes');
       wire('rom', function() {});
       return function() {
         plan.rom = picked('rom') === 'yes' ? (disk(plan.boot).rom || 'off') : 'off';
-        return 'extra';
+        return nextOf('rom');
       };
     },
     extra: function() {
@@ -372,24 +410,11 @@ pub(super) const SCRIPT: &str = r#"<script>
         sel.addEventListener('change', function() { show(disk(sel.value)); });
       });
       return function() {
-        var out = readRows('slot', true);
-        if (!out) return null;
-        plan.disks = out; return 'ready';
+        plan.disks = readRows('slot'); return nextOf('extra');
       };
     },
+    // The lines are `Plan::describe`'s, from the check that led here.
     ready: function() {
-      var lines = [];
-      if (plan.runs === 'boot') {
-        lines.push('Boot ' + plan.boot + ' on ' + machineLabel(machineInForce()));
-      } else lines.push(T.dataset.emulator);
-      lines.push('Processor: ' + (plan.cpu === '8080' ? '8080' : 'Z80'));
-      if (plan.runs === 'boot' && plan.rom !== 'off') lines.push('Monitor ROM: ' + plan.rom);
-      var ks = Object.keys(plan.disks).sort(function(a, b) { return a - b; });
-      if (!ks.length) lines.push('No other disks');
-      ks.forEach(function(k) {
-        var at = plan.runs === 'boot' ? disk(plan.boot).on[machineInForce()].slots[k] : String.fromCharCode(65 + Number(k)) + ':';
-        lines.push(at + ' ' + plan.disks[k]);
-      });
       box.innerHTML = '<p><b>Ready.</b> These are the settings:</p><ul>' +
         lines.map(function(l) { return '<li>' + esc(l) + '</li>'; }).join('') +
         '</ul><p class="sub">Disks mounted now and not listed here are taken off. Nothing has been saved yet.</p>';
@@ -404,15 +429,34 @@ pub(super) const SCRIPT: &str = r#"<script>
     view = steps[s]();
     back.style.visibility = trail.length ? 'visible' : 'hidden';
   }
-  function save() {
+  function form() {
     var body = 'runs=' + encodeURIComponent(plan.runs) + '&cpu=' + encodeURIComponent(plan.cpu);
     if (plan.runs === 'boot') {
       body += '&boot=' + encodeURIComponent(plan.boot) + '&machine=' + encodeURIComponent(plan.machine) +
         '&rom=' + encodeURIComponent(plan.rom);
     }
-    body += '&disks=' + encodeURIComponent(Object.keys(plan.disks).map(function(k) { return k + '=' + plan.disks[k]; }).join(';'));
+    return body + '&disks=' + encodeURIComponent(Object.keys(plan.disks).map(function(k) { return k + '=' + plan.disks[k]; }).join(';'));
+  }
+  function post(url) {
+    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form() })
+      .then(function(r) { return r.json(); });
+  }
+  // On from `step` to `to`, the plan checked first where the disks were
+  // chosen or the summary is next: the gateway's rules, said while the
+  // operator can still change the answer.
+  function advance(to) {
+    if (to !== 'ready' && step !== 'drives' && step !== 'extra') { trail.push(step); go(to); return; }
+    var from = step;
+    say('Checking…');
+    post('/cpm-wizard/check').then(function(j) {
+      if (step !== from) return;
+      if (!j.ok) { say(j.error); return; }
+      lines = j.lines; trail.push(step); go(to);
+    }).catch(function() { say('The gateway did not answer.'); });
+  }
+  function save() {
     say('Saving…');
-    fetch('/cpm-wizard/apply', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+    post('/cpm-wizard/apply')
       .then(function(r) { return r.json(); })
       .then(function(j) {
         if (!j.ok) { say('Not saved: ' + j.error); return; }
@@ -427,7 +471,7 @@ pub(super) const SCRIPT: &str = r#"<script>
   next.addEventListener('click', function() {
     if (!view) return;
     var to = view();
-    if (to) { trail.push(step); go(to); }
+    if (to) advance(to);
   });
   back.addEventListener('click', function() { if (trail.length) go(trail.pop()); });
   document.querySelectorAll('button.more[data-target="cpm-wizard"]').forEach(function(b) {
@@ -481,6 +525,39 @@ mod tests {
         ] {
             assert!(plan_from_form(&form(&bad)).is_err(), "{bad:?} was accepted");
         }
+    }
+
+    /// `esc` escapes both quotes: image names go into attribute values, and
+    /// a file named `x" onmouseover="...".dsk` was script in the config page.
+    #[test]
+    fn test_the_script_escapes_quotes() {
+        let f = &SCRIPT[SCRIPT.find("function esc(s)").expect("esc")..];
+        let f = &f[..f.find("\n  }\n").expect("its end")];
+        for (raw, ent) in [("/\"/g", "&quot;"), ("/'/g", "&#39;"), ("/&/g", "&amp;"), ("/</g", "&lt;")] {
+            assert!(f.contains(&format!(".replace({raw}, '{ent}')")), "esc does not turn {raw} into {ent}");
+        }
+        // `&` first, or the entities the others make are escaped again.
+        assert!(f.find("/&/g").unwrap() < f.find("/\"/g").unwrap());
+    }
+
+    /// The page walks the steps by the gateway's table, never by its own
+    /// rules: no step returns another step's name.
+    #[test]
+    fn test_the_page_has_no_step_order_of_its_own() {
+        for step in wizard::Step::ALL {
+            let lit = format!("return '{}'", step.key());
+            assert!(!SCRIPT.contains(&lit), "the script decides a step itself: {lit}");
+        }
+        assert!(SCRIPT.contains("nextOf('cpu')"), "positive control: the script asks the table");
+        let modal = render_modal();
+        assert!(modal.contains("data-next=\"{&quot;runs|emulator|0&quot;:&quot;drives&quot;"), "the table is sent");
+        assert!(SCRIPT.contains("'/cpm-wizard/check'"), "the page asks the gateway to check");
+    }
+
+    #[test]
+    fn test_the_check_answers_as_json() {
+        assert_eq!(check_json(Ok(vec!["Boot \"A\".DSK".into()])), "{\"ok\":true,\"lines\":[\"Boot \\\"A\\\".DSK\"]}");
+        assert_eq!(check_json(Err("no".into())), "{\"ok\":false,\"error\":\"no\"}");
     }
 
     /// Nothing the wizard draws is ever submitted with the page's one form:

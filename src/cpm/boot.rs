@@ -257,6 +257,17 @@ pub fn image_can_boot(path: &std::path::Path) -> bool {
 /// The same cache, keyed on both, so the two callers never disagree about a
 /// disk asked the same question.
 pub fn image_can_boot_on(path: &std::path::Path, machine: &str, cpu: &str) -> bool {
+    can_boot_on(path, None, machine, cpu)
+}
+
+/// [`image_can_boot_on`] for a caller that has read the image already -- the
+/// wizard, which reads each disk once for every question it asks of it.  On a
+/// cache hit the bytes are simply dropped.
+pub fn image_can_boot_on_with(path: &std::path::Path, bytes: Vec<u8>, machine: &str, cpu: &str) -> bool {
+    can_boot_on(path, Some(bytes), machine, cpu)
+}
+
+fn can_boot_on(path: &std::path::Path, bytes: Option<Vec<u8>>, machine: &str, cpu: &str) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     let (machine, cpu) = (machine.to_string(), cpu.to_string());
@@ -298,7 +309,7 @@ pub fn image_can_boot_on(path: &std::path::Path, machine: &str, cpu: &str) -> bo
     // load themselves, and it fires on 7 of 60 images with no false positives.
     // The BROAD version ("writes to a port nobody answers") is used nowhere —
     // it flagged nine disks that boot perfectly well.
-    let verdict = match std::fs::read(path) {
+    let verdict = match bytes.map(Ok).unwrap_or_else(|| std::fs::read(path)) {
         Err(_) => false,
         Ok(bytes) => {
             why_not_from(path, &bytes).is_none()

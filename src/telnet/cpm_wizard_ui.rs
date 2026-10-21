@@ -11,7 +11,7 @@
 //! Nothing is saved until the last screen's `Y`.
 
 use super::*;
-use crate::cpm::wizard::{self, DiskFacts, Plan};
+use crate::cpm::wizard::{self, DiskFacts, Plan, Runs, Step};
 
 /// Every screen's row budget, the prompt row included.
 const ROWS: usize = 22;
@@ -22,18 +22,14 @@ enum DiskAnswer {
     Back,
 }
 
-/// The wizard's steps, in the order they are asked.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Step {
-    Runs,
-    EmulatorDrives,
-    EmulatorCpu,
-    BootDisk,
-    Machine,
-    Cpu,
-    Rom,
-    ExtraDisks,
-    Summary,
+/// Where a step's screen leaves the wizard.
+enum Move {
+    /// On to the step [`Step::next`] names.
+    On,
+    /// This step again (the disks were downloaded, say).
+    Stay,
+    /// Back one step.
+    Back,
 }
 
 impl TelnetSession {
@@ -107,94 +103,83 @@ impl TelnetSession {
         let mut step = Step::Runs;
         let mut trail: Vec<Step> = Vec::new();
         loop {
-            // Each arm returns the next step, or `None` to go back one.
-            let next = match step {
+            // Each arm answers the step; where it goes from there is
+            // `Step::next`'s, shared with the other two surfaces.
+            let moved = match step {
                 // Boot is offered only when a disk can boot: an images folder
                 // of data disks would otherwise lead to an empty picker, with
                 // the download offer hidden behind it.
                 Step::Runs => match self.wiz_runs(disks.iter().any(|d| d.boots)).await? {
                     Some('e') => {
-                        plan = Plan::emulator();
-                        Some(Step::EmulatorDrives)
+                        plan.choose_runs(Runs::Emulator);
+                        Move::On
                     }
-                    Some('b') => Some(Step::BootDisk),
+                    Some('b') => {
+                        plan.choose_runs(Runs::Boot);
+                        Move::On
+                    }
                     Some('d') => {
                         self.cpmmount_download().await?;
                         let read_base = base.clone();
                         disks = tokio::task::spawn_blocking(move || wizard::all_disks(&read_base))
                             .await
                             .map_err(std::io::Error::other)?;
-                        Some(Step::Runs)
+                        Move::Stay
                     }
                     _ => return Ok(()),
                 },
                 Step::EmulatorDrives => {
                     let choices: Vec<&DiskFacts> = disks.iter().filter(|d| d.mountable()).collect();
-                    self.wiz_emulator_drives(&mut plan, &choices).await?.then_some(Step::EmulatorCpu)
+                    if self.wiz_emulator_drives(&mut plan, &choices, &disks).await? { Move::On } else { Move::Back }
                 }
-                Step::EmulatorCpu => match self.wiz_cpu(wizard::EMULATOR_CPU, "the Z80 runs nearly all 8080 software").await? {
-                    Some(cpu) => {
-                        plan.cpu = cpu;
-                        Some(Step::Summary)
-                    }
-                    None => None,
-                },
                 Step::BootDisk => {
                     let bootable: Vec<&DiskFacts> = disks.iter().filter(|d| d.boots).collect();
                     match self.wiz_pick_boot_disk(&bootable).await? {
-                        Some(name) => {
-                            // The same disk again keeps what was chosen for it.
-                            if plan.boot_disk.as_deref() != Some(name.as_str()) {
-                                let disk = disks.iter().find(|d| d.name == name).expect("picked from the list");
-                                plan = Plan::boot(disk);
-                            }
-                            Some(Step::Machine)
+                        Some(i) => {
+                            plan.choose_boot_disk(bootable[i]);
+                            Move::On
                         }
-                        None => None,
+                        None => Move::Back,
                     }
                 }
                 Step::Machine => {
                     let disk = boot_disk(&disks, &plan);
                     match self.wiz_machine(&disk).await? {
                         Some(m) => {
-                            // A different machine can be a different board, and
-                            // disks chosen for the old one would not fit it.  The
-                            // same one keeps them.
-                            if m != plan.machine {
-                                plan.disks.clear();
-                            }
-                            plan.machine = m;
-                            Some(Step::Cpu)
+                            plan.choose_machine(&m, &disk);
+                            Move::On
                         }
-                        None => None,
+                        None => Move::Back,
                     }
                 }
                 Step::Cpu => {
-                    let disk = boot_disk(&disks, &plan);
-                    let (cpu, why) = wizard::recommended_cpu(&disk);
+                    let (cpu, why) = wizard::advised_cpu(plan.runs, plan.boot_in(&disks));
                     match self.wiz_cpu(cpu, why).await? {
                         Some(c) => {
                             plan.cpu = c;
-                            Some(if disk.needs_rom { Step::Rom } else { Step::ExtraDisks })
+                            Move::On
                         }
-                        None => None,
+                        None => Move::Back,
                     }
                 }
                 Step::Rom => match self.wiz_rom().await? {
                     Some(yes) => {
-                        plan.rom = if yes { "cuter_vdm" } else { crate::cpm::rom::ROM_OFF }.to_string();
-                        Some(Step::ExtraDisks)
+                        let disk = boot_disk(&disks, &plan);
+                        let rom = wizard::rom_for(&disk).filter(|_| yes);
+                        plan.rom = rom.unwrap_or(crate::cpm::rom::ROM_OFF).to_string();
+                        Move::On
                     }
-                    None => None,
+                    None => Move::Back,
                 },
                 Step::ExtraDisks => {
                     let disk = boot_disk(&disks, &plan);
-                    let machine = self.wiz_machine_in_force(&disk, &plan);
+                    let machine = plan.machine_in_force(&disk);
                     let choices = wizard::extra_disk_choices(&disk, &machine, &disks);
                     let room = wizard::extra_disk_room(&disk, &machine);
-                    self.wiz_extra_disks(&mut plan, &disk, &machine, &choices, room).await?.then_some(Step::Summary)
+                    let on = self.wiz_extra_disks(&mut plan, &disk, &machine, &choices, room, &disks).await?;
+                    if on { Move::On } else { Move::Back }
                 }
-                Step::Summary => match self.wiz_summary(&plan, &cfg.transfer_dir).await? {
+                Step::Ready => match self.wiz_summary(&plan, &cfg.transfer_dir).await? {
                     Some(true) => {
                         let p = plan.clone();
                         let dir = cfg.transfer_dir.clone();
@@ -204,30 +189,22 @@ impl TelnetSession {
                         self.wiz_done(outcome).await?;
                         return Ok(());
                     }
-                    _ => None,
+                    _ => Move::Back,
                 },
             };
-            match next {
-                Some(s) if s != step => {
-                    trail.push(step);
-                    step = s;
+            match moved {
+                Move::On => {
+                    if let Some(to) = step.next(plan.runs, plan.needs_rom(&disks)) {
+                        trail.push(step);
+                        step = to;
+                    }
                 }
-                Some(_) => {}
-                None => match trail.pop() {
+                Move::Stay => {}
+                Move::Back => match trail.pop() {
                     Some(prev) => step = prev,
                     None => return Ok(()),
                 },
             }
-        }
-    }
-
-    /// The machine the boot will use: the plan's, or the disk's own when the
-    /// plan says to detect it.
-    fn wiz_machine_in_force(&self, disk: &DiskFacts, plan: &Plan) -> String {
-        if plan.machine == crate::cpm::console::AUTO_MACHINE {
-            disk.machine.clone()
-        } else {
-            plan.machine.clone()
         }
     }
 
@@ -268,7 +245,7 @@ impl TelnetSession {
             let w = self.wiz_width();
             self.wiz_heading("A DISK").await?;
             let mut used = 4;
-            self.send_line(&format!("  {}", self.amber(&truncate_to_width(&disk.name, w)))).await?;
+            self.send_line(&format!("  {}", self.amber(&truncate_to_width(&safe(&disk.name), w)))).await?;
             used += 1;
             for line in crate::aichat::wrap_line(&disk.summary, w).into_iter().take(2) {
                 self.send_line(&format!("  {}", self.dim(&line))).await?;
@@ -280,11 +257,11 @@ impl TelnetSession {
                 used += 1;
             }
             if disk.altair_basic {
-                self.send_line(&format!("  {}", self.amber("Altair BASIC: the 8080 is advised."))).await?;
+                self.send_line(&format!("  {}", self.amber(wizard::BASIC_NOTE))).await?;
                 used += 1;
             }
             if disk.needs_rom {
-                self.send_line(&format!("  {}", self.amber("Needs the CUTER monitor ROM."))).await?;
+                self.send_line(&format!("  {}", self.amber(wizard::ROM_NOTE))).await?;
                 used += 1;
             }
             self.send_line("").await?;
@@ -339,7 +316,7 @@ impl TelnetSession {
             self.wiz_heading("DISK LISTING").await?;
             self.send_line(&format!(
                 "  {}  {}",
-                self.amber(&truncate_to_width(&disk.name, w.saturating_sub(12))),
+                self.amber(&truncate_to_width(&safe(&disk.name), w.saturating_sub(12))),
                 self.dim(&format!("page {}/{}", page + 1, pages))
             ))
             .await?;
@@ -398,7 +375,7 @@ impl TelnetSession {
                 self.send_line(&format!(
                     "  {} {:<name_w$} {}",
                     self.cyan(&num),
-                    truncate_to_width(&d.name, name_w),
+                    truncate_to_width(&safe(&d.name), name_w),
                     self.dim(&truncate_to_width(about, rest)),
                 ))
                 .await?;
@@ -431,21 +408,26 @@ impl TelnetSession {
     }
 
     /// The boot disk: a picker of the disks seen to start, then the disk.
-    async fn wiz_pick_boot_disk(&mut self, bootable: &[&DiskFacts]) -> Result<Option<String>, std::io::Error> {
+    /// The index of the one chosen.
+    async fn wiz_pick_boot_disk(&mut self, bootable: &[&DiskFacts]) -> Result<Option<usize>, std::io::Error> {
         loop {
             let Some(i) = self.wiz_pick_from("BOOT DISK", wizard::BOOT_DISK_HELP, bootable).await? else {
                 return Ok(None);
             };
-            let disk = bootable[i];
-            if let DiskAnswer::Use = self.wiz_disk(disk, "Boot this disk", true).await? {
-                return Ok(Some(disk.name.clone()));
+            if let DiskAnswer::Use = self.wiz_disk(bootable[i], "Boot this disk", true).await? {
+                return Ok(Some(i));
             }
         }
     }
 
     /// The emulator's drives: images on letters B: to P:, optional.
     /// `true` to go on, `false` to go back.
-    async fn wiz_emulator_drives(&mut self, plan: &mut Plan, choices: &[&DiskFacts]) -> Result<bool, std::io::Error> {
+    async fn wiz_emulator_drives(
+        &mut self,
+        plan: &mut Plan,
+        choices: &[&DiskFacts],
+        all: &[DiskFacts],
+    ) -> Result<bool, std::io::Error> {
         loop {
             let rows: Vec<String> =
                 plan.disks.iter().map(|(d, n)| format!("{}: {n}", (b'A' + d) as char)).collect();
@@ -468,7 +450,11 @@ impl TelnetSession {
                     }
                 }
                 Some('r') => self.wiz_remove(plan).await?,
-                Some('n') => return Ok(true),
+                Some('n') => {
+                    if self.wiz_checked(plan, all).await? {
+                        return Ok(true);
+                    }
+                }
                 _ => return Ok(false),
             }
         }
@@ -511,7 +497,7 @@ impl TelnetSession {
         self.wiz_heading("REMOVE A DISK").await?;
         // Heading 4, the rows, blank, the prompt: sixteen fit.
         for (i, (_, n)) in plan.disks.iter().enumerate().take(ROWS - 6) {
-            self.send_line(&format!("  {} {}", self.cyan(&format!("{:>2}", i + 1)), truncate_to_width(n, w - 3)))
+            self.send_line(&format!("  {} {}", self.cyan(&format!("{:>2}", i + 1)), truncate_to_width(&safe(n), w - 3)))
                 .await?;
         }
         self.send_line("").await?;
@@ -544,7 +530,7 @@ impl TelnetSession {
             let cut = rows.len() > space;
             let shown = if cut { space - 1 } else { rows.len() };
             for r in &rows[..shown] {
-                self.send_line(&format!("  {}", truncate_to_width(r, w))).await?;
+                self.send_line(&format!("  {}", truncate_to_width(&safe(r), w))).await?;
             }
             if cut {
                 self.send_line(&format!("  {}", self.dim(&format!("...and {} more", rows.len() - shown))))
@@ -585,6 +571,7 @@ impl TelnetSession {
         machine: &str,
         choices: &[&DiskFacts],
         room: u8,
+        all: &[DiskFacts],
     ) -> Result<bool, std::io::Error> {
         loop {
             let rows: Vec<String> = plan
@@ -619,7 +606,11 @@ impl TelnetSession {
                         d.0 = i as u8 + 1;
                     }
                 }
-                Some('n') => return Ok(true),
+                Some('n') => {
+                    if self.wiz_checked(plan, all).await? {
+                        return Ok(true);
+                    }
+                }
                 Some(_) => {}
                 None => return Ok(false),
             }
@@ -652,13 +643,9 @@ impl TelnetSession {
                     if let Ok(n) = other.trim().parse::<usize>()
                         && let Some(m) = choices.get(n.wrapping_sub(1))
                     {
-                        // The detected one is kept as `auto`, so the setting
-                        // follows the disk if it is changed by hand later.
-                        return Ok(Some(if m.key == disk.machine {
-                            crate::cpm::console::AUTO_MACHINE.to_string()
-                        } else {
-                            m.key.to_string()
-                        }));
+                        // `Plan::choose_machine` keeps the detected one as
+                        // `auto`.
+                        return Ok(Some(m.key.to_string()));
                     }
                 }
             }
@@ -697,14 +684,7 @@ impl TelnetSession {
     async fn wiz_rom(&mut self) -> Result<Option<bool>, std::io::Error> {
         loop {
             self.wiz_heading("MONITOR ROM").await?;
-            self.wiz_text(&[
-                "This disk looks for the CUTER",
-                "monitor at C000 and stops without",
-                "it. The ROM is fetched with the",
-                "sample disks, from its author's",
-                "collection.",
-            ])
-            .await?;
+            self.wiz_text(wizard::ROM_HELP).await?;
             self.send_line("").await?;
             self.send_line(&format!("  {}  Load the ROM (advised)", self.cyan("Y"))).await?;
             self.send_line(&format!("  {}  No ROM", self.cyan("N"))).await?;
@@ -719,6 +699,26 @@ impl TelnetSession {
                 _ => {}
             }
         }
+    }
+
+    /// [`wizard::check_plan`] at a disks step's Next: `true` when the plan
+    /// passes, else the reason is shown until a key is pressed.  The pickers
+    /// here offer only what may be chosen, so this is the same rule the save
+    /// will apply, said while the operator can still change the answer.
+    async fn wiz_checked(&mut self, plan: &Plan, all: &[DiskFacts]) -> Result<bool, std::io::Error> {
+        let Err(e) = wizard::check_plan(plan, all) else {
+            return Ok(true);
+        };
+        let w = self.wiz_width();
+        self.wiz_heading("NOT YET").await?;
+        for l in crate::aichat::wrap_line(&safe(&e), w).into_iter().take(4) {
+            self.send_line(&format!("  {}", self.red(&l))).await?;
+        }
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        Ok(false)
     }
 
     /// The last question: these settings?  `Some(true)` to save.
@@ -736,7 +736,7 @@ impl TelnetSession {
             let cut = lines.len() > space;
             let shown = if cut { space - 1 } else { lines.len() };
             for l in &lines[..shown] {
-                self.send_line(&format!("  {}", self.amber(&truncate_to_width(l, w)))).await?;
+                self.send_line(&format!("  {}", self.amber(&truncate_to_width(&safe(l), w)))).await?;
             }
             if cut {
                 self.send_line(&format!("  {}", self.dim(&format!("...and {} more", lines.len() - shown))))
@@ -776,15 +776,17 @@ impl TelnetSession {
                 for l in lines.iter().take(space) {
                     self.send_line(&format!("  {}", self.dim(l))).await?;
                 }
+                // Only once saved: after "Not saved" it would send the
+                // operator to boot the configuration they came to replace.
+                self.send_line("").await?;
+                self.send_line(&format!("  {}", self.yellow(wizard::FINISH_LINE))).await?;
             }
             Err(e) => {
-                for l in crate::aichat::wrap_line(&format!("Not saved: {e}"), w).into_iter().take(2) {
+                for l in crate::aichat::wrap_line(&format!("Not saved: {}", safe(&e)), w).into_iter().take(2) {
                     self.send_line(&format!("  {}", self.red(&l))).await?;
                 }
             }
         }
-        self.send_line("").await?;
-        self.send_line(&format!("  {}", self.yellow(wizard::FINISH_LINE))).await?;
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
@@ -810,6 +812,13 @@ fn boot_disk(disks: &[DiskFacts], plan: &Plan) -> DiskFacts {
         altair_basic: false,
         needs_rom: false,
     })
+}
+
+/// A disk image's name, or a line naming one, as a terminal may be sent it.
+/// Names are the operator's files, and a file can be called anything a
+/// filesystem allows -- an ESC included.
+fn safe(s: &str) -> String {
+    crate::aichat::display_for_terminal(s)
 }
 
 /// A disk's listing as a terminal may be sent it.  The names are the disk's own
@@ -852,14 +861,14 @@ mod tests {
     use super::*;
     use crate::telnet::TerminalType;
 
-    /// Render what `draw` sends answering `keys`, as the rows a terminal holds.
-    fn rendered<F>(term: TerminalType, keys: &[u8], draw: F) -> Vec<String>
+    /// The bytes `draw` sends answering `keys`.
+    fn sent<F>(term: TerminalType, keys: &[u8], draw: F) -> Vec<u8>
     where
         F: AsyncFnOnce(&mut TelnetSession),
     {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let mut out = rt.block_on(async {
+        rt.block_on(async {
             let (mut session, peer) = crate::telnet::tests::make_test_session_with_peer(term);
             let (mut pr, mut pw) = tokio::io::split(peer);
             pw.write_all(keys).await.unwrap();
@@ -868,7 +877,15 @@ mod tests {
             let (_, r) = tokio::join!(run, pr.read_to_end(&mut out));
             r.unwrap();
             out
-        });
+        })
+    }
+
+    /// Render what `draw` sends answering `keys`, as the rows a terminal holds.
+    fn rendered<F>(term: TerminalType, keys: &[u8], draw: F) -> Vec<String>
+    where
+        F: AsyncFnOnce(&mut TelnetSession),
+    {
+        let mut out = sent(term, keys, draw);
         if term == TerminalType::Petscii {
             out = out
                 .iter()
@@ -1040,6 +1057,28 @@ mod tests {
                 "{term:?}: the K instruction is missing"
             );
         }
+    }
+
+    /// "Not saved" never ends by sending the operator to K: that would boot
+    /// the configuration they came to replace.  And the reason, which can
+    /// name an image, is made safe for the terminal.
+    #[test]
+    fn test_a_failed_save_does_not_say_press_k() {
+        for term in TERMS {
+            let s = screens(term, b" ", async move |t| {
+                t.wiz_done(Err("BAD\x1b[2JNAME.DSK is not a disk this board reads.".into())).await.unwrap();
+            });
+            fits(term, "not saved", &s);
+            let text = s.concat().join("\n").to_ascii_lowercase();
+            assert!(text.contains("not saved"), "{term:?}: {text}");
+            assert!(!text.contains("main menu"), "{term:?}: a failed save sends the operator to K");
+        }
+        // An OSC title from a file name would retitle the operator's window.
+        let raw = sent(TerminalType::Ansi, b" ", async move |t| {
+            t.wiz_done(Err("BAD\x1b]0;OWNED\x07NAME.DSK".into())).await.unwrap();
+        });
+        assert!(!raw.windows(3).any(|w| w == b"\x1b]0"), "an escape in a name reached the terminal");
+        assert!(raw.windows(5).any(|w| w == b"OWNED"), "positive control: the reason was sent");
     }
 
     /// The drives step full: sixteen rows of disks, and the step still fits.

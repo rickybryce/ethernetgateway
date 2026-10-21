@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use eframe::egui;
 
 use super::{AMBER, AMBER_BRIGHT, AMBER_DIM, WARN_BORDER};
-use crate::cpm::wizard::{self, DiskFacts, Plan, Runs};
+use crate::cpm::wizard::{self, DiskFacts, Plan, Runs, Step};
 
 /// What the window asks its host to do after this frame.
 pub(super) enum Outcome {
@@ -23,22 +23,13 @@ pub(super) enum Outcome {
     Saved,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Step {
-    Runs,
-    EmulatorDrives,
-    Cpu,
-    BootDisk,
-    Machine,
-    Rom,
-    ExtraDisks,
-    Ready,
-    Done,
-}
-
 pub(super) struct CpmWizard {
     transfer_dir: String,
+    /// The step on screen; its order is [`Step::next`]'s, shared with the
+    /// other two surfaces.
     step: Step,
+    /// The save has answered: the outcome is on screen in place of a step.
+    done: bool,
     trail: Vec<Step>,
     disks: Option<Vec<DiskFacts>>,
     loading: Option<Receiver<Vec<DiskFacts>>>,
@@ -63,6 +54,7 @@ impl CpmWizard {
         CpmWizard {
             transfer_dir: transfer_dir.to_string(),
             step: Step::Runs,
+            done: false,
             trail: Vec::new(),
             disks: None,
             loading: Some(rx),
@@ -79,24 +71,26 @@ impl CpmWizard {
         self.disks.as_ref()?.iter().find(|d| d.name == name)
     }
 
-    fn boot(&self) -> Option<DiskFacts> {
-        self.plan.boot_disk.as_deref().and_then(|n| self.disk(n)).cloned()
-    }
-
-    fn machine_in_force(&self, boot: &DiskFacts) -> String {
-        if self.plan.machine == crate::cpm::console::AUTO_MACHINE {
-            boot.machine.clone()
-        } else {
-            self.plan.machine.clone()
-        }
-    }
-
-    fn go(&mut self, to: Step) {
+    /// On to the step after this one.
+    fn go_on(&mut self) {
+        let disks = self.disks.as_deref().unwrap_or_default();
+        let Some(to) = self.step.next(self.plan.runs, self.plan.needs_rom(disks)) else {
+            return;
+        };
         self.trail.push(self.step);
         self.step = to;
         self.msg.clear();
         if to == Step::Ready {
             self.ready_lines = self.plan.describe(&self.transfer_dir);
+        }
+    }
+
+    /// [`wizard::check_plan`] at a disks step's Next: on when the plan
+    /// passes, else the reason stays on screen.
+    fn go_on_checked(&mut self) {
+        match wizard::check_plan(&self.plan, self.disks.as_deref().unwrap_or_default()) {
+            Ok(()) => self.go_on(),
+            Err(e) => self.msg = e,
         }
     }
 
@@ -132,7 +126,7 @@ impl CpmWizard {
                     saved = r.is_ok();
                     self.result = Some(r);
                     self.saving = None;
-                    self.step = Step::Done;
+                    self.done = true;
                     self.trail.clear();
                 }
                 Err(TryRecvError::Empty) => {
@@ -143,7 +137,7 @@ impl CpmWizard {
                 Err(TryRecvError::Disconnected) => {
                     self.result = Some(Err("the save did not finish".to_string()));
                     self.saving = None;
-                    self.step = Step::Done;
+                    self.done = true;
                 }
             }
         }
@@ -159,7 +153,7 @@ impl CpmWizard {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if self.step != Step::Done
+                    if !self.done
                         && !self.trail.is_empty()
                         && ui.button("Back").clicked()
                     {
@@ -167,8 +161,8 @@ impl CpmWizard {
                         self.msg.clear();
                     }
                     let label = match self.step {
+                        _ if self.done => "Close",
                         Step::Ready => "Save",
-                        Step::Done => "Close",
                         _ => "Next",
                     };
                     if ui.add(egui::Button::new(egui::RichText::new(label).strong().color(AMBER_BRIGHT))).clicked() {
@@ -199,10 +193,10 @@ impl CpmWizard {
         ui.label(egui::RichText::new(&d.name).strong().color(AMBER_BRIGHT));
         ui.label(egui::RichText::new(&d.summary).color(AMBER_DIM));
         if d.altair_basic {
-            ui.label(egui::RichText::new("Altair BASIC: the 8080 is advised.").color(AMBER));
+            ui.label(egui::RichText::new(wizard::BASIC_NOTE).color(AMBER));
         }
         if d.needs_rom {
-            ui.label(egui::RichText::new("Needs the CUTER monitor ROM.").color(AMBER));
+            ui.label(egui::RichText::new(wizard::ROM_NOTE).color(AMBER));
         }
         egui::ScrollArea::vertical().max_height(360.0).id_salt("cpmw_listing").show(ui, |ui| {
             ui.set_min_width(260.0);
@@ -230,20 +224,29 @@ impl CpmWizard {
 
     /// The boot disk, looked up in `disks` while they are lent out.
     fn boot_in(&self, disks: &[DiskFacts]) -> Option<DiskFacts> {
-        let name = self.plan.boot_disk.as_deref()?;
-        disks.iter().find(|d| d.name == name).cloned()
+        self.plan.boot_in(disks).cloned()
     }
 
     fn draw_step_with(&mut self, ui: &mut egui::Ui, disks: &[DiskFacts]) {
+        if self.done {
+            self.draw_done(ui);
+            return;
+        }
         match self.step {
             Step::Runs => {
                 ui.heading("What should CP/M run?");
                 Self::para(ui, wizard::RUNS_HELP);
                 let can_boot = disks.iter().any(|d| d.boots);
-                ui.radio_value(&mut self.plan.runs, Runs::Emulator, wizard::EMULATOR_LABEL);
+                // Through `choose_runs`, which knows what each answer keeps.
+                let mut runs = self.plan.runs;
+                ui.radio_value(&mut runs, Runs::Emulator, wizard::EMULATOR_LABEL);
                 if can_boot {
-                    ui.radio_value(&mut self.plan.runs, Runs::Boot, wizard::BOOT_LABEL);
-                } else {
+                    ui.radio_value(&mut runs, Runs::Boot, wizard::BOOT_LABEL);
+                }
+                if runs != self.plan.runs {
+                    self.plan.choose_runs(runs);
+                }
+                if !can_boot {
                     ui.label(
                         egui::RichText::new(
                             "No disk image here can boot yet: Download Sample Disks first, then open the wizard again to boot one.",
@@ -277,9 +280,7 @@ impl CpmWizard {
                         let about = d.summary.split(" -- ").nth(1).unwrap_or("");
                         if ui.selectable_label(on, format!("{}   {}", d.name, about)).clicked() {
                             self.viewing = Some(d.name.clone());
-                            if !on {
-                                self.plan = Plan::boot(d);
-                            }
+                            self.plan.choose_boot_disk(d);
                         }
                     }
                 });
@@ -289,26 +290,19 @@ impl CpmWizard {
                 ui.heading("Which machine?");
                 Self::para(ui, wizard::MACHINE_HELP);
                 ui.label(format!("The disk reads as: {}", crate::cpm::console::machine_label(&boot.machine)));
-                let current = self.machine_in_force(&boot);
+                let current = self.plan.machine_in_force(&boot);
                 for m in wizard::machine_choices(&boot) {
                     let detected = m.key == boot.machine;
                     let label = if detected { format!("{}  (what the disk was read as)", m.description) } else { m.description.to_string() };
                     if ui.radio(current == m.key, label).clicked() {
-                        let v = if detected { crate::cpm::console::AUTO_MACHINE.to_string() } else { m.key.to_string() };
-                        if v != self.plan.machine {
-                            self.plan.disks.clear();
-                        }
-                        self.plan.machine = v;
+                        self.plan.choose_machine(m.key, &boot);
                     }
                 }
             }
             Step::Cpu => {
                 ui.heading("Which processor?");
                 Self::para(ui, wizard::CPU_HELP);
-                let (adv, why) = match self.boot_in(disks) {
-                    Some(b) if self.plan.runs == Runs::Boot => wizard::recommended_cpu(&b),
-                    _ => (wizard::EMULATOR_CPU, "the Z80 runs nearly all 8080 software"),
-                };
+                let (adv, why) = wizard::advised_cpu(self.plan.runs, self.plan.boot_in(disks));
                 ui.label(
                     egui::RichText::new(format!("Advised: {}, {why}.", crate::cpm::cpu::cpu_short(adv))).color(AMBER),
                 );
@@ -318,17 +312,14 @@ impl CpmWizard {
             }
             Step::Rom => {
                 ui.heading("Monitor ROM");
-                ui.label(
-                    "This disk looks for the CUTER monitor at C000 and stops without it. \
-                     The ROM is fetched with the sample disks, from its author's collection.",
-                );
+                Self::para(ui, wizard::ROM_HELP);
                 let want = self.boot_in(disks).and_then(|b| wizard::rom_for(&b)).unwrap_or(crate::cpm::rom::ROM_OFF);
                 ui.radio_value(&mut self.plan.rom, want.to_string(), "Load the ROM (advised)");
                 ui.radio_value(&mut self.plan.rom, crate::cpm::rom::ROM_OFF.to_string(), "No ROM");
             }
             Step::ExtraDisks => {
                 let Some(boot) = self.boot_in(disks) else { return };
-                let machine = self.machine_in_force(&boot);
+                let machine = self.plan.machine_in_force(&boot);
                 let room = wizard::extra_disk_room(&boot, &machine);
                 ui.heading("More disks for the machine");
                 Self::para(ui, wizard::EXTRA_DISKS_HELP);
@@ -366,19 +357,23 @@ impl CpmWizard {
                         .color(AMBER_DIM),
                 );
             }
-            Step::Done => match &self.result {
-                Some(Ok(notes)) => {
-                    ui.heading("Saved");
-                    for n in notes {
-                        ui.label(egui::RichText::new(n).color(AMBER_DIM));
-                    }
-                    ui.label(egui::RichText::new(wizard::FINISH_LINE).strong().color(AMBER_BRIGHT));
+        }
+    }
+
+    /// The save's answer.
+    fn draw_done(&self, ui: &mut egui::Ui) {
+        match &self.result {
+            Some(Ok(notes)) => {
+                ui.heading("Saved");
+                for n in notes {
+                    ui.label(egui::RichText::new(n).color(AMBER_DIM));
                 }
-                Some(Err(e)) => {
-                    ui.label(egui::RichText::new(format!("Not saved: {e}")).color(WARN_BORDER));
-                }
-                None => {}
-            },
+                ui.label(egui::RichText::new(wizard::FINISH_LINE).strong().color(AMBER_BRIGHT));
+            }
+            Some(Err(e)) => {
+                ui.label(egui::RichText::new(format!("Not saved: {e}")).color(WARN_BORDER));
+            }
+            None => {}
         }
     }
 
@@ -408,46 +403,13 @@ impl CpmWizard {
 
     /// `Next` (or Save, or Close).  `true` when the window should close.
     fn next(&mut self) -> bool {
+        if self.done {
+            return true;
+        }
         match self.step {
-            Step::Runs => match self.plan.runs {
-                Runs::Emulator => {
-                    if self.plan.boot_disk.is_some() {
-                        self.plan = Plan::emulator();
-                    }
-                    self.go(Step::EmulatorDrives);
-                }
-                Runs::Boot => self.go(Step::BootDisk),
-            },
-            Step::EmulatorDrives => {
-                if let Some(e) = clash(&self.plan.disks, false) {
-                    self.msg = e;
-                } else {
-                    self.go(Step::Cpu);
-                }
-            }
-            Step::BootDisk => {
-                if self.plan.boot_disk.is_some() {
-                    self.go(Step::Machine);
-                } else {
-                    self.msg = "Choose the disk to boot.".to_string();
-                }
-            }
-            Step::Machine => self.go(Step::Cpu),
-            Step::Cpu => {
-                let to = match (self.plan.runs, self.boot()) {
-                    (Runs::Emulator, _) => Step::Ready,
-                    (Runs::Boot, Some(b)) if b.needs_rom => Step::Rom,
-                    _ => Step::ExtraDisks,
-                };
-                self.go(to);
-            }
-            Step::Rom => self.go(Step::ExtraDisks),
-            Step::ExtraDisks => {
-                if let Some(e) = clash(&self.plan.disks, true) {
-                    self.msg = e;
-                } else {
-                    self.go(Step::Ready);
-                }
+            Step::EmulatorDrives | Step::ExtraDisks => self.go_on_checked(),
+            Step::BootDisk if self.plan.boot_disk.is_none() => {
+                self.msg = "Choose the disk to boot.".to_string();
             }
             Step::Ready => {
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -458,24 +420,10 @@ impl CpmWizard {
                 });
                 self.saving = Some(rx);
             }
-            Step::Done => return true,
+            _ => self.go_on(),
         }
         false
     }
-}
-
-/// What is wrong with a set of drive or slot choices, if anything: one image
-/// twice, or -- for a booted machine's slots -- a gap.
-fn clash(disks: &[(u8, String)], in_order: bool) -> Option<String> {
-    for (i, (_, a)) in disks.iter().enumerate() {
-        if disks[i + 1..].iter().any(|(_, b)| b == a) {
-            return Some(format!("{a} is chosen twice; one image can be in one place."));
-        }
-    }
-    if in_order && disks.iter().enumerate().any(|(i, (s, _))| *s as usize != i + 1) {
-        return Some("Fill the slots in order, with no empty slot between two disks.".to_string());
-    }
-    None
 }
 
 #[cfg(test)]
@@ -495,14 +443,5 @@ mod tests {
         for k in keys {
             assert!(f.contains(&format!("cfg.{k} = g.{k}")), "{k} is written by the wizard but not taken back");
         }
-    }
-
-    #[test]
-    fn test_a_disk_twice_or_a_gap_is_refused() {
-        let d = |v: &[(u8, &str)]| v.iter().map(|(n, s)| (*n, s.to_string())).collect::<Vec<_>>();
-        assert!(clash(&d(&[(1, "A.DSK"), (2, "B.DSK")]), true).is_none());
-        assert!(clash(&d(&[(1, "A.DSK"), (3, "B.DSK")]), true).is_some(), "a gap");
-        assert!(clash(&d(&[(1, "A.DSK"), (3, "B.DSK")]), false).is_none(), "drive letters may skip");
-        assert!(clash(&d(&[(1, "A.DSK"), (2, "A.DSK")]), false).is_some(), "one image twice");
     }
 }

@@ -5756,7 +5756,14 @@ fn test_every_menu_prompt_fits_petscii_and_shares_the_main_menu_root() {
         while let Some(i) = code[at..].find(NEEDLE_WITH_BACK) {
             let from = at + i + NEEDLE_WITH_BACK.len();
             at = from;
-            let Some(c) = code[from..from + 300.min(code.len() - from)].find("self.cyan(\"") else {
+            // A window of about 300 bytes, its end walked back to a character
+            // boundary: a byte count can land inside an em-dash, and slicing
+            // there panics.
+            let mut end = from + 300.min(code.len() - from);
+            while !code.is_char_boundary(end) {
+                end -= 1;
+            }
+            let Some(c) = code[from..end].find("self.cyan(\"") else {
                 continue;
             };
             let lit_at = from + c + "self.cyan(\"".len();

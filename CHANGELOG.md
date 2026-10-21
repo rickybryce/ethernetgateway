@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `L` opens the whole listing on paged screens and returns to the step.
   - Nothing is saved until the summary is confirmed.  It ends: press `K` on
     the main menu.
+  - The gateway checks every answer before it saves -- the disks for a
+    board's slots must be ones it reads, filled in order -- whichever screen
+    they came from; a save that could not mount every disk says so first.
 
 ### Security
 
