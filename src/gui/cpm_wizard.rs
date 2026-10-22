@@ -41,6 +41,10 @@ pub(super) struct CpmWizard {
     offer: Option<SampleOffer>,
     /// A download asked of the host is running.
     fetching: bool,
+    /// A Download was refused because the host's slot was taken: when it
+    /// frees, the disks are read again, since that other run may have been
+    /// the sample disks and the offer would then be stale.
+    slot_wait: bool,
     /// The disks are being read again after a download: on to the next step
     /// once they are, rather than to the first.
     after_fetch: bool,
@@ -70,6 +74,7 @@ impl CpmWizard {
             loading: Some(Self::read_disks(transfer_dir)),
             offer: None,
             fetching: false,
+            slot_wait: false,
             after_fetch: false,
             fetch_note: String::new(),
             want_fetch: false,
@@ -93,15 +98,24 @@ impl CpmWizard {
         rx
     }
 
-    /// A download asked for with [`Outcome::Fetch`] is running.
-    pub(super) fn fetching(&self) -> bool {
-        self.fetching
+    /// Waiting on the host's download slot: a run asked for with
+    /// [`Outcome::Fetch`], or the slot to free after one was refused.  The
+    /// host polls the slot and calls [`Self::fetched`] once it is empty.
+    pub(super) fn waiting(&self) -> bool {
+        self.fetching || self.slot_wait
     }
 
-    /// The host's download is over, saying `note`: the disks are read again,
-    /// and the wizard goes on from the download step with its first answer
-    /// worked out afresh ([`Plan::opening`]).
+    /// The host's slot is empty again.  After this wizard's own download,
+    /// saying `note`: the disks are read again, and the wizard goes on from
+    /// the download step with its first answer worked out afresh
+    /// ([`Plan::opening`]).  After a refusal: only read again, to start over
+    /// on whatever step [`Step::first`] now names.
     pub(super) fn fetched(&mut self, note: &str) {
+        if std::mem::take(&mut self.slot_wait) {
+            self.msg.clear();
+            self.loading = Some(Self::read_disks(&self.transfer_dir));
+            return;
+        }
         self.fetching = false;
         self.fetch_note = note.trim().to_string();
         self.after_fetch = true;
@@ -113,6 +127,7 @@ impl CpmWizard {
     /// Waiting on the slot would report that other run as the disks'.
     pub(super) fn fetch_refused(&mut self) {
         self.fetching = false;
+        self.slot_wait = true;
         self.msg = "Another download is running: press Download again once it has finished.".to_string();
     }
 
@@ -177,7 +192,7 @@ impl CpmWizard {
                 }
             }
         }
-        if self.fetching {
+        if self.waiting() {
             // Polled by the host; this only keeps the frames coming.
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -557,6 +572,13 @@ mod tests {
         let start = &gui[gui.find("fn start_cpm_fetch(").unwrap()..];
         let start = &start[..start.find("\n    }\n").unwrap()];
         assert!(start.contains("return false;") && start.trim_end().ends_with("true"), "{start}");
+        // Refused, it waits for the slot to free and reads the disks again:
+        // the run that held it may have been the sample disks.
+        let refused = &me[me.find("pub(super) fn fetch_refused(").unwrap()..];
+        let refused = &refused[..refused.find("\n    }\n").unwrap()];
+        assert!(refused.contains("self.slot_wait = true;"), "a refused Download never looks again");
+        let host = &gui[gui.find("if let Some(mut w) = self.cpm_wizard.take()").unwrap()..];
+        assert!(host[..host.find("let mut open = true;").unwrap()].contains("if w.waiting() {"), "the slot is not watched after a refusal");
     }
 
     /// The desktop takes every key the wizard writes back from the global

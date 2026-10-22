@@ -4670,8 +4670,11 @@ impl App {
     /// ahead.
     fn start_wizard_fetch_if_pending(&mut self, ctx: &egui::Context) {
         if std::mem::take(&mut self.wizard_fetch_pending) {
-            logger::log("CP/M sample disks: downloading…".into());
-            self.start_cpm_fetch(ctx);
+            if self.start_cpm_fetch(ctx) {
+                logger::log("CP/M sample disks: downloading…".into());
+            } else {
+                logger::log("CP/M sample disks: another CP/M download is running, so none was started.".into());
+            }
         }
     }
 
@@ -6814,7 +6817,7 @@ impl eframe::App for App {
             // A download the wizard asked for: over once the shared slot is
             // empty, whoever collected the result (the panel's button may have,
             // earlier this frame).
-            if w.fetching() {
+            if w.waiting() {
                 self.poll_cpm_fetch();
                 if self.cpm_fetch.is_none() {
                     w.fetched(&self.cpm_fetch_note);

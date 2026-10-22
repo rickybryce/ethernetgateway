@@ -1015,10 +1015,12 @@ mod tests {
     fn test_the_wizard_can_be_cancelled_after_the_download_offer() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let _lock = crate::config::CONFIG_TEST_LOCK.blocking_lock();
-        struct Restore(Option<crate::config::Config>);
+        // The config put back and the folder removed however the test ends.
+        struct Restore(Option<crate::config::Config>, std::path::PathBuf);
         impl Drop for Restore {
             fn drop(&mut self) {
                 crate::config::swap_config_for_test(self.0.take());
+                let _ = std::fs::remove_dir_all(&self.1);
             }
         }
         let td = std::env::temp_dir().join(format!("egw_wiz_cancel_{}", std::process::id()));
@@ -1026,14 +1028,13 @@ mod tests {
         std::fs::create_dir_all(&td).unwrap();
         let mut cfg = crate::config::get_config();
         cfg.transfer_dir = td.to_string_lossy().to_string();
-        let _restore = Restore(crate::config::swap_config_for_test(Some(cfg)));
+        let _restore = Restore(crate::config::swap_config_for_test(Some(cfg)), td.clone());
         let done = std::sync::Arc::new(AtomicBool::new(false));
         let d = done.clone();
         let rows = rendered(TerminalType::Ansi, b"n\rq", async move |t| {
             let r = tokio::time::timeout(std::time::Duration::from_secs(10), t.cpm_wizard()).await;
             d.store(matches!(r, Ok(Ok(()))), Ordering::SeqCst);
         });
-        let _ = std::fs::remove_dir_all(&td);
         let all = rows.join("\n");
         assert!(all.contains("Download them?"), "positive control: the offer was shown\n{all}");
         assert!(all.contains("CP/M SETUP: WHAT RUNS"), "positive control: N went on\n{all}");
