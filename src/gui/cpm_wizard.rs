@@ -198,7 +198,9 @@ impl CpmWizard {
         if d.needs_rom {
             ui.label(egui::RichText::new(wizard::ROM_NOTE).color(AMBER));
         }
-        egui::ScrollArea::vertical().max_height(360.0).id_salt("cpmw_listing").show(ui, |ui| {
+        // The listing takes whatever width the window has beside the steps:
+        // dragging the wizard wider is for long file names.
+        egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).id_salt("cpmw_listing").show(ui, |ui| {
             ui.set_min_width(260.0);
             for f in d.listing() {
                 ui.monospace(f);

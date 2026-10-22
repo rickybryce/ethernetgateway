@@ -4964,6 +4964,18 @@ impl App {
 /// the cure is not a clipped row instead of a sliding panel.
 const POPUP_CONTENT_W: f32 = 640.0;
 
+/// The CP/M setup wizard's opening width, and how wide it can be dragged.
+///
+/// **It is not a settings popup, so `POPUP_CONTENT_W` is not its bound.**  It
+/// had that cap, which silently beat its own `default_width` of 760: it opened
+/// at 640 and could not be dragged wider, the disk listing squeezed beside
+/// the fixed 420 steps column (measured on the running window, 2026-10-22).
+/// Nothing in it sizes itself from the width it is given -- the steps column
+/// is fixed, and only the listing takes what is left -- so the ratchet that
+/// cap prevents has nothing to feed it.  Opens a fifth wider than the 640.
+const CPM_WIZARD_W: f32 = 770.0;
+const CPM_WIZARD_MAX_W: f32 = 1240.0;
+
 const CPM_LABEL_W: f32 = 196.0;
 const CPM_CONTROL_W: f32 = 330.0;
 
@@ -6793,8 +6805,8 @@ impl eframe::App for App {
                 .open(&mut open)
                 .resizable(true)
                 .collapsible(false)
-                .default_width(760.0)
-                .max_width(POPUP_CONTENT_W)
+                .default_width(CPM_WIZARD_W)
+                .max_width(CPM_WIZARD_MAX_W)
                 .frame(popup_frame)
                 .show(&ctx, |ui| {
                     ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
@@ -8100,6 +8112,8 @@ mod tests {
                 "Serial Port",
                 popup_window_width(POPUP_SERIAL_LEFT_W, POPUP_SERIAL_RIGHT_W),
             ),
+            ("CP/M Setup Wizard", CPM_WIZARD_W),
+            ("CP/M Setup Wizard, dragged widest", CPM_WIZARD_MAX_W),
         ];
         for (name, w) in widest {
             assert!(
