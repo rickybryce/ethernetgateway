@@ -53,10 +53,51 @@ pub(super) fn disks_json(transfer_dir: &str) -> String {
         }
         out.push_str(&disk_json(d, &disks));
     }
-    // The plan the page starts from, so it has no idea of its own of what
-    // an untouched wizard holds.
-    out.push_str(&format!("],\"plan\":{}}}", plan_json(&Plan::emulator(), &disks)));
+    // The plan the page starts from, and the first answer to mark advised,
+    // so it has no idea of its own of what an untouched wizard holds.
+    out.push_str(&format!(
+        "],\"advised\":\"{}\",\"plan\":{}",
+        runs_key(wizard::opening_runs(&disks)),
+        plan_json(&Plan::opening(&disks), &disks)
+    ));
+    // The download step, while the sample disks are not here.
+    match wizard::sample_offer(&base) {
+        Some(o) => out.push_str(&format!(
+            ",\"offer\":{{\"disks\":{},\"mb\":{:.0},\"from\":\"{}\"}}}}",
+            o.disks,
+            o.megabytes,
+            json_escape(&crate::cpm::fetch::source_repos().join(" and "))
+        )),
+        None => out.push_str(",\"offer\":null}"),
+    }
     out
+}
+
+fn runs_key(runs: Runs) -> &'static str {
+    match runs {
+        Runs::Emulator => "emulator",
+        Runs::Boot => "boot",
+    }
+}
+
+/// The wizard's download step: the sample disks fetched -- blocking, about a
+/// minute, as the panel's own Download is -- and the disks read again, with
+/// what the run came to as `note`.
+pub(super) fn fetch_json(transfer_dir: &str) -> String {
+    let base = wizard::cpm_base(transfer_dir);
+    let note = match crate::cpm::fetch::download_missing(&base, crate::cpm::fetch::log_progress) {
+        Ok(r) => {
+            let mut m = r.summary();
+            for line in r.failure_lines(3) {
+                m.push_str(&format!(" {line}."));
+            }
+            m
+        }
+        Err(e) => e,
+    };
+    crate::glog!("Web: CP/M sample disks (setup wizard): {}", note.trim());
+    let disks = disks_json(transfer_dir);
+    format!("{{\"note\":\"{}\",{}", json_escape(note.trim()), &disks[1..])
 }
 
 /// What `/cpm-wizard/disks` answers when reading the images failed: no disks,
@@ -65,7 +106,7 @@ pub(super) fn disks_json(transfer_dir: &str) -> String {
 /// to show.
 pub(super) fn disks_fallback() -> String {
     format!(
-        "{{\"machines\":[],\"cpus\":[],\"disks\":[],\"plan\":{},\"error\":\"{}\"}}",
+        "{{\"machines\":[],\"cpus\":[],\"disks\":[],\"advised\":\"emulator\",\"plan\":{},\"offer\":null,\"error\":\"{}\"}}",
         plan_json(&Plan::emulator(), &[]),
         json_escape(DISKS_UNREAD)
     )
@@ -87,10 +128,7 @@ pub(super) fn plan_json(plan: &Plan, all: &[DiskFacts]) -> String {
     format!(
         "{{\"runs\":\"{}\",\"boot\":{},\"machine\":\"{}\",\"inForce\":{},\"cpu\":\"{}\",\"rom\":\"{}\",\
          \"needsRom\":{},\"disks\":{{{}}}}}",
-        match plan.runs {
-            Runs::Emulator => "emulator",
-            Runs::Boot => "boot",
-        },
+        runs_key(plan.runs),
         opt(plan.boot_disk.as_deref()),
         json_escape(&plan.machine),
         opt(in_force.as_deref()),
@@ -117,9 +155,11 @@ pub(super) fn choose(
         return Err("choose to boot a disk first".to_string());
     }
     match what {
+        // Boot even with nothing here that boots: the operator may have images
+        // of their own to add, and the boot-disk step says where.
         "runs" => plan.choose_runs(match value {
             "emulator" => Runs::Emulator,
-            "boot" if all.iter().any(|d| d.boots) => Runs::Boot,
+            "boot" => Runs::Boot,
             _ => return Err("Choose one of the two.".to_string()),
         }),
         "boot" => {
@@ -331,7 +371,9 @@ pub(super) fn render_modal() -> String {
           data-runs=\"{runs}\" data-drives=\"{drives}\" data-bootdisk=\"{bootdisk}\" \
           data-machine=\"{machine}\" data-cpu=\"{cpu}\" data-extra=\"{extra}\" data-rom=\"{rom}\" \
           data-z80why=\"{z80why}\" data-emucpu=\"{emucpu}\" data-next=\"{next}\" \
-          data-finish=\"{finish}\" data-emulator=\"{emu}\" data-boot=\"{boot}\"></template>",
+          data-finish=\"{finish}\" data-emulator=\"{emu}\" data-boot=\"{boot}\" \
+          data-fetch=\"{fetch}\" data-fetchlabel=\"{fetchlabel}\" data-decline=\"{decline}\" \
+          data-noboot=\"{noboot}\"></template>",
         runs = html_escape(&para(wizard::RUNS_HELP)),
         drives = html_escape(&para(wizard::EMULATOR_DRIVES_HELP)),
         bootdisk = html_escape(&para(wizard::BOOT_DISK_HELP)),
@@ -345,6 +387,10 @@ pub(super) fn render_modal() -> String {
         finish = html_escape(wizard::FINISH_LINE),
         emu = html_escape(wizard::EMULATOR_LABEL),
         boot = html_escape(wizard::BOOT_LABEL),
+        fetch = html_escape(&para(wizard::FETCH_HELP)),
+        fetchlabel = html_escape(wizard::FETCH_LABEL),
+        decline = html_escape(wizard::DECLINE_LABEL),
+        noboot = html_escape(&para(wizard::NO_BOOT_DISK)),
     )
 }
 
@@ -437,12 +483,35 @@ pub(super) const SCRIPT: &str = r#"<script>
     return out;
   }
   var steps = {
+    // Offered first while the sample disks are not here (`D.offer`), and
+    // answered by its own two buttons: Next is hidden on it (see `go`).
+    fetch: function() {
+      var o = D.offer;
+      box.innerHTML = T.dataset.fetch +
+        (o ? '<p class="sub">' + esc(o.disks + ' disks, ' + o.mb + ' MB, from ' + o.from + '.') + '</p>' : '') +
+        '<p><button type="button" class="cpmw-opt cpmw-on" id="cpmw-get">' + esc(T.dataset.fetchlabel) + '</button> ' +
+        '<button type="button" class="secondary cpmw-opt" id="cpmw-skip">' + esc(T.dataset.decline) + '</button></p>';
+      document.getElementById('cpmw-get').addEventListener('click', function() {
+        if (busy) return;
+        say('Downloading… this takes a minute.');
+        request('/cpm-wizard/fetch', '').then(function(j) {
+          if (j.error) { box.innerHTML = '<p>' + esc(j.error) + '</p>'; say(''); return; }
+          D = j; plan = j.plan; trail.push('fetch'); go('runs');
+          if (j.note) say('Sample disks: ' + j.note);
+        }).catch(function() { say('The gateway did not answer.'); });
+      });
+      document.getElementById('cpmw-skip').addEventListener('click', function() {
+        if (!busy) { trail.push('fetch'); go('runs'); }
+      });
+      return function() { return null; };
+    },
+    // Both answers always -- Boot too with nothing here that boots, for an
+    // operator with images of their own (the next step says where) -- and
+    // the gateway's first answer (`wizard::opening_runs`) marked.
     runs: function() {
-      var items = [['emulator', T.dataset.emulator, '']];
-      if (D.disks.some(function(d) { return d.boots; })) items.push(['boot', T.dataset.boot, '']);
-      box.innerHTML = T.dataset.runs + (items.length > 1 ? '' :
-        '<p class="sub">No disk image here can boot yet: Download sample disks on this panel first, then open the wizard again to boot one.</p>') +
-        choices('runs', items, plan.runs);
+      var items = [['emulator', T.dataset.emulator, D.advised === 'emulator' ? 'advised' : ''],
+        ['boot', T.dataset.boot, D.advised === 'boot' ? 'advised' : '']];
+      box.innerHTML = T.dataset.runs + choices('runs', items, plan.runs);
       wire('runs', function() {});
       return function() {
         var v = picked('runs');
@@ -465,6 +534,10 @@ pub(super) const SCRIPT: &str = r#"<script>
     },
     bootdisk: function() {
       var list = D.disks.filter(function(d) { return d.boots; });
+      if (!list.length) {
+        box.innerHTML = T.dataset.noboot;
+        return function() { say('No disk here boots: go back, or close the wizard.'); return null; };
+      }
       box.innerHTML = T.dataset.bootdisk +
         choices('boot', list.map(function(d) { return [d.name, d.name, d.summary.split(' -- ')[1] || '']; }), plan.boot) +
         '<div id="cpmw-view"></div>';
@@ -541,6 +614,7 @@ pub(super) const SCRIPT: &str = r#"<script>
   };
   function go(s) {
     step = s; say(''); next.textContent = 'Next';
+    next.style.visibility = s === 'fetch' ? 'hidden' : 'visible';
     view = steps[s]();
     back.style.visibility = trail.length ? 'visible' : 'hidden';
   }
@@ -653,7 +727,7 @@ pub(super) const SCRIPT: &str = r#"<script>
         // would advise downloading disks that are there, and its emulator
         // plan, saved, would take every mounted disk off.
         if (j.error) { box.innerHTML = '<p>' + esc(j.error) + '</p>'; return; }
-        D = j; plan = j.plan; go('runs');
+        D = j; plan = j.plan; go(D.offer ? 'fetch' : 'runs');
       }).catch(function() { say('The gateway did not answer.'); });
     });
   });
@@ -724,7 +798,7 @@ mod tests {
         }
         assert!(SCRIPT.contains("return nextOf(from);"), "positive control: the script asks the table");
         let modal = render_modal();
-        assert!(modal.contains("data-next=\"{&quot;runs|emulator|0&quot;:&quot;drives&quot;"), "the table is sent");
+        assert!(modal.contains("&quot;runs|emulator|0&quot;:&quot;drives&quot;"), "the table is sent");
         assert!(SCRIPT.contains("'/cpm-wizard/check'"), "the page asks the gateway to check");
     }
 
@@ -810,12 +884,15 @@ mod tests {
         for (what, value) in [("boot", "BOOT.DSK"), ("machine", "altair_2sio"), ("rom", "no")] {
             assert!(ask(&emu, what, value).is_err(), "{what} was answered for the emulator");
         }
-        // Boot is no answer when nothing here boots.
+        // Boot is an answer even when nothing here boots -- every surface
+        // offers it, for images of the operator's own -- though no disk is.
         let none = vec![facts("DATA.DSK", false, true, false)];
         let mut f = form(&[("runs", "emulator"), ("cpu", "z80"), ("what", "runs"), ("value", "boot")]);
-        assert!(choose(&f, &none).is_err());
+        assert_eq!(choose(&f, &none).map(|p| p.runs), Ok(Runs::Boot), "Boot refused with nothing that boots");
         f.insert("value".into(), "emulator".into());
         assert!(choose(&f, &none).is_ok());
+        let f = form(&[("runs", "boot"), ("cpu", "z80"), ("machine", "auto"), ("rom", "off"), ("what", "boot"), ("value", "DATA.DSK")]);
+        assert!(choose(&f, &none).is_err(), "a disk that does not boot was taken");
     }
 
     /// The page is sent the two things it draws that are rules: the machine
@@ -924,7 +1001,37 @@ mod tests {
         let err = open.find("if (j.error) {").expect("the error is not looked at");
         let rest = &open[err..];
         assert!(rest[..rest.find('}').unwrap()].contains("return;"), "the steps are drawn after the error");
-        assert!(err < open.find("go('runs')").unwrap());
+        assert!(err < open.find("go(").unwrap());
+    }
+
+    /// The page is told what the download step offers and which first
+    /// answer to hold, and follows both: it opens on the download while one
+    /// is offered, hides Next there, and offers Boot whatever is here.
+    #[test]
+    fn test_the_page_is_told_the_offer_and_the_first_answer() {
+        let j: serde_json::Value = serde_json::from_str(&disks_json("/nonexistent-transfer-dir")).expect("JSON");
+        assert_eq!(j["offer"]["disks"], crate::cpm::fetch::catalogue().len(), "{j}");
+        assert_eq!(j["advised"], "emulator", "nothing here boots");
+        assert_eq!(j["plan"]["runs"], "emulator");
+        // Nothing boots in a folder that is not there, so the opening plan
+        // and the emulator's look alike above: the plan sent is checked at
+        // its source, bounded to the function.
+        let src = include_str!("cpm_wizard.rs").replace('\r', "");
+        let dj = &src[src.find("pub(super) fn disks_json(").unwrap()..];
+        let dj = &dj[..dj.find("\n}\n").unwrap()];
+        assert!(dj.contains("plan_json(&Plan::opening(&disks), &disks)"), "the page is sent another first answer");
+        assert!(dj.contains("runs_key(wizard::opening_runs(&disks))"), "the advised answer is not the gateway's");
+        let f: serde_json::Value = serde_json::from_str(&disks_fallback()).unwrap();
+        assert!(f["offer"].is_null());
+        let open = &SCRIPT[SCRIPT.find("button.more[data-target=\"cpm-wizard\"]").expect("the opener")..];
+        assert!(open.contains("go(D.offer ? 'fetch' : 'runs')"), "the page does not open on the download");
+        let go = &SCRIPT[SCRIPT.find("function go(").unwrap()..];
+        assert!(go[..go.find("\n  }\n").unwrap()].contains("s === 'fetch' ? 'hidden'"), "Next shows on the download step");
+        let runs = &SCRIPT[SCRIPT.find("    runs: function").unwrap()..];
+        let runs = &runs[..runs.find("\n    },\n").unwrap()];
+        assert!(runs.contains("['boot', T.dataset.boot") && !runs.contains("boots"), "Boot is offered only with a disk that boots");
+        assert!(runs.contains("D.advised"), "the advised answer is the page's own");
+        assert!(SCRIPT.contains("request('/cpm-wizard/fetch', '')"), "the download is not asked through request()");
     }
 
     /// The processors the page offers are the settings' own list, sent with

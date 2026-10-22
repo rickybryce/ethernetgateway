@@ -8,8 +8,10 @@
 //! surfaces would come to disagree, and every other CP/M rule in this project
 //! is held in one place for that reason.
 //!
-//! The order follows what each answer makes irrelevant.  The first question
-//! is what CP/M runs: the emulator needs no boot disk and asks only for drive
+//! The order follows what each answer makes irrelevant.  While the sample
+//! disks are not here, the first step offers to fetch them ([`Step::Fetch`]):
+//! most people come to boot a disk, and there is nothing to boot without
+//! one.  Then what CP/M runs: the emulator needs no boot disk and asks only for drive
 //! letters, while a booted disk asks for its machine, its processor, a monitor
 //! ROM if it needs one, and the disks to ride along in its board's other slots.
 //!
@@ -43,7 +45,7 @@ pub const RUNS_HELP: &[&str] = &[
     "own CP/M 2.2. Drives A: to P: are",
     "folders, the EGT8080 terminal is on",
     "A:, and disk images can be added on",
-    "drive letters. Start here if unsure.",
+    "drive letters.",
     "",
     "Booting a disk hands an emulated",
     "Altair, Cromemco or z80pack machine",
@@ -55,6 +57,37 @@ pub const RUNS_HELP: &[&str] = &[
 pub const EMULATOR_LABEL: &str = "The CP/M Emulator";
 /// What choosing a boot disk means, under the choice.
 pub const BOOT_LABEL: &str = "Boot a disk image";
+
+/// The first step, while the sample disks are not here ([`sample_offer`]).
+pub const FETCH_HELP: &[&str] = &[
+    "Most people come here to boot a",
+    "disk image, and the sample disks",
+    "are not here yet: CP/M 2.2, CP/M 3,",
+    "Altair BASIC, CDOS and more, the",
+    "disks this gateway is known to boot.",
+    "",
+    "They are not ours; this fetches them",
+    "for you, and anything already there",
+    "is left alone. It takes a minute.",
+    "",
+    "Not now: the CP/M Emulator needs no",
+    "disks, and disk images of your own",
+    "can still be booted.",
+];
+/// The answer that fetches the sample disks.
+pub const FETCH_LABEL: &str = "Download the sample disks";
+/// The answer that goes on without them.
+pub const DECLINE_LABEL: &str = "Not now";
+
+/// The boot-disk step when no disk here boots: Boot is offered anyway, for
+/// an operator with images of their own, and this says where they go.
+pub const NO_BOOT_DISK: &[&str] = &[
+    "No disk image here boots yet. Put",
+    "your own .dsk images in CPM/images",
+    "in the transfer folder, then open",
+    "the wizard again -- or go back and",
+    "download the sample disks.",
+];
 
 /// The emulator's drive step.
 pub const EMULATOR_DRIVES_HELP: &[&str] = &[
@@ -139,6 +172,8 @@ pub const FINISH_LINE: &str = "Press K on the main menu to start.";
 /// a table ([`Step::table`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
+    /// Offered first, and only while the sample disks are missing.
+    Fetch,
     Runs,
     EmulatorDrives,
     BootDisk,
@@ -150,7 +185,8 @@ pub enum Step {
 }
 
 impl Step {
-    pub const ALL: [Step; 8] = [
+    pub const ALL: [Step; 9] = [
+        Step::Fetch,
         Step::Runs,
         Step::EmulatorDrives,
         Step::BootDisk,
@@ -164,6 +200,7 @@ impl Step {
     /// The step's name on the web page.
     pub fn key(self) -> &'static str {
         match self {
+            Step::Fetch => "fetch",
             Step::Runs => "runs",
             Step::EmulatorDrives => "drives",
             Step::BootDisk => "bootdisk",
@@ -179,6 +216,7 @@ impl Step {
     /// boot disk does or does not want a monitor ROM.  `None` after Ready.
     pub fn next(self, runs: Runs, needs_rom: bool) -> Option<Step> {
         Some(match (self, runs) {
+            (Step::Fetch, _) => Step::Runs,
             (Step::Runs, Runs::Emulator) => Step::EmulatorDrives,
             (Step::Runs, Runs::Boot) => Step::BootDisk,
             (Step::EmulatorDrives, _) => Step::Cpu,
@@ -191,6 +229,12 @@ impl Step {
             (Step::ExtraDisks, _) => Step::Ready,
             (Step::Ready, _) => return None,
         })
+    }
+
+    /// Where a wizard starts: on the download offer while it has something
+    /// to offer ([`sample_offer`]), else on what CP/M runs.
+    pub fn first(offer: Option<&SampleOffer>) -> Step {
+        if offer.is_some() { Step::Fetch } else { Step::Runs }
     }
 
     /// [`Step::next`] for every case, as `step|runs|rom` keys (`rom` is 0 or
@@ -208,6 +252,35 @@ impl Step {
         }
         out
     }
+}
+
+/// The sample disks not here yet: what the download step offers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SampleOffer {
+    pub disks: usize,
+    pub megabytes: f64,
+}
+
+/// What the download step would fetch, or `None` when every sample disk is
+/// here.  **Disks only**, not the monitor ROMs [`super::fetch::outstanding`]
+/// also counts: the step is about having something to boot, and the ROM has
+/// its own offer -- one missing ROM would otherwise open every wizard on a
+/// download.  A run started here fetches both, as every download does.
+pub fn sample_offer(cpm_base: &Path) -> Option<SampleOffer> {
+    let (disks, _roms) = super::fetch::outstanding(cpm_base);
+    if disks.is_empty() {
+        return None;
+    }
+    let megabytes = disks.iter().map(|d| d.bytes).sum::<u64>() as f64 / (1024.0 * 1024.0);
+    Some(SampleOffer { disks: disks.len(), megabytes })
+}
+
+/// The first answer the wizard holds: **boot**, whenever a disk here can --
+/// the samples, just fetched or already here, or the operator's own -- since
+/// that is what most people come for; the emulator, which needs no disk,
+/// otherwise.  Boot is offered either way.
+pub fn opening_runs(disks: &[DiskFacts]) -> Runs {
+    if disks.iter().any(|d| d.boots) { Runs::Boot } else { Runs::Emulator }
 }
 
 /// What one disk image is, as far as the wizard needs to know.
@@ -473,6 +546,13 @@ impl Plan {
             rom: super::rom::ROM_OFF.to_string(),
             disks: Vec::new(),
         }
+    }
+
+    /// The plan a wizard opens with, over these disks: the emulator's, with
+    /// [`opening_runs`] as the first answer.  No boot disk is chosen for the
+    /// operator -- the next step lists them.
+    pub fn opening(disks: &[DiskFacts]) -> Plan {
+        Plan { runs: opening_runs(disks), ..Plan::emulator() }
     }
 
     /// A plan that boots `disk` with every recommendation taken.
@@ -748,6 +828,8 @@ mod tests {
     #[test]
     fn test_every_explanation_fits_a_narrow_screen() {
         for (what, text) in [
+            ("fetch", FETCH_HELP),
+            ("no boot disk", NO_BOOT_DISK),
             ("runs", RUNS_HELP),
             ("emulator drives", EMULATOR_DRIVES_HELP),
             ("boot disk", BOOT_DISK_HELP),
@@ -779,6 +861,58 @@ mod tests {
             altair_basic: basic,
             needs_rom: rom,
         }
+    }
+
+    /// The first answer is Boot exactly when some disk here boots -- the
+    /// samples or the operator's own -- and no boot disk is chosen for them.
+    #[test]
+    fn test_the_wizard_opens_on_boot_when_a_disk_boots() {
+        let data = DiskFacts { boots: false, ..disk("DATA.DSK", false, false) };
+        assert_eq!(opening_runs(&[]), Runs::Emulator);
+        assert_eq!(opening_runs(std::slice::from_ref(&data)), Runs::Emulator);
+        assert_eq!(opening_runs(&[data.clone(), disk("MINE.DSK", false, false)]), Runs::Boot);
+        let p = Plan::opening(&[data, disk("MINE.DSK", false, false)]);
+        assert_eq!(p.runs, Runs::Boot);
+        assert_eq!(p.boot_disk, None, "a disk was chosen for the operator");
+        assert_eq!(Plan { runs: Runs::Emulator, ..p }, Plan::emulator(), "the rest is not the emulator's");
+    }
+
+    /// The download step comes first exactly while sample disks are missing,
+    /// and leads to what CP/M runs whatever the plan.
+    #[test]
+    fn test_the_download_step_comes_first_only_while_disks_are_missing() {
+        let o = SampleOffer { disks: 3, megabytes: 1.0 };
+        assert_eq!(Step::first(Some(&o)), Step::Fetch);
+        assert_eq!(Step::first(None), Step::Runs);
+        for runs in [Runs::Emulator, Runs::Boot] {
+            for rom in [false, true] {
+                assert_eq!(Step::Fetch.next(runs, rom), Some(Step::Runs));
+            }
+        }
+        assert!(Step::ALL.iter().all(|s| *s == Step::Fetch || s.next(Runs::Boot, false) != Some(Step::Fetch)), "a step leads back to the download");
+    }
+
+    /// The offer counts the sample disks missing, and only disks: a folder
+    /// with every one of them offers nothing, monitor ROMs or not.
+    #[test]
+    fn test_the_offer_is_the_missing_sample_disks() {
+        let td = std::env::temp_dir().join(format!("egw_wizard_offer_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&td);
+        let images = super::super::image::images_dir(&td);
+        std::fs::create_dir_all(&images).unwrap();
+        let all = super::super::fetch::catalogue();
+        assert!(all.len() > 1);
+        let o = sample_offer(&td).expect("an empty folder offers every disk");
+        assert_eq!(o.disks, all.len());
+        assert!(o.megabytes > 1.0, "{o:?}");
+        std::fs::write(images.join(&all[0].name), b"x").unwrap();
+        assert_eq!(sample_offer(&td).unwrap().disks, all.len() - 1);
+        for d in &all {
+            std::fs::write(images.join(&d.name), b"x").unwrap();
+        }
+        assert!(!super::super::fetch::outstanding(&td).1.is_empty(), "positive control: a ROM is still missing");
+        assert_eq!(sample_offer(&td), None, "a missing ROM opened the wizard on a download");
+        let _ = std::fs::remove_dir_all(&td);
     }
 
     /// The 8080 is recommended for Altair BASIC and only for it; a disk that

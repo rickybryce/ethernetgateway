@@ -688,6 +688,28 @@ async fn handle_connection(
             )
             .await?;
         }
+        ("POST", "/cpm-wizard/fetch") => {
+            // The wizard's download step: the sample disks fetched, then every
+            // disk read again for the steps after it.  Writes no setting.  Off
+            // the runtime: a minute of network and file I/O, held open as the
+            // panel's own Download is.
+            let dir = config::get_config().transfer_dir;
+            let body = tokio::task::spawn_blocking(move || cpm_wizard::fetch_json(&dir))
+                .await
+                .unwrap_or_else(|e| {
+                    glog!("Web: CP/M wizard download failed: {e}");
+                    cpm_wizard::disks_fallback()
+                });
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
         ("POST", "/cpm-wizard/apply") => {
             // The wizard's answers, as one form: their shape checked here
             // (`cpm_wizard::plan_from_form`), the plan by `wizard::apply`

@@ -1960,6 +1960,18 @@ impl App {
     /// them by hand should be able to see that and not press it.
     fn draw_cpm_fetch_button(&mut self, ui: &mut egui::Ui) {
         // Collect a finished download first, so the button comes back.
+        self.poll_cpm_fetch();
+        if self.cpm_fetch.is_some() {
+            ui.label(egui::RichText::new("Downloading…").color(AMBER));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            return;
+        }
+        self.draw_cpm_fetch_offer(ui);
+    }
+
+    /// Take a finished download's result, if one has finished: by the panel's
+    /// button, and by the CP/M setup wizard, which waits on the same slot.
+    fn poll_cpm_fetch(&mut self) {
         if let Some(rx) = &self.cpm_fetch {
             match rx.try_recv() {
                 Ok(msg) => {
@@ -1974,12 +1986,9 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        if self.cpm_fetch.is_some() {
-            ui.label(egui::RichText::new("Downloading…").color(AMBER));
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
-            return;
-        }
+    }
 
+    fn draw_cpm_fetch_offer(&mut self, ui: &mut egui::Ui) {
         let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
         // Disks *and* monitor ROMs: gating on the disks alone hid this button
         // from everybody who already had the collection, which is everybody who
@@ -6799,6 +6808,15 @@ impl eframe::App for App {
         // alone, the next Save of anything else here would write the old
         // values back over the wizard's.
         if let Some(mut w) = self.cpm_wizard.take() {
+            // A download the wizard asked for: over once the shared slot is
+            // empty, whoever collected the result (the panel's button may have,
+            // earlier this frame).
+            if w.fetching() {
+                self.poll_cpm_fetch();
+                if self.cpm_fetch.is_none() {
+                    w.fetched(&self.cpm_fetch_note);
+                }
+            }
             let mut open = true;
             let mut outcome = cpm_wizard::Outcome::Continue;
             egui::Window::new(egui::RichText::new("CP/M Setup Wizard").strong().color(AMBER_BRIGHT))
@@ -6818,6 +6836,10 @@ impl eframe::App for App {
                     self.cpm_wizard = Some(w);
                 }
                 cpm_wizard::Outcome::Close => {}
+                cpm_wizard::Outcome::Fetch => {
+                    self.start_cpm_fetch(&ctx);
+                    self.cpm_wizard = Some(w);
+                }
                 // Kept while a save runs even if the window was closed, so the
                 // save's answer still reaches `take_cpm_keys_from_global`.
                 cpm_wizard::Outcome::Continue if open || w.busy() => self.cpm_wizard = Some(w),

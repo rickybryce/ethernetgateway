@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use eframe::egui;
 
 use super::{AMBER, AMBER_BRIGHT, AMBER_DIM, WARN_BORDER};
-use crate::cpm::wizard::{self, DiskFacts, Plan, Runs, Step};
+use crate::cpm::wizard::{self, DiskFacts, Plan, Runs, SampleOffer, Step};
 
 /// What the window asks its host to do after this frame.
 pub(super) enum Outcome {
@@ -21,6 +21,10 @@ pub(super) enum Outcome {
     /// Saved: the host must take the CP/M keys from the global config into its
     /// own copy, or its next Save would write the old ones back.
     Saved,
+    /// Download the sample disks: the host's one download slot
+    /// (`start_cpm_fetch`), shared with the panel's button so two runs can
+    /// never overlap.  The host says when it is over ([`CpmWizard::fetched`]).
+    Fetch,
 }
 
 pub(super) struct CpmWizard {
@@ -32,7 +36,18 @@ pub(super) struct CpmWizard {
     done: bool,
     trail: Vec<Step>,
     disks: Option<Vec<DiskFacts>>,
-    loading: Option<Receiver<Vec<DiskFacts>>>,
+    loading: Option<Receiver<(Vec<DiskFacts>, Option<SampleOffer>)>>,
+    /// The sample disks not here, as of the last read.
+    offer: Option<SampleOffer>,
+    /// A download asked of the host is running.
+    fetching: bool,
+    /// The disks are being read again after a download: on to the next step
+    /// once they are, rather than to the first.
+    after_fetch: bool,
+    /// What the download came to, said on the step after it.
+    fetch_note: String,
+    /// Download was pressed this frame: [`Outcome::Fetch`] to the host.
+    want_fetch: bool,
     saving: Option<Receiver<Result<Vec<String>, String>>>,
     result: Option<Result<Vec<String>, String>>,
     plan: Plan,
@@ -46,18 +61,18 @@ pub(super) struct CpmWizard {
 
 impl CpmWizard {
     pub(super) fn new(transfer_dir: &str) -> CpmWizard {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let dir = transfer_dir.to_string();
-        std::thread::spawn(move || {
-            let _ = tx.send(wizard::all_disks(&wizard::cpm_base(&dir)));
-        });
         CpmWizard {
             transfer_dir: transfer_dir.to_string(),
             step: Step::Runs,
             done: false,
             trail: Vec::new(),
             disks: None,
-            loading: Some(rx),
+            loading: Some(Self::read_disks(transfer_dir)),
+            offer: None,
+            fetching: false,
+            after_fetch: false,
+            fetch_note: String::new(),
+            want_fetch: false,
             saving: None,
             result: None,
             plan: Plan::emulator(),
@@ -65,6 +80,32 @@ impl CpmWizard {
             msg: String::new(),
             ready_lines: Vec::new(),
         }
+    }
+
+    /// Every disk, and what the download step would fetch, read on a thread.
+    fn read_disks(transfer_dir: &str) -> Receiver<(Vec<DiskFacts>, Option<SampleOffer>)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = transfer_dir.to_string();
+        std::thread::spawn(move || {
+            let base = wizard::cpm_base(&dir);
+            let _ = tx.send((wizard::all_disks(&base), wizard::sample_offer(&base)));
+        });
+        rx
+    }
+
+    /// A download asked for with [`Outcome::Fetch`] is running.
+    pub(super) fn fetching(&self) -> bool {
+        self.fetching
+    }
+
+    /// The host's download is over, saying `note`: the disks are read again,
+    /// and the wizard goes on from the download step with its first answer
+    /// worked out afresh ([`Plan::opening`]).
+    pub(super) fn fetched(&mut self, note: &str) {
+        self.fetching = false;
+        self.fetch_note = note.trim().to_string();
+        self.after_fetch = true;
+        self.loading = Some(Self::read_disks(&self.transfer_dir));
     }
 
     fn disk(&self, name: &str) -> Option<&DiskFacts> {
@@ -104,9 +145,16 @@ impl CpmWizard {
     pub(super) fn draw(&mut self, ui: &mut egui::Ui) -> Outcome {
         if let Some(rx) = &self.loading {
             match rx.try_recv() {
-                Ok(d) => {
+                Ok((d, offer)) => {
+                    self.plan = Plan::opening(&d);
+                    self.offer = offer;
                     self.disks = Some(d);
                     self.loading = None;
+                    if std::mem::take(&mut self.after_fetch) {
+                        self.go_on();
+                    } else {
+                        self.step = Step::first(self.offer.as_ref());
+                    }
                 }
                 Err(TryRecvError::Empty) => {
                     ui.label("Reading the disk images…");
@@ -118,6 +166,10 @@ impl CpmWizard {
                     self.loading = None;
                 }
             }
+        }
+        if self.fetching {
+            // Polled by the host; this only keeps the frames coming.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
         let mut saved = false;
         if let Some(rx) = &self.saving {
@@ -165,7 +217,10 @@ impl CpmWizard {
                         Step::Ready => "Save",
                         _ => "Next",
                     };
-                    if ui.add(egui::Button::new(egui::RichText::new(label).strong().color(AMBER_BRIGHT))).clicked() {
+                    // The download step answers with its own two buttons.
+                    if (self.done || self.step != Step::Fetch)
+                        && ui.add(egui::Button::new(egui::RichText::new(label).strong().color(AMBER_BRIGHT))).clicked()
+                    {
                         close = self.next();
                     }
                 });
@@ -177,6 +232,10 @@ impl CpmWizard {
         });
         if saved {
             return Outcome::Saved;
+        }
+        if std::mem::take(&mut self.want_fetch) {
+            self.fetching = true;
+            return Outcome::Fetch;
         }
         if close {
             return Outcome::Close;
@@ -230,26 +289,50 @@ impl CpmWizard {
             return;
         }
         match self.step {
+            Step::Fetch => {
+                ui.heading("Sample disks");
+                Self::para(ui, wizard::FETCH_HELP);
+                if let Some(o) = &self.offer {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} disks, {:.0} MB, from {}.",
+                            o.disks,
+                            o.megabytes,
+                            crate::cpm::fetch::source_repos().join(" and ")
+                        ))
+                        .color(AMBER_DIM),
+                    );
+                }
+                ui.add_space(6.0);
+                if self.fetching {
+                    ui.label(egui::RichText::new("Downloading… this takes a minute.").color(AMBER));
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui.button(egui::RichText::new(wizard::FETCH_LABEL).strong().color(AMBER_BRIGHT)).clicked() {
+                            self.want_fetch = true;
+                        }
+                        if ui.button(wizard::DECLINE_LABEL).clicked() {
+                            self.go_on();
+                        }
+                    });
+                }
+            }
             Step::Runs => {
                 ui.heading("What should CP/M run?");
                 Self::para(ui, wizard::RUNS_HELP);
-                let can_boot = disks.iter().any(|d| d.boots);
+                // Both always: Boot too with nothing here that boots, for an
+                // operator with images of their own (the next step says where).
                 // Through `choose_runs`, which knows what each answer keeps.
+                let advised = wizard::opening_runs(disks);
+                let mark = |r: Runs| if r == advised { " (advised)" } else { "" };
                 let mut runs = self.plan.runs;
-                ui.radio_value(&mut runs, Runs::Emulator, wizard::EMULATOR_LABEL);
-                if can_boot {
-                    ui.radio_value(&mut runs, Runs::Boot, wizard::BOOT_LABEL);
-                }
+                ui.radio_value(&mut runs, Runs::Emulator, format!("{}{}", wizard::EMULATOR_LABEL, mark(Runs::Emulator)));
+                ui.radio_value(&mut runs, Runs::Boot, format!("{}{}", wizard::BOOT_LABEL, mark(Runs::Boot)));
                 if runs != self.plan.runs {
                     self.plan.choose_runs(runs);
                 }
-                if !can_boot {
-                    ui.label(
-                        egui::RichText::new(
-                            "No disk image here can boot yet: Download Sample Disks first, then open the wizard again to boot one.",
-                        )
-                        .color(AMBER_DIM),
-                    );
+                if !self.fetch_note.is_empty() {
+                    ui.label(egui::RichText::new(format!("Sample disks: {}", self.fetch_note)).small().color(AMBER_DIM));
                 }
             }
             Step::EmulatorDrives => {
@@ -270,6 +353,10 @@ impl CpmWizard {
             }
             Step::BootDisk => {
                 ui.heading("Which disk should boot?");
+                if !disks.iter().any(|d| d.boots) {
+                    Self::para(ui, wizard::NO_BOOT_DISK);
+                    return;
+                }
                 Self::para(ui, wizard::BOOT_DISK_HELP);
                 egui::ScrollArea::vertical().max_height(300.0).id_salt("cpmw_boot").show(ui, |ui| {
                     for d in disks.iter().filter(|d| d.boots) {

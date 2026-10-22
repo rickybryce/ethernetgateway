@@ -26,8 +26,6 @@ enum DiskAnswer {
 enum Move {
     /// On to the step [`Step::next`] names.
     On,
-    /// This step again (the disks were downloaded, say).
-    Stay,
     /// Back one step.
     Back,
 }
@@ -95,21 +93,36 @@ impl TelnetSession {
         self.send_line("  Looking at the disk images...").await?;
         self.flush().await?;
         let read_base = base.clone();
-        let mut disks = tokio::task::spawn_blocking(move || wizard::all_disks(&read_base))
-            .await
-            .map_err(std::io::Error::other)?;
+        let (mut disks, offer) =
+            tokio::task::spawn_blocking(move || (wizard::all_disks(&read_base), wizard::sample_offer(&read_base)))
+                .await
+                .map_err(std::io::Error::other)?;
 
-        let mut plan = Plan::emulator();
-        let mut step = Step::Runs;
+        let mut plan = Plan::opening(&disks);
+        let mut step = Step::first(offer.as_ref());
         let mut trail: Vec<Step> = Vec::new();
         loop {
             // Each arm answers the step; where it goes from there is
             // `Step::next`'s, shared with the other two surfaces.
             let moved = match step {
-                // Boot is offered only when a disk can boot: an images folder
-                // of data disks would otherwise lead to an empty picker, with
-                // the download offer hidden behind it.
-                Step::Runs => match self.wiz_runs(disks.iter().any(|d| d.boots)).await? {
+                // The download screen the mount menu has -- what, how much and
+                // from where, then y/N -- since a wizard-styled one with the
+                // step's own text comes to more than a screen.  Either answer
+                // goes on; the first answer is worked out afresh from the
+                // disks now here.
+                Step::Fetch => {
+                    self.cpmmount_download().await?;
+                    let read_base = base.clone();
+                    disks = tokio::task::spawn_blocking(move || wizard::all_disks(&read_base))
+                        .await
+                        .map_err(std::io::Error::other)?;
+                    plan = Plan::opening(&disks);
+                    Move::On
+                }
+                // Boot is offered even with nothing here that boots: the
+                // operator may have images of their own to put in the folder,
+                // and the boot-disk step says where.
+                Step::Runs => match self.wiz_runs(wizard::opening_runs(&disks), trail.is_empty()).await? {
                     Some('e') => {
                         plan.choose_runs(Runs::Emulator);
                         Move::On
@@ -118,15 +131,7 @@ impl TelnetSession {
                         plan.choose_runs(Runs::Boot);
                         Move::On
                     }
-                    Some('d') => {
-                        self.cpmmount_download().await?;
-                        let read_base = base.clone();
-                        disks = tokio::task::spawn_blocking(move || wizard::all_disks(&read_base))
-                            .await
-                            .map_err(std::io::Error::other)?;
-                        Move::Stay
-                    }
-                    _ => return Ok(()),
+                    _ => Move::Back,
                 },
                 Step::EmulatorDrives => {
                     let choices: Vec<&DiskFacts> = disks.iter().filter(|d| d.mountable()).collect();
@@ -134,12 +139,17 @@ impl TelnetSession {
                 }
                 Step::BootDisk => {
                     let bootable: Vec<&DiskFacts> = disks.iter().filter(|d| d.boots).collect();
-                    match self.wiz_pick_boot_disk(&bootable).await? {
-                        Some(i) => {
-                            plan.choose_boot_disk(bootable[i]);
-                            Move::On
+                    if bootable.is_empty() {
+                        self.wiz_no_boot_disk().await?;
+                        Move::Back
+                    } else {
+                        match self.wiz_pick_boot_disk(&bootable).await? {
+                            Some(i) => {
+                                plan.choose_boot_disk(bootable[i]);
+                                Move::On
+                            }
+                            None => Move::Back,
                         }
-                        None => Move::Back,
                     }
                 }
                 Step::Machine => {
@@ -197,7 +207,6 @@ impl TelnetSession {
                         step = to;
                     }
                 }
-                Move::Stay => {}
                 Move::Back => match trail.pop() {
                     Some(prev) => step = prev,
                     None => return Ok(()),
@@ -206,30 +215,39 @@ impl TelnetSession {
         }
     }
 
-    /// Step 1: the emulator, or a disk of its own.
-    async fn wiz_runs(&mut self, can_boot: bool) -> Result<Option<char>, std::io::Error> {
+    /// Step 1: the emulator, or a disk of its own -- both always offered,
+    /// the [`wizard::opening_runs`] one marked.  `first`: nothing before it,
+    /// so `Q` cancels rather than going back to the download.
+    async fn wiz_runs(&mut self, advised: Runs, first: bool) -> Result<Option<char>, std::io::Error> {
         loop {
             self.wiz_heading("WHAT RUNS").await?;
             self.wiz_text(wizard::RUNS_HELP).await?;
             self.send_line("").await?;
-            self.send_line(&format!("  {}  {}", self.cyan("E"), wizard::EMULATOR_LABEL)).await?;
-            if can_boot {
-                self.send_line(&format!("  {}  {}", self.cyan("B"), wizard::BOOT_LABEL)).await?;
-            } else {
-                self.send_line(&format!("  {}  {}", self.cyan("D"), "Download sample disks first")).await?;
-            }
+            let star = |r: Runs| if r == advised { " (advised)" } else { "" };
+            self.send_line(&format!("  {}  {}{}", self.cyan("E"), wizard::EMULATOR_LABEL, star(Runs::Emulator))).await?;
+            self.send_line(&format!("  {}  {}{}", self.cyan("B"), wizard::BOOT_LABEL, star(Runs::Boot))).await?;
             self.send_line("").await?;
-            let Some(input) = self.wiz_prompt(&[("Q", "Cancel")]).await? else {
+            let Some(input) = self.wiz_prompt(&[("Q", if first { "Cancel" } else { "Back" })]).await? else {
                 return Ok(None);
             };
             match input.as_str() {
                 "e" => return Ok(Some('e')),
-                "b" if can_boot => return Ok(Some('b')),
-                "d" if !can_boot => return Ok(Some('d')),
+                "b" => return Ok(Some('b')),
                 "q" | "" => return Ok(None),
                 _ => {}
             }
         }
+    }
+
+    /// Boot was chosen and no disk here boots: where the operator's own go.
+    async fn wiz_no_boot_disk(&mut self) -> Result<(), std::io::Error> {
+        self.wiz_heading("BOOT DISK").await?;
+        self.wiz_text(wizard::NO_BOOT_DISK).await?;
+        self.send_line("").await?;
+        self.send("  Press any key to go back.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        Ok(())
     }
 
     /// A disk: what it is, the start of its listing, and `L` for all of it.
@@ -970,12 +988,29 @@ mod tests {
     #[test]
     fn test_the_first_step_fits() {
         for term in TERMS {
-            for have in [true, false] {
-                let s = screens(term, b"q", async move |t| {
-                    t.wiz_runs(have).await.unwrap();
-                });
-                fits(term, "what runs", &s);
+            for advised in [Runs::Boot, Runs::Emulator] {
+                for first in [true, false] {
+                    let s = screens(term, b"q", async move |t| {
+                        t.wiz_runs(advised, first).await.unwrap();
+                    });
+                    fits(term, "what runs", &s);
+                    // Either case: PETSCII swaps it on the wire.
+                    let all = s.concat().join("\n").to_ascii_lowercase();
+                    assert!(all.contains(&wizard::BOOT_LABEL.to_ascii_lowercase()), "{term:?}: Boot is not offered");
+                    assert!(all.contains(&wizard::EMULATOR_LABEL.to_ascii_lowercase()), "{term:?}: the emulator is not offered");
+                    assert_eq!(all.matches("(advised)").count(), 1, "{term:?}: not one answer marked advised");
+                }
             }
+        }
+    }
+
+    #[test]
+    fn test_the_no_boot_disk_screen_fits() {
+        for term in TERMS {
+            let s = screens(term, b" ", async move |t| {
+                t.wiz_no_boot_disk().await.unwrap();
+            });
+            fits(term, "no boot disk", &s);
         }
     }
 
