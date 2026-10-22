@@ -84,9 +84,9 @@ pub const DECLINE_LABEL: &str = "Not now";
 pub const NO_BOOT_DISK: &[&str] = &[
     "No disk image here boots yet. Put",
     "your own .dsk images in CPM/images",
-    "in the transfer folder, then open",
-    "the wizard again -- or go back and",
-    "download the sample disks.",
+    "in the transfer folder, or download",
+    "the sample disks, then open the",
+    "wizard again.",
 ];
 
 /// The emulator's drive step.
@@ -172,7 +172,8 @@ pub const FINISH_LINE: &str = "Press K on the main menu to start.";
 /// a table ([`Step::table`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// Offered first, and only while the sample disks are missing.
+    /// Offered first, and only while the sample disks are missing.  Never
+    /// on the way back ([`Step::on_trail`]).
     Fetch,
     Runs,
     EmulatorDrives,
@@ -229,6 +230,16 @@ impl Step {
             (Step::ExtraDisks, _) => Step::Ready,
             (Step::Ready, _) => return None,
         })
+    }
+
+    /// Whether Back can return to this step.  **Not to the download**: after
+    /// one it would offer what is already here, and on telnet, where its every
+    /// answer goes on, Back and On between it and the next step was a loop
+    /// with no way out but Save.  The step after it is the first one Back
+    /// knows -- Back there cancels -- and opening the wizard again offers the
+    /// download while disks are still missing.
+    pub fn on_trail(self) -> bool {
+        self != Step::Fetch
     }
 
     /// Where a wizard starts: on the download offer while it has something
@@ -890,6 +901,8 @@ mod tests {
             }
         }
         assert!(Step::ALL.iter().all(|s| *s == Step::Fetch || s.next(Runs::Boot, false) != Some(Step::Fetch)), "a step leads back to the download");
+        assert!(!Step::Fetch.on_trail(), "Back returns to the download");
+        assert!(Step::ALL.iter().filter(|s| s.on_trail()).count() == Step::ALL.len() - 1);
     }
 
     /// The offer counts the sample disks missing, and only disks: a folder

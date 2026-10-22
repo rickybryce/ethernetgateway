@@ -485,6 +485,8 @@ pub(super) const SCRIPT: &str = r#"<script>
   var steps = {
     // Offered first while the sample disks are not here (`D.offer`), and
     // answered by its own two buttons: Next is hidden on it (see `go`).
+    // Never on the trail (`Step::on_trail`): Back from the step after it
+    // closes nothing and returns to nothing -- opening again offers it.
     fetch: function() {
       var o = D.offer;
       box.innerHTML = T.dataset.fetch +
@@ -496,12 +498,12 @@ pub(super) const SCRIPT: &str = r#"<script>
         say('Downloading… this takes a minute.');
         request('/cpm-wizard/fetch', '').then(function(j) {
           if (j.error) { box.innerHTML = '<p>' + esc(j.error) + '</p>'; say(''); return; }
-          D = j; plan = j.plan; trail.push('fetch'); go('runs');
+          D = j; plan = j.plan; go('runs');
           if (j.note) say('Sample disks: ' + j.note);
         }).catch(function() { say('The gateway did not answer.'); });
       });
       document.getElementById('cpmw-skip').addEventListener('click', function() {
-        if (!busy) { trail.push('fetch'); go('runs'); }
+        if (!busy) go('runs');
       });
       return function() { return null; };
     },
@@ -692,7 +694,7 @@ pub(super) const SCRIPT: &str = r#"<script>
         opened++; trail = []; step = 'failed';
         box.innerHTML = '';
         view = function() { closeModal('cpm-wizard'); return null; };
-        next.textContent = 'Close'; back.style.visibility = 'hidden';
+        next.textContent = 'Close'; next.style.visibility = 'visible'; back.style.visibility = 'hidden';
       }
       say(s);
     }
@@ -706,7 +708,8 @@ pub(super) const SCRIPT: &str = r#"<script>
         box.innerHTML = '<p><b>Saved.</b></p>' +
           (j.notes || []).map(function(n) { return '<p class="sub">' + esc(n) + '</p>'; }).join('') +
           '<p><b>' + esc(T.dataset.finish) + '</b></p>';
-        step = 'done'; view = steps.done(); next.textContent = 'Close'; back.style.visibility = 'hidden';
+        step = 'done'; view = steps.done(); next.textContent = 'Close'; next.style.visibility = 'visible';
+        back.style.visibility = 'hidden';
       })
       .catch(function() { failed('The gateway did not answer: the settings may not have been saved.'); });
   }
@@ -1032,6 +1035,14 @@ mod tests {
         assert!(runs.contains("['boot', T.dataset.boot") && !runs.contains("boots"), "Boot is offered only with a disk that boots");
         assert!(runs.contains("D.advised"), "the advised answer is the page's own");
         assert!(SCRIPT.contains("request('/cpm-wizard/fetch', '')"), "the download is not asked through request()");
+        assert!(SCRIPT.contains("#cpmw-skip") || SCRIPT.contains("'cpmw-skip'"), "positive control: the download step");
+        assert!(!SCRIPT.contains("trail.push('fetch')"), "Back returns to the download (`Step::on_trail`)");
+        // A save's outcome can land on a wizard opened again since, on the
+        // download step, where Next is hidden: its Close must be shown.
+        let save = &SCRIPT[SCRIPT.find("function save()").unwrap()..];
+        let save = &save[..save.find("\n  }\n").unwrap()];
+        assert_eq!(save.matches("next.textContent = 'Close'").count(), 2, "positive control: both outcomes offer Close");
+        assert_eq!(save.matches("next.style.visibility = 'visible'").count(), 2, "a save's Close is left hidden");
     }
 
     /// The processors the page offers are the settings' own list, sent with

@@ -2025,9 +2025,11 @@ impl App {
     /// saved — the wizard edits a draft, so it has no folder to download into
     /// until then.  One implementation, so the two offers cannot drift apart
     /// over which disks are fetched or what the result says.
-    fn start_cpm_fetch(&mut self, ctx: &egui::Context) {
+    ///
+    /// `false` when the slot is taken and nothing was started.
+    fn start_cpm_fetch(&mut self, ctx: &egui::Context) -> bool {
         if self.cpm_fetch.is_some() {
-            return;
+            return false;
         }
         let base = crate::cpm::layout::cpm_dir(&self.cfg.transfer_dir);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2053,6 +2055,7 @@ impl App {
             // until something else happens to cause a repaint.
             ctx.request_repaint();
         });
+        true
     }
 
     /// Offer to fetch the monitor ROM the CP/M settings name, while it is not
@@ -6837,7 +6840,9 @@ impl eframe::App for App {
                 }
                 cpm_wizard::Outcome::Close => {}
                 cpm_wizard::Outcome::Fetch => {
-                    self.start_cpm_fetch(&ctx);
+                    if !self.start_cpm_fetch(&ctx) {
+                        w.fetch_refused();
+                    }
                     self.cpm_wizard = Some(w);
                 }
                 // Kept while a save runs even if the window was closed, so the

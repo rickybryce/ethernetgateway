@@ -108,6 +108,14 @@ impl CpmWizard {
         self.loading = Some(Self::read_disks(&self.transfer_dir));
     }
 
+    /// The host's download slot was taken -- by the panel's own download or
+    /// its monitor-ROM fetch -- so no run was started for this Download.
+    /// Waiting on the slot would report that other run as the disks'.
+    pub(super) fn fetch_refused(&mut self) {
+        self.fetching = false;
+        self.msg = "Another download is running: press Download again once it has finished.".to_string();
+    }
+
     fn disk(&self, name: &str) -> Option<&DiskFacts> {
         self.disks.as_ref()?.iter().find(|d| d.name == name)
     }
@@ -118,7 +126,9 @@ impl CpmWizard {
         let Some(to) = self.step.next(self.plan.runs, self.plan.needs_rom(disks)) else {
             return;
         };
-        self.trail.push(self.step);
+        if self.step.on_trail() {
+            self.trail.push(self.step);
+        }
         self.step = to;
         self.msg.clear();
         if to == Step::Ready {
@@ -529,6 +539,25 @@ impl CpmWizard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The download is never on the way back, and a Download pressed while
+    /// the host's one slot is taken (the panel's run, or its ROM fetch) is
+    /// refused rather than waiting on that other run and reporting it.
+    #[test]
+    fn test_the_download_step_is_left_behind_and_never_borrowed() {
+        let me = include_str!("cpm_wizard.rs").replace('\r', "");
+        let go_on = &me[me.find("    fn go_on(&mut self)").expect("go_on")..];
+        let go_on = &go_on[..go_on.find("\n    }\n").expect("its end")];
+        assert!(go_on.contains("self.trail.push(self.step)"), "positive control: go_on keeps the trail");
+        assert!(go_on.contains("if self.step.on_trail() {"), "Back returns to the download");
+        let gui = include_str!("../gui.rs").replace('\r', "");
+        let arm = &gui[gui.find("cpm_wizard::Outcome::Fetch =>").expect("the host's Fetch arm")..];
+        let arm = &arm[..arm.find("\n                }\n").expect("its end")];
+        assert!(arm.contains("if !self.start_cpm_fetch(&ctx) {") && arm.contains("w.fetch_refused()"), "{arm}");
+        let start = &gui[gui.find("fn start_cpm_fetch(").unwrap()..];
+        let start = &start[..start.find("\n    }\n").unwrap()];
+        assert!(start.contains("return false;") && start.trim_end().ends_with("true"), "{start}");
+    }
 
     /// The desktop takes every key the wizard writes back from the global
     /// config after a save.  A key missing from that copy is one the
