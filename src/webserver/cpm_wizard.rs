@@ -607,11 +607,26 @@ pub(super) const SCRIPT: &str = r#"<script>
   // from are gone).  Saved or not, nothing goes unsaid, and the reload is the
   // observer's, on the close that follows.
   function save() {
+    var at = opened;
+    // Not saved: said on the summary it was sent from -- or, if the wizard
+    // was opened again since, in place of the new opening, which is dropped
+    // as a success drops it; its disk list, arriving after, would otherwise
+    // draw the first step over the outcome.
+    function failed(s) {
+      if (!document.getElementById('cpm-wizard').classList.contains('open')) openModal('cpm-wizard');
+      if (at !== opened) {
+        opened++; trail = []; step = 'failed';
+        box.innerHTML = '';
+        view = function() { closeModal('cpm-wizard'); return null; };
+        next.textContent = 'Close'; back.style.visibility = 'hidden';
+      }
+      say(s);
+    }
     say('Saving…');
     request('/cpm-wizard/apply', form(), true)
       .then(function(j) {
+        if (!j.ok) { failed('Not saved: ' + j.error); return; }
         if (!document.getElementById('cpm-wizard').classList.contains('open')) openModal('cpm-wizard');
-        if (!j.ok) { say('Not saved: ' + j.error); return; }
         opened++;
         say(''); trail = []; saved = true;
         box.innerHTML = '<p><b>Saved.</b></p>' +
@@ -619,10 +634,7 @@ pub(super) const SCRIPT: &str = r#"<script>
           '<p><b>' + esc(T.dataset.finish) + '</b></p>';
         step = 'done'; view = steps.done(); next.textContent = 'Close'; back.style.visibility = 'hidden';
       })
-      .catch(function() {
-        if (!document.getElementById('cpm-wizard').classList.contains('open')) openModal('cpm-wizard');
-        say('The gateway did not answer: the settings may not have been saved.');
-      });
+      .catch(function() { failed('The gateway did not answer: the settings may not have been saved.'); });
   }
   next.addEventListener('click', function() {
     if (!view || busy) return;
@@ -891,6 +903,15 @@ mod tests {
         assert_eq!(save.matches("openModal('cpm-wizard')").count(), 2, "an outcome is said into a closed wizard");
         assert!(!save.contains("location.href"), "a save reloads the page under the operator");
         assert!(save.contains("saved = true"), "positive control: the close after a save reloads");
+        // Not saved, into a wizard opened again since: that opening is
+        // dropped, or its disk list draws the first step over the outcome.
+        assert!(save.contains("var at = opened;"), "a save does not know the opening it was sent from");
+        let failed = &save[save.find("function failed(").expect("failed")..];
+        let failed = &failed[..failed.find("\n    }\n").expect("its end")];
+        let reopened = &failed[failed.find("if (at !== opened) {").expect("a reopen is not looked for")..];
+        assert!(reopened[..reopened.find('}').unwrap()].contains("opened++"), "a reopened wizard's disk list wipes a failed save");
+        assert!(save.contains("if (!j.ok) { failed("), "a refused save is not said through failed()");
+        assert!(save.contains(".catch(function() { failed("), "an unanswered save is not said through failed()");
     }
 
     /// Unread images are said, and the steps are not drawn: an empty list
