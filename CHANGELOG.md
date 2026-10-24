@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name to save the reply under.  Only items a server marks as Gopher+ are
   asked for these, so a server that does not speak it is spoken to as before
   (Floodgap and SDF ignore the request; quux.org answers -- all measured).
+  A text file's leading dots are undone as RFC 1436 says: a server doubles
+  a `.` that starts a line, and the browser takes one off.
 
 ### Changed
 

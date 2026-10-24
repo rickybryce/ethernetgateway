@@ -5495,6 +5495,14 @@ mod tests {
         let page = fetch_gopher(&format!("gopher://127.0.0.1:{port}/0/dots.txt"), 72).unwrap();
         server.join().unwrap();
         assert_eq!(page.lines, vec!["Dots follow", "."]);
+        // RFC 1436: a leading `.` the server doubled is undone, in text and
+        // in the two text encodings of a file; a single one is the line's.
+        for ty in ['0', '6'] {
+            let (port, server) = serve_gopher(b"..hidden\r\n...\r\n.one\r\nplain.\r\n.\r\n");
+            let page = fetch_gopher(&format!("gopher://127.0.0.1:{port}/{ty}/dots.txt"), 72).unwrap();
+            server.join().unwrap();
+            assert_eq!(page.lines, vec![".hidden", "..", ".one", "plain."], "{ty}");
+        }
         assert_eq!(strip_gopher_terminator(b".\r\n"), b"");
         assert_eq!(strip_gopher_terminator(b"a\n.\r\n"), b"a\n");
         assert_eq!(strip_gopher_terminator(b"a.\r\n"), b"a.\r\n");

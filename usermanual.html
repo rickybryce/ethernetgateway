@@ -5494,6 +5494,27 @@ what was typed.
 <h2>13.5 Gopher</h2>
 
 <p>
+<strong>What it is.</strong>  Gopher came out of the University of Minnesota
+in 1991, just before the web took off.  Where the web is pages with links
+inside the text, Gopher is <em>menus</em>: each screen is a list of items,
+and an item is another menu, a text file, a search, a file to download or a
+telnet session.  There is no layout, no images on the page and no scripts,
+so it suits a 40-column C64 or an 80-column terminal as well as anything on
+the internet can.  Hobbyists still run hundreds of servers.
+</p>
+
+<p>
+<strong>Getting started.</strong>  Open the browser (<span class="kbd">B</span>
+on the main menu), press <span class="kbd">G</span> and type a
+<code>gopher://</code> address &mdash; <code>gopher://gopher.floodgap.com</code>
+is a good first stop, and its menu includes a search of all of Gopher.  A
+menu's items carry link numbers, as a web page's links do: press
+<span class="kbd">L</span> and a number to follow one, and
+<span class="kbd">B</span> to come back.  Bookmarks, Back and Reload work
+the same as on the web.
+</p>
+
+<p>
 Every Gopher item type in RFC 1436 is followed, and Gopher+ servers'
 extras are used.  A menu labels each item by what it does:
 </p>
@@ -5514,6 +5535,21 @@ extras are used.  A menu labels each item by what it does:
         <tr><td><code>[???]</code></td><td>other</td><td>A type no standard defines: shown, not followed.</td></tr>
     </tbody>
 </table>
+
+<p>
+<strong>Why a line can lose a dot.</strong>  You never need to do anything
+about this; it explains one small thing you may notice.  Gopher does not
+tell the browser how long a text file is.  Instead the server ends the file
+with a line holding a single <code>.</code>, the way mail servers end a
+message they pass on.  That would cut a file short wherever the file
+itself has a line starting with a dot, so the standard (RFC&nbsp;1436) has
+the server add an extra dot to the front of every such line, and the
+browser take it off again.  The browser does both of its parts: it hides
+the closing <code>.</code> line, and takes one dot off any line that starts
+with two.  Many servers today skip their part and send files as they are,
+so from those a line that really begins with two or more dots &mdash; a
+row of <code>...</code> in a poem, say &mdash; is shown with one dot fewer.
+</p>
 
 <p>
 <strong>Gopher+.</strong>  A Gopher+ server marks its items, and only those

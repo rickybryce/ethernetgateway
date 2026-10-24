@@ -8,10 +8,13 @@
 //!   (quux.org) answers in full.  A menu marks Gopher+ items with a fifth
 //!   field, `+` or `?`, and only those get a Gopher+ request.  A reply with no
 //!   `+`/`-` header is still taken as the plain reply it is.
-//! - **No dot is unstuffed in a plain reply.**  RFC 1436 has servers double a
-//!   leading `.` in text; none of Bucktooth (Floodgap), gophernicus or
-//!   pygopherd does, so undoing it would turn a file's own `...` into `..`.
-//!   Only Gopher+ `+-1` data, which is framed by the `.` line, is unstuffed.
+//! - **A text file's doubled dots are undone, as RFC 1436 says.**  A server
+//!   doubles a leading `.` in a text file so that no line of it can be the
+//!   `.` line that ends it, and the client takes one off.  None of Bucktooth
+//!   (Floodgap), gophernicus or pygopherd doubles them (measured), so from
+//!   those a file's own line that starts `..` loses a dot: the spec is kept,
+//!   for the servers that do follow it.  Gopher+ `+-1` data is unstuffed
+//!   the same way.
 //!
 //! The URL carries everything (RFC 4266): `%09<search>%09<gopher+ string>`
 //! after the selector, so Back, Reload and bookmarks keep a Gopher+ item,
@@ -787,6 +790,12 @@ fn cso_query(g: &GopherUrl, width: usize) -> Result<WebPage, String> {
     })
 }
 
+/// A line of a text file as RFC 1436 sends it: a leading `.` doubled, so
+/// that it cannot be the `.` line ending the file.  One is taken off.
+fn unstuff_line(line: &str) -> &str {
+    line.strip_prefix('.').filter(|l| l.starts_with('.')).unwrap_or(line)
+}
+
 /// Draw a reply's data as the item type it is shown as (`shown_as`).
 fn render_gopher_reply(g: &GopherUrl, data: &[u8], width: usize, final_url: String) -> Result<WebPage, String> {
     let ty = g.shown_as();
@@ -806,7 +815,7 @@ fn render_gopher_reply(g: &GopherUrl, data: &[u8], width: usize, final_url: Stri
         '0' | '4' | '6' => {
             let lines: Vec<String> = text
                 .lines()
-                .flat_map(|line| wrap_line(line.trim_end_matches('\r'), width))
+                .flat_map(|line| wrap_line(unstuff_line(line.trim_end_matches('\r')), width))
                 .take(MAX_RENDERED_LINES)
                 .collect();
             WebPage {
