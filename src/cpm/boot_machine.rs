@@ -406,6 +406,15 @@ impl BootMachine {
         self.d7a.is_some()
     }
 
+    /// The joystick's half of a pump seam: tell `screen` whether this machine
+    /// has the board, so its page hands the letters back when it has not, and
+    /// hand the board what the viewer is holding.  One call for both, so the
+    /// first cannot be left out without the joystick itself stopping.
+    pub fn sync_joystick(&mut self, screen: &super::screen::Screen) {
+        screen.set_board(self.has_joystick());
+        self.set_joystick_held(screen.joystick());
+    }
+
     /// Has a guest actually read the joystick board? Reported, never a gate.
     pub fn joystick_addressed(&self) -> bool {
         self.d7a.as_ref().is_some_and(|b| b.addressed())
@@ -2130,6 +2139,24 @@ pub(crate) mod tests {
         m.set_machine("altair_2sio");
         m.set_joystick(true);
         assert!(m.d7a.is_some(), "an Altair still takes one");
+    }
+
+    /// A pump seam tells the screen whether the machine has the board, so the
+    /// screen page refuses the joystick on a z80pack (which never gets one)
+    /// and takes it on a machine that has one.  It was set once at boot, in a
+    /// line no test reached.
+    #[test]
+    fn test_a_seam_tells_the_screen_whether_the_board_is_fitted() {
+        use crate::cpm::screen;
+        for (machine, fitted) in [("z80pack", false), ("altair_2sio", true)] {
+            let mut m = BootMachine::new();
+            m.set_machine(machine);
+            m.set_joystick(true);
+            let live = screen::register("board");
+            live.set_board(!fitted); // the wrong answer, to see it corrected
+            m.sync_joystick(&live);
+            assert_eq!(screen::has_board(live.id()), Some(fitted), "{machine}");
+        }
     }
 
     /// The picture is sampled from wherever the guest put it, at the size its

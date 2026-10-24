@@ -1080,7 +1080,6 @@ impl TelnetSession {
         // into the guest's session would put a line about our web UI on the
         // console of a machine that is about to start painting its own.
         glog!("CP/M boot: screen {} is {}", screen.id(), name);
-        screen.set_board(machine.has_joystick());
 
         self.send_line("").await?;
         self.send_line(&format!("  {} {}", self.green("Booted"), self.amber(&name)))
@@ -1567,8 +1566,11 @@ impl TelnetSession {
                 // saying because it was not at first: `Screen::joystick`
                 // returns on the mask before reading a clock, and
                 // `set_joystick_held` reads one only if the machine has a
-                // board. The same bargain as `publish_screen`.
-                machine.set_joystick_held(screen.joystick());
+                // board. The same bargain as `publish_screen`.  It also tells
+                // the screen whether there is a board at all (one relaxed
+                // store), which is what lets the page refuse the joystick
+                // on a machine without one.
+                machine.sync_joystick(screen);
 
                 // The screens, at the same seam and to whoever has them
                 // open in the browser.  A no-op — one atomic swap — unless a
