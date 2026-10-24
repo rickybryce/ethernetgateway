@@ -76,8 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the rest.
 - **Modem: `ATDT` to an IPv6 address.**  A bare address (`ATDT fe80::1`)
   dialled the wrong host and port; it now calls the telnet port of that
-  address, and `[addr]:port` works as before.  A slave relays the same
-  strings the same way.
+  address.  `[addr]:port` works as before, and so does an unbracketed
+  `::1:6400`, read as address `::1`, port 6400; to mean an address whose last
+  group looks like a port, bracket it (`[fe80::1:23]`).  A slave relays the
+  same strings the same way.
 - **Master/slave: a modem port follows a change of master made while it was
   registering**, as a console port does.
 - **Peer dial: a caller giving up no longer drops the next caller's call** to

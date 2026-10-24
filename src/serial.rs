@@ -5571,16 +5571,44 @@ fn slave_resolve_relay_target(
 /// local path split at the last `:`, so `ATDT fe80::1` called host `fe80:` on
 /// port 1, while a slave refused it.
 ///
-/// A bare host -- a name, an IPv4 address, or an IPv6 address on its own,
-/// bracketed or not -- takes the telnet port.  Anything else with a `:` must
-/// be `host:port` or `[ipv6]:port`, through the relay's splitter so the slave
-/// and the master parse it alike.  `None` is a malformed target.  The host
-/// comes back without brackets; [`dial_tcp`] resolves it as an address.
+/// A bare host -- a name, an IPv4 address, or an IPv6 address on its own --
+/// takes the telnet port.  Anything else with a `:` must be `host:port` or
+/// `[ipv6]:port`, through the relay's splitter so the slave and the master
+/// parse it alike.  `None` is a malformed target.  The host comes back without
+/// brackets; [`dial_tcp`] resolves it as an address.
+///
+/// **An unbracketed IPv6 string can be read two ways**, and the string cannot
+/// say which: `::1:6400` is an address in its own right, the last group read
+/// as hex.  The local dial always took the last group as the port when what
+/// remains is an address -- `ATDT ::1:6400` called `[::1]:6400` -- and that
+/// reading is kept, so nothing that dialled before dials elsewhere now.  A
+/// string that cannot split that way (`fe80::1`, `2001:db8::5`) is an address
+/// on port 23.  Brackets always mean the whole address: `[fe80::1:23]`.
 fn dial_host_port(resolved: &str) -> Option<(String, u16)> {
+    use std::net::Ipv6Addr;
     let r = resolved.trim();
-    let bare = r.strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or(r);
-    if !r.contains(':') || bare.parse::<std::net::Ipv6Addr>().is_ok() {
-        return Some((bare.to_string(), 23));
+    if let Some(inner) = r.strip_prefix('[').and_then(|x| x.strip_suffix(']'))
+        && inner.parse::<Ipv6Addr>().is_ok()
+    {
+        return Some((inner.to_string(), 23));
+    }
+    if !r.contains(':') {
+        return Some((r.to_string(), 23));
+    }
+    // Two colons or more is IPv6, with or without a port -- and whether the
+    // whole string parses says nothing: `::1:32989` does not (a group has at
+    // most four hex digits) and is still address and port.
+    if r.matches(':').count() > 1 {
+        if let Some((host, port)) = r.rsplit_once(':')
+            && host.parse::<Ipv6Addr>().is_ok()
+            && let Ok(port) = port.parse::<u16>()
+            && port > 0
+        {
+            return Some((host.to_string(), port));
+        }
+        if r.parse::<Ipv6Addr>().is_ok() {
+            return Some((r.to_string(), 23));
+        }
     }
     crate::relay::split_dial_host_port(r)
 }
@@ -10189,8 +10217,20 @@ mod tests {
         assert_eq!(dial_host_port("bbs.example.com:6400"), hp("bbs.example.com", 6400));
         assert_eq!(dial_host_port("192.168.1.5:23"), hp("192.168.1.5", 23));
         assert_eq!(dial_host_port("fe80::1"), hp("fe80::1", 23), "a bare IPv6 address");
+        assert_eq!(dial_host_port("2001:db8::5"), hp("2001:db8::5", 23));
         assert_eq!(dial_host_port("[fe80::1]"), hp("fe80::1", 23));
         assert_eq!(dial_host_port("[fe80::1]:6400"), hp("fe80::1", 6400));
+        // Unbracketed and splittable: the last group is the port, as the local
+        // dial always read it (`::1:6400` is also an address in its own right).
+        assert_eq!(dial_host_port("::1:6400"), hp("::1", 6400), "a regression the review caught");
+        assert_eq!(dial_host_port("fe80::1:23"), hp("fe80::1", 23));
+        // A five-digit port is no hex group, so the whole is no address --
+        // found dialling the real binary after the first version of this fix.
+        assert_eq!(dial_host_port("::1:32989"), hp("::1", 32989));
+        // Brackets mean the whole address, whatever its last group.
+        assert_eq!(dial_host_port("[fe80::1:23]"), hp("fe80::1:23", 23));
+        // A full eight-group address cannot lose a group to a port.
+        assert_eq!(dial_host_port("2001:db8:0:0:0:0:0:5"), hp("2001:db8:0:0:0:0:0:5", 23));
         assert_eq!(dial_host_port("host:0"), None);
         assert_eq!(dial_host_port("host:notaport"), None);
         assert_eq!(
