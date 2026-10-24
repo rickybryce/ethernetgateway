@@ -1008,7 +1008,9 @@ impl TelnetSession {
         max: usize,
     ) -> Result<Vec<u8>, &'static str> {
         let meta = tokio::fs::metadata(path).await.map_err(|_| "File not found.")?;
-        if meta.len() as usize > max {
+        // As `u64`: `as usize` wrapped on the 32-bit Pi build, so a file of
+        // 4 GiB + n bytes compared as n, passed, and was read whole.
+        if meta.len() > max as u64 {
             return Err(if max >= Self::MAX_FILE_SIZE {
                 "File too big (over 8 MB)."
             } else {

@@ -3547,45 +3547,179 @@ fn test_dialup_prompts_fit_petscii() {
     }
 }
 
-/// File transfer menu: header(3) + blank + dir + blank + 5 items + blank + footer = 12 rows.
+/// The File Transfer menu fits 22 rows -- the prompt's row included -- and
+/// the terminal's width, with a transfer's outcome note showing, as it does
+/// when the operator arrives here straight from one.  Drawn: the modelled
+/// version still counted "5 items" when the menu had eight.
 #[test]
 fn test_file_transfer_menu_row_count() {
-    // The outcome note (`draw_transfer_note`) adds a row whenever the operator
-    // arrives here straight from a transfer, which is the common case -- so it
-    // belongs in the worst case, not outside it.  The count was 13 and did not
-    // include it.
-    let note = 1;
-    let rows = 3 + 1 + note + 1 + 1 + 5 + 1 + 1; // 14
-    assert!(rows <= 22, "file transfer menu is {} rows, exceeds 22", rows);
+    let _cfg = crate::config::CONFIG_TEST_LOCK.blocking_lock();
+    for term in [TerminalType::Petscii, TerminalType::Ansi] {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let out = rt.block_on(async {
+            use tokio::io::AsyncReadExt;
+            let (mut session, peer) = make_test_session_with_peer(term);
+            session.current_menu = Menu::FileTransfer;
+            session.last_transfer_note = Some(TransferNote { ok: true, text: "Upload complete".into() });
+            let (mut pr, _pw) = tokio::io::split(peer);
+            let run = async move { session.render_file_transfer().await.unwrap() };
+            let mut out = Vec::new();
+            let (_, r) = tokio::join!(run, pr.read_to_end(&mut out));
+            r.unwrap();
+            out
+        });
+        let width = if term == TerminalType::Petscii { 39 } else { 80 };
+        let text: Vec<u8> = out
+            .into_iter()
+            .filter(|&b| matches!(b, b'\r' | b'\n' | 0x1B | 0x20..=0x7F | 0xA0..=0xFF))
+            .collect();
+        let rows: Vec<String> = render_rows(&text).into_iter().skip_while(|r| r.trim().is_empty()).collect();
+        let end = rows.iter().rposition(|r| !r.trim().is_empty()).map_or(0, |i| i + 1);
+        let rows = &rows[..end];
+        assert!(rows.len() >= 12, "{term:?}: only {} rows drawn -- not the menu\n{rows:#?}", rows.len());
+        assert!(rows.len() < 22, "{term:?}: {} rows plus the prompt\n{rows:#?}", rows.len());
+        for r in rows {
+            assert!(r.chars().count() <= width, "{term:?}: {} columns: {r:?}", r.chars().count());
+        }
+        assert!(rows.iter().any(|r| r.to_ascii_lowercase().contains("upload complete")), "{term:?}: no note");
+    }
 }
 
-/// Download/delete file listing: header(3) + note + blank + col_header +
-/// divider + 10 entries + blank + page_info + blank + nav + blank + prompt.
+/// The Kermit server screen fits 22 rows and 40 columns and is plain ASCII on
+/// every terminal type; it was 26 rows, up to 57 columns, with em-dashes a C64
+/// drew as `?`.  Its summary marks files the way the upload summary does,
+/// names shortened to the screen, and a long batch is counted, not listed.
+#[test]
+fn test_kermit_server_screen_and_summary_fit() {
+    for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (intro, summary) = rt.block_on(async {
+            use tokio::io::AsyncReadExt;
+            let (mut session, peer) = make_test_session_with_peer(term);
+            let (mut pr, _pw) = tokio::io::split(peer);
+            let run = async move {
+                session.draw_kermit_server_screen().await.unwrap();
+                let saved: Vec<(String, usize)> = (0..15)
+                    .map(|i| (format!("an_extremely_long_received_file_name_{i:02}.txt"), 8_388_608))
+                    .collect();
+                let skipped = vec![("another_quite_long_name_for_a_skip.bin".to_string(), "already exists")];
+                session.send_line("<<SUMMARY>>").await.unwrap();
+                session.draw_file_outcomes(&saved, &skipped).await.unwrap();
+            };
+            let mut out = Vec::new();
+            let (_, r) = tokio::join!(run, pr.read_to_end(&mut out));
+            r.unwrap();
+            let at = out.windows(11).position(|w| w.eq_ignore_ascii_case(b"<<SUMMARY>>")).expect("summary marker");
+            (out[..at].to_vec(), out[at..].to_vec())
+        });
+        let width = if term == TerminalType::Petscii { 39 } else { 80 };
+        if term != TerminalType::Petscii {
+            assert!(intro.is_ascii(), "{term:?}: the screen sends non-ASCII bytes");
+            assert!(summary.is_ascii(), "{term:?}: the summary sends non-ASCII bytes");
+        }
+        let text = |b: &[u8]| -> Vec<u8> {
+            b.iter().copied().filter(|&b| matches!(b, b'\r' | b'\n' | 0x1B | 0x20..=0x7E)).collect()
+        };
+        let rows: Vec<String> = render_rows(&text(&intro)).into_iter().skip_while(|r| r.trim().is_empty()).collect();
+        let end = rows.iter().rposition(|r| !r.trim().is_empty()).map_or(0, |i| i + 1);
+        let rows = &rows[..end];
+        assert!(rows.len() >= 15, "{term:?}: not the server screen\n{rows:#?}");
+        assert!(rows.len() <= 22, "{term:?}: {} rows\n{rows:#?}", rows.len());
+        for r in rows.iter().chain(render_rows(&text(&summary)).iter()) {
+            assert!(r.chars().count() <= width, "{term:?}: {} columns: {r:?}", r.chars().count());
+        }
+        let summary_rows: Vec<String> = render_rows(&text(&summary)).into_iter().filter(|r| !r.trim().is_empty()).collect();
+        assert_eq!(summary_rows.len(), 1 + TelnetSession::OUTCOME_ROWS + 1, "{term:?}\n{summary_rows:#?}");
+        assert!(summary_rows.last().unwrap().to_ascii_lowercase().contains("4 more"), "{term:?}: {summary_rows:#?}");
+    }
+}
+
+/// The Download and Delete pickers fit 22 rows and the terminal's width on
+/// every page, drawn rather than modelled.
 ///
-/// **This is now exactly 22 rows -- the whole PETSCII budget, with nothing
-/// spare.**  A download returns to this picker, so the outcome note is drawn
-/// here too, and that is the row that used the last of the margin.  The next
-/// line anyone adds to this screen has to take one away, and this assertion is
-/// what will say so.
+/// The arithmetic version of this test summed constants -- it said 22 while
+/// the screen was 23 after a download (it had left out the blank above the
+/// prompt), and on a C64 a middle page's key line was 45 columns, so it wrapped
+/// to 24.  Twenty-five files make three pages; the keys walk to the middle one,
+/// and a download's outcome note is waiting, as it is on the way back from a
+/// transfer.
 #[test]
 fn test_file_listing_row_count() {
-    let header = 3; // sep + title + sep
-    let note = 1;   // draw_transfer_note, when arriving from a transfer
-    let col = 2;    // column header + divider
-    let entries = TelnetSession::TRANSFER_PAGE_SIZE; // 10
-    let footer = 5; // blank + page info + blank + nav + prompt
-    let total = header + note + 1 + col + entries + footer;
-    assert!(
-        total <= 22,
-        "file listing is {} rows, exceeds 22",
-        total,
-    );
-    assert_eq!(
-        total, 22,
-        "the listing is at the budget exactly; if this number moved, the \
-         screen changed and the margin needs re-checking rather than the \
-         assertion relaxing"
-    );
+    let _cfg = crate::config::CONFIG_TEST_LOCK.blocking_lock();
+    struct TransferDirGuard(String);
+    impl Drop for TransferDirGuard {
+        fn drop(&mut self) {
+            config::update_config_value("transfer_dir", &self.0);
+        }
+    }
+    let _dir_guard = TransferDirGuard(config::get_config().transfer_dir);
+    let dir = std::env::temp_dir().join(format!("eg_listing_rows_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..25 {
+        std::fs::write(dir.join(format!("a_rather_long_file_name_{i:02}.prg")), b"x").unwrap();
+    }
+    config::update_config_value("transfer_dir", &dir.to_string_lossy());
+    for term in [TerminalType::Petscii, TerminalType::Ansi] {
+        for delete in [false, true] {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let out = rt.block_on(async {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let (mut session, peer) = make_test_session_with_peer(term);
+                session.last_transfer_note = Some(TransferNote { ok: true, text: "Download complete".into() });
+                let (mut pr, mut pw) = tokio::io::split(peer);
+                pw.write_all(b"n\rq\r").await.unwrap();
+                let run = async move {
+                    if delete {
+                        session.file_transfer_delete().await.unwrap()
+                    } else {
+                        session.file_transfer_download().await.unwrap()
+                    }
+                };
+                let mut out = Vec::new();
+                let (_, r) = tokio::join!(run, pr.read_to_end(&mut out));
+                r.unwrap();
+                out
+            });
+            let (clear, width): (&[u8], usize) = if term == TerminalType::Petscii {
+                (&[PETSCII_CLEAR], 39)
+            } else {
+                (ANSI_CLEAR.as_bytes(), 80)
+            };
+            // One screen per clear; what comes before the first is nothing.
+            let mut screens: Vec<&[u8]> = Vec::new();
+            let mut rest = &out[..];
+            while let Some(i) = rest.windows(clear.len()).position(|w| w == clear) {
+                screens.push(&rest[..i]);
+                rest = &rest[i + clear.len()..];
+            }
+            screens.push(rest);
+            screens.remove(0);
+            assert_eq!(screens.len(), 2, "{term:?} delete={delete}: page 1, then page 2");
+            for (n, screen) in screens.iter().enumerate() {
+                let text: Vec<u8> = if term == TerminalType::Petscii {
+                    screen.iter().copied().filter(|&b| matches!(b, b'\r' | b'\n' | 0x20..=0x7F | 0xA0..=0xFF)).collect()
+                } else {
+                    screen.to_vec()
+                };
+                let rows = render_rows(&text);
+                let end = rows.iter().rposition(|r| !r.trim().is_empty()).map_or(0, |i| i + 1);
+                let rows = &rows[..end];
+                let what = format!("{term:?} delete={delete} page {}", n + 1);
+                assert!(rows.len() <= 22, "{what}: {} rows\n{rows:#?}", rows.len());
+                for r in rows {
+                    assert!(r.chars().count() <= width, "{what}: {} columns: {r:?}", r.chars().count());
+                }
+                if n == 0 && !delete {
+                    assert!(rows.iter().any(|r| r.to_ascii_lowercase().contains("download complete")), "{what}: no note\n{rows:#?}");
+                }
+                if n == 1 {
+                    assert!(rows.iter().any(|r| r.to_ascii_lowercase().contains("page 2 of 3")), "{what}: not the middle page");
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// AI Chat and weather print text from the internet; for a C64 or an ASCII
@@ -10341,6 +10475,27 @@ fn test_apply_ymodem_meta_mode_unix() {
     TelnetSession::apply_ymodem_meta(&tmp, Some(&meta));
     let actual = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o7777;
     assert_eq!(actual, 0o755, "setuid bit must be stripped, perms preserved");
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// A sender's mode can narrow what others may do, never what the gateway
+/// itself may: `100000` is not 0, so it passed the "0 means no info" filter,
+/// and the saved file came out `0o000` -- unreadable, so it could not be
+/// downloaded, and unwritable, so an overwrite upload failed on it.
+#[cfg(unix)]
+#[test]
+fn test_apply_ymodem_meta_mode_keeps_the_owner_read_and_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = std::env::temp_dir()
+        .join(format!("ymeta_mode_owner_{}", std::process::id()));
+    for (sent, want) in [(0o100000, 0o600), (0o100200, 0o600), (0o100444, 0o644)] {
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::write(&tmp, b"x").unwrap();
+        let meta = crate::xmodem::YmodemReceiveMeta { size: Some(1), modtime: None, mode: Some(sent) };
+        TelnetSession::apply_ymodem_meta(&tmp, Some(&meta));
+        let actual = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(actual, want, "sent {sent:o}");
+    }
     let _ = std::fs::remove_file(&tmp);
 }
 

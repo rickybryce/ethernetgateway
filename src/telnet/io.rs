@@ -1430,30 +1430,13 @@ impl TelnetSession {
             skipped.len()
         ))
         .await?;
-        for (name, size) in &saved {
-            self.send_line(&format!(
-                "    {} {} ({} bytes)",
-                self.green("✓"),
-                self.amber(name),
-                size
-            ))
-            .await?;
-        }
-        for (name, reason) in &skipped {
-            self.send_line(&format!(
-                "    {} {} ({})",
-                self.red("✗"),
-                self.amber(name),
-                reason
-            ))
-            .await?;
-        }
+        // The same rows as the menu's upload and the Kermit server: ✓/✗ were
+        // `?` on a C64 and raw UTF-8 on an ASCII terminal, and a long batch
+        // scrolled its own summary away.
+        self.draw_file_outcomes(&saved, &skipped).await?;
         if let Some(e) = &batch_error {
-            self.send_line(&format!(
-                "  {}",
-                self.red(&format!("Transfer failed: {}", e))
-            ))
-            .await?;
+            let e = truncate_to_width(&format!("Transfer failed: {e}"), self.screen_room(2));
+            self.send_line(&format!("  {}", self.red(&e))).await?;
         }
         // The same exchange as every other transfer: settle, ask, re-offer,
         // arm.  This is a third upload path and the one a terminal starts by

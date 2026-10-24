@@ -505,7 +505,10 @@ impl TelnetSession {
     /// modtime and mode are best-effort — failures are ignored because
     /// they don't affect data integrity.  Mode is masked to `0o777` so
     /// a misbehaving sender can't set setuid/setgid/sticky bits on our
-    /// saved files; mode application is a no-op on non-Unix platforms.
+    /// saved files, and the owner's read and write are always kept: a
+    /// sender's `100000` passed the "0 means no info" filter and left a file
+    /// the gateway could neither download nor overwrite.  Mode application
+    /// is a no-op on non-Unix platforms.
     /// Sync std::fs calls are deliberate — these are microsecond-level
     /// operations that run once per saved file, so the cost of routing
     /// through `spawn_blocking` would exceed the operations themselves.
@@ -522,7 +525,7 @@ impl TelnetSession {
         #[cfg(unix)]
         if let Some(mode) = m.mode {
             use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(mode & 0o777);
+            let perms = std::fs::Permissions::from_mode((mode & 0o777) | 0o600);
             let _ = std::fs::set_permissions(path, perms);
         }
     }
@@ -1235,15 +1238,13 @@ impl TelnetSession {
         let verbose = config::get_config().verbose;
         let start = std::time::Instant::now();
         let mut writer_guard = self.writer.lock().await;
-        // Normalize both receive paths to a Vec of (sender-proposed
-        // filename, data).  XMODEM/YMODEM never carries a filename in
-        // the protocol, so we mark it as None and the user-entered
-        // name wins.  ZMODEM carries a filename per file; we keep it
-        // so batches can save files 2..N under their sender names.
-        // The third tuple slot carries optional YMODEM metadata
-        // (modtime/mode/sno) parsed from block 0; ZMODEM doesn't surface
-        // file attributes through this path so its entries are always
-        // `None`.  The save-side applies modtime + mode after writing.
+        // Normalize every receive path to a Vec of (sender-proposed
+        // filename, data, metadata).  Plain XMODEM carries no filename, so
+        // it is None and the user-entered name wins; YMODEM's block 0 and
+        // ZMODEM's ZFILE each carry one per file, kept so a batch saves
+        // files under their sender names.  The third slot is the modtime /
+        // mode from block 0 or ZFILE, which the save side applies after
+        // writing.
         type Received = Vec<(Option<String>, Vec<u8>, Option<crate::xmodem::YmodemReceiveMeta>)>;
         // Decide callback for the ZMODEM receiver: every file, the first
         // included, is judged by `zmodem_accepts` -- the same rule the
@@ -1510,11 +1511,11 @@ impl TelnetSession {
             // declined or failed is an upload that did not happen, whatever
             // the reasons listed under it.  Nor when a batch failed partway:
             // what it saved first is kept, but files are missing.
+            // Two lines: as one, even "1 saved, 0 skipped" with its time was
+            // 43 columns and wrapped on every C64.
             let line = format!(
-                "Upload {}: {} saved, {} skipped, {:.1}s",
+                "Upload {} in {:.1}s:",
                 if batch_error.is_some() { "stopped" } else { "complete" },
-                saved.len(),
-                skipped.len(),
                 elapsed.as_secs_f64()
             );
             let line = if saved.is_empty() || batch_error.is_some() {
@@ -1523,31 +1524,13 @@ impl TelnetSession {
                 self.green(&line)
             };
             self.send_line(&format!("  {}", line)).await?;
+            self.send_line(&format!("  {} saved, {} skipped", saved.len(), skipped.len()))
+                .await?;
             self.last_transfer_note = Some(Self::upload_note(&saved, &skipped, &batch_error, elapsed));
-            for (name, bytes) in &saved {
-                self.send_line(&format!(
-                    "  {} {} ({} bytes)",
-                    self.green("*"),
-                    name,
-                    bytes
-                ))
-                .await?;
-            }
-            for (name, reason) in &skipped {
-                self.send_line(&format!(
-                    "  {} {} ({})",
-                    self.yellow("-"),
-                    name,
-                    reason
-                ))
-                .await?;
-            }
+            self.draw_file_outcomes(&saved, &skipped).await?;
             if let Some(e) = &batch_error {
-                self.send_line(&format!(
-                    "  {}",
-                    self.red(&format!("Transfer failed: {}", e))
-                ))
-                .await?;
+                let e = truncate_to_width(&format!("Transfer failed: {e}"), self.screen_room(2));
+                self.send_line(&format!("  {}", self.red(&e))).await?;
             }
         }
         // Surface detected Kermit flavor (auto-classified from the
@@ -1640,13 +1623,16 @@ impl TelnetSession {
             }
 
             self.send_line("").await?;
+            // No blank between the page count and the keys: with the outcome
+            // note a download draws on its way back here, that row made the
+            // screen 23.  And no `ESC=Main`: ESC goes back, as Q does, and on
+            // a middle page the extra item made the PETSCII line 45 columns.
             self.send_line(&format!(
                 "  Page {} of {}",
                 page + 1,
                 total_pages
             ))
             .await?;
-            self.send_line("").await?;
 
             let mut nav = Vec::new();
             if page > 0 {
@@ -1657,11 +1643,6 @@ impl TelnetSession {
             }
             nav.push(self.action_prompt("Q", "Back"));
             nav.push(self.action_prompt("H", "Help"));
-            let esc_label = match self.terminal_type {
-                TerminalType::Petscii => "<-",
-                _ => "ESC",
-            };
-            nav.push(self.action_prompt(esc_label, "Main"));
             self.send_line(&format!("  {}", nav.join(" | ")))
                 .await?;
             self.send_line("").await?;
@@ -1814,7 +1795,7 @@ impl TelnetSession {
         filename: &str,
         file_size: u64,
     ) -> Result<(), std::io::Error> {
-        let blocks = (file_size as usize).div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE);
+        let blocks = file_size.div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE as u64);
 
         self.send_line("").await?;
         self.send_line(&format!(
@@ -1828,14 +1809,24 @@ impl TelnetSession {
         ))
         .await?;
 
-        if file_size as usize > Self::MAX_FILE_SIZE {
+        // Compared as `u64`: `as usize` on the 32-bit Pi build wrapped a file
+        // of 4 GiB + n bytes to n, which passed, and the read below then tried
+        // to hold the whole of it.
+        if file_size > Self::MAX_FILE_SIZE as u64 {
             self.show_error("File too large.").await?;
             return Ok(());
         }
 
         let filepath = self.transfer_path().join(filename);
-        let data = match tokio::fs::read(&filepath).await {
-            Ok(d) => d,
+        // Capped as it is read, not checked after: the listing's size may be
+        // minutes old, and a file grown since would otherwise be read whole
+        // before anything noticed.
+        let data = match crate::kermit::read_capped(&filepath).await {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                self.show_error("File too large.").await?;
+                return Ok(());
+            }
             Err(e) => {
                 self.show_error(&format!("Failed to read: {}", e))
                     .await?;
@@ -1986,7 +1977,9 @@ impl TelnetSession {
             let ymodem = if matches!(protocol, DownloadProtocol::Ymodem) {
                 Some(crate::xmodem::YmodemHeader {
                     filename: filename.to_string(),
-                    size: file_size,
+                    // What is actually being sent, not the listing's size:
+                    // a receiver trims the file to this.
+                    size: data.len() as u64,
                     modtime: file_modtime,
                     mode: file_mode,
                 })
@@ -2022,7 +2015,7 @@ impl TelnetSession {
                 self.send_line(&format!(
                     "  {} bytes, {} blocks, {:.1}s",
                     data.len(),
-                    blocks,
+                    data.len().div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE),
                     elapsed.as_secs_f64()
                 ))
                 .await?;
@@ -2078,16 +2071,112 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// Columns left on this terminal's screen after an `indent`.
+    ///
+    /// 39 on a C64, not 40: a row that fills the last column auto-wraps there,
+    /// and the CR LF after it then draws a blank row (see `separator`).
+    pub(in crate::telnet) fn screen_room(&self, indent: usize) -> usize {
+        let width = if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 80 };
+        width - indent
+    }
+
+    /// Most per-file rows a transfer summary draws.  A batch can be a thousand
+    /// files; the rest are counted, not listed, so the summary and its
+    /// "press a key" stay on one screen.
+    pub(in crate::telnet) const OUTCOME_ROWS: usize = 12;
+
+    /// The per-file rows of a batch summary -- `*` saved, `-` skipped -- the
+    /// same marks for every protocol, names shortened to the screen.  The
+    /// Kermit server drew `✓`/`✗`, which a C64 shows as `?` and an ASCII
+    /// terminal as raw UTF-8, and neither summary shortened a name: a long one
+    /// wrapped on a C64.
+    pub(in crate::telnet) async fn draw_file_outcomes(
+        &mut self,
+        saved: &[(String, usize)],
+        skipped: &[(String, &'static str)],
+    ) -> Result<(), std::io::Error> {
+        // Skipped first: when a batch is longer than the cap, the files that
+        // did not make it are the ones worth a row, not the hundredth success.
+        let rows: Vec<(bool, &str, String)> = skipped
+            .iter()
+            .map(|(n, r)| (false, n.as_str(), format!(" ({r})")))
+            .chain(saved.iter().map(|(n, b)| (true, n.as_str(), format!(" ({b} bytes)"))))
+            .collect();
+        for (ok, name, tail) in rows.iter().take(Self::OUTCOME_ROWS) {
+            let mark = if *ok { self.green("*") } else { self.yellow("-") };
+            let room = self.screen_room(4).saturating_sub(tail.chars().count()).max(8);
+            let name = self.amber(&truncate_to_width(name, room));
+            self.send_line(&format!("  {mark} {name}{tail}")).await?;
+        }
+        if rows.len() > Self::OUTCOME_ROWS {
+            self.send_line(&format!("  ...and {} more", rows.len() - Self::OUTCOME_ROWS))
+                .await?;
+        }
+        Ok(())
+    }
+
     // ─── KERMIT SERVER MODE ─────────────────────────────────
+
+    /// The screen the Kermit server shows while it listens.
+    ///
+    /// 22 rows and 40 columns, ASCII only.  It was 26 rows, lines up to 57
+    /// columns, and em-dashes a C64 drew as `?` and an ASCII terminal
+    /// received as raw UTF-8.
+    pub(in crate::telnet) async fn draw_kermit_server_screen(&mut self) -> Result<(), std::io::Error> {
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("KERMIT SERVER MODE"))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.green("Listening for Kermit packets."))).await?;
+        self.send_line(&format!("  {}", self.dim("A quiet screen here is normal."))).await?;
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.amber("Needs a Kermit client at your end:"))).await?;
+        self.send_line(&format!("    {}: its Kermit menu", self.cyan("Tera Term/K95"))).await?;
+        self.send_line(&format!("    {}, from a shell:", self.cyan("C-Kermit/G-Kermit"))).await?;
+        self.send_line(&format!("      {}", self.amber("kermit -j host:port -g file"))).await?;
+        self.send_line("").await?;
+        self.send_line("  From your client:").await?;
+        self.send_line(&format!("    {}   upload to us", self.cyan("send <file>"))).await?;
+        self.send_line(&format!("    {}    download from us", self.cyan("get <file>"))).await?;
+        self.send_line(&format!("    {}", self.cyan("remote dir / cwd / help"))).await?;
+        self.send_line(&format!("    {}  end the session", self.cyan("finish | bye"))).await?;
+        self.send_line("").await?;
+        let esc_label = match self.terminal_type {
+            TerminalType::Petscii => "<-",
+            _ => "ESC",
+        };
+        let idle_secs = config::get_config().kermit_idle_timeout;
+        self.send_line(&format!("  {} goes back to File Transfer.", self.cyan(esc_label)))
+            .await?;
+        if idle_secs == 0 {
+            self.send_line("  No idle timeout: finish/bye ends it.").await?;
+        } else {
+            let idle_display = if idle_secs >= 60 && idle_secs.is_multiple_of(60) {
+                format!("{} min", idle_secs / 60)
+            } else {
+                format!("{}s", idle_secs)
+            };
+            // Shortened only for a setting no one means (eight digits of
+            // seconds); every real one fits.
+            let room = self.screen_room(2).saturating_sub("After  idle, we disconnect.".len());
+            let idle_display = truncate_to_width(&idle_display, room);
+            self.send_line(&format!("  After {} idle, we disconnect.", self.amber(&idle_display)))
+                .await?;
+        }
+        self.send_line("  Full client setup: kermit.html").await?;
+        self.flush().await?;
+        Ok(())
+    }
 
     /// Idle as a Kermit server: peer drives the session by sending
     /// Kermit commands (`send`, `get`, `dir`, `finish`, `bye`, etc.).
-    /// On exit, any files received during the session are written to
-    /// the current transfer subdir using the same `validate_filename`
-    /// rules as the interactive upload path.  Files whose sender-
-    /// supplied names fail validation or collide with an existing
-    /// path are skipped rather than clobbered, mirroring ZMODEM batch
-    /// behavior.
+    /// Each file received is saved as it completes, into the folder the
+    /// peer's `remote cd` has reached, under the same `validate_filename`
+    /// rules as the interactive upload path.  A name that collides with an
+    /// existing file is renamed DOS/Kermit-style, never clobbered; one that
+    /// fails validation is skipped.
     pub(in crate::telnet) async fn file_transfer_kermit_server(&mut self) -> Result<(), std::io::Error> {
         self.ensure_transfer_dir().await?;
 
@@ -2103,101 +2192,7 @@ impl TelnetSession {
             return Ok(());
         }
 
-        self.clear_screen().await?;
-        let sep = self.separator();
-        self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("KERMIT SERVER MODE"))).await?;
-        self.send_line(&sep).await?;
-        self.send_line("").await?;
-        self.send_line(&format!(
-            "  {}",
-            self.green("Listening for Kermit packets.")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  {}",
-            self.dim("Your screen will be quiet — that's normal.")
-        ))
-        .await?;
-        self.send_line("").await?;
-        self.send_line(&format!(
-            "  {}",
-            self.amber("Needs a Kermit-aware client at your end.")
-        ))
-        .await?;
-        self.send_line("  A plain telnet client cannot drive this.").await?;
-        self.send_line("").await?;
-        self.send_line("  Compatible clients:").await?;
-        self.send_line(&format!(
-            "    {} use the built-in Kermit menu",
-            self.cyan("Tera Term / Kermit-95 —")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "    {} run from a separate shell:",
-            self.cyan("C-Kermit / G-Kermit —")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "      {}",
-            self.amber("kermit -j host:port -g file")
-        ))
-        .await?;
-        self.send_line("").await?;
-        self.send_line("  Remote commands once your client is talking:").await?;
-        self.send_line(&format!(
-            "    {}  upload to us",
-            self.cyan("send <file>")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "    {}  download from us",
-            self.cyan("get <file>")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "    {}  list / change dir / show help",
-            self.cyan("remote dir / cwd / help")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "    {}  end the session",
-            self.cyan("finish | bye")
-        ))
-        .await?;
-        self.send_line("").await?;
-        let esc_label = match self.terminal_type {
-            TerminalType::Petscii => "<-",
-            _ => "ESC",
-        };
-        let idle_secs = config::get_config().kermit_idle_timeout;
-        self.send_line(&format!(
-            "  {} returns to the File Transfer menu.",
-            self.cyan(esc_label)
-        ))
-        .await?;
-        if idle_secs == 0 {
-            self.send_line(
-                "  Idle timeout disabled — server holds the session",
-            )
-            .await?;
-            self.send_line("  open until the peer sends finish/bye.").await?;
-        } else {
-            let idle_display = if idle_secs >= 60 && idle_secs.is_multiple_of(60) {
-                format!("{} min", idle_secs / 60)
-            } else {
-                format!("{}s", idle_secs)
-            };
-            self.send_line(&format!(
-                "  After {} idle, we send the client an error packet",
-                self.amber(&idle_display)
-            ))
-            .await?;
-            self.send_line("  and disconnect.").await?;
-        }
-        self.send_line("  See kermit.html for full client setup.").await?;
-        self.send_line("").await?;
-        self.flush().await?;
+        self.draw_kermit_server_screen().await?;
 
         let verbose = config::get_config().verbose;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
@@ -2324,33 +2319,17 @@ impl TelnetSession {
         ))
         .await?;
         if let Some(msg) = &error_msg {
-            self.send_line(&format!("  {}", self.red(msg))).await?;
+            let msg = truncate_to_width(msg, self.screen_room(2));
+            self.send_line(&format!("  {}", self.red(&msg))).await?;
         }
         self.send_line(&format!(
-            "  Received: {} file(s), saved: {}, skipped: {}.",
+            "  Received {}: {} saved, {} skipped",
             total,
             saved.len(),
             skipped.len()
         ))
         .await?;
-        for (name, size) in &saved {
-            self.send_line(&format!(
-                "    {} {} ({} bytes)",
-                self.green("✓"),
-                self.amber(name),
-                size
-            ))
-            .await?;
-        }
-        for (name, reason) in &skipped {
-            self.send_line(&format!(
-                "    {} {} ({})",
-                self.red("✗"),
-                self.amber(name),
-                reason
-            ))
-            .await?;
-        }
+        self.draw_file_outcomes(&saved, &skipped).await?;
         self.send_line("").await?;
         self.wait_for_key().await?;
         Ok(())
@@ -2423,13 +2402,16 @@ impl TelnetSession {
             }
 
             self.send_line("").await?;
+            // The same footer as the Download picker, which needs the row
+            // its outcome note takes; and no `ESC=Main`: ESC goes back, as Q
+            // does, and on a middle page the extra item made the PETSCII line
+            // 45 columns.
             self.send_line(&format!(
                 "  Page {} of {}",
                 page + 1,
                 total_pages
             ))
             .await?;
-            self.send_line("").await?;
 
             let mut nav = Vec::new();
             if page > 0 {
@@ -2440,11 +2422,6 @@ impl TelnetSession {
             }
             nav.push(self.action_prompt("Q", "Back"));
             nav.push(self.action_prompt("H", "Help"));
-            let esc_label = match self.terminal_type {
-                TerminalType::Petscii => "<-",
-                _ => "ESC",
-            };
-            nav.push(self.action_prompt(esc_label, "Main"));
             self.send_line(&format!("  {}", nav.join(" | ")))
                 .await?;
             self.send_line("").await?;

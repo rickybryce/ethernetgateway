@@ -2437,7 +2437,7 @@ impl TelnetSession {
             "  P    Previous page of files",
             "  N    Next page of files",
             "  Q    Back to file transfer menu",
-            "  ESC  Return to main menu",
+            "  ESC  Back to file transfer menu",
         ]
     }
 
@@ -2448,7 +2448,7 @@ impl TelnetSession {
             "  P    Previous page of files",
             "  N    Next page of files",
             "  Q    Back to file transfer menu",
-            "  ESC  Return to main menu",
+            "  ESC  Back to file transfer menu",
         ]
     }
 
