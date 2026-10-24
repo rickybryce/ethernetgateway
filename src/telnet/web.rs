@@ -765,7 +765,8 @@ impl TelnetSession {
                     }
                     crate::webbrowser::FormField::Select { label, options, selected, .. } => {
                         field_num += 1;
-                        let chosen = options.get(*selected).map(|(_, t)| t.as_str()).unwrap_or("?");
+                        // Past the end: nothing chosen (a disabled placeholder).
+                        let chosen = options.get(*selected).map(|(_, t)| t.as_str()).unwrap_or("(none)");
                         Some(format!("  {}.{}: {}",
                             field_num,
                             crate::webbrowser::truncate_to_width(&self.web_text(label), max_label),
@@ -944,6 +945,35 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn web_submit_form(&mut self, form_idx: usize) -> Result<(), std::io::Error> {
+        // A page that came over plain HTTP because HTTPS failed resolves its
+        // relative form actions to `http://`, so the form would go out in the
+        // clear with no HTTPS attempt -- on the very site whose HTTPS was just
+        // broken, perhaps on purpose.  Not refused: an HTTP-only site's
+        // search box is what the fallback is for.  Asked, on an explicit Y.
+        let action = {
+            let form = &self.web_forms[form_idx];
+            let base = self.web_url.clone().unwrap_or_default();
+            if form.action.is_empty() { base } else { crate::webbrowser::resolve_url(&base, &form.action) }
+        };
+        if self.web_fallback && action.starts_with("http://") {
+            // A screen of its own: the form screen below is full.
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!("  {}", self.yellow("PLAIN HTTP"))).await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.red("HTTPS failed for this page."))).await?;
+            self.send_line("").await?;
+            self.send_line("  This form would be sent over plain").await?;
+            self.send_line("  HTTP, readable on the way.").await?;
+            self.send_line("").await?;
+            self.send("  Send it anyway? (Y/N) ").await?;
+            self.flush().await?;
+            if !self.cpm_confirm().await? {
+                return Ok(());
+            }
+        }
         self.send_line("").await?;
         self.send_line(&format!("  {}...", self.dim("Submitting"))).await?;
         self.flush().await?;
@@ -981,6 +1011,7 @@ impl TelnetSession {
                 self.web_lines = page.lines;
                 self.web_links = page.links;
                 self.web_forms = page.forms;
+                self.web_fallback = page.cleartext_fallback;
                 self.web_scroll = 0;
                 Ok(true)
             }
@@ -1015,6 +1046,7 @@ impl TelnetSession {
         self.web_history.clear();
         self.web_url = None;
         self.web_title = None;
+        self.web_fallback = false;
         // Leaving the browser ends the visit, so the homepage is auto-loaded
         // again next time -- the once-only guard is per visit, not per session.
         self.web_home_tried = false;

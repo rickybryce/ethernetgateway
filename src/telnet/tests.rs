@@ -1098,6 +1098,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         web_history: Vec::new(),
         web_url: None,
         web_home_tried: false,
+        web_fallback: false,
         web_title: None,
         web_forms: Vec::new(),
         weather_location: String::new(),
@@ -1164,6 +1165,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         web_history: Vec::new(),
         web_url: None,
         web_home_tried: false,
+        web_fallback: false,
         web_title: None,
         web_forms: Vec::new(),
         weather_location: String::new(),
@@ -16105,4 +16107,76 @@ async fn test_settling_a_trickled_command_is_bounded() {
     }
     assert!(started.elapsed() < std::time::Duration::from_secs(5), "held for {:?}", started.elapsed());
     assert!(matches!(s.iac_resume, crate::telnet::io::SessionIac::Data), "the command was left half-read");
+}
+
+/// A form on a page that came over plain HTTP because HTTPS failed asks
+/// before it is sent over `http://`: N sends nothing, Y sends it, and a page
+/// that did not fall back is not asked about at all.
+#[tokio::test]
+async fn test_a_form_on_a_fallen_back_page_asks_before_plain_http() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (fallback, answer, expect_sent) in [(true, b'n', false), (true, b'y', true), (false, b'x', true)] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while std::time::Instant::now() < deadline {
+                if let Ok((mut s, _)) = listener.accept() {
+                    s.set_nonblocking(false).unwrap();
+                    s.set_read_timeout(Some(std::time::Duration::from_millis(300))).ok();
+                    let mut buf = [0u8; 2048];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                    return Some(String::from_utf8_lossy(&buf[..n]).into_owned());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            None
+        });
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        sess.color_enabled = false;
+        sess.web_url = Some(format!("http://127.0.0.1:{port}/"));
+        sess.web_fallback = fallback;
+        sess.web_forms = vec![crate::webbrowser::WebForm {
+            action: "/s".into(),
+            method: "get".into(),
+            label: "Search".into(),
+            fields: vec![crate::webbrowser::FormField::Hidden { name: "q".into(), value: "x".into() }],
+        }];
+        // Answered once the question is on screen: `cpm_confirm` drains
+        // anything typed ahead, as a confirmation should.
+        let (mut from_session, mut to_session) = tokio::io::split(peer);
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 512];
+            let mut answered = false;
+            loop {
+                match from_session.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => out.extend_from_slice(&buf[..n]),
+                }
+                if !answered && out.windows(5).any(|w| w == b"(Y/N)") {
+                    answered = true;
+                    // After the drain's 50 ms quiet window, or it eats the key.
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    to_session.write_all(&[answer]).await.unwrap();
+                }
+            }
+            out
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_submit_form(0))
+            .await
+            .expect("the form screen hung")
+            .unwrap();
+        drop(sess);
+        let shown = String::from_utf8_lossy(&collector.await.unwrap()).into_owned();
+        let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+        assert_eq!(sent.is_some(), expect_sent, "fallback={fallback} answer={}: {sent:?}", answer as char);
+        if let Some(req) = sent {
+            assert!(req.starts_with("GET /s?q=x "), "{req}");
+        }
+        assert_eq!(shown.contains("Send it anyway?"), fallback, "{shown}");
+    }
 }

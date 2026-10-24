@@ -5449,7 +5449,7 @@ query:
 <ul>
     <li>A URL without a scheme — <code>example.com</code> — gets <code>https://</code> prepended automatically.</li>
     <li>Text without dots is treated as a search query and sent to DuckDuckGo.</li>
-    <li>A <code>gopher://</code> URL uses the Gopher protocol.  Its selector is percent-encoded, as the standard (RFC 4266) writes it: <code>gopher://host/0/my%20file</code> asks for <code>my file</code>.</li>
+    <li>A <code>gopher://</code> URL uses the Gopher protocol.  Its selector is percent-encoded, as the standard (RFC 4266) writes it: <code>gopher://host/0/my%20file</code> asks for <code>my file</code>.  An HTML page a Gopher server holds (an <code>h</code> item) is drawn as a web page, and its links stay on that server: <code>/about.html</code> is the selector <code>/about.html</code>, a link ending in <code>/</code> opens a menu, and other files open as text.</li>
 </ul>
 
 <h2>13.2 Following Links</h2>
@@ -5496,7 +5496,7 @@ pick a form, edit fields by number, <span class="kbd">S</span> to submit or
     <li>Maximum rendered lines: 5000.</li>
     <li>HTTP request timeout: 15 s.</li>
     <li>Page history depth: 50.</li>
-    <li>When HTTPS fails (a TLS error, or nothing answering on its port), a <em>page load</em> retries over HTTP with a warning.  A <em>form submission</em>, GET or POST, and any address carrying data after a <code>?</code> (a search, or a form's result reloaded or bookmarked) are refused instead, never re-sent in the clear; type the address with <code>http://</code> to send it anyway.</li>
+    <li>When HTTPS fails (a TLS error, or nothing answering on its port), a <em>page load</em> retries over HTTP with a warning.  A <em>form submission</em>, GET or POST, and any address carrying data after a <code>?</code> (a search, or a form's result reloaded or bookmarked) are refused instead, never re-sent in the clear; type the address with <code>http://</code> to send it anyway.  A form on a page that itself came over HTTP after HTTPS failed asks <em>Send it anyway? (Y/N)</em> before it goes out over <code>http://</code>.</li>
 </ul>
 
 <!-- ═══════════════════ 14. Weather ═══════════════════ -->

@@ -80,6 +80,11 @@ pub(crate) struct WebPage {
     pub url: String,
     /// HTML forms found on the page.
     pub forms: Vec<WebForm>,
+    /// The page came over plain HTTP because HTTPS failed for it (the
+    /// `[!]` notice).  Its relative form actions resolve to `http://`, so a
+    /// form on it would go out in the clear with no HTTPS attempt at all; the
+    /// form screen asks first (`web_submit_form`).
+    pub cleartext_fallback: bool,
 }
 
 impl WebPage {
@@ -431,9 +436,13 @@ enum Fetch {
 
 /// Why a form was not sent: its secure connection failed, and a form is never
 /// retried over `http://` (M-10).  One message for GET and POST alike.
-const FORM_NOT_RESENT: &str = "Secure connection failed and this form was NOT resubmitted \
+///
+/// Not "try again": a reset or a timeout can come after the request went
+/// out, so whether the site acted on it is not known here.
+const FORM_NOT_RESENT: &str = "Secure connection failed and this form was NOT re-sent \
      over an insecure (http://) link - form data can include \
-     passwords. Try again later or use a secure site.";
+     passwords. It may or may not have reached the site: check \
+     before sending it again.";
 
 /// A failure after the form went through: telling the reader it was "NOT
 /// resubmitted, try again" invited a second order.
@@ -534,7 +543,7 @@ fn render_response(
             .take(MAX_RENDERED_LINES)
             .collect();
         (
-            WebPage { title: None, lines, links: Vec::new(), url: final_url, forms: Vec::new() },
+            WebPage { title: None, lines, links: Vec::new(), url: final_url, forms: Vec::new(), cleartext_fallback: false },
             None,
         )
     } else {
@@ -832,6 +841,7 @@ fn fetch_and_render_from(
         && page.url.starts_with("http://")
     {
         prepend_downgrade_notice(&mut page, width, reason);
+        page.cleartext_fallback = true;
     }
     Ok(page)
 }
@@ -1784,6 +1794,7 @@ fn render_html_body(
             links,
             url: final_url,
             forms,
+            cleartext_fallback: false,
         },
         meta_refresh,
     ))
@@ -1795,6 +1806,8 @@ fn render_html_body(
 pub(crate) fn resolve_url(base: &str, relative: &str) -> String {
     let resolved = if relative.starts_with("http://") || relative.starts_with("https://") || relative.starts_with("gopher://") {
         relative.to_string()
+    } else if let Some(url) = resolve_gopher_html_link(base, relative) {
+        url
     } else {
         match url::Url::parse(base) {
             Ok(base_url) => match base_url.join(relative) {
@@ -1807,6 +1820,37 @@ pub(crate) fn resolve_url(base: &str, relative: &str) -> String {
 
     // Unwrap DuckDuckGo redirect links: extract the real URL from the uddg parameter
     unwrap_ddg_redirect(&resolved)
+}
+
+/// A link on an HTML page a gopher server holds (an `h` item), as a
+/// selector on that server.  Joined to the page's URL, the item type letter
+/// was read as part of the path: `/about.html` became type `a`, selector
+/// `bout.html`, and `..` could climb out through the `h`.  So the link is
+/// joined to the page's selector instead, and its type taken from what it
+/// names: a trailing `/` is a menu, an HTML file an `h`, anything else text.
+/// `None` for any other base, and for a link with a scheme of its own.
+fn resolve_gopher_html_link(base: &str, relative: &str) -> Option<String> {
+    let (host, port, item_type, selector) = parse_gopher_url(base).ok()?;
+    if item_type != 'h' || url::Url::parse(relative).is_ok() {
+        return None;
+    }
+    let page = url::Url::parse("http://gopher.invalid/").ok()?
+        .join(&encode_selector(selector.strip_prefix('/').unwrap_or(&selector)))
+        .ok()?;
+    let joined = page.join(relative).ok()?;
+    let mut target = decode_selector(joined.path());
+    if !selector.starts_with('/') {
+        target.remove(0);
+    }
+    let lower = target.to_ascii_lowercase();
+    let ty = if target.is_empty() || target.ends_with('/') {
+        '1'
+    } else if [".html", ".htm", ".xhtml", ".shtml"].iter().any(|e| lower.ends_with(e)) {
+        'h'
+    } else {
+        '0'
+    };
+    Some(build_gopher_url(&host, port, ty, &target))
 }
 
 /// If `url` is a DuckDuckGo `/l/?uddg=<encoded_url>` redirect, return the
@@ -2327,9 +2371,25 @@ fn extract_form_fields(
     }
 }
 
+/// A drop-down's choices, and which is chosen.
+///
+/// **A disabled option is not a choice**, nor is anything in a disabled
+/// `<optgroup>`: both were offered and sent.  One chosen by `selected` --
+/// the "Choose one..." placeholder a page greys out -- leaves `selected` past
+/// the end, which sends nothing for the drop-down, as a browser sends
+/// nothing for it.  With none marked, the first enabled option is chosen.
 fn extract_select_options(node: &Handle, options: &mut Vec<(String, String)>, selected: &mut usize) {
     for child in node.children.borrow().iter() {
         if let Element { ref name, .. } = child.data {
+            let disabled = get_attr(child, "disabled").is_some();
+            if disabled && matches!(name.local.as_ref(), "option" | "optgroup") {
+                let marked = get_attr(child, "selected").is_some()
+                    || child.children.borrow().iter().any(|o| get_attr(o, "selected").is_some());
+                if marked {
+                    *selected = usize::MAX;
+                }
+                continue;
+            }
             if &*name.local == "option" {
                 let value = get_attr(child, "value")
                     .unwrap_or_else(|| get_text_content(child));
@@ -2631,21 +2691,24 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(GOPHER_TIMEOUT_SECS);
     let body = read_gopher_body(stream.get_mut(), GOPHER_MAX_BODY, deadline)?;
 
-    let text = String::from_utf8_lossy(&body);
+    // A text file or HTML page ends with the protocol's `.` line on a
+    // server that sends one (RFC 1436), and not on one that sends the file
+    // as it is.  Bucktooth (Floodgap) writes `\r\n.\r\n`; SDF writes the
+    // file alone (both measured).  Only that CRLF line is dropped: a file
+    // whose own last line is `.` keeps it, Unix line ends and all.
+    let body = match item_type {
+        '0' | 'h' => strip_gopher_terminator(&body),
+        _ => &body[..],
+    };
+    let text = String::from_utf8_lossy(body);
     let final_url = build_gopher_url(&host, port, item_type, &selector);
 
     let mut page = match item_type {
         '0' => {
-            // Plain text file — just wrap and display.  A text file ends
-            // with a line holding only `.` (RFC 1436), which is the
-            // protocol's and not the file's: it was shown as the last line.
-            let mut raw: Vec<&str> = text.lines().map(|line| line.trim_end_matches('\r')).collect();
-            if raw.last() == Some(&".") {
-                raw.pop();
-            }
-            let lines: Vec<String> = raw
-                .into_iter()
-                .flat_map(|line| wrap_line(line, width))
+            // Plain text file — just wrap and display.
+            let lines: Vec<String> = text
+                .lines()
+                .flat_map(|line| wrap_line(line.trim_end_matches('\r'), width))
                 .take(MAX_RENDERED_LINES)
                 .collect();
             WebPage {
@@ -2654,6 +2717,7 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
                 links: Vec::new(),
                 url: final_url,
                 forms: Vec::new(),
+                cleartext_fallback: false,
             }
         }
         '1' | '7' => {
@@ -2663,7 +2727,7 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
         // An HTML document the gopher server holds itself (an `h` item
         // whose selector is not a `URL:` link): drawn as a web page is.
         // Its refresh, if any, is not followed -- that is an HTTP fetch.
-        'h' => render_html_body(&body, final_url, width)?.0,
+        'h' => render_html_body(body, final_url, width)?.0,
         _ => {
             // Unsupported type — show as plain text
             let lines: Vec<String> = text
@@ -2677,6 +2741,7 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
                 links: Vec::new(),
                 url: final_url,
                 forms: Vec::new(),
+                cleartext_fallback: false,
             }
         }
     };
@@ -2686,6 +2751,15 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
     // WebPage::sanitize).
     page.sanitize();
     Ok(page)
+}
+
+/// `body` without the `.` line a gopher server ends a document with: a
+/// last line that is exactly `.` and ends in CRLF (see `fetch_gopher`).
+fn strip_gopher_terminator(body: &[u8]) -> &[u8] {
+    match body.strip_suffix(b".\r\n") {
+        Some(rest) if rest.is_empty() || rest.ends_with(b"\n") => rest,
+        _ => body,
+    }
 }
 
 /// Parse a Gopher directory listing into a WebPage with numbered links.
@@ -2813,6 +2887,7 @@ fn render_gopher_directory(
         links,
         url: final_url,
         forms: Vec::new(),
+        cleartext_fallback: false,
     })
 }
 
@@ -2921,6 +2996,7 @@ mod tests {
             links: vec![],
             forms: vec![],
             url: "http://example.com/".to_string(),
+            cleartext_fallback: false,
         };
         prepend_downgrade_notice(&mut page, 80, DowngradeReason::TlsFailed);
         for line in &page.lines {
@@ -2944,6 +3020,7 @@ mod tests {
             links: vec![],
             forms: vec![],
             url: "http://textfiles.com/".to_string(),
+            cleartext_fallback: false,
         };
         prepend_downgrade_notice(&mut plain, 80, DowngradeReason::NoHttps);
         for line in &plain.lines {
@@ -3290,6 +3367,7 @@ mod tests {
             links: vec![],
             forms: vec![],
             url: "https://ex.com/caf\u{e9}/\u{2014}path".to_string(),
+            cleartext_fallback: false,
         };
         page.sanitize();
         assert_eq!(page.lines[0], "-line", "lines should fold");
@@ -3314,6 +3392,7 @@ mod tests {
             links: Vec::new(),
             url: "http://example.com/".to_string(),
             forms: Vec::new(),
+            cleartext_fallback: false,
         };
         page.sanitize();
         assert_eq!(page.title.as_deref(), Some("evil[2Jtitle"));
@@ -3337,6 +3416,7 @@ mod tests {
             links: vec!["http://example.com/x".to_string()],
             url: "http://example.com/".to_string(),
             forms: Vec::new(),
+            cleartext_fallback: false,
         };
         page.sanitize();
         // Sentinels intact; the escape inside and the bell outside are gone.
@@ -3351,6 +3431,7 @@ mod tests {
             links: Vec::new(),
             url: "http://example.com/".to_string(),
             forms: Vec::new(),
+            cleartext_fallback: false,
         };
         page.sanitize();
         let title_once = page.title.clone();
@@ -3390,6 +3471,7 @@ mod tests {
                     },
                 ],
             }],
+            cleartext_fallback: false,
         };
         page.sanitize();
         assert_eq!(page.url, "gopher://h/1sel[2J");
@@ -5080,7 +5162,11 @@ mod tests {
                 s.set_nonblocking(false).unwrap();
                 if reset && seen == 0 {
                     seen += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    // Wait for the hello without taking it: closing with it
+                    // unread is what makes the RST.  A fixed sleep could close
+                    // first on a slow host, and a FIN is not a reset.
+                    s.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
+                    let _ = s.peek(&mut [0u8; 1]);
                     drop(s);
                     continue;
                 }
@@ -5119,7 +5205,7 @@ mod tests {
         let cleartext = server.join().unwrap();
         assert!(cleartext.is_empty(), "the form went out in the clear: {cleartext:?}");
         let err = result.err().expect("the submission must fail, not downgrade");
-        assert!(err.contains("NOT resubmitted"), "{err}");
+        assert!(err.contains("NOT re-sent"), "{err}");
     }
 
     /// Nor when the HTTPS connection is reset, which an attacker can do as
@@ -5136,7 +5222,8 @@ mod tests {
         let result = submit_form("https://example.com/", &form, 72);
         let cleartext = server.join().unwrap();
         assert!(cleartext.is_empty(), "the form went out in the clear: {cleartext:?}");
-        assert!(result.is_err());
+        let err = result.err().expect("the submission must fail, not downgrade");
+        assert!(err.contains("NOT re-sent") && err.contains("may or may not"), "{err}");
         // The positive control: a page fetch from the same fixture does fall
         // back, so the reset really is the no-HTTPS case.
         let (port, server) = serve_https_breaker(true);
@@ -5205,6 +5292,35 @@ mod tests {
         let cleartext = server.join().unwrap();
         assert_eq!(cleartext.len(), 1, "{cleartext:?}");
         assert!(page.lines[0].contains("HTTPS failed"), "{:?}", page.lines);
+        // Marked, so a form on it asks before going out over http://.
+        assert!(page.cleartext_fallback);
+        // And a page that was asked for over http:// is not.
+        let plain = fetch_and_render(&serve_raw(response("200 OK", Some("text/plain"), b"ok")), 72).unwrap();
+        assert!(!plain.cleartext_fallback);
+    }
+
+    /// A disabled option is not a choice, nor anything in a disabled
+    /// optgroup; a disabled placeholder chosen by `selected` sends nothing.
+    #[test]
+    fn test_disabled_options_are_not_choices() {
+        let html = br#"<form action=/s>
+            <select name=a><option disabled selected>Choose one</option><option value=1>One</option></select>
+            <select name=b><optgroup label=Old disabled><option value=x selected>X</option></optgroup><option value=2>Two</option></select>
+            <select name=c><option value=no disabled>No</option><option value=3>Three</option></select>
+        </form>"#;
+        let (page, _) = render_html_body(html, "http://h/".into(), 72).unwrap();
+        let picks: Vec<(Vec<String>, Option<String>)> = page.forms[0].fields.iter().filter_map(|f| match f {
+            FormField::Select { options, selected, .. } => Some((
+                options.iter().map(|(v, _)| v.clone()).collect(),
+                options.get(*selected).map(|(v, _)| v.clone()),
+            )),
+            _ => None,
+        }).collect();
+        assert_eq!(picks, vec![
+            (vec!["1".to_string()], None),
+            (vec!["2".to_string()], None),
+            (vec!["3".to_string()], Some("3".to_string())),
+        ]);
     }
 
     /// The HTTP redirect loop clears the downgrade reason at an HTTPS hop,
@@ -5267,6 +5383,38 @@ mod tests {
         assert_eq!((host.as_str(), ty, sel.as_str()), ("gopher.example", 'h', "/index.html"));
     }
 
+    /// A link on an HTML page a gopher server holds is a selector on that
+    /// server: root-relative and `..` links stay on it, and the item type
+    /// comes from what the link names, not from the page's `h`.
+    #[test]
+    fn test_links_on_a_gopher_html_page_are_selectors() {
+        let at = |base: &str, href: &str| {
+            let (host, port, ty, sel) = parse_gopher_url(&resolve_url(base, href)).unwrap();
+            (host, port, ty, sel)
+        };
+        let base = "gopher://g.example:7070/h/docs/index.html";
+        let g = |ty, sel: &str| ("g.example".to_string(), 7070, ty, sel.to_string());
+        assert_eq!(at(base, "/about.html"), g('h', "/about.html"));
+        assert_eq!(at(base, "../up.htm"), g('h', "/up.htm"));
+        assert_eq!(at(base, "page2.html"), g('h', "/docs/page2.html"));
+        assert_eq!(at(base, "/files/"), g('1', "/files/"));
+        assert_eq!(at(base, "notes.txt"), g('0', "/docs/notes.txt"));
+        assert_eq!(at(base, "my%20file.txt"), g('0', "/docs/my file.txt"));
+        // A colon later in the link is not a scheme.
+        assert_eq!(at(base, "/log/10:30.txt"), g('0', "/log/10:30.txt"));
+        assert_eq!(at("gopher://g.example:7070/h/index.html", "../x.html"), g('h', "/x.html"));
+        // A selector written without the leading slash keeps that form.
+        assert_eq!(at("gopher://g.example:7070/hdocs/index.html", "a.html"), g('h', "docs/a.html"));
+        // Absolute links are untouched, and a menu's links were already whole.
+        assert_eq!(resolve_url(base, "http://web.example/"), "http://web.example/");
+        assert_eq!(resolve_url(base, "gopher://o.example/1/x"), "gopher://o.example/1/x");
+        assert_eq!(resolve_url("gopher://g.example/1/dir", "gopher://g.example/0/f"), "gopher://g.example/0/f");
+        // A fragment is this page.
+        assert_eq!(resolve_url(base, "#top"), base);
+        // Only an `h` page: on any other base a link joins as a URL does.
+        assert_eq!(resolve_url("gopher://g.example/1/dir/", "x"), "gopher://g.example/1/dir/x");
+    }
+
     /// Serve one gopher reply; returns the port and the selector line sent.
     fn serve_gopher(reply: &'static [u8]) -> (u16, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
@@ -5289,6 +5437,21 @@ mod tests {
         let page = fetch_gopher(&format!("gopher://127.0.0.1:{port}/0/file.txt"), 72).unwrap();
         server.join().unwrap();
         assert_eq!(page.lines, vec!["Hello world", "Line two"]);
+        // A server that sends the file as it is: a `.` that is the file's own
+        // last line is kept.
+        let (port, server) = serve_gopher(b"Dots follow\n.\n");
+        let page = fetch_gopher(&format!("gopher://127.0.0.1:{port}/0/dots.txt"), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.lines, vec!["Dots follow", "."]);
+        assert_eq!(strip_gopher_terminator(b".\r\n"), b"");
+        assert_eq!(strip_gopher_terminator(b"a\n.\r\n"), b"a\n");
+        assert_eq!(strip_gopher_terminator(b"a.\r\n"), b"a.\r\n");
+        assert_eq!(strip_gopher_terminator(b"a\n."), b"a\n.");
+        // An HTML page loses it too, rather than ending on a stray `.`.
+        let (port, server) = serve_gopher(b"<p>Hi</p>\r\n.\r\n");
+        let page = fetch_gopher(&format!("gopher://127.0.0.1:{port}/h/i.html"), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.lines, vec!["Hi"], "{:?}", page.lines);
     }
 
     #[test]
