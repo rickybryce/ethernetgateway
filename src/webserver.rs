@@ -557,21 +557,7 @@ async fn handle_connection(
             let form = parse_form(&text);
             let id = form.get("id").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             let mask = form.get("m").and_then(|s| s.parse::<u16>().ok());
-            let body = if !config::get_config().cpm_joystick {
-                // A refusal the page can act on: it unticks its own switch and
-                // hands the ten letters back to the keyboard.
-                "{\"held\":false,\"why\":\"off\"}".to_string()
-            } else {
-                match mask {
-                    // `0` is a real and important report -- it is the release,
-                    // and dropping it as "nothing" would leave the stick over.
-                    Some(m) if crate::cpm::screen::set_joystick(id, m) => {
-                        "{\"held\":true}".to_string()
-                    }
-                    Some(_) => "{\"held\":false,\"why\":\"gone\"}".to_string(),
-                    None => "{\"held\":false,\"why\":\"nothing\"}".to_string(),
-                }
-            };
+            let body = joystick_reply(config::get_config().cpm_joystick, id, mask);
             write_response(
                 &mut stream,
                 200,
@@ -2241,6 +2227,25 @@ const VDM_STYLE: &str = "<style>
 const VDM_POLL_MS: u32 = 150;
 /// How often the session list is rebuilt.  Sessions come and go at human speed.
 const VDM_LIST_MS: u32 = 2000;
+
+/// The answer to a `/vdm/joy` post, with `cpm_joystick` passed in.
+fn joystick_reply(enabled: bool, id: u64, mask: Option<u16>) -> String {
+    // Off too for a machine with no board (z80pack never has one, key or no
+    // key): the letters would otherwise go to nothing.
+    let board = crate::cpm::screen::has_board(id) != Some(false);
+    if !enabled || !board {
+        // A refusal the page can act on: it unticks its own switch and hands
+        // the ten letters back to the keyboard.
+        return "{\"held\":false,\"why\":\"off\"}".to_string();
+    }
+    match mask {
+        // `0` is a real and important report -- it is the release, and
+        // dropping it as "nothing" would leave the stick over.
+        Some(m) if crate::cpm::screen::set_joystick(id, m) => "{\"held\":true}".to_string(),
+        Some(_) => "{\"held\":false,\"why\":\"gone\"}".to_string(),
+        None => "{\"held\":false,\"why\":\"nothing\"}".to_string(),
+    }
+}
 
 const VDM_SCRIPT: &str = "<script>
 var vdmCurrent = null;
@@ -8013,6 +8018,22 @@ mod tests {
         // The header keeps its ports line and nothing else — a second copy
         // would be two things to keep in step for no gain.
         assert!(!render_header(&Config::default()).contains("/vdm"));
+    }
+
+    /// A machine without the board is refused like a key that is off, so the
+    /// page hands its ten letters back: z80pack never gets one, and with the
+    /// key on its screen took W/A/S/Z/X/I/J/K/M/N into nothing.
+    #[test]
+    fn test_joystick_is_refused_for_a_machine_without_the_board() {
+        let screen = crate::cpm::screen::register("joy-board-test");
+        let off = "{\"held\":false,\"why\":\"off\"}";
+        assert_eq!(joystick_reply(true, screen.id(), Some(1)), off, "no board fitted");
+        screen.set_board(true);
+        assert_eq!(joystick_reply(true, screen.id(), Some(0)), "{\"held\":true}");
+        assert_eq!(joystick_reply(false, screen.id(), Some(0)), off, "the key off");
+        let id = screen.id();
+        drop(screen);
+        assert!(joystick_reply(true, id, Some(0)).contains("gone"), "a gone screen is not 'off'");
     }
 
     /// The manual link the desktop GUI has, and this page used to lack.

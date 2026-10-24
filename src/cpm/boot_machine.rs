@@ -349,7 +349,15 @@ impl BootMachine {
     /// Off by default so that a machine is unchanged unless the operator asked
     /// for one: these ports read `0xFF` unclaimed, and `0xFF` on an axis is a
     /// stick jammed off-centre rather than no answer.
+    ///
+    /// **Never on a z80pack machine**, whatever was asked.  z80pack has no
+    /// D+7A, and `18h`-`1Ch` are its own: the clock's command and data ports
+    /// (`19h`/`1Ah`), the 10 ms timer and the delay circuit (`simio.c`).
+    /// Measured: `cpm3-1.dsk`'s BIOS does `OUT 19h` / `IN 1Ah` five times
+    /// booting, and with the board fitted `DATE` read the joystick instead.
+    /// Call after [`Self::set_machine`]; it takes the board back too.
     pub fn set_joystick(&mut self, on: bool) {
+        let on = on && !self.is_z80pack();
         match (on, self.d7a.is_some()) {
             (true, false) => self.d7a = Some(super::d7a::D7a::new()),
             (false, true) => self.d7a = None,
@@ -390,6 +398,12 @@ impl BootMachine {
         if let Some(b) = self.d7a.as_mut() {
             b.force_switches(byte);
         }
+    }
+
+    /// Is the joystick board fitted?  Asked for and not refused -- see
+    /// [`Self::set_joystick`].
+    pub fn has_joystick(&self) -> bool {
+        self.d7a.is_some()
     }
 
     /// Has a guest actually read the joystick board? Reported, never a gate.
@@ -562,11 +576,19 @@ impl BootMachine {
         // whether this machine can bank.  Claiming ports 14h-17h anywhere else
         // would take them from a real board that might want them.
         self.has_mmu = machine.boards.contains(&super::console::Board::Z80pack);
+        if self.is_z80pack() {
+            self.d7a = None; // its ports are z80pack's clock -- see `set_joystick`
+        }
         // Cromemco's memory boards carry the bank select, so a machine with a
         // Cromemco disk controller is a machine that has one.  Gated, because a
         // guest on any other machine writing `40h` must go on seeing nothing
         // happen — a port this machine does not have is not this machine's.
         self.has_bank40 = machine.boards.contains(&super::console::Board::Cromemco);
+    }
+
+    /// Is this a z80pack machine?  The MMU comes only with its board set.
+    fn is_z80pack(&self) -> bool {
+        self.has_mmu
     }
 
     /// The console this machine carries.
@@ -2084,6 +2106,30 @@ pub(crate) mod tests {
                 assert!(len.abs_diff(want) <= 1, "{mhz} MHz: a frame of {len} NOPs, want {want}");
             }
         }
+    }
+
+    /// A z80pack machine never gets the joystick board: `18h`-`1Ch` are its
+    /// clock and timers, and its CP/M 3 BIOS reads the clock there (`OUT
+    /// 19h` / `IN 1Ah`, measured on `cpm3-1.dsk`).  Either order of setting
+    /// the machine and the board; every other machine still takes one.
+    #[test]
+    fn test_a_z80pack_machine_never_gets_the_joystick_board() {
+        let mut m = BootMachine::new();
+        m.set_machine("z80pack");
+        m.set_joystick(true);
+        assert!(m.d7a.is_none(), "asked for after the machine");
+        assert_eq!(m.port_in(0x1A), 0xFF, "1Ah is not the joystick's");
+
+        let mut m = BootMachine::new();
+        m.set_joystick(true);
+        assert!(m.d7a.is_some());
+        m.set_machine("z80pack");
+        assert!(m.d7a.is_none(), "asked for before the machine");
+
+        let mut m = BootMachine::new();
+        m.set_machine("altair_2sio");
+        m.set_joystick(true);
+        assert!(m.d7a.is_some(), "an Altair still takes one");
     }
 
     /// The picture is sampled from wherever the guest put it, at the size its

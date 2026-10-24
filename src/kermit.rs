@@ -947,7 +947,7 @@ pub(crate) async fn read_packet(
     reader: &mut (impl AsyncRead + Unpin),
     is_tcp: bool,
     is_petscii: bool,
-    mut chkt: u8,
+    chkt: u8,
     eol: u8,
     verbose: bool,
     state: &mut ReadState,
@@ -956,11 +956,26 @@ pub(crate) async fn read_packet(
     // 1. Hunt for SOH, discarding everything else.  Anything that's not
     //    SOH is line noise (or the end-of-line of the previous packet).
     //    ESC (0x1B for ANSI, also 0x5F for PETSCII) and CAN×2 are the
-    //    two user/peer abort signals that get processed during the hunt.
+    //    two user/peer abort signals that get processed during the hunt --
+    //    but only at a packet boundary.  After a packet that stopped
+    //    part-way (`state.resync`) the hunt is reading that packet's
+    //    leftover, where `_` is an ordinary printable data, SEQ or check
+    //    character and a peer that does not prefix them can send `ESC` and
+    //    `CAN`: a cancel there ended a transfer a NAK would have saved.
+    //    Silence ends the leftover, so a timeout here clears it.
     loop {
-        let b = read_byte_with_deadline(reader, is_tcp, state, deadline).await?;
+        let b = match read_byte_with_deadline(reader, is_tcp, state, deadline).await {
+            Ok(b) => b,
+            Err(e) => {
+                state.resync = false;
+                return Err(e);
+            }
+        };
         if b == SOH {
             break;
+        }
+        if state.resync {
+            continue;
         }
         if is_esc_key(b, is_petscii) {
             return Err("Kermit: cancelled by user".into());
@@ -969,7 +984,23 @@ pub(crate) async fn read_packet(
             return Err("Kermit: peer aborted (CAN×2)".into());
         }
     }
+    let got = read_packet_after_mark(reader, is_tcp, chkt, eol, verbose, state, deadline).await;
+    state.resync = got.is_err();
+    got
+}
 
+/// The rest of [`read_packet`], from the byte after MARK.  Any error leaves
+/// the stream part-way through a packet -- the caller marks it.
+#[allow(clippy::too_many_arguments)]
+async fn read_packet_after_mark(
+    reader: &mut (impl AsyncRead + Unpin),
+    is_tcp: bool,
+    mut chkt: u8,
+    eol: u8,
+    verbose: bool,
+    state: &mut ReadState,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<Packet, String> {
     // 2. LEN
     let len_byte = read_byte_with_deadline(reader, is_tcp, state, deadline).await?;
     let mut header_input: Vec<u8> = Vec::with_capacity(8);
@@ -2298,6 +2329,19 @@ pub(crate) fn compute_resume_offset(
 // SENDER STATE MACHINE
 // =============================================================================
 
+/// Is this `read_packet` error the user's ESC or the peer's CAN x2?  Either
+/// ends a transfer at once, never a retry.  The Kermit Protocol Manual (6th
+/// ed.) allows it at any point: §3.3 "Errors" has the side with a fatal error
+/// send an Error (E) packet, and "Both the sender and receiver should be
+/// prepared to receive an Error packet at any time during the transaction".
+/// The user's cancel is that side's fatal error, so it sends one; a peer that
+/// CANned us is not sent one back.  (§6.4's gentler interruption -- `Z` with
+/// `D`, or `X`/`Z` in an ACK -- is optional and ends in an E anyway when the
+/// other side ignores it.)
+fn is_cancel(e: &str) -> bool {
+    e.contains("cancelled by user") || e.contains("peer aborted")
+}
+
 /// Wait for the receiver's initiating NAK before we send our Send-Init on
 /// a download (gateway = sender).  A Kermit receiver pokes the sender with
 /// periodic NAK packets once it enters receive mode; holding our Send-Init
@@ -2327,7 +2371,7 @@ async fn wait_for_initiating_nak(
             }
             Ok(())
         }
-        Err(e) if e.contains("cancelled by user") || e.contains("peer aborted") => Err(e),
+        Err(e) if is_cancel(&e) => Err(e),
         Err(e) => {
             // Plain read timeout or a malformed poke: the peer either
             // stayed silent or is already transmitting.  Either way, stop
@@ -2435,7 +2479,8 @@ pub(crate) async fn kermit_send_with_starting_seq(
                 glog!("Kermit send: transfer aborted — notifying peer with E-packet");
             }
             // E's seq is non-critical: the peer treats any E as a session abort.
-            let _ = send_error(writer, 0, "Transfer aborted", chkt, npad, padc, eol, is_tcp).await;
+            let why = if e.contains("cancelled by user") { "Cancelled by user" } else { "Transfer aborted" };
+            let _ = send_error(writer, 0, why, chkt, npad, padc, eol, is_tcp).await;
         }
     }
     result
@@ -3041,7 +3086,7 @@ async fn send_and_await_ack(
 ) -> Result<Vec<u8>, String> {
     send_and_await_ack_opts(
         reader, writer, kind, seq, payload, chkt, pad_count, pad_char, eol, is_tcp, is_petscii,
-        verbose, state, deadline, max_retries, is_send_init, true, false,
+        verbose, state, deadline, max_retries, is_send_init, true,
     )
     .await
 }
@@ -3074,7 +3119,6 @@ async fn send_and_await_ack_opts(
     max_retries: u32,
     is_send_init: bool,
     resend_on_timeout: bool,
-    stop_on_cancel: bool,
 ) -> Result<Vec<u8>, String> {
     let pkt = build_packet(kind, seq, payload, chkt, pad_count, pad_char, eol);
     let mut attempts = 0u32;
@@ -3239,12 +3283,11 @@ async fn send_and_await_ack_opts(
                     ));
                 }
                 Err(e) => {
-                    // The user's ESC or the peer's CAN x2 means stop.  Taken
-                    // as a read error it was retried -- for a G command that
-                    // re-sent DELETE / RENAME on every ESC the user pressed.
-                    // Only where the caller asks: the data paths keep their
-                    // long-standing behaviour.
-                    if stop_on_cancel && (e.contains("cancelled by user") || e.contains("peer aborted")) {
+                    // The user's ESC or the peer's CAN x2 means stop -- see
+                    // `is_cancel`.  Taken as a read error it was retried: for
+                    // a G command that re-sent DELETE / RENAME on every ESC the
+                    // user pressed, and a transfer ran on to its retry limit.
+                    if is_cancel(&e) {
                         return Err(e);
                     }
                     attempts += 1;
@@ -3484,6 +3527,9 @@ async fn send_d_packets_windowed(
             // and only *expired* packets count against the retries, so the
             // loop spun a core until the next per-packet deadline came round.
             Err(e) if e == crate::tnio::PEER_CLOSED_ERR => return Err(e),
+            // The user's ESC or the peer's CAN x2 -- see `is_cancel`.  The
+            // caller sends the E packet on the way out.
+            Err(e) if is_cancel(&e) => return Err(e),
             Err(_e) => {
                 // Read timeout (or noisy line).  Retransmit any packet
                 // whose individual per-packet deadline has elapsed.
@@ -3700,6 +3746,7 @@ async fn send_d_and_z_streaming(
             }
             // A hang-up, not a timeout -- see `send_d_packets_windowed`.
             Err(e) if e == crate::tnio::PEER_CLOSED_ERR => return Err(e),
+            Err(e) if is_cancel(&e) => return Err(e), // see `is_cancel`
             Err(_) => {
                 // Timeout — retransmit any expired packets (D or Z).
                 let now = tokio::time::Instant::now();
@@ -4136,6 +4183,25 @@ async fn kermit_receive_committing(
                 Ok(p) => {
                     consecutive_failures = 0;
                     p
+                }
+                Err(e) if is_cancel(&e) => {
+                    // See `is_cancel`: the user's ESC is our fatal error and
+                    // tells the sender with an E packet; a CAN x2 came from
+                    // the sender, which needs no telling.
+                    if e.contains("cancelled by user") {
+                        send_error(
+                            writer,
+                            expected_seq,
+                            "Cancelled by user",
+                            session.chkt,
+                            session.npad,
+                            session.padc,
+                            session.eol,
+                            is_tcp,
+                        )
+                        .await?;
+                    }
+                    return Err(e);
                 }
                 Err(e) => {
                     consecutive_failures += 1;
@@ -6755,7 +6821,6 @@ async fn kermit_client_send_g_simple(
         cfg.kermit_max_retries,
         false,
         repeatable,
-        true,
     )
     .await?;
     Ok(())
@@ -7942,6 +8007,91 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
     }
 
+    /// The user's ESC ends a windowed or streaming send at once rather than
+    /// being retried as a read error until the retry limit (see `is_cancel`):
+    /// every timeout-length wait of those retries was the user still waiting.
+    #[tokio::test(start_paused = true)]
+    async fn test_esc_ends_a_windowed_or_streaming_send_at_once() {
+        use tokio::io::AsyncWriteExt;
+        for streaming in [false, true] {
+            let session = Capabilities { window: 4, maxl: 80, chkt: b'1', ..Capabilities::default() };
+            let q = Quoting { qctl: DEFAULT_QCTL, qbin: None, rept: None, locking_shifts: false };
+            let (inbound, mut keyboard) = tokio::io::duplex(1 << 16);
+            keyboard.write_all(&[0x1B]).await.unwrap(); // and stays connected
+            let (mut rd, _) = tokio::io::split(inbound);
+            let (outbound, _still_reading) = tokio::io::duplex(1 << 20);
+            let (_, mut wr) = tokio::io::split(outbound);
+            let mut state = ReadState::default();
+            let mut sent = 0u32;
+            let started = tokio::time::Instant::now();
+            let timeout = tokio::time::Duration::from_secs(3);
+            let out = if streaming {
+                send_d_and_z_streaming(
+                    &mut rd, &mut wr, &[0x41; 400], 40, q, 1, &session,
+                    timeout, true, false, false, &mut state, 5, &mut sent,
+                )
+                .await
+            } else {
+                send_d_packets_windowed(
+                    &mut rd, &mut wr, &[0x41; 400], 40, q, 1, &session,
+                    timeout, true, false, false, &mut state, 5, &mut sent,
+                )
+                .await
+                .map(|_| 0)
+            };
+            let err = out.expect_err("ESC ends it");
+            assert!(err.contains("cancelled by user"), "streaming={streaming}: {err}");
+            assert!(started.elapsed() < timeout, "streaming={streaming}: no retry waited out");
+            drop(keyboard);
+        }
+    }
+
+    /// The user's ESC while receiving ends it at once and tells the sender
+    /// with an E packet (Kermit Protocol Manual §3.3); a peer's CAN x2 ends it
+    /// too, but the peer that cancelled is not sent an E back.  Both used to
+    /// be NAKed and retried to the retry limit.
+    #[tokio::test(start_paused = true)]
+    async fn test_esc_ends_a_receive_with_an_e_packet_and_can_without_one() {
+        let _guard = ConfigTestGuard::acquire().await;
+        for (abort, says) in [(&[0x1Bu8][..], "cancelled by user"), (&[0x18, 0x18][..], "peer aborted")] {
+            let peer_caps = Capabilities { chkt: b'1', maxl: 80, ..Capabilities::default() };
+            let mut wire =
+                build_packet(TYPE_SEND_INIT, 0, &build_send_init_payload(&peer_caps), b'1', 0, 0, CR);
+            wire.extend(build_packet(TYPE_FILE, 1, b"ESC.BIN", b'1', 0, 0, CR));
+            wire.extend_from_slice(abort);
+            let (peer_to_gw, gw_in) = tokio::io::duplex(1 << 16);
+            let (gw_out, peer_from_gw) = tokio::io::duplex(1 << 16);
+            let (mut gw_r, _) = tokio::io::split(gw_in);
+            let (_, mut gw_w) = tokio::io::split(gw_out);
+            let (mut peer_r, mut peer_w) =
+                (tokio::io::split(peer_from_gw).0, tokio::io::split(peer_to_gw).1);
+            let peer_task = tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                peer_w.write_all(&wire).await.ok();
+                let mut heard = Vec::new();
+                let mut tmp = vec![0u8; 4096];
+                while let Ok(n) = peer_r.read(&mut tmp).await {
+                    if n == 0 {
+                        break;
+                    }
+                    heard.extend_from_slice(&tmp[..n]);
+                }
+                drop(peer_w);
+                heard
+            });
+            let started = tokio::time::Instant::now();
+            let result = kermit_receive(&mut gw_r, &mut gw_w, false, false, false).await;
+            let took = started.elapsed();
+            drop(gw_w);
+            let heard = peer_task.await.unwrap();
+            let err = result.expect_err("the abort ends it");
+            assert!(err.contains(says), "{err}");
+            assert!(took < tokio::time::Duration::from_secs(1), "{says}: not retried ({took:?})");
+            let e_sent = heard.windows(17).any(|w| w == b"Cancelled by user");
+            assert_eq!(e_sent, says == "cancelled by user", "{says}: E packet {e_sent}");
+        }
+    }
+
     /// **A NAK for the next packet is an ACK for this one** (spec §5.4) --
     /// except after a Send-Init, whose ACK carries capabilities a NAK lacks.
     /// The receiver's ACK lost and its timer firing before ours used to abort
@@ -7972,7 +8122,7 @@ mod tests {
             let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
             let out = send_and_await_ack_opts(
                 &mut rd, &mut wr, kind, seq, b"x", b'1', 0, 0, CR,
-                false, false, false, &mut state, deadline, 2, is_send_init, true, true,
+                false, false, false, &mut state, deadline, 2, is_send_init, true,
             )
             .await;
             drop(wr);
@@ -8027,7 +8177,7 @@ mod tests {
             let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
             let out = send_and_await_ack_opts(
                 &mut rd, &mut wr, TYPE_GENERIC, 0, b"Edoomed", b'1', 0, 0, CR,
-                false, false, false, &mut state, deadline, 5, false, false, true,
+                false, false, false, &mut state, deadline, 5, false, false,
             )
             .await;
             drop(wr);
@@ -8067,7 +8217,7 @@ mod tests {
         let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
         let out = send_and_await_ack_opts(
             &mut rd, &mut wr, TYPE_GENERIC, 0, b"Efile", b'1', 0, 0, CR,
-            false, false, false, &mut state, deadline, 5, false, true, true,
+            false, false, false, &mut state, deadline, 5, false, true,
         )
         .await;
         drop(wr);
@@ -8148,6 +8298,46 @@ mod tests {
         let result =
             read_packet(&mut c, false, true, b'1', CR, false, &mut state, None).await;
         assert!(result.is_err());
+    }
+
+    /// A packet that stopped part-way leaves its tail for the next MARK hunt,
+    /// and `_` there is data -- a printable character, a legal SEQ or check
+    /// -- not the C64's ESC.  Once cancels ended transfers rather than being
+    /// NAKed, it killed a transfer a resend would have saved.  At a packet
+    /// boundary, and after silence, the same byte still cancels.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_cancel_byte_in_a_broken_packets_tail_is_data() {
+        use tokio::io::AsyncWriteExt;
+        let good = build_packet(TYPE_DATA, 3, b"OK", b'1', 0, 0, CR);
+        let broken = |tail: &[u8]| {
+            let mut w = vec![SOH, b'!']; // LEN 1: "too small", returned undrained
+            w.extend_from_slice(tail);
+            w
+        };
+        let mut state = ReadState::default();
+        let mut wire = broken(b"__\x1B\x18\x18_");
+        wire.extend_from_slice(&good);
+        let mut c = cursor(wire);
+        assert!(read_packet(&mut c, false, true, b'1', CR, false, &mut state, None).await.is_err());
+        let p = read_packet(&mut c, false, true, b'1', CR, false, &mut state, None)
+            .await
+            .expect("the tail is skipped, the next packet read");
+        assert_eq!((p.kind, p.seq), (TYPE_DATA, 3));
+        let mut c = cursor(vec![0x5F]);
+        let err = read_packet(&mut c, false, true, b'1', CR, false, &mut state, None).await;
+        assert!(err.unwrap_err().contains("cancelled"), "after a clean packet it cancels");
+
+        // Silence after the tail: the next `_` is the user's.
+        let mut state = ReadState::default();
+        let (mut rd, mut wr) = tokio::io::duplex(256);
+        wr.write_all(&broken(b"_")).await.unwrap();
+        let soon = || Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(1));
+        assert!(read_packet(&mut rd, false, true, b'1', CR, false, &mut state, soon()).await.is_err());
+        let quiet = read_packet(&mut rd, false, true, b'1', CR, false, &mut state, soon()).await;
+        assert!(!quiet.unwrap_err().contains("cancelled"), "the tail's `_` is still data");
+        wr.write_all(&[0x5F]).await.unwrap();
+        let err = read_packet(&mut rd, false, true, b'1', CR, false, &mut state, soon()).await;
+        assert!(err.unwrap_err().contains("cancelled"), "after silence it cancels");
     }
 
     // ---------- Send-Init / negotiation ----------

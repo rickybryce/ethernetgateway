@@ -125,6 +125,10 @@ struct Live {
     /// permanent, and "the ship spins for ever" is the failure a level-based
     /// input has that a queue does not.
     joystick_at: AtomicU64,
+    /// Whether this screen's machine has the joystick board at all.  The key
+    /// can be on while a machine has none -- z80pack never gets one -- and a
+    /// page told so hands its ten letters back to the keyboard.
+    board: AtomicBool,
 }
 
 /// How many typed bytes may wait for a busy guest.
@@ -180,6 +184,7 @@ pub fn register(label: impl Into<String>) -> Screen {
         keys: Mutex::new(std::collections::VecDeque::new()),
         joystick: AtomicU16::new(0),
         joystick_at: AtomicU64::new(0),
+        board: AtomicBool::new(false),
     });
     if let Ok(mut list) = screens().lock() {
         list.push((id, live.clone()));
@@ -188,6 +193,11 @@ pub fn register(label: impl Into<String>) -> Screen {
 }
 
 impl Screen {
+    /// Say whether this machine has the joystick board.
+    pub fn set_board(&self, fitted: bool) {
+        self.live.board.store(fitted, Ordering::Relaxed);
+    }
+
     /// This screen's id, as the web UI names it.
     pub fn id(&self) -> u64 {
         self.id
@@ -320,6 +330,13 @@ pub fn push_keys(id: u64, bytes: &[u8]) -> bool {
 /// request never drops a held direction, and short enough that a closed tab
 /// lets go while the player is still looking at the screen.
 pub const JOYSTICK_IDLE_MS: u64 = 1_000;
+
+/// Does this screen's machine have the joystick board?  `None` when the
+/// screen has gone.
+pub fn has_board(id: u64) -> Option<bool> {
+    let list = screens().lock().ok()?;
+    list.iter().find(|(sid, _)| *sid == id).map(|(_, l)| l.board.load(Ordering::Relaxed))
+}
 
 /// Hold or release directions at one screen's guest.
 ///

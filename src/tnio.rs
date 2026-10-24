@@ -118,10 +118,15 @@ pub(crate) fn retries_exhausted<T: PartialOrd>(failures: T, max_retries: T) -> b
 ///   was a CAN.  The next CAN aborts; any non-CAN clears the flag.
 ///   ZMODEM doesn't use this field (its own CANCAN logic handles
 ///   abort) but carrying it costs nothing.
+/// - `resync` (Kermit only) records that the last packet read stopped
+///   part-way, so the next MARK hunt starts inside that packet's leftover,
+///   where an `ESC`, a PETSCII `_` or a `CAN` is data rather than a cancel.
+///   Cleared by the next clean packet, or by silence during the hunt.
 #[derive(Default)]
 pub(crate) struct ReadState {
     pub(crate) pushback: Option<u8>,
     pub(crate) pending_can: bool,
+    pub(crate) resync: bool,
 }
 
 /// Forsberg's CAN×2 abort rule, factored so every read site applies
@@ -500,7 +505,7 @@ mod tests {
         // state.pushback; the next read must return it before touching the wire.
         let data = vec![0x42];
         let mut cur = std::io::Cursor::new(data);
-        let mut s = ReadState { pushback: Some(0x99), pending_can: false };
+        let mut s = ReadState { pushback: Some(0x99), pending_can: false, resync: false };
         assert_eq!(nvt_read_byte(&mut cur, true, &mut s).await.unwrap(), 0x99);
         assert_eq!(nvt_read_byte(&mut cur, true, &mut s).await.unwrap(), 0x42);
     }

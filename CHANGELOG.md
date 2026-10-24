@@ -28,6 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     board's slots must be ones it reads, filled in order -- whichever screen
     they came from; a save that could not mount every disk says so first.
 
+### Changed
+
+- **The CP/M joystick board is off by default** (`cpm_joystick` now defaults
+  to `false`), so a booted machine is unchanged unless you ask.  Turn it on for
+  SPACEWAR and the other Cromemco games.  It is never fitted to a z80pack
+  machine, whose clock and timers use the same ports (`18h`-`1Ch`): with it
+  fitted, CP/M 3's `DATE` read the joystick.  An `egateway.conf` that already
+  says `cpm_joystick = true` keeps it.
+- **Kermit: ESC ends a transfer at once**, in either direction, and tells
+  the other Kermit with an Error packet (`Cancelled by user`), as the Kermit
+  Protocol Manual allows at any time.  It used to be retried as a read error
+  until the retry limit.  Two `CAN` bytes from the other side end it the same
+  way.  A byte inside a damaged packet's leftover is still data, so a PETSCII
+  `_` there cannot cancel.
+
 ### Security
 
 - **rustls-webpki updated to 0.103.16 and webpki-roots to 1.0.10** for
@@ -111,6 +126,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in force.  On Windows, inactive persistent routes are ignored.
 - macOS: the advice on finding the copy that holds a port uses `lsof` and
   `pgrep -l`.
+- **CP/M disk images: files in user areas 16-31 keep their space.**  Those
+  files (and names with a control byte in them), which the gateway does not
+  list, had their blocks counted free, so the next file written could
+  overwrite one.  A guest can no longer create or rename a file to such a name.
 
 ## [1.0.5] - 2026-10-18
 

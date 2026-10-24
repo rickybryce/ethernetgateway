@@ -2673,10 +2673,11 @@ impl App {
              joysticks from.  Player 1 is W/A/S/Z with X to fire, player 2 \
              I/J/K/M with N, and the screen page says so.  A held key SWINGS: \
              centred when pressed, full deflection half a second later, because \
-             these are analogue sticks and a key has no halfway.  On by default, \
-             and note the alternative -- ports 18h-1Ch read FFh when nobody \
-             claims them, and on an analogue axis FFh is a stick pushed hard \
-             over rather than no stick at all.  Needs the web server on; the \
+             these are analogue sticks and a key has no halfway.  Off by default; \
+             turn it on for those games, because without it ports 18h-1Ch \
+             read FFh, and on an analogue axis FFh is a stick pushed hard \
+             over.  Never fitted to a z80pack machine, whose clock and timers \
+             live on those ports.  Needs the web server on; the \
              terminal that started the session cannot play.  Read when a boot \
              starts, so a session already running keeps the hardware it booted \
              with.",

@@ -156,6 +156,9 @@ pub struct ImageFs {
     params: Params,
     /// Every live directory entry, in directory order.
     dir: Vec<DirSlot>,
+    /// Blocks named by entries that are in use but not files this parser
+    /// reads -- see [`foreign_blocks`].  Never handed out, never checked.
+    foreign: Vec<u16>,
     /// Allocation bitmap, one entry per block, rebuilt from the directory
     /// after every mutation.  Index 0 is block 0.
     used: Vec<bool>,
@@ -207,12 +210,13 @@ impl ImageFs {
                 format!("{}: extent mask {} is not a power of two", fmt.token, params.exm + 1),
             ));
         }
-        let dir = Self::read_directory(&mut *media, fmt, &params)?;
+        let (dir, foreign) = Self::read_directory(&mut *media, fmt, &params)?;
         let mut fs = ImageFs {
             media,
             fmt,
             params,
             dir,
+            foreign,
             used: Vec::new(),
             read_only,
         };
@@ -331,13 +335,15 @@ impl ImageFs {
         Ok(buf)
     }
 
-    /// Read and parse every live directory entry.
+    /// Read and parse every live directory entry, and gather the blocks of
+    /// the in-use entries that are not ones (see [`foreign_blocks`]).
     fn read_directory(
         media: &mut dyn Media,
         fmt: &'static Format,
         params: &Params,
-    ) -> std::io::Result<Vec<DirSlot>> {
+    ) -> std::io::Result<(Vec<DirSlot>, Vec<u16>)> {
         let mut out = Vec::new();
+        let mut foreign = Vec::new();
         for rec in 0..params.dir_records {
             let buf = Self::read_data_record(media, fmt, rec)?;
             for slot in 0..ENTRIES_PER_RECORD {
@@ -347,10 +353,12 @@ impl ImageFs {
                 let index = (rec as usize * ENTRIES_PER_RECORD + slot) as u16;
                 if let Some(e) = parse_entry(index, &raw, params) {
                     out.push(e);
+                } else {
+                    foreign.extend(foreign_blocks(&raw, params));
                 }
             }
         }
-        Ok(out)
+        Ok((out, foreign))
     }
 
     /// All extents of one file, lowest extent first.
@@ -490,12 +498,11 @@ impl ImageFs {
         for b in 0..dir_blocks.min(used.len() as u32) {
             used[b as usize] = true;
         }
-        for e in &self.dir {
-            for &b in &e.blocks {
-                if b != 0 {
-                    if let Some(slot) = used.get_mut(b as usize) {
-                        *slot = true;
-                    }
+        let files = self.dir.iter().flat_map(|e| e.blocks.iter().copied());
+        for b in files.chain(self.foreign.iter().copied()) {
+            if b != 0 {
+                if let Some(slot) = used.get_mut(b as usize) {
+                    *slot = true;
                 }
             }
         }
@@ -700,6 +707,7 @@ impl ImageFs {
     /// full.
     pub fn create(&mut self, user: u8, name: &[u8; 8], ext: &[u8; 3]) -> std::io::Result<()> {
         self.check_writable()?;
+        check_name(name, ext)?;
         if self.exists(user, name, ext) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -891,6 +899,7 @@ impl ImageFs {
         new_ext: &[u8; 3],
     ) -> std::io::Result<bool> {
         self.check_writable()?;
+        check_name(new_name, new_ext)?;
         if self.exists(user, new_name, new_ext) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -1023,7 +1032,7 @@ impl ImageFs {
     /// cannot drift from the disk — drift being the thing that makes the *next*
     /// allocation overwrite a live file.
     fn reload(&mut self) -> std::io::Result<()> {
-        self.dir = Self::read_directory(&mut *self.media, self.fmt, &self.params)?;
+        (self.dir, self.foreign) = Self::read_directory(&mut *self.media, self.fmt, &self.params)?;
         self.rebuild_bitmap();
         Ok(())
     }
@@ -1345,6 +1354,48 @@ fn encode_blocks(raw: &mut RawEntry, blocks: &[u16], params: &Params) {
             *slot = if b <= 0xFF { b as u8 } else { 0 };
         }
     }
+}
+
+/// The blocks of an in-use directory entry that [`parse_entry`] does not read
+/// as a file, which must stay allocated all the same.
+///
+/// User 16-31 is a real file to a CP/M 2.2 BDOS (BDOS 32 takes 0-31; ZCPR and
+/// ZSDOS use the upper areas), and a name with a control byte in it is still
+/// an entry the disk's own BDOS counted.  Leaving their blocks out of the
+/// bitmap handed them to the next file written -- and with a fresh block now
+/// zeroed whole, it would overwrite all of it.  CP/M 3's password entries
+/// (user 16-31 too) carry no blocks, so reading their bytes as blocks only
+/// reserves space that is not needed: the safe way to be wrong.  The label
+/// (0x20) and timestamp (0x21) records, and anything above, carry no blocks
+/// at all.  Out-of-range numbers are dropped rather than refused -- these
+/// bytes may not be block numbers.
+fn foreign_blocks(raw: &RawEntry, params: &Params) -> Vec<u16> {
+    let free = raw[0] == E5 || (raw[0] == 0 && raw[1..12].iter().all(|&c| c == 0));
+    if free || raw[0] > 31 {
+        return Vec::new();
+    }
+    // Every map byte, not just the format's `map_slots`: a file written under
+    // a wider extent mask than the format states (see `inconsistency`) names
+    // blocks past them, and nothing else stops those being handed out.
+    let map = &raw[16..32];
+    let blocks: Vec<u16> = if params.wide_blocks {
+        map.as_chunks::<2>().0.iter().map(|p| u16::from_le_bytes(*p)).collect()
+    } else {
+        map.iter().map(|&b| b as u16).collect()
+    };
+    blocks.into_iter().filter(|&b| b != 0 && b <= params.max_block).collect()
+}
+
+/// Refuse a name `parse_entry` would not read back -- a control byte in it.
+/// Written, the file would vanish from the guest's own directory.
+fn check_name(name: &[u8; 8], ext: &[u8; 3]) -> std::io::Result<()> {
+    if name.iter().chain(ext).any(|&c| !(0x20..0x7F).contains(&(c & 0x7F))) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a CP/M file name is printable characters",
+        ));
+    }
+    Ok(())
 }
 
 /// Parse one raw directory entry, or `None` if the slot is free or unusable.
@@ -1782,6 +1833,75 @@ mod tests {
             );
         }
         assert!(fs.inconsistency().is_none());
+    }
+
+    /// A foreign entry reserves every block its map names, past the format's
+    /// `map_slots` too: one written under a wider extent mask than the format
+    /// states uses them, and nothing else keeps them from the next file.
+    #[test]
+    fn test_a_foreign_entry_reserves_its_whole_map() {
+        let mut narrow = 0;
+        for fmt in super::super::format::FORMATS {
+            let p = Params::derive(fmt);
+            let mut raw: RawEntry = [0; 32];
+            raw[0] = 16;
+            raw[1..12].copy_from_slice(b"HIGH    DAT");
+            let full = if p.wide_blocks { 8 } else { 16 };
+            for i in 0..full {
+                let b = (i as u16 % p.max_block.max(1)) + 1; // nonzero, in range
+                if p.wide_blocks {
+                    raw[16 + 2 * i..18 + 2 * i].copy_from_slice(&b.to_le_bytes());
+                } else {
+                    raw[16 + i] = b as u8;
+                }
+            }
+            narrow += usize::from(p.map_slots < full);
+            assert_eq!(foreign_blocks(&raw, &p).len(), full, "{}", fmt.token);
+        }
+        assert!(narrow > 0, "some format uses fewer slots than its map has, or this tests nothing");
+    }
+
+    /// Blocks named by entries this parser does not read as files -- a user
+    /// 16-31 file (CP/M 2.2 takes 0-31), a name with a control byte in it --
+    /// are still in use, and the next file written must not be given them.
+    /// They were counted free, and with a fresh block zeroed whole the first
+    /// write wiped one.  A guest cannot create such a name either.
+    #[test]
+    fn test_blocks_of_entries_we_do_not_read_are_never_reused() {
+        let fmt = by_token("ibm3740").unwrap();
+        let mut img = blank(fmt);
+        put_entry(&mut img, fmt, 0, 16, "HIGH.DAT", 0, 16, &[2, 3]);
+        put_entry(&mut img, fmt, 1, 0, "A\u{1}.DAT", 0, 8, &[4]);
+        let p = Params::derive(fmt);
+        // Record by record: this format is skewed, so a block's records are
+        // not contiguous in the file.
+        let records = |b: u32| {
+            (0..p.records_per_block).map(move |r| fmt.data_record_offset(b * p.records_per_block + r).unwrap() as usize)
+        };
+        for b in 2..=4 {
+            for off in records(b) {
+                img[off..off + 128].fill(0xAA);
+            }
+        }
+        let mut fs = ImageFs::mount(Box::new(MemMedia::new(img)), fmt, false).unwrap();
+        assert!(!fs.is_read_only(), "a disk with such entries is still writable");
+        let (n, e) = name_of("NEW.DAT");
+        fs.create(0, &n, &e).unwrap();
+        for rec in 0..3 * p.records_per_block {
+            fs.write_record(0, &n, &e, rec, &[0x55; 128]).unwrap();
+        }
+        for b in 2..=4u32 {
+            for off in records(b) {
+                let mut got = [0u8; 128];
+                fs.media.read_at(off as u64, &mut got).unwrap();
+                assert!(got.iter().all(|&x| x == 0xAA), "block {b} was handed to NEW.DAT");
+            }
+        }
+
+        let (bad, bad_ext) = name_of("BAD\u{1}.DAT");
+        assert!(fs.create(0, &bad, &bad_ext).is_err(), "a name the directory cannot read back");
+        assert!(fs.rename(0, &n, &e, &bad, &bad_ext).is_err());
+        assert!(fs.exists(0, &n, &e), "the refused rename left the file where it was");
     }
 
     /// Space freed by an erase must be reusable, and reusing it must not

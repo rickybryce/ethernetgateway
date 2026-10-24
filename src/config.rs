@@ -601,23 +601,21 @@ const DEFAULT_CPM_SCREEN_INPUT: bool = true;
 
 /// Give a booted machine the Cromemco D+7A joystick board.
 ///
-/// On by default, and the reasoning is the opposite of a port being "free".
-/// Ports `18h`-`1Ch` read `0xFF` when nobody claims them, and on an analogue
-/// axis `0xFF` is a stick pinned hard over -- not an absence of one. So the
-/// Cromemco games have always been played against a jammed joystick, and the
-/// choice here is not whether to add hardware but which wrong answer to give:
-/// a centred stick nobody is touching, or a hard-over one.
-///
-/// It is still a key rather than always-on, because claiming a port is a real
-/// change to the machine and an operator is entitled to a booted guest that is
-/// byte for byte what it was -- the same courtesy `cpm_printer_port` gets.
+/// Off by default: claiming ports `18h`-`1Ch` is a real change to the machine,
+/// and an operator is entitled to a booted guest that is byte for byte what it
+/// was unless they asked -- the same courtesy `cpm_printer_port` gets.  Those
+/// ports are not free everywhere, either: on z80pack they are the clock and
+/// timers, so a z80pack machine never gets the board whatever this says (see
+/// `BootMachine::set_joystick`).  The cost of off is known and stated: an
+/// unclaimed port reads `0xFF`, which on an analogue axis is a stick pinned
+/// hard over, so SPACEWAR and its neighbours want this turned on.
 ///
 /// The keyboard for it is the browser's, on the Dazzler/VDM screen page, so
 /// this key does nothing whatever if the web server is off.  That page's own
 /// *Joystick* switch starts **on** when this is on: the operator has already
 /// answered the question here, and a second switch defaulting the other way
 /// reads as the setting not having taken.
-const DEFAULT_CPM_JOYSTICK: bool = true;
+const DEFAULT_CPM_JOYSTICK: bool = false;
 
 /// How fast a booted guest is allowed to run — see [`crate::cpm::speed`].
 ///
@@ -3711,11 +3709,11 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 #   terminal is.  The ESC ESC exit gesture is NOT honoured from a browser:
 #   ending a session somebody else is sitting at is not a keystroke.
 # cpm_joystick: give a booted machine the Cromemco D+7A joystick board, played
-#   from the keyboard of the browser watching its screen.  On by default, and
-#   note what the alternative is: ports 18h-1Ch read FFh when nobody claims
-#   them, and on an analogue axis FFh is a stick pushed hard over rather than no
-#   stick at all -- so SPACEWAR and its neighbours have always run against a
-#   jammed joystick.  Player 1 is W/A/S/Z with X to fire, player 2 I/J/K/M with
+#   from the keyboard of the browser watching its screen.  Off by default, so a
+#   booted machine is unchanged unless you ask; turn it on for SPACEWAR and its
+#   neighbours, because without it ports 18h-1Ch read FFh, and on an analogue
+#   axis FFh is a stick pushed hard over.  Never fitted to a z80pack machine,
+#   whose clock and timers live on those ports.  Player 1 is W/A/S/Z with X to fire, player 2 I/J/K/M with
 #   N; the page says so, and its Joystick switch starts ON while this is on.
 #   A held key SWINGS -- centred when pressed, full
 #   deflection half a second later -- because these are analogue controls and a
