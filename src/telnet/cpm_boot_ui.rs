@@ -1789,6 +1789,25 @@ mod tests {
         );
     }
 
+    /// **A screen knows whether its joystick board is fitted from the moment
+    /// it is offered.**  The web page can read the screen as soon as it is
+    /// registered; the pump seam syncs it only once the guest is running, and
+    /// a page that asked first was told "no board" and unticked its switch.
+    /// So the sync comes after `register` and before the session next yields.
+    #[test]
+    fn test_a_registered_screen_is_told_its_board_before_any_await() {
+        let src = include_str!("cpm_boot_ui.rs").replace("\r\n", "\n");
+        let src = &src[..src.find("#[cfg(test)]\nmod tests").expect("the test module")];
+        let at = src.find("async fn cpm_boot_session(").expect("cpm_boot_session");
+        let end = at + 1 + src[at + 1..].find("\n    }\n").expect("fn end");
+        let session = &src[at..end];
+        let reg = session.find("crate::cpm::screen::register(").expect("the screen is never registered");
+        let after = &session[reg..];
+        let sync = after.find("machine.sync_joystick(&screen);").expect("the screen is not synced at registration");
+        let yields = after.find(".await").expect("the session never yields");
+        assert!(sync < yields, "a page can see the screen before it is told about the board");
+    }
+
     /// **The monitor-ROM warning fits a C64 and says what to do about it.**
     ///
     /// Drawn for the operator whose disk is about to print one line and stop,
