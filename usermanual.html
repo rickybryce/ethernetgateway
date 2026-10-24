@@ -5449,7 +5449,7 @@ query:
 <ul>
     <li>A URL without a scheme — <code>example.com</code> — gets <code>https://</code> prepended automatically.</li>
     <li>Text without dots is treated as a search query and sent to DuckDuckGo.</li>
-    <li>A <code>gopher://</code> URL uses the Gopher protocol.</li>
+    <li>A <code>gopher://</code> URL uses the Gopher protocol.  Its selector is percent-encoded, as the standard (RFC 4266) writes it: <code>gopher://host/0/my%20file</code> asks for <code>my file</code>.</li>
 </ul>
 
 <h2>13.2 Following Links</h2>
@@ -5457,7 +5457,8 @@ query:
 <p>
 Links are marked with numbered tags: <code>[1]</code>, <code>[2]</code>,
 <code>[3]</code>. Press <span class="kbd">L</span> and enter a number to
-follow.
+follow.  A link the browser cannot follow &mdash; <code>javascript:</code>,
+<code>mailto:</code> &mdash; has no number.
 </p>
 
 <h2>13.3 Navigation Commands</h2>
@@ -5483,8 +5484,7 @@ follow.
 <h2>13.4 Bookmarks and Forms</h2>
 
 <p>
-Up to 100 bookmarks are saved in <code>bookmarks.txt</code> next to the
-binary. When a page has forms, press <span class="kbd">F</span> to interact —
+Up to 100 bookmarks are saved in <code>ethernetgateway-data/bookmarks.txt</code>. When a page has forms, press <span class="kbd">F</span> to interact —
 pick a form, edit fields by number, <span class="kbd">S</span> to submit or
 <span class="kbd">Q</span> to cancel.
 </p>
@@ -5496,7 +5496,7 @@ pick a form, edit fields by number, <span class="kbd">S</span> to submit or
     <li>Maximum rendered lines: 5000.</li>
     <li>HTTP request timeout: 15 s.</li>
     <li>Page history depth: 50.</li>
-    <li>On a TLS error, an HTTPS <em>page load</em> (GET) retries over HTTP with a warning; a <em>form submission</em> (POST) is refused, never re-sent in the clear.</li>
+    <li>When HTTPS fails (a TLS error, or nothing answering on its port), a <em>page load</em> retries over HTTP with a warning.  A <em>form submission</em>, GET or POST, and any address carrying data after a <code>?</code> (a search, or a form's result reloaded or bookmarked) are refused instead, never re-sent in the clear; type the address with <code>http://</code> to send it anyway.</li>
 </ul>
 
 <!-- ═══════════════════ 14. Weather ═══════════════════ -->

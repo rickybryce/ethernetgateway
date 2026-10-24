@@ -413,7 +413,62 @@ fn guard_public_url(url_str: &str) -> Result<(), String> {
 /// This is a blocking call (uses ureq) and should be run via `spawn_blocking`.
 /// `width` is the target column count for word-wrapping (32 for PETSCII, 72 for ANSI).
 pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, String> {
-    fetch_and_render_from(url, width, 0, None)
+    fetch_and_render_from(url, width, 0, None, Fetch::Page)
+}
+
+/// What a fetch is for, which decides whether a failed HTTPS request may be
+/// retried over HTTP -- see [`cleartext_refusal`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Fetch {
+    /// A page: retried over HTTP, with a warning, unless its address carries
+    /// data.
+    Page,
+    /// A GET form's own request, its fields in the address.
+    FormSubmit,
+    /// The pages a submission leads to: its redirects and refreshes.
+    AfterForm,
+}
+
+/// Why a form was not sent: its secure connection failed, and a form is never
+/// retried over `http://` (M-10).  One message for GET and POST alike.
+const FORM_NOT_RESENT: &str = "Secure connection failed and this form was NOT resubmitted \
+     over an insecure (http://) link - form data can include \
+     passwords. Try again later or use a secure site.";
+
+/// A failure after the form went through: telling the reader it was "NOT
+/// resubmitted, try again" invited a second order.
+const FORM_SENT_NO_REPLY: &str = "The form was sent, but the secure connection to the page \
+     after it failed, and that page was NOT fetched over insecure http://. \
+     Check before sending the form again.";
+
+/// An address with a query, which may be a form's fields (a reload, Back, a
+/// bookmark of a GET form's result) or a search.
+const QUERY_NOT_RESENT: &str = "No working secure connection to this address, and it carries \
+     data (after its ?), so it was NOT retried over insecure http://. \
+     To send it in the clear, type it with http:// instead.";
+
+/// Why the failed HTTPS request for `url` must not be retried over HTTP, or
+/// `None` if it may be.  `submitting`: this request is the form's own.
+///
+/// **Data in an address is never sent in the clear because HTTPS failed** --
+/// an attacker can break or refuse HTTPS at will.  A GET form puts its fields
+/// in the address, and retrying it over `http://` re-sent them, a password
+/// included (measured: `GET /login?pw=SECRET` reached the cleartext port,
+/// the warning arriving after the data had gone).  Guarding the submission
+/// alone was not enough: the result page keeps the fields in its address, and
+/// Reload, Back and a bookmark of it fetch that address as a page.  So any
+/// address with a query is refused, whoever asks; a plain page address still
+/// falls back, which is what the fallback is for (an HTTP-only site typed by
+/// name).  The hops after a submission are refused too, because a handler's
+/// redirect can carry what was submitted.
+fn cleartext_refusal(fetch: Fetch, url: &str, submitting: bool) -> Option<&'static str> {
+    let has_query = url::Url::parse(url).ok().and_then(|u| u.query().map(|q| !q.is_empty())) == Some(true);
+    match fetch {
+        Fetch::FormSubmit if submitting => Some(FORM_NOT_RESENT),
+        Fetch::FormSubmit | Fetch::AfterForm => Some(FORM_SENT_NO_REPLY),
+        Fetch::Page if has_query => Some(QUERY_NOT_RESENT),
+        Fetch::Page => None,
+    }
 }
 
 /// Turn a response into a page -- one function for a page load and a form
@@ -648,11 +703,15 @@ fn carry_downgrade(url: &str, carried: Option<DowngradeReason>) -> Option<Downgr
 /// refreshed to another page handed the reader cleartext with no warning at
 /// all -- and `no_https_service` / `https_timed_out` sites are exactly the
 /// ones the downgrade exists for.
+///
+/// `fetch` says whether a failed HTTPS request may be retried over HTTP; see
+/// [`cleartext_refusal`].
 fn fetch_and_render_from(
     url: &str,
     width: usize,
     start_hops: usize,
     carried: Option<DowngradeReason>,
+    fetch: Fetch,
 ) -> Result<WebPage, String> {
     // Follow redirects manually (auto-follow disabled below) so EVERY hop
     // is SSRF-checked before we connect — otherwise ureq would follow a
@@ -685,6 +744,8 @@ fn fetch_and_render_from(
     // `<meta refresh>` -- but only while the chain stays cleartext.
     let mut downgrade: Option<DowngradeReason> = carry_downgrade(url, carried);
     let mut hops = start_hops;
+    // Only the first request of a GET form's fetch is the submission itself.
+    let mut submitting = fetch == Fetch::FormSubmit;
     let (response, final_url) = loop {
         guard_public_url(&current)?;
         let resp = match agent
@@ -702,6 +763,9 @@ fn fetch_and_render_from(
                 if current.starts_with("https://")
                     && (is_tls_error(&e) || no_https_service(&e) || https_timed_out(&e)) =>
             {
+                if let Some(why) = cleartext_refusal(fetch, &current, submitting) {
+                    return Err(why.to_string());
+                }
                 downgrade = Some(if is_tls_error(&e) {
                     DowngradeReason::TlsFailed
                 } else if https_timed_out(&e) {
@@ -723,6 +787,12 @@ fn fetch_and_render_from(
                     if hops > MAX_REDIRECTS {
                         return Err("Too many redirects".to_string());
                     }
+                    // The same rule a `<meta refresh>` hop gets: an HTTPS hop
+                    // ends the cleartext run.  Without it, `https://a` failing
+                    // TLS, then `http://a` -> working `https://b` -> `http://c`
+                    // announced `c` as a TLS failure it never had.
+                    downgrade = carry_downgrade(&next, downgrade);
+                    submitting = false;
                     current = next;
                     continue;
                 }
@@ -745,7 +815,8 @@ fn fetch_and_render_from(
             if hops > MAX_REDIRECTS {
                 return Err("Too many redirects".to_string());
             }
-            return fetch_and_render_from(&next, width, hops, downgrade);
+            let fetch = if fetch == Fetch::FormSubmit { Fetch::AfterForm } else { fetch };
+            return fetch_and_render_from(&next, width, hops, downgrade, fetch);
         }
     }
 
@@ -895,12 +966,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
         {
             Ok(r) => r,
             Err(e) if post_url.starts_with("https://") && is_tls_error(&e) => {
-                return Err(
-                    "Secure connection failed and this form was NOT resubmitted \
-                     over an insecure (http://) link — form data can include \
-                     passwords. Try again later or use a secure site."
-                        .to_string(),
-                );
+                return Err(FORM_NOT_RESENT.to_string());
             }
             Err(e) => return Err(friendly_fetch_error(&e)),
         };
@@ -916,8 +982,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             {
                 let next = resolve_url(&post_url, loc);
                 if next != post_url {
-                    let page = fetch_and_render(&next, width)?;
-                    return Ok(page);
+                    return fetch_and_render_from(&next, width, 0, None, Fetch::AfterForm);
                 }
             }
             // 3xx with no usable / self-referential Location — render as-is.
@@ -932,7 +997,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
         if let Some(target) = meta_refresh {
             let next = resolve_url(&page.url, &target);
             if next != page.url {
-                return fetch_and_render(&next, width);
+                return fetch_and_render_from(&next, width, 0, None, Fetch::AfterForm);
             }
         }
 
@@ -949,7 +1014,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
                 query.append_pair(k, v);
             }
         }
-        fetch_and_render(url.as_str(), width)
+        fetch_and_render_from(url.as_str(), width, 0, None, Fetch::FormSubmit)
     }
 }
 
@@ -1043,6 +1108,55 @@ fn rewrap_for_screen(line: &str, max: usize) -> Vec<String> {
     rows
 }
 
+/// The node `node` is a child of, if any.
+fn parent_of(node: &Handle) -> Option<Handle> {
+    let weak = node.parent.take()?;
+    let up = weak.upgrade();
+    node.parent.set(Some(weak));
+    up
+}
+
+/// Edits to many children, done as one rebuild of each parent's child list.
+///
+/// **Linear, not one tree call per edit.**  `append_before_sibling` and
+/// `remove_from_parent` each search the parent's children and shift them, so
+/// an edit per link was the square of the links that share a parent: a 1 MB
+/// page of 51,755 adjacent links spent 49 s spacing them and 20 s numbering
+/// them (debug build), on a render nobody can interrupt.  Here each parent
+/// with edits has its children taken out once and put back with `each`'s
+/// answer for every child -- the child itself, text around it, or text in
+/// its place.  (`append` joins adjacent text, which draws the same.)
+fn rewrite_children<T>(
+    dom: &RcDom,
+    edits: Vec<(Handle, T)>,
+    mut each: impl FnMut(Handle, Option<&mut Vec<T>>) -> Vec<html5ever::tree_builder::NodeOrText<Handle>>,
+) {
+    use html5ever::tree_builder::TreeSink;
+    use std::collections::HashMap;
+    let key = |h: &Handle| std::rc::Rc::as_ptr(h) as usize;
+    let mut by_parent: HashMap<usize, (Handle, HashMap<usize, Vec<T>>)> = HashMap::new();
+    for (child, edit) in edits {
+        let Some(parent) = parent_of(&child) else { continue };
+        by_parent
+            .entry(key(&parent))
+            .or_insert_with(|| (parent, HashMap::new()))
+            .1
+            .entry(key(&child))
+            .or_default()
+            .push(edit);
+    }
+    for (_, (parent, mut edits)) in by_parent {
+        let old: Vec<Handle> = std::mem::take(&mut *parent.children.borrow_mut());
+        for child in old {
+            child.parent.set(None);
+            let edit = edits.get_mut(&key(&child));
+            for item in each(child, edit) {
+                dom.append(&parent, item);
+            }
+        }
+    }
+}
+
 /// Remove every element named in `tags` (and what is inside it) from the tree.
 ///
 /// Iterative, like the tree's own `Drop`: the depth is bounded before this
@@ -1082,7 +1196,7 @@ fn prune_elements(root: &Handle, tags: &[&str]) {
 /// One pass over the tree: each node's edges are worked out from its
 /// children's, never by re-reading a subtree.
 fn space_touching_elements(dom: &RcDom) {
-    use html5ever::tree_builder::{NodeOrText, TreeSink};
+    use html5ever::tree_builder::NodeOrText;
     use std::collections::HashMap;
 
     /// A node's first and last visible character (whitespace as ' '), and
@@ -1171,9 +1285,11 @@ fn space_touching_elements(dom: &RcDom) {
         drop(children);
         edges.insert(key(&node), own);
     }
-    for sibling in inserts {
-        dom.append_before_sibling(&sibling, NodeOrText::AppendText(" ".into()));
-    }
+    let inserts = inserts.into_iter().map(|h| (h, ())).collect();
+    rewrite_children(dom, inserts, |child, space| match space {
+        Some(_) => vec![NodeOrText::AppendText(" ".into()), NodeOrText::AppendNode(child)],
+        None => vec![NodeOrText::AppendNode(child)],
+    });
 }
 
 /// Parse HTML the way a browser that does not run JavaScript should.
@@ -1226,43 +1342,38 @@ const MAX_META_REFRESH_DELAY: f64 = 5.0;
 /// `None` when there is no URL at all -- that is a self-refresh, and following
 /// it would spin -- or when the delay is longer than a redirect would use.
 fn parse_meta_refresh(content: &str) -> Option<String> {
-    let parts: Vec<&str> = content.split(';').collect();
-    // The delay is first *when there is one*.  It is read without consuming
-    // the part, because some pages write only `url=...` with no delay at all
-    // -- consuming it unconditionally swallowed exactly that form.  An absent
-    // or non-numeric delay is treated as 0; a parseable one that is too long
-    // is a periodic refresh and is rejected here.
-    let delay: f64 = parts
-        .first()
-        .and_then(|p| p.trim().parse().ok())
-        .unwrap_or(0.0);
+    let content = content.trim();
+    // The delay is first *when there is one*: some pages write only
+    // `url=...`, and that form is followed.  A delay too long is a periodic
+    // refresh, and is not.
+    let digits = content.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(content.len());
+    let delay: f64 = content[..digits].parse().unwrap_or(0.0);
     if delay > MAX_META_REFRESH_DELAY {
         return None;
     }
-    for part in &parts {
-        // Split on the FIRST '=' so a query string in the target keeps its
-        // own: `url=/a?b=c` gives key `url`, value `/a?b=c`.  Trimming each
-        // side is what admits `url = "..."`, which real pages write and a
-        // fixed `"url="` prefix test misses -- found by the test, not by
-        // reading the spec.
-        let Some((key, value)) = part.split_once('=') else {
-            continue;
-        };
-        if key.trim().eq_ignore_ascii_case("url") {
-            let raw = value.trim();
-            // Strip one layer of matching quotes, which both forms use.
-            let unquoted = raw
-                .strip_prefix('"')
-                .and_then(|r| r.strip_suffix('"'))
-                .or_else(|| raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
-                .unwrap_or(raw);
-            let target = unquoted.trim();
-            if !target.is_empty() {
-                return Some(target.to_string());
-            }
-        }
-    }
-    None
+    let rest = content[digits..].trim_start();
+    let rest = rest.strip_prefix([';', ',']).unwrap_or(rest).trim_start();
+    // The keyword is optional after a delay (HTML's own parse allows `0;
+    // /next`), required without one, and in any case and spacing:
+    // `url = "..."` is written by real pages.
+    let keyword = rest
+        .get(..3)
+        .filter(|k| k.eq_ignore_ascii_case("url"))
+        .and_then(|_| rest[3..].trim_start().strip_prefix('='));
+    let value = match keyword {
+        Some(v) => v.trim_start(),
+        None if digits > 0 => rest,
+        None => return None,
+    };
+    // **Everything after `url=` is the address**, semicolons and all.  It was
+    // split on `;` with the delay, so `0; url=/a;jsessionid=X` followed `/a`.
+    // A quoted value ends at its closing quote.
+    let target = match value.chars().next() {
+        Some(q @ ('"' | '\'')) => value[1..].split(q).next().unwrap_or(""),
+        _ => value,
+    };
+    let target = target.trim();
+    (!target.is_empty()).then(|| target.to_string())
 }
 
 /// Find a followable `<meta http-equiv="refresh">` target in the document.
@@ -1312,25 +1423,34 @@ const MARK_CLOSE: char = '\u{FDD1}';
 /// to show -- an icon with no alt text -- gets none, as before: html2text
 /// draws nothing for it, and a number on its own is a link to nowhere visible.
 fn number_links(dom: &RcDom) -> Vec<String> {
-    use html5ever::tree_builder::{NodeOrText, TreeSink};
+    use html5ever::tree_builder::NodeOrText;
 
     let mut links: Vec<String> = Vec::new();
+    // Each target's number, so a page of many links is not a search per link.
+    let mut numbers: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut marks: Vec<(Handle, usize)> = Vec::new();
     let mut stack = vec![dom.document.clone()];
     while let Some(node) = stack.pop() {
         if let Element { ref name, .. } = node.data {
             if &*name.local == "a" {
                 if let Some(href) = get_attr(&node, "href") {
-                    // An anchor on this page goes nowhere a number could take you.
-                    let shown = if href.is_empty() || href.starts_with('#') { None } else { last_shown(&node) };
+                    // An anchor on this page goes nowhere a number could take
+                    // you, and nor does a link this browser cannot fetch --
+                    // `javascript:`, `mailto:`, `tel:` -- which was numbered
+                    // and then answered "Blocked: URL has no host".  A
+                    // relative link does not parse alone, and is kept.
+                    let fetchable = url::Url::parse(&href)
+                        .map_or(true, |u| matches!(u.scheme(), "http" | "https" | "gopher"));
+                    let shown = if href.is_empty() || href.starts_with('#') || !fetchable {
+                        None
+                    } else {
+                        last_shown(&node)
+                    };
                     if let Some(leaf) = shown {
-                        let num = match links.iter().position(|l| *l == href) {
-                            Some(pos) => pos + 1,
-                            None => {
-                                links.push(href);
-                                links.len()
-                            }
-                        };
+                        let num = *numbers.entry(href.clone()).or_insert_with(|| {
+                            links.push(href);
+                            links.len()
+                        });
                         marks.push((leaf, num));
                     }
                 }
@@ -1348,37 +1468,21 @@ fn number_links(dom: &RcDom) -> Vec<String> {
     // alone on the next.  Whitespace after the number is harmless -- and a
     // space inside the link (`<a>Log in </a><a>Register</a>`) now lands
     // after the number instead of between it and its word.
-    for (leaf, num) in marks {
-        let mark = format!("{MARK_OPEN}{num}{MARK_CLOSE}");
-        let Some(parent) = leaf.parent.take().and_then(|w| {
-            let up = w.upgrade();
-            leaf.parent.set(Some(w));
-            up
-        }) else {
-            continue;
-        };
-        let next = {
-            let siblings = parent.children.borrow();
-            siblings.iter().position(|c| std::rc::Rc::ptr_eq(c, &leaf))
-                .and_then(|i| siblings.get(i + 1).cloned())
-        };
-        let insert = |text: String| match &next {
-            Some(n) => dom.append_before_sibling(n, NodeOrText::AppendText(text.into())),
-            None => dom.append(&parent, NodeOrText::AppendText(text.into())),
-        };
+    rewrite_children(dom, marks, |leaf, nums| {
+        let Some(nums) = nums else { return vec![NodeOrText::AppendNode(leaf)] };
+        let mark: String = nums.iter().map(|n| format!("{MARK_OPEN}{n}{MARK_CLOSE}")).collect();
         match text_of(&leaf) {
             // Text: replaced by itself with the number before its trailing
             // whitespace.
             Some(text) => {
                 let body = text.trim_end();
                 let tail = &text[body.len()..];
-                dom.remove_from_parent(&leaf);
-                insert(format!("{body}{mark}{tail}"));
+                vec![NodeOrText::AppendText(format!("{body}{mark}{tail}").into())]
             }
             // An image: the number straight after its alt text.
-            None => insert(mark),
+            None => vec![NodeOrText::AppendNode(leaf), NodeOrText::AppendText(mark.into())],
         }
-    }
+    });
     links
 }
 
@@ -1390,7 +1494,7 @@ fn number_links(dom: &RcDom) -> Vec<String> {
 /// pointing at whatever link 1 really was.  Text, and the attributes html2text
 /// draws (`alt`); an SVG's title is text like any other.
 fn strip_mark_chars(dom: &RcDom) {
-    use html5ever::tree_builder::{NodeOrText, TreeSink};
+    use html5ever::tree_builder::NodeOrText;
 
     let is_mark = |c: char| c == MARK_OPEN || c == MARK_CLOSE;
     let mut forged: Vec<(Handle, String)> = Vec::new();
@@ -1409,11 +1513,12 @@ fn strip_mark_chars(dom: &RcDom) {
         }
         stack.extend(node.children.borrow().iter().cloned());
     }
-    for (node, clean) in forged {
-        // Before the old node and then without it, so it lands in its place.
-        dom.append_before_sibling(&node, NodeOrText::AppendText(clean.into()));
-        dom.remove_from_parent(&node);
-    }
+    // In its place -- one rebuild per parent, as for the numbers: a page of
+    // forged marks is as many edits as a page of links.
+    rewrite_children(dom, forged, |node, clean| match clean.and_then(|c| c.pop()) {
+        Some(clean) => vec![NodeOrText::AppendText(clean.into())],
+        None => vec![NodeOrText::AppendNode(node)],
+    });
 }
 
 /// A text node's exact contents, or `None` for anything else.
@@ -2059,6 +2164,26 @@ fn extract_form_fields(
     }
     if let Element { ref name, .. } = node.data {
         let tag = name.local.as_ref();
+        // **A disabled control is never sent**, as in any browser -- they
+        // were, value and all.  Nor is anything in a disabled `<fieldset>`
+        // except what is in its first `<legend>`, which the HTML spec keeps
+        // enabled.  A disabled submit button is passed over, so the next one
+        // is the form's button rather than a button that does nothing.
+        if get_attr(node, "disabled").is_some() {
+            match tag {
+                "input" | "textarea" | "select" | "button" => return,
+                "fieldset" => {
+                    let legend = node.children.borrow().iter()
+                        .find(|c| matches!(&c.data, Element { name, .. } if &*name.local == "legend"))
+                        .cloned();
+                    if let Some(legend) = legend {
+                        extract_form_fields(&legend, fields, submit_label, submit_taken, labels, enclosing);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         match tag {
             "input" => {
                 let input_type = get_attr(node, "type")
@@ -2355,10 +2480,53 @@ fn read_gopher_body(
     Ok(body)
 }
 
+/// A selector as a URL writes it: percent-encoded (RFC 4266 section 2.1).
+///
+/// Everything that is not printable ASCII, and the three characters a URL
+/// gives meaning to -- `%`, `?` (the `?search` mark, see
+/// [`is_gopher_search`]) and `#`.  A search's TAB goes in as `%09`, which is
+/// also what keeps it through a bookmark: the bookmark file strips
+/// whitespace, and a raw TAB in the URL was stripped with it, joining the
+/// query to the selector.
+fn encode_selector(selector: &str) -> String {
+    let mut out = String::with_capacity(selector.len());
+    for b in selector.bytes() {
+        if b.is_ascii_graphic() && !matches!(b, b'%' | b'?' | b'#') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The selector a URL's path stands for, its `%XX` escapes decoded.  A `%`
+/// not followed by two hex digits is kept as written.
+fn decode_selector(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(h), Some(l)) = (bytes.get(i + 1).and_then(|&b| hex(b)), bytes.get(i + 2).and_then(|&b| hex(b)))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Parse a gopher:// URL into (host, port, item_type, selector).
 ///
 /// Format: `gopher://host[:port][/[type][selector]]`
 /// Default port is 70, default type is '1' (directory), default selector is empty.
+/// The selector is percent-decoded: a link from a web page writes
+/// `my%20file`, and the server's selector is `my file`.
 fn parse_gopher_url(url: &str) -> Result<(String, u16, char, String), String> {
     let rest = url.strip_prefix("gopher://").ok_or("Not a gopher URL")?;
 
@@ -2390,17 +2558,19 @@ fn parse_gopher_url(url: &str) -> Result<(String, u16, char, String), String> {
     } else {
         let first = path.chars().next().unwrap();
         if first.is_ascii_alphanumeric() || first == 'i' || first == '+' {
-            (first, path[1..].to_string())
+            (first, decode_selector(&path[1..]))
         } else {
-            ('1', path.to_string())
+            ('1', decode_selector(path))
         }
     };
 
     Ok((host, port, item_type, selector))
 }
 
-/// Build a gopher:// URL from components.
+/// Build a gopher:// URL from components, the selector percent-encoded
+/// (see [`encode_selector`]).
 fn build_gopher_url(host: &str, port: u16, item_type: char, selector: &str) -> String {
+    let selector = encode_selector(selector);
     if port == GOPHER_PORT {
         format!("gopher://{}/{}{}", host, item_type, selector)
     } else {
@@ -2466,13 +2636,16 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
 
     let mut page = match item_type {
         '0' => {
-            // Plain text file — just wrap and display
-            let lines: Vec<String> = text
-                .lines()
-                .flat_map(|line| {
-                    let clean = line.trim_end_matches('\r');
-                    wrap_line(clean, width)
-                })
+            // Plain text file — just wrap and display.  A text file ends
+            // with a line holding only `.` (RFC 1436), which is the
+            // protocol's and not the file's: it was shown as the last line.
+            let mut raw: Vec<&str> = text.lines().map(|line| line.trim_end_matches('\r')).collect();
+            if raw.last() == Some(&".") {
+                raw.pop();
+            }
+            let lines: Vec<String> = raw
+                .into_iter()
+                .flat_map(|line| wrap_line(line, width))
                 .take(MAX_RENDERED_LINES)
                 .collect();
             WebPage {
@@ -2487,6 +2660,10 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
             // Directory listing or search results — parse Gopher menu
             render_gopher_directory(&text, &host, port, width, final_url)?
         }
+        // An HTML document the gopher server holds itself (an `h` item
+        // whose selector is not a `URL:` link): drawn as a web page is.
+        // Its refresh, if any, is not followed -- that is an HTTP fetch.
+        'h' => render_html_body(&body, final_url, width)?.0,
         _ => {
             // Unsupported type — show as plain text
             let lines: Vec<String> = text
@@ -2540,10 +2717,12 @@ fn render_gopher_directory(
 
         let display = fields.first().unwrap_or(&"");
         let selector = fields.get(1).unwrap_or(&"");
-        let host = fields.get(2).unwrap_or(&current_host);
+        // An empty host field means this server, as a missing one does: it
+        // was taken as written, giving `gopher:///1/sub` and "Empty host".
+        let host = fields.get(2).map(|h| h.trim()).filter(|h| !h.is_empty()).unwrap_or(current_host);
         let port: u16 = fields
             .get(3)
-            .and_then(|p| p.parse().ok())
+            .and_then(|p| p.trim().parse().ok())
             .unwrap_or(current_port);
 
         match item_type {
@@ -2580,9 +2759,16 @@ fn render_gopher_directory(
                 }
             }
             'h' => {
-                // HTML link — extract URL if selector starts with "URL:"
-                let url = selector.strip_prefix("URL:").unwrap_or(selector);
-                links.push(url.to_string());
+                // `URL:` is a link to the web; anything else is an HTML
+                // document on a gopher server, fetched as one.  The bare
+                // selector was taken for a URL, so `/index.html` resolved to
+                // `gopher://host/index.html` -- item type `i`, selector
+                // `ndex.html`.
+                let url = match selector.strip_prefix("URL:") {
+                    Some(web) => web.to_string(),
+                    None => build_gopher_url(host, port, 'h', selector),
+                };
+                links.push(url);
                 let link_num = links.len();
                 for (i, wrapped) in wrap_line(display, width.saturating_sub(5)).iter().enumerate() {
                     if i == 0 {
@@ -3880,8 +4066,11 @@ mod tests {
             "gopher://example.com/7/v2/vs?search",
             "hello world",
         );
-        assert!(url.starts_with("gopher://example.com/7/v2/vs"));
-        assert!(url.contains("hello world"));
+        // Percent-encoded in the URL (RFC 4266), the TAB included, and
+        // decoded back into the selector the server is sent.
+        assert_eq!(url, "gopher://example.com/7/v2/vs%09hello%20world");
+        let (_, _, _, selector) = parse_gopher_url(&url).unwrap();
+        assert_eq!(selector, "/v2/vs\thello world");
     }
 
     #[test]
@@ -4862,5 +5051,310 @@ mod tests {
             "expected q=hello world (URL-encoded), got body: {:?}",
             body
         );
+    }
+
+    /// A server that answers a TLS hello with plain HTTP -- a forced TLS
+    /// error -- and then counts what reaches it in the clear.  Returns the
+    /// port and a handle giving every request after the first.
+    fn serve_tls_breaker() -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        serve_https_breaker(false)
+    }
+
+    /// As [`serve_tls_breaker`], or with `reset` the first connection is
+    /// reset instead: closed with the hello unread, which the kernel answers
+    /// with RST -- "nothing serves HTTPS here", the other road to HTTP.
+    fn serve_https_breaker(reset: bool) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut cleartext = Vec::new();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut seen = 0;
+            while std::time::Instant::now() < deadline {
+                let Ok((mut s, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                };
+                s.set_nonblocking(false).unwrap();
+                if reset && seen == 0 {
+                    seen += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    drop(s);
+                    continue;
+                }
+                s.set_read_timeout(Some(std::time::Duration::from_millis(300))).ok();
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                if seen > 0 {
+                    cleartext.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                }
+                seen += 1;
+                let _ = s.write_all(&response("200 OK", Some("text/plain"), b"ok"));
+            }
+            cleartext
+        });
+        (port, handle)
+    }
+
+    /// A GET form is never retried over HTTP: its fields are in the URL.
+    /// Measured before the fix: `GET /login?pw=SECRET` reached the
+    /// cleartext port after a forced TLS error.
+    #[test]
+    fn test_a_get_form_is_not_resent_in_the_clear_when_tls_fails() {
+        let (port, server) = serve_tls_breaker();
+        let form = WebForm {
+            action: format!("https://127.0.0.1:{port}/login"),
+            method: "get".into(),
+            label: "Log in".into(),
+            fields: vec![FormField::Text {
+                name: "pw".into(),
+                value: "SECRET".into(),
+                label: "Password".into(),
+                input_type: "password".into(),
+            }],
+        };
+        let result = submit_form("https://example.com/", &form, 72);
+        let cleartext = server.join().unwrap();
+        assert!(cleartext.is_empty(), "the form went out in the clear: {cleartext:?}");
+        let err = result.err().expect("the submission must fail, not downgrade");
+        assert!(err.contains("NOT resubmitted"), "{err}");
+    }
+
+    /// Nor when the HTTPS connection is reset, which an attacker can do as
+    /// easily as break the handshake.
+    #[test]
+    fn test_a_get_form_is_not_resent_in_the_clear_when_https_is_reset() {
+        let (port, server) = serve_https_breaker(true);
+        let form = WebForm {
+            action: format!("https://127.0.0.1:{port}/login"),
+            method: "get".into(),
+            label: "Log in".into(),
+            fields: vec![FormField::Hidden { name: "pw".into(), value: "SECRET".into() }],
+        };
+        let result = submit_form("https://example.com/", &form, 72);
+        let cleartext = server.join().unwrap();
+        assert!(cleartext.is_empty(), "the form went out in the clear: {cleartext:?}");
+        assert!(result.is_err());
+        // The positive control: a page fetch from the same fixture does fall
+        // back, so the reset really is the no-HTTPS case.
+        let (port, server) = serve_https_breaker(true);
+        let page = fetch_and_render(&format!("https://127.0.0.1:{port}/"), 72).unwrap();
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert!(page.lines[0].contains("No HTTPS"), "{:?}", page.lines);
+    }
+
+    /// A form's result keeps its fields in its address, and Reload, Back and
+    /// a bookmark fetch that address as a page: an address with a query is
+    /// never retried over HTTP either, by a TLS error or by a reset.
+    #[test]
+    fn test_an_address_with_a_query_is_not_resent_in_the_clear() {
+        for reset in [false, true] {
+            let (port, server) = serve_https_breaker(reset);
+            let result = fetch_and_render(&format!("https://127.0.0.1:{port}/login?pw=SECRET"), 72);
+            let cleartext = server.join().unwrap();
+            assert!(cleartext.is_empty(), "reset={reset}: went out in the clear: {cleartext:?}");
+            let err = result.err().expect("the fetch must fail, not downgrade");
+            assert!(err.contains("NOT retried"), "reset={reset}: {err}");
+        }
+    }
+
+    /// After a POST went through, a failure on the page it leads to must not
+    /// say the form was not sent: "try again" there is a second order.
+    #[test]
+    fn test_a_failure_after_a_post_says_the_form_was_sent() {
+        let (breaker, breaker_server) = serve_tls_breaker();
+        let location = format!("https://127.0.0.1:{breaker}/done");
+        let action = serve_raw(format!(
+            "HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ).into_bytes());
+        let form = WebForm { action, method: "post".into(), label: "Buy".into(), fields: Vec::new() };
+        let err = submit_form("http://127.0.0.1/", &form, 72).err().expect("the reply page failed");
+        assert!(breaker_server.join().unwrap().is_empty());
+        assert!(err.contains("The form was sent"), "{err}");
+    }
+
+    /// A GET form's own request is the submission; a redirect or a refresh
+    /// after it is a page the form led to, and is reported as such.
+    #[test]
+    fn test_a_failure_after_a_get_form_says_the_form_was_sent() {
+        for refresh in [false, true] {
+            let (breaker, breaker_server) = serve_tls_breaker();
+            let next = format!("https://127.0.0.1:{breaker}/done");
+            let reply = if refresh {
+                let body = format!("<meta http-equiv=refresh content=\"0; url={next}\">");
+                response("200 OK", Some("text/html"), body.as_bytes())
+            } else {
+                format!("HTTP/1.1 302 Found\r\nLocation: {next}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+            };
+            let action = serve_raw(reply);
+            let form = WebForm { action, method: "get".into(), label: "Go".into(), fields: Vec::new() };
+            let err = submit_form("http://127.0.0.1/", &form, 72).err().expect("the reply page failed");
+            assert!(breaker_server.join().unwrap().is_empty());
+            assert!(err.contains("The form was sent"), "refresh={refresh}: {err}");
+        }
+    }
+
+    /// The positive control: an ordinary page fetch still falls back, so the
+    /// fixture above really does force the downgrade.
+    #[test]
+    fn test_a_page_fetch_still_falls_back_when_tls_fails() {
+        let (port, server) = serve_tls_breaker();
+        let page = fetch_and_render(&format!("https://127.0.0.1:{port}/"), 72).unwrap();
+        let cleartext = server.join().unwrap();
+        assert_eq!(cleartext.len(), 1, "{cleartext:?}");
+        assert!(page.lines[0].contains("HTTPS failed"), "{:?}", page.lines);
+    }
+
+    /// The HTTP redirect loop clears the downgrade reason at an HTTPS hop,
+    /// as the meta-refresh path does.  Pinned by source: a hop that *works*
+    /// over HTTPS needs a trusted certificate, which no fixture here has.
+    #[test]
+    fn test_an_https_redirect_hop_ends_the_cleartext_run() {
+        let src = include_str!("webbrowser.rs").replace("\r\n", "\n");
+        let start = src.find("\nfn fetch_and_render_from(").unwrap();
+        let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+        let redirect = &body[body.find("hops > MAX_REDIRECTS").unwrap()..];
+        let carry = redirect.find("downgrade = carry_downgrade(&next, downgrade);");
+        let advance = redirect.find("current = next;").unwrap();
+        assert!(carry.is_some_and(|c| c < advance), "the redirect hop must re-judge the downgrade reason");
+    }
+
+    /// Tree edits are linear in the links that share a parent.  Before:
+    /// 49 s + 20 s for a 1 MB page of 51,755 adjacent links (debug build),
+    /// about 11 s for this 400 KB one.
+    #[test]
+    fn test_a_page_of_many_adjacent_links_is_numbered_in_linear_time() {
+        let mut html = String::from("<html><body>");
+        let mut i = 0;
+        while html.len() < 400 * 1024 {
+            html.push_str(&format!("<a href=/{i}>x</a>"));
+            i += 1;
+        }
+        let dom = parse_html_no_scripting(html.as_bytes()).unwrap();
+        let t = std::time::Instant::now();
+        strip_mark_chars(&dom);
+        space_touching_elements(&dom);
+        let links = number_links(&dom);
+        let took = t.elapsed();
+        assert_eq!(links.len(), i);
+        assert!(took < std::time::Duration::from_secs(3), "{i} links took {took:?}");
+        // Every one spaced and numbered, in order.
+        let (page, _) = render_html_body(b"<a href=/a>x</a><a href=/b>y</a><a href=/a>z</a>", "http://h/".into(), 72).unwrap();
+        assert_eq!(page.links, vec!["/a", "/b"]);
+        assert_eq!(page.lines[0], "x\u{2}1\u{3} y\u{2}2\u{3} z\u{2}1\u{3}");
+    }
+
+    /// Forged mark characters are still taken out in place.
+    #[test]
+    fn test_forged_marks_are_stripped_in_place() {
+        let (page, _) = render_html_body("<p>a<b>B</b>c&#xFDD0;9&#xFDD1;d<i>I</i>e</p>".as_bytes(), "http://h/".into(), 72).unwrap();
+        assert_eq!(page.lines[0], "aBc9dIe");
+    }
+
+    /// Gopher `h` items, empty host fields, and the text terminator.
+    #[test]
+    fn test_gopher_h_items_and_empty_hosts_make_working_links() {
+        let menu = "hHome page\t/index.html\tgopher.example\t70\r\n\
+                    hThe web\tURL:http://example.com/\tgopher.example\t70\r\n\
+                    1Sub\t/sub\t\t70\r\n.\r\n";
+        let page = render_gopher_directory(menu, "here.example", 70, 72, "gopher://here.example/1".into()).unwrap();
+        assert_eq!(page.links[0], "gopher://gopher.example/h/index.html");
+        assert_eq!(page.links[1], "http://example.com/");
+        assert_eq!(page.links[2], "gopher://here.example/1/sub");
+        let (host, _, ty, sel) = parse_gopher_url(&resolve_url(&page.url, &page.links[0])).unwrap();
+        assert_eq!((host.as_str(), ty, sel.as_str()), ("gopher.example", 'h', "/index.html"));
+    }
+
+    /// Serve one gopher reply; returns the port and the selector line sent.
+    fn serve_gopher(reply: &'static [u8]) -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok();
+            let mut buf = [0u8; 1024];
+            let n = s.read(&mut buf).unwrap_or(0);
+            s.write_all(reply).unwrap();
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+        (port, h)
+    }
+
+    #[test]
+    fn test_a_gopher_text_file_drops_its_terminator_line() {
+        let (port, server) = serve_gopher(b"Hello world\r\nLine two\r\n.\r\n");
+        let page = fetch_gopher(&format!("gopher://127.0.0.1:{port}/0/file.txt"), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.lines, vec!["Hello world", "Line two"]);
+    }
+
+    #[test]
+    fn test_a_gopher_html_document_is_drawn_as_a_page() {
+        let (port, server) = serve_gopher(b"<html><title>Hi</title><body><p>Hello <a href=\"http://x.example/\">there</a></p></body></html>");
+        let page = fetch_gopher(&format!("gopher://127.0.0.1:{port}/h/index.html"), 72).unwrap();
+        assert_eq!(server.join().unwrap(), "/index.html\r\n");
+        assert_eq!(page.title.as_deref(), Some("Hi"));
+        assert_eq!(page.links, vec!["http://x.example/"]);
+        assert!(page.lines[0].starts_with("Hello there"), "{:?}", page.lines);
+    }
+
+    /// RFC 4266: a URL's selector is percent-encoded, and the server is sent
+    /// it decoded.
+    #[test]
+    fn test_a_gopher_selector_is_percent_decoded_for_the_server() {
+        let (port, server) = serve_gopher(b"text\r\n.\r\n");
+        fetch_gopher(&format!("gopher://127.0.0.1:{port}/0/my%20file%3F"), 72).unwrap();
+        assert_eq!(server.join().unwrap(), "/my file?\r\n");
+        // A menu's selector goes into its link encoded, and comes back whole.
+        let page = render_gopher_directory("0A file\t/a b%c?search\th\t70\r\n", "h", 70, 72, "gopher://h/1".into()).unwrap();
+        assert_eq!(page.links[0], "gopher://h/0/a%20b%25c%3Fsearch");
+        assert!(!is_gopher_search(&page.links[0]));
+        assert_eq!(parse_gopher_url(&page.links[0]).unwrap().3, "/a b%c?search");
+        // A `%` not starting an escape is kept.
+        assert_eq!(decode_selector("/100%"), "/100%");
+    }
+
+    #[test]
+    fn test_meta_refresh_keeps_the_whole_url() {
+        assert_eq!(parse_meta_refresh("0; url=/a;jsessionid=X"), Some("/a;jsessionid=X".to_string()));
+        assert_eq!(parse_meta_refresh("0;url='/a;b' junk"), Some("/a;b".to_string()));
+        assert_eq!(parse_meta_refresh("0; /next"), Some("/next".to_string()));
+        assert_eq!(parse_meta_refresh("1, URL=/comma"), Some("/comma".to_string()));
+        assert_eq!(parse_meta_refresh("nonsense"), None);
+    }
+
+    #[test]
+    fn test_disabled_controls_are_not_sent() {
+        let html = br#"<form action=/s>
+            <input name=q value=a>
+            <input name=off value=b disabled>
+            <textarea name=ta disabled>t</textarea>
+            <select name=sel disabled><option>o</option></select>
+            <fieldset disabled><legend><input name=inlegend value=l></legend><input name=infs value=f></fieldset>
+            <fieldset disabled><div><input name=indiv></div><legend><input name=late value=l></legend></fieldset>
+            <button name=b1 value=1 disabled>No</button>
+            <button name=b2 value=2>Go</button>
+        </form>"#;
+        let (page, _) = render_html_body(html, "http://h/".into(), 72).unwrap();
+        let form = &page.forms[0];
+        let names: Vec<&str> = form.fields.iter().map(|f| match f {
+            FormField::Text { name, .. } | FormField::Hidden { name, .. } | FormField::TextArea { name, .. }
+            | FormField::Select { name, .. } | FormField::Checkbox { name, .. } | FormField::Radio { name, .. } => name.as_str(),
+        }).collect();
+        // The first `<legend>` is enabled wherever it stands among the children.
+        assert_eq!(names, vec!["q", "inlegend", "late", "b2"]);
+        assert_eq!(form.label, "Go");
+    }
+
+    #[test]
+    fn test_links_that_cannot_be_fetched_get_no_number() {
+        let html = br#"<p><a href="javascript:void(0)">js</a> <a href="mailto:a@b.c">mail</a>
+            <a href="/rel">rel</a> <a href="HTTP://x.example/">abs</a> <a href="gopher://g/1">go</a></p>"#;
+        let (page, _) = render_html_body(html, "http://h/".into(), 72).unwrap();
+        assert_eq!(page.links, vec!["/rel", "HTTP://x.example/", "gopher://g/1"]);
+        assert!(page.lines[0].starts_with("js mail rel\u{2}1\u{3}"), "{:?}", page.lines);
     }
 }

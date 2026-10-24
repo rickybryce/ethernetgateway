@@ -65,6 +65,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Browser: form data is never re-sent over plain HTTP.**  A search or
+  login form that submits with GET puts its fields in the address, and when
+  HTTPS failed it was retried over `http://` like any page -- a password
+  field included, the warning arriving after the data had gone.  It is
+  refused now, as a POST form always was, and so is any `https://` address
+  carrying data after a `?` -- the form's result page reloaded, gone back to
+  or bookmarked, or a search.  A plain page address still falls back to HTTP
+  with its warning.  A failure on the page a form leads to says the form was
+  sent, rather than inviting a second submission.
+- **Browser: a page with thousands of links no longer stalls the session.**
+  Spacing and numbering the links took time that grew with the square of
+  their number: a 1 MB page of adjacent links took over a minute.  It is
+  linear now (the same page, about 4 s in a debug build).
+- **Browser: Gopher links that did not work.**  An `h` item that is an HTML
+  page on the gopher server opened as a broken link (it is fetched and drawn
+  as a page now); a menu line with an empty host field gave "Empty host";
+  and `gopher://` addresses are percent-encoded as the standard says
+  (`my%20file`), so a link from a web page reaches the right selector.  A
+  bookmarked Gopher search keeps its query, and a text file no longer ends
+  with the protocol's `.` line.
+- **Browser: smaller fixes.**  A `<meta refresh>` address keeps everything
+  after `url=`, semicolons included (`;jsessionid=...` was cut off); disabled
+  form fields are not sent; links the browser cannot follow (`javascript:`,
+  `mailto:`) carry no number; and a page reached over HTTP after an HTTPS
+  redirect is no longer labelled with an earlier hop's HTTPS failure.
 - **CP/M: a booted disk runs at the speed it is set to.**  A guest with no
   console, printer, modem or disk traffic -- every Dazzler game and demo --
   was napped as if it sat idle at a prompt, and each nap was lost: a 4 MHz
