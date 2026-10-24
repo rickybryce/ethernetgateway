@@ -307,8 +307,21 @@ async fn receive_batch_into(
     // is the message that reaches a terminal whose screen has come back.
     let mut peer_also_receiving = false;
     // How many of our own start requests have come back at us.  One is an
-    // echo; two across separate attempts is a peer.
+    // echo; two is taken as a peer.  That is a judgement, not a proof: a line
+    // that echoes *every* request (a loopback plug, a half-duplex wire) also
+    // produces one per attempt and reads the same, so the diagnosis can be
+    // wrong for a fault that persists -- it is only ever advice on a failure.
     let mut mirrored_requests: u32 = 0;
+    // A lone EOT before any block, NAKed once and believed only when the
+    // sender repeats it -- the same Forsberg confirmation the main loop
+    // makes.  Taken on sight, one noise 0x04 on a serial line became an
+    // empty "complete" upload, and with Overwrite on it replaced a file.
+    let mut early_eot_seen = false;
+    // Set when that EOT's NAK has just gone out: it is this round's request,
+    // and a start byte straight after it would be a second "resend" to a
+    // sender already mid-block, or one more non-ACK to an empty-file sender
+    // that answers every one with another EOT.
+    let mut request_already_sent = false;
 
     // `.max(1)` on the divisor guards against a divide-by-zero panic if
     // `negotiation_retry_interval` is ever 0 — today the config layer floors
@@ -346,9 +359,11 @@ async fn receive_batch_into(
         if attempt == crc_attempts {
             mode = TransferMode::Checksum;
         }
-        if verbose { glog!("XMODEM recv: attempt {} sending 0x{:02X} ({})",
-            attempt, request, if request == CRC_REQUEST { "CRC req" } else { "NAK" }); }
-        raw_write_byte(writer, request, is_tcp).await?;
+        if !std::mem::take(&mut request_already_sent) {
+            if verbose { glog!("XMODEM recv: attempt {} sending 0x{:02X} ({})",
+                attempt, request, if request == CRC_REQUEST { "CRC req" } else { "NAK" }); }
+            raw_write_byte(writer, request, is_tcp).await?;
+        }
 
         match tokio::time::timeout(
             std::time::Duration::from_secs(negotiation_retry_interval),
@@ -530,6 +545,13 @@ async fn receive_batch_into(
                     }
                     break;
                 }
+                if byte == EOT && !early_eot_seen {
+                    early_eot_seen = true;
+                    if verbose { glog!("XMODEM recv: EOT before any block — NAKing to verify"); }
+                    raw_write_byte(writer, NAK, is_tcp).await?;
+                    request_already_sent = true;
+                    continue;
+                }
                 if byte == EOT {
                     raw_write_byte(writer, ACK, is_tcp).await?;
                     // EOT before any data block: an empty transfer.  Return the
@@ -546,15 +568,12 @@ async fn receive_batch_into(
                     // Our own kind of byte, coming the other way -- see
                     // `peer_also_receiving`.
                     //
-                    // **Two of them, on separate attempts, before believing
-                    // it.**  A single one cannot be told from our own request
-                    // echoed back: a half-duplex wire, a loopback-wired port
-                    // or a bridge that echoes all produce exactly one, and a
-                    // confident "start a send on your terminal" would then be
-                    // advice for a fault that is not the one they have.  A
-                    // peer that is genuinely receiving keeps re-prompting on
-                    // its own timer, so it produces more than one across our
-                    // retries; an echo produces one per request we send.
+                    // **Two of them before believing it.**  A single one
+                    // cannot be told from a stray echo of our own request, and
+                    // a confident "start a send on your terminal" would then
+                    // be advice for a fault that is not the one they have.  A
+                    // line that echoes every request is not told apart -- see
+                    // `mirrored_requests`.
                     mirrored_requests = mirrored_requests.saturating_add(1);
                     if mirrored_requests >= 2 && !peer_also_receiving {
                         peer_also_receiving = true;
@@ -704,9 +723,11 @@ async fn receive_batch_into(
                         // (X2 — the old top-of-loop `>` check let a file grow
                         // one block past the limit first).  Exactly 8 MB is
                         // still accepted; the block that would push it over is
-                        // refused.  In a YMODEM batch this aborts the whole
-                        // session (CAN×3 + Err), discarding earlier files too —
-                        // an oversize file is a hard error, not skip-and-carry.
+                        // refused.  In a YMODEM batch this ends the session
+                        // (CAN×3 + Err): the files already confirmed are kept
+                        // (see `BatchReceipt`), this one and any after it are
+                        // not -- an oversize file is a hard error, not
+                        // skip-and-carry.
                         if file_data.len() + data.len() > MAX_FILE_SIZE {
                             raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
                             return Err("File exceeds 8 MB size limit".into());
@@ -1074,12 +1095,14 @@ async fn receive_block(
     .await
 }
 
-/// Read and validate the 128-byte payload + CRC/checksum trailer of a
-/// YMODEM block 0, given that `SOH 0x00 0xFF` has already been read.
-/// Returns `(valid, meta)` — `valid=false` means CRC/checksum mismatch
-/// and `meta` is meaningless; on `valid=true` `meta` carries whatever
-/// metadata fields were parsed.  Called under a `tokio::time::timeout`
-/// so a stalled sender can't hold the session indefinitely.
+/// Read and validate the payload (128 bytes, or 1024 -- see below) and
+/// CRC/checksum trailer of a YMODEM block 0, given that its header has
+/// already been read.  Returns `(valid, is_terminator, filename, meta)`:
+/// `valid=false` means a CRC/checksum mismatch and the rest is meaningless;
+/// `is_terminator` is the null block 0 that ends a batch; otherwise the
+/// filename and whatever metadata fields were parsed.  Called under a
+/// `tokio::time::timeout` so a stalled sender can't hold the session
+/// indefinitely.
 ///
 /// Per Forsberg YMODEM §6.1 the block-0 payload is:
 ///
@@ -4372,6 +4395,59 @@ mod tests {
             vec![0x41u8; XMODEM_BLOCK_SIZE],
             "the recovery path must deliver the file"
         );
+    }
+
+    /// An EOT before any block is NAKed and believed only when repeated.
+    ///
+    /// One noise `0x04` during the negotiation wait used to be ACKed on sight
+    /// and returned as an empty, successful file -- and with Overwrite on, the
+    /// upload truncated the file it was meant to replace.  The first half is
+    /// that noise followed by a real sender; the second is a real empty file,
+    /// whose sender repeats the EOT and is served.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_lone_eot_before_any_block_is_confirmed_not_taken() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), NAK, "the EOT is questioned");
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        let mut ack = None;
+        for _ in 0..8 {
+            match raw_read_byte(&mut send_read, false).await.unwrap() {
+                ACK => {
+                    ack = Some(ACK);
+                    break;
+                }
+                CRC_REQUEST | NAK => continue,
+                other => panic!("unexpected response to block 1: 0x{:02X}", other),
+            }
+        }
+        assert_eq!(ack, Some(ACK), "block 1 after a noise EOT is served");
+        finish_plain_eot(&mut send_read, &mut send_write).await;
+        let (data, _) = recv_task.await.unwrap().expect("the transfer completes");
+        assert_eq!(data, vec![0x41u8; XMODEM_BLOCK_SIZE], "not an empty file");
+
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), NAK);
+        raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+        // ACK next, with no start request between: the NAK was that round's
+        // request, and one more non-ACK would draw a third EOT from a sender
+        // that answers each with another, left behind for the menu to read.
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK, "a repeated EOT is an empty file");
+        let (data, _) = recv_task.await.unwrap().expect("an empty file is a success");
+        assert!(data.is_empty());
     }
 
     /// A spurious EOT followed by the sender's duplicate resend must NOT leave
