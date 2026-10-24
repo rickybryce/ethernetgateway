@@ -1080,6 +1080,9 @@ impl TelnetSession {
         // into the guest's session would put a line about our web UI on the
         // console of a machine that is about to start painting its own.
         glog!("CP/M boot: screen {} is {}", screen.id(), name);
+        // Once now, so a page that sees the screen before the first seam is
+        // not told "no board" and untick its switch.
+        machine.sync_joystick(&screen);
 
         self.send_line("").await?;
         self.send_line(&format!("  {} {}", self.green("Booted"), self.amber(&name)))

@@ -40,8 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the other Kermit with an Error packet (`Cancelled by user`), as the Kermit
   Protocol Manual allows at any time.  It used to be retried as a read error
   until the retry limit.  Two `CAN` bytes from the other side end it the same
-  way.  A byte inside a damaged packet's leftover is still data, so a PETSCII
-  `_` there cannot cancel.
+  way.  After a packet that failed, bytes up to the next good packet (or a
+  pause) are still data, so a PETSCII `_` in a damaged packet cannot cancel.
 
 ### Security
 

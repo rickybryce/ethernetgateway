@@ -985,7 +985,13 @@ pub(crate) async fn read_packet(
         }
     }
     let got = read_packet_after_mark(reader, is_tcp, chkt, eol, verbose, state, deadline).await;
-    state.resync = got.is_err();
+    // A packet that broke off in silence left no leftover: the silence is the
+    // boundary, so the user's next ESC is a cancel, as after a timeout in the
+    // hunt.  Swallowed as leftover, it cost them a whole packet timeout.
+    state.resync = match &got {
+        Ok(_) => false,
+        Err(e) => e != "Kermit: read timeout" && e != crate::tnio::PEER_CLOSED_ERR,
+    };
     got
 }
 
@@ -8338,6 +8344,15 @@ mod tests {
         wr.write_all(&[0x5F]).await.unwrap();
         let err = read_packet(&mut rd, false, true, b'1', CR, false, &mut state, soon()).await;
         assert!(err.unwrap_err().contains("cancelled"), "after silence it cancels");
+
+        // A packet that breaks off in silence is a boundary too: the very
+        // next `_` cancels, rather than waiting out a hunt of its own.
+        wr.write_all(&[SOH, b'#', b' ']).await.unwrap(); // LEN 3, then nothing
+        let cut = read_packet(&mut rd, false, true, b'1', CR, false, &mut state, soon()).await;
+        assert!(cut.unwrap_err().contains("timeout"));
+        wr.write_all(&[0x5F]).await.unwrap();
+        let err = read_packet(&mut rd, false, true, b'1', CR, false, &mut state, soon()).await;
+        assert!(err.unwrap_err().contains("cancelled"), "after a packet cut off by silence");
     }
 
     // ---------- Send-Init / negotiation ----------

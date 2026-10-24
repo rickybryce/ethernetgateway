@@ -12,7 +12,7 @@ from `about.toml` + `about.hbs`. Do not edit by hand — regenerate with:
 cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
 ```
 
-- 425 crate(s) under **MIT License** (MIT)
+- 426 crate(s) under **MIT License** (MIT)
 - 19 crate(s) under **Unicode License v3** (Unicode-3.0)
 - 18 crate(s) under **Apache License 2.0** (Apache-2.0)
 - 7 crate(s) under **ISC License** (ISC)
@@ -1767,7 +1767,7 @@ express Statement of Purpose.
 ## Community Data License Agreement Permissive 2.0 (CDLA-Permissive-2.0)
 
 Used by:
-- [webpki-roots 1.0.9](https://github.com/rustls/webpki-roots)
+- [webpki-roots 1.0.10](https://github.com/rustls/webpki-roots)
 
 ```
 # Community Data License Agreement - Permissive - Version 2.0
@@ -2596,7 +2596,7 @@ THIS SOFTWARE.
 ## ISC License (ISC)
 
 Used by:
-- [rustls-webpki 0.103.15](https://github.com/rustls/webpki)
+- [rustls-webpki 0.103.16](https://github.com/rustls/webpki)
 
 ```
 Except as otherwise noted, this project is licensed under the following
@@ -2684,8 +2684,8 @@ Used by:
 - [core-graphics-types 0.1.3](https://github.com/servo/core-foundation-rs)
 - [core-graphics 0.23.2](https://github.com/servo/core-foundation-rs)
 - [euclid 0.22.14](https://github.com/servo/euclid)
-- [string_cache 0.9.0](https://github.com/servo/string-cache)
-- [string_cache_codegen 0.6.1](https://github.com/servo/string-cache)
+- [string_cache 0.11.0](https://github.com/servo/string-cache)
+- [string_cache_codegen 0.11.2](https://github.com/servo/string-cache)
 
 ```
 Copyright (c) 2012-2013 Mozilla Foundation
@@ -3120,9 +3120,9 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [html5ever 0.39.0](https://github.com/servo/html5ever)
-- [markup5ever 0.39.0](https://github.com/servo/html5ever)
-- [web_atoms 0.2.6](https://github.com/servo/html5ever)
+- [html5ever 0.40.1](https://github.com/servo/html5ever)
+- [markup5ever 0.40.0](https://github.com/servo/html5ever)
+- [web_atoms 0.3.0](https://github.com/servo/html5ever)
 
 ```
 Copyright (c) 2014 The html5ever Project Developers
@@ -3798,7 +3798,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [proptest 1.11.0](https://github.com/proptest-rs/proptest)
+- [proptest 1.12.0](https://github.com/proptest-rs/proptest)
 - [rusty-fork 0.3.1](https://github.com/altsysrq/rusty-fork)
 
 ```
@@ -4091,7 +4091,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [sha1 0.11.0](https://github.com/RustCrypto/hashes)
-- [sha2 0.11.0](https://github.com/RustCrypto/hashes)
+- [sha2 0.11.1](https://github.com/RustCrypto/hashes)
 
 ```
 Copyright (c) 2016-2026 The RustCrypto Project Developers
@@ -4454,6 +4454,42 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+```
+
+---
+
+## MIT License (MIT)
+
+Used by:
+- [core_detect 1.0.0](https://github.com/thomcc/core_detect)
+
+```
+Copyright (c) 2017-2020 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 
 ```
 
@@ -6119,7 +6155,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [argon2 0.6.0](https://github.com/RustCrypto/password-hashes)
-- [crypto-bigint 0.7.5](https://github.com/RustCrypto/crypto-bigint)
+- [crypto-bigint 0.7.6](https://github.com/RustCrypto/crypto-bigint)
 - [phc 0.6.1](https://github.com/RustCrypto/formats)
 - [pkcs5 0.8.1](https://github.com/RustCrypto/formats)
 - [scrypt 0.12.0](https://github.com/RustCrypto/password-hashes)
@@ -6399,8 +6435,8 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [bit-set 0.8.0](https://github.com/contain-rs/bit-set)
-- [bit-vec 0.8.0](https://github.com/contain-rs/bit-vec)
+- [bit-set 0.11.1](https://github.com/contain-rs/bit-vec)
+- [bit-vec 0.10.1](https://github.com/contain-rs/bit-vec)
 - [bit-vec 0.9.1](https://github.com/contain-rs/bit-vec)
 
 ```
@@ -6581,7 +6617,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [ctutils 0.4.2](https://github.com/RustCrypto/utils)
+- [ctutils 0.4.5](https://github.com/RustCrypto/utils)
 
 ```
 Copyright (c) 2025-2026 The RustCrypto Project Developers
@@ -6924,7 +6960,7 @@ Used by:
 - [rand 0.9.5](https://github.com/rust-random/rand)
 - [rand_chacha 0.9.0](https://github.com/rust-random/rand)
 - [rand_core 0.9.5](https://github.com/rust-random/rand)
-- [rand_xorshift 0.4.0](https://github.com/rust-random/rngs)
+- [rand_xorshift 0.5.0](https://github.com/rust-random/rngs)
 
 ```
 Copyright 2018 Developers of the Rand project
@@ -7267,7 +7303,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [html2text 0.17.1](https://github.com/jugglerchris/rust-html2text/)
+- [html2text 0.17.3](https://github.com/jugglerchris/rust-html2text/)
 
 ```
 MIT License
@@ -7725,7 +7761,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [arboard 3.6.1](https://github.com/1Password/arboard)
+- [arboard 3.7.0](https://github.com/1Password/arboard)
 
 ```
 MIT License
@@ -7998,7 +8034,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [tokio 1.53.2](https://github.com/tokio-rs/tokio)
+- [tokio 1.53.3](https://github.com/tokio-rs/tokio)
 
 ```
 MIT License
@@ -8298,7 +8334,7 @@ Used by:
 - [serde 1.0.229](https://github.com/serde-rs/serde)
 - [serde_core 1.0.229](https://github.com/serde-rs/serde)
 - [serde_derive 1.0.229](https://github.com/serde-rs/serde)
-- [serde_json 1.0.151](https://github.com/serde-rs/json)
+- [serde_json 1.0.154](https://github.com/serde-rs/json)
 - [serde_repr 0.1.21](https://github.com/dtolnay/serde-repr)
 - [smol_str 0.2.2](https://github.com/rust-analyzer/smol_str)
 - [syn 2.0.119](https://github.com/dtolnay/syn)
@@ -8534,11 +8570,11 @@ SOFTWARE.
 
 Used by:
 - [phf 0.11.3](https://github.com/rust-phf/rust-phf)
-- [phf 0.13.1](https://github.com/rust-phf/rust-phf)
-- [phf_codegen 0.13.1](https://github.com/rust-phf/rust-phf)
-- [phf_generator 0.13.1](https://github.com/rust-phf/rust-phf)
+- [phf 0.14.0](https://github.com/rust-phf/rust-phf)
+- [phf_codegen 0.14.0](https://github.com/rust-phf/rust-phf)
+- [phf_generator 0.14.0](https://github.com/rust-phf/rust-phf)
 - [phf_shared 0.11.3](https://github.com/rust-phf/rust-phf)
-- [phf_shared 0.13.1](https://github.com/rust-phf/rust-phf)
+- [phf_shared 0.14.0](https://github.com/rust-phf/rust-phf)
 
 ```
 The MIT License (MIT)
@@ -9989,4 +10025,3 @@ OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ---
-
