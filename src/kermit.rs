@@ -947,7 +947,7 @@ pub(crate) async fn read_packet(
     reader: &mut (impl AsyncRead + Unpin),
     is_tcp: bool,
     is_petscii: bool,
-    chkt: u8,
+    mut chkt: u8,
     eol: u8,
     verbose: bool,
     state: &mut ReadState,
@@ -1028,6 +1028,18 @@ pub(crate) async fn read_packet(
         if n < 3 {
             return Err(format!("Kermit: packet length {} too small (LEN byte {:#x})", n, len_byte));
         }
+        // SEQ and TYPE before the length check, because TYPE decides the
+        // check: a Send-Init or an I-packet is always block check 1, whatever
+        // was negotiated (spec §6).  A peer resending its S because our ACK
+        // was lost sends it type 1, and reading it as the session's type 3
+        // failed its check, so the duplicate was NAKed instead of answered.
+        let seq_byte = read_byte_with_deadline(reader, is_tcp, state, deadline).await?;
+        header_input.push(seq_byte);
+        let kind = read_byte_with_deadline(reader, is_tcp, state, deadline).await?;
+        header_input.push(kind);
+        if kind == TYPE_SEND_INIT || kind == TYPE_INIT {
+            chkt = b'1';
+        }
         let cklen = check_size(chkt);
         if n < 2 + cklen {
             // Drain enough bytes to log a useful hex dump — at least
@@ -1042,7 +1054,7 @@ pub(crate) async fn read_packet(
             // many (capped at 32 so a wildly-wrong LEN can't wedge us)
             // so the next SOH-hunt starts at a clean packet boundary
             // instead of inside this bogus packet's tail.
-            let drain_n = n.min(32);
+            let drain_n = (n - 2).min(32);
             for _ in 0..drain_n {
                 match read_byte_with_deadline(reader, is_tcp, state, deadline).await {
                     Ok(b) => wire.push(b),
@@ -1061,10 +1073,6 @@ pub(crate) async fn read_packet(
                 n, cklen
             ));
         }
-        let seq_byte = read_byte_with_deadline(reader, is_tcp, state, deadline).await?;
-        header_input.push(seq_byte);
-        let kind = read_byte_with_deadline(reader, is_tcp, state, deadline).await?;
-        header_input.push(kind);
         let payload_len = n - 2 - cklen;
         (unchar(seq_byte) & 0x3F, kind, payload_len)
     };
@@ -3148,6 +3156,36 @@ async fn send_and_await_ack_opts(
                         }
                         return Ok(resp.payload);
                     }
+                    // A NAK for the *next* packet is an ACK for this one (spec
+                    // §5.4): the receiver got ours, its ACK was lost, and its
+                    // own timer fired first.  Aborting here as "unexpected"
+                    // ended a transfer that was going fine.  Not for a packet
+                    // whose ACK carries data -- a Send-Init's capabilities, an
+                    // A-packet's resume offset -- which a NAK cannot: taken as
+                    // a bare accept, a lost resume offset sent the whole file
+                    // after the receiver's partial.  Those are resent, and the
+                    // receiver answers the duplicate with the same ACK.
+                    let carries_data = is_send_init || kind == TYPE_SEND_INIT || kind == TYPE_ATTRIBUTE;
+                    if resp.kind == TYPE_NAK && resp.seq == (seq + 1) & 0x3F && carries_data {
+                        attempts += 1;
+                        if retries_exhausted(attempts, max_retries) {
+                            return Err(format!(
+                                "Kermit: too many NAKs (>{}) for seq {} type '{}'",
+                                max_retries, seq, kind as char
+                            ));
+                        }
+                        resend = true;
+                        continue;
+                    }
+                    if resp.kind == TYPE_NAK && resp.seq == (seq + 1) & 0x3F {
+                        if verbose {
+                            glog!(
+                                "Kermit send: NAK seq={} taken as ACK of seq={} type='{}'",
+                                resp.seq, seq, kind as char
+                            );
+                        }
+                        return Ok(Vec::new());
+                    }
                     if resp.kind == TYPE_NAK && resp.seq == seq {
                         attempts += 1;
                         if verbose {
@@ -3442,6 +3480,10 @@ async fn send_d_packets_windowed(
                     );
                 }
             }
+            // A hang-up is not a timeout: every read after it fails at once,
+            // and only *expired* packets count against the retries, so the
+            // loop spun a core until the next per-packet deadline came round.
+            Err(e) if e == crate::tnio::PEER_CLOSED_ERR => return Err(e),
             Err(_e) => {
                 // Read timeout (or noisy line).  Retransmit any packet
                 // whose individual per-packet deadline has elapsed.
@@ -3656,6 +3698,8 @@ async fn send_d_and_z_streaming(
                 )
                 .await?;
             }
+            // A hang-up, not a timeout -- see `send_d_packets_windowed`.
+            Err(e) if e == crate::tnio::PEER_CLOSED_ERR => return Err(e),
             Err(_) => {
                 // Timeout — retransmit any expired packets (D or Z).
                 let now = tokio::time::Instant::now();
@@ -4028,6 +4072,14 @@ async fn kermit_receive_committing(
     // seq (e.g., after the dispatcher's R/I/G handling has already
     // advanced the sender's counter).
     let mut expected_seq: u8 = (s_pkt.seq + 1) & 0x3F;
+    // The last ACK that carried data, as `(seq, payload, block check)`, so a
+    // duplicate of the packet it answered gets the *same* ACK back.  A bare
+    // re-ACK of a resent Send-Init told the peer "all defaults" -- or failed
+    // its type-1 check outright -- and a bare re-ACK of a resent A-packet
+    // dropped the resume offset, so the sender sent the whole file after the
+    // partial we had already loaded.  Dropped once `expected_seq` is past the
+    // back-window, so a seq reused 64 packets later never gets it.
+    let mut replay_ack: Option<(u8, Vec<u8>, u8)> = Some((s_pkt.seq, ack_payload.clone(), b'1'));
     // Per-file counter for rate-limiting verbose D-packet success
     // logs.  Resets on every F-packet so each file gets its own first
     // few traced — same pattern as zmodem.rs's subpacket-trace cap.
@@ -4131,6 +4183,18 @@ async fn kermit_receive_committing(
         if pkt.kind == TYPE_ERROR {
             let msg = decode_error_message(&pkt.payload, recv_q);
             return Err(format!("Kermit: peer sent E-packet: {}", msg));
+        }
+
+        // Every pass, in order or not: run only for out-of-order packets, it
+        // never ran on a clean line, so a lap of 64 later a duplicate of an
+        // ordinary packet at the stored seq was answered with the old
+        // Send-Init ACK.  `expected_seq` moves one packet per pass (a drained
+        // packet comes through here too), so it cannot step over the window.
+        if replay_ack
+            .as_ref()
+            .is_some_and(|(seq, _, _)| (expected_seq.wrapping_sub(*seq) & 0x3F) > window)
+        {
+            replay_ack = None;
         }
 
         if pkt.seq != expected_seq {
@@ -4239,16 +4303,33 @@ async fn kermit_receive_committing(
                         expected_seq
                     );
                 }
-                send_ack(
-                    writer,
-                    pkt.seq,
-                    session.chkt,
-                    session.npad,
-                    session.padc,
-                    session.eol,
-                    is_tcp,
-                )
-                .await?;
+                match replay_ack.as_ref().filter(|(seq, _, _)| *seq == pkt.seq) {
+                    Some((_, payload, chkt)) => {
+                        send_ack_with_payload(
+                            writer,
+                            pkt.seq,
+                            payload,
+                            *chkt,
+                            session.npad,
+                            session.padc,
+                            session.eol,
+                            is_tcp,
+                        )
+                        .await?
+                    }
+                    None => {
+                        send_ack(
+                            writer,
+                            pkt.seq,
+                            session.chkt,
+                            session.npad,
+                            session.padc,
+                            session.eol,
+                            is_tcp,
+                        )
+                        .await?
+                    }
+                }
                 continue;
             }
 
@@ -4596,6 +4677,7 @@ async fn kermit_receive_committing(
                         is_tcp,
                     )
                     .await?;
+                    replay_ack = Some((pkt.seq, payload, session.chkt));
                 } else {
                     send_ack(
                         writer,
@@ -5052,6 +5134,22 @@ fn session_dir(base: &std::path::Path, subdir: &str) -> std::path::PathBuf {
         p.push(subdir);
     }
     p
+}
+
+/// A whole file for the server to send, or `Ok(None)` when it is over
+/// `MAX_FILE_SIZE` -- decided from its size before a byte is read, and the
+/// read itself bounded in case it grows meanwhile.  Reading first and
+/// checking after let any peer on the always-on server load a multi-gigabyte
+/// disk image into memory with one `get`, as often as it liked.
+pub(crate) async fn read_capped(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path).await?;
+    if file.metadata().await?.len() > MAX_FILE_SIZE {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_SIZE + 1).read_to_end(&mut bytes).await?;
+    Ok((bytes.len() as u64 <= MAX_FILE_SIZE).then_some(bytes))
 }
 
 /// Does `path`, with every symlink followed, still land inside `base`?
@@ -6027,8 +6125,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
             }
             return Ok(());
         }
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(b) => b,
+        let bytes = match read_capped(&path).await {
+            Ok(Some(b)) => b,
+            Ok(None) => return self.refuse(seq, "File too large").await,
             Err(e) => {
                 let msg = if e.kind() == std::io::ErrorKind::NotFound {
                     "File not found"
@@ -6045,9 +6144,6 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
                 return Ok(());
             }
         };
-        if bytes.len() as u64 > MAX_FILE_SIZE {
-            return self.refuse(seq, "File too large").await;
-        }
         self.reply(&fname, &bytes).await
     }
 
@@ -6283,7 +6379,13 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
             }
             return Ok(Next::Idle);
         }
-        let Ok(bytes) = tokio::fs::read(&path).await else {
+        let read = read_capped(&path).await;
+        if matches!(read, Ok(None)) {
+            self.refuse(pkt.seq, "File too large").await?;
+            // Stay idle for the next command per spec.
+            return Ok(Next::Idle);
+        }
+        let Ok(Some(bytes)) = read else {
             self.refuse(pkt.seq, "File not found").await?;
             if self.verbose {
                 glog!(
@@ -6294,11 +6396,6 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
             // Stay idle for the next command per spec.
             return Ok(Next::Idle);
         };
-        if bytes.len() as u64 > MAX_FILE_SIZE {
-            self.refuse(pkt.seq, "File too large").await?;
-            // Stay idle for the next command per spec.
-            return Ok(Next::Idle);
-        }
         let modtime = tokio::fs::metadata(&path)
             .await
             .ok()
@@ -7712,6 +7809,186 @@ mod tests {
         let _ = peer_task.await;
         let err = result.expect_err("an endless stale peer must be refused");
         assert!(err.contains("without seq"), "stopped for the right reason: {err}");
+    }
+
+    /// The remembered Send-Init ACK expires once the window has passed it,
+    /// on a clean line too.  Its expiry ran only for out-of-order packets, so
+    /// after one in-order lap of 64 a duplicate D-packet at seq 0 -- its ACK
+    /// lost -- was answered with the Send-Init's capabilities, which a peer
+    /// under CHKT 3 cannot even verify, until the transfer died.
+    #[tokio::test]
+    async fn test_a_duplicate_a_lap_later_gets_a_plain_ack_not_the_send_init_one() {
+        let _guard = ConfigTestGuard::acquire().await;
+        let peer_caps = Capabilities { chkt: b'1', maxl: 80, ..Capabilities::default() };
+        let mut wire = build_packet(TYPE_SEND_INIT, 0, &build_send_init_payload(&peer_caps), b'1', 0, 0, CR);
+        wire.extend(build_packet(TYPE_FILE, 1, b"LAP.BIN", b'1', 0, 0, CR));
+        for n in 2..=64u32 {
+            wire.extend(build_packet(TYPE_DATA, (n & 0x3F) as u8, b"x", b'1', 0, 0, CR));
+        }
+        wire.extend(build_packet(TYPE_DATA, 0, b"x", b'1', 0, 0, CR)); // the lost-ACK resend
+        wire.extend(build_packet(TYPE_ERROR, 1, b"done", b'1', 0, 0, CR));
+        let (peer_to_gw, gw_in) = tokio::io::duplex(1 << 16);
+        let (gw_out, peer_from_gw) = tokio::io::duplex(1 << 16);
+        let (mut gw_r, _) = tokio::io::split(gw_in);
+        let (_, mut gw_w) = tokio::io::split(gw_out);
+        let (mut peer_r, mut peer_w) =
+            (tokio::io::split(peer_from_gw).0, tokio::io::split(peer_to_gw).1);
+        let peer_task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            peer_w.write_all(&wire).await.unwrap();
+            let mut seen = Vec::new();
+            let _ = peer_r.read_to_end(&mut seen).await;
+            (seen, peer_w)
+        });
+        let _ = kermit_receive(&mut gw_r, &mut gw_w, false, false, false).await;
+        drop(gw_w);
+        let (seen, _) = peer_task.await.unwrap();
+        let answers: Vec<&[u8]> = seen.split(|&b| b == CR).filter(|p| !p.is_empty()).collect();
+        assert_eq!(answers.len(), 66, "S, F, 63 D and the duplicate are each answered: {}", answers.len());
+        let last = answers[65];
+        assert_eq!(last, &build_packet(TYPE_ACK, 0, &[], b'1', 0, 0, CR)[..last.len()], "a plain ACK: {last:?}");
+        assert_ne!(last, answers[0], "not the Send-Init's ACK again");
+    }
+
+    /// **A resent Send-Init gets the same ACK back, capabilities and all.**
+    /// Our S-ACK lost on a noisy line makes the peer resend S; a bare re-ACK
+    /// told it "all defaults", or failed its type-1 check under a negotiated
+    /// CHKT 3, and either way the session died.
+    #[tokio::test]
+    async fn test_a_resent_send_init_gets_its_capabilities_again() {
+        let _guard = ConfigTestGuard::acquire().await;
+        let peer_caps = Capabilities { chkt: b'3', maxl: 80, ..Capabilities::default() };
+        let init = build_packet(TYPE_SEND_INIT, 0, &build_send_init_payload(&peer_caps), b'1', 0, 0, CR);
+        let (peer_to_gw, gw_in) = tokio::io::duplex(1 << 16);
+        let (gw_out, peer_from_gw) = tokio::io::duplex(1 << 16);
+        let (mut gw_r, _) = tokio::io::split(gw_in);
+        let (_, mut gw_w) = tokio::io::split(gw_out);
+        let (mut peer_r, mut peer_w) =
+            (tokio::io::split(peer_from_gw).0, tokio::io::split(peer_to_gw).1);
+        let peer_task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut seen = Vec::new();
+            let mut tmp = vec![0u8; 4096];
+            let mut read_one_packet = async |seen: &mut Vec<u8>| {
+                let before = seen.iter().filter(|&&b| b == CR).count();
+                while seen.iter().filter(|&&b| b == CR).count() == before {
+                    let n = peer_r.read(&mut tmp).await.unwrap();
+                    assert!(n > 0, "the gateway hung up");
+                    seen.extend_from_slice(&tmp[..n]);
+                }
+            };
+            peer_w.write_all(&init).await.unwrap();
+            read_one_packet(&mut seen).await;
+            peer_w.write_all(&init).await.unwrap(); // our ACK "was lost"
+            read_one_packet(&mut seen).await;
+            peer_w.write_all(&build_packet(TYPE_ERROR, 1, b"done", b'3', 0, 0, CR)).await.unwrap();
+            seen
+        });
+        let _ = kermit_receive(&mut gw_r, &mut gw_w, false, false, false).await;
+        drop(gw_w);
+        let seen = peer_task.await.unwrap();
+        let acks: Vec<&[u8]> = seen.split(|&b| b == CR).filter(|p| !p.is_empty()).collect();
+        assert!(acks.len() >= 2, "two answers: {seen:?}");
+        assert_eq!(acks[0], acks[1], "the duplicate S is answered with the same S-ACK");
+        assert!(acks[0].len() > 6, "and that ACK carries our capabilities: {:?}", acks[0]);
+    }
+
+    /// The server's GET and TYPE read through `read_capped`: a file over the
+    /// cap is refused without being loaded (a sparse 5 GB file stands in for
+    /// a disk image), and one exactly at the cap is still served.
+    #[tokio::test]
+    async fn test_read_capped_refuses_an_oversize_file_without_loading_it() {
+        let dir = std::env::temp_dir().join(format!("kermit_capped_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("hd.img");
+        std::fs::File::create(&big).unwrap().set_len(5 << 30).unwrap();
+        assert_eq!(read_capped(&big).await.unwrap(), None);
+        let at_cap = dir.join("at_cap.bin");
+        std::fs::File::create(&at_cap).unwrap().set_len(MAX_FILE_SIZE).unwrap();
+        assert_eq!(read_capped(&at_cap).await.unwrap().map(|b| b.len() as u64), Some(MAX_FILE_SIZE));
+        assert!(read_capped(&dir.join("missing")).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A windowed or streaming send to a peer that has hung up ends at once.
+    /// Every read fails immediately after a hang-up, and only an *expired*
+    /// packet counted against the retries, so the sender spun a core until
+    /// the next per-packet deadline.
+    #[tokio::test]
+    async fn test_a_windowed_send_stops_when_the_peer_hangs_up() {
+        let session = Capabilities { window: 4, maxl: 80, chkt: b'1', ..Capabilities::default() };
+        let q = Quoting { qctl: DEFAULT_QCTL, qbin: None, rept: None, locking_shifts: false };
+        // The reads hit EOF; the writes still land, as on a socket whose
+        // peer has shut down its sending side.
+        let (inbound, hung_up) = tokio::io::duplex(1 << 16);
+        drop(hung_up);
+        let (mut rd, _) = tokio::io::split(inbound);
+        let (outbound, _still_reading) = tokio::io::duplex(1 << 20);
+        let (_, mut wr) = tokio::io::split(outbound);
+        let mut state = ReadState::default();
+        let mut sent = 0u32;
+        let started = std::time::Instant::now();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            send_d_packets_windowed(
+                &mut rd, &mut wr, &[0x41; 400], 40, q, 1, &session,
+                tokio::time::Duration::from_secs(3), true, false, false, &mut state, 5, &mut sent,
+            ),
+        )
+        .await
+        .expect("the sender returned");
+        assert!(out.is_err(), "a hang-up is a failure");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+    }
+
+    /// **A NAK for the next packet is an ACK for this one** (spec §5.4) --
+    /// except after a Send-Init, whose ACK carries capabilities a NAK lacks.
+    /// The receiver's ACK lost and its timer firing before ours used to abort
+    /// the transfer as an "unexpected response".
+    #[tokio::test(start_paused = true)]
+    async fn test_a_nak_for_the_next_packet_acknowledges_this_one() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // (kind, seq, is_send_init): a D-packet takes NAK(n+1) as its ACK; a
+        // Send-Init and an A-packet, whose ACKs carry data, are resent and
+        // get the real ACK -- payload and all -- the second time.
+        for (kind, seq, is_send_init) in [
+            (TYPE_DATA, 5u8, false),
+            (TYPE_DATA, 63, false),
+            (TYPE_SEND_INIT, 0, true),
+            (TYPE_ATTRIBUTE, 7, false),
+        ] {
+            let carries_data = kind != TYPE_DATA;
+            let (ours, peer) = tokio::io::duplex(4096);
+            let (mut rd, mut wr) = tokio::io::split(ours);
+            let (mut prd, mut pwr) = tokio::io::split(peer);
+            pwr.write_all(&build_packet(TYPE_NAK, (seq + 1) & 0x3F, &[], b'1', 0, 0, CR))
+                .await
+                .unwrap();
+            if carries_data {
+                pwr.write_all(&build_packet(TYPE_ACK, seq, b"#R", b'1', 0, 0, CR)).await.unwrap();
+            }
+            let mut state = ReadState::default();
+            let deadline = Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5));
+            let out = send_and_await_ack_opts(
+                &mut rd, &mut wr, kind, seq, b"x", b'1', 0, 0, CR,
+                false, false, false, &mut state, deadline, 2, is_send_init, true, true,
+            )
+            .await;
+            drop(wr);
+            drop(rd);
+            let mut sent = Vec::new();
+            prd.read_to_end(&mut sent).await.unwrap();
+            let copies = sent.iter().filter(|&&b| b == CR).count();
+            let what = format!("type '{}' seq {seq}", kind as char);
+            if carries_data {
+                assert_eq!(out, Ok(b"#R".to_vec()), "{what}: the real ACK's payload");
+                assert_eq!(copies, 2, "{what}: resent on NAK(n+1)");
+            } else {
+                assert_eq!(out, Ok(Vec::new()), "{what}: NAK(n+1) is ACK(n)");
+                assert_eq!(copies, 1, "{what}: not resent");
+            }
+        }
     }
 
     /// A packet sent with `resend_on_timeout = false` is resent on a NAK --
