@@ -269,16 +269,21 @@ impl Governor {
     ///
     /// `None` means it is not ahead — either it is keeping up or it has fallen
     /// behind, and **falling behind is not made up for**. A guest that was
-    /// napped while idle, or descheduled, or reading a disk, must not then be
+    /// descheduled, or stalled behind a slow console or a printer job, must not then be
     /// given a burst at seventy-one times speed to "catch up": that is exactly
     /// the symptom being fixed, arriving in bursts instead of continuously.
     ///
-    /// **Forgetting is done here, not by the caller.**  Only the idle nap used
-    /// to re-baseline, so any *other* stall -- a console write on a slow link,
+    /// **Forgetting is done here, not by the caller.**  The session's idle nap
+    /// used to re-baseline, so any *other* stall -- a console write on a slow link,
     /// a printer job being rendered, the host descheduling the task -- left
     /// the guest behind its base, and it then ran unpaced until it had caught
     /// up: the burst this doc says cannot happen.  Past [`MAX_ARREARS`] the
     /// base moves to now, so the debt is dropped the moment it exists.
+    ///
+    /// **And nothing paced should nap.**  That idle nap -- "idle" meaning no
+    /// console, printer, modem or disk traffic, which is also a busy Dazzler
+    /// game -- wrote its naps off as arrears, and held a 4 MHz guest near 3.2.
+    /// The session now naps only a guest with no governor.
     pub fn behind(&mut self, cycles: u64, now_ms: u64) -> Option<Duration> {
         let virtual_secs = cycles.saturating_sub(self.base_cycles) as f64 / self.cycles_per_sec;
         let real_secs = now_ms.saturating_sub(self.base_ms) as f64 / 1000.0;
@@ -295,9 +300,9 @@ impl Governor {
 
     /// Start counting again from here.
     ///
-    /// For the moment a guest stops being paced and starts again — after a long
-    /// idle nap, say — so the arrears it built up while nobody was playing do
-    /// not become a free run at full speed.
+    /// For the moment a guest stops being paced and starts again, so the
+    /// arrears it built up meanwhile do not become a free run at full speed.
+    /// [`Governor::behind`] calls it past [`MAX_ARREARS`].
     pub fn rebase(&mut self, cycles: u64, now_ms: u64) {
         self.base_cycles = cycles;
         self.base_ms = now_ms;

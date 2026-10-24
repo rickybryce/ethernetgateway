@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CP/M: a booted disk runs at the speed it is set to.**  A guest with no
+  console, printer, modem or disk traffic -- every Dazzler game and demo --
+  was napped as if it sat idle at a prompt, and each nap was lost: a 4 MHz
+  machine settled near 3.2 MHz after its first few seconds (GDEMO measured
+  3.25, SPACEWAR 1.83 at a 2 MHz setting).  Under a speed limit the guest is
+  no longer napped, and holds 4.00 MHz; the limit already keeps an idle
+  prompt cheap.  `cpm_boot_speed = unlimited` naps as before.
 - **Serial Kermit server: a cancelled upload no longer closes the port.**  On
   a port in Kermit-server mode, any upload that failed -- cancelled by the
   user, out of retries -- made the gateway close the port, log that the

@@ -1636,13 +1636,25 @@ impl TelnetSession {
                     machine.modem().set_carrier(modem.carrier_asserted());
                 }
 
-                // Pacing.  A guest sitting at its prompt polls the console
-                // status register as fast as we will let it, and without this
-                // an idle booted session costs a large fraction of a core —
-                // the same trap the emulator fell into at 161% CPU.  Only
-                // demonstrably idle seams are paced: a keystroke, a printed
-                // byte, a modem byte or any disk access resets the count, so
-                // nothing that is actually working is ever slowed down.
+                // Pacing an *unpaced* guest.  A guest sitting at its prompt polls
+                // the console status register as fast as we will let it, and
+                // with no speed limit an idle booted session costs a large
+                // fraction of a core — the same trap the emulator fell into at
+                // 161% CPU.  Only demonstrably idle seams are napped: a
+                // keystroke, a printed byte, a modem byte or any disk access
+                // resets the count.
+                //
+                // **Never under a speed limit.**  "Idle" here means no console,
+                // printer, modem or disk traffic -- which is also every Dazzler
+                // game and demo, busy the whole time.  Each nap was written off
+                // as arrears, so after the first few hundred seams such a guest
+                // lost 8 ms of every ~34 and settled near 3.2 MHz at a 4 MHz
+                // setting: GDEMO measured 3.25 over six minutes, SPACEWAR 1.83 at
+                // 2.  With the governor holding the clock the nap saves nothing
+                // -- the guest already sleeps most of the time; measured on a
+                // release build at the `A>` prompt, 6.2% of a core without the
+                // nap against 7.3% with it -- so it only ever cost the guest its
+                // speed.  Skipped, both read exactly 4.00 MHz.
                 let disk_now = machine.disk_accesses();
                 if keys > 0 || printed || modem_moved || disk_now != disk_before {
                     idle_seams = 0;
@@ -1653,19 +1665,13 @@ impl TelnetSession {
                     // its work is never cut off, only one waiting for a person
                     // who is not there.
                     last_key = tokio::time::Instant::now();
-                } else {
+                } else if governor.is_none() {
+                    // No clock to fall behind, so nothing to forget after the
+                    // nap -- the governor's own `MAX_ARREARS` drops any other
+                    // stall when there is one.
                     idle_seams = idle_seams.saturating_add(1);
                     if let Some(nap) = idle_nap(idle_seams) {
                         tokio::time::sleep(nap).await;
-                        // **Forget the arrears.** While the guest was napped it
-                        // fell behind its clock, and without this an hour spent
-                        // at a prompt would buy an hour of virtual time to be
-                        // spent at full speed the moment somebody typed -- the
-                        // burst this governor exists to prevent, arriving by the
-                        // one path that looks like good citizenship.
-                        if let Some(g) = governor.as_mut() {
-                            g.rebase(cpu.cycle_count(), crate::cpm::speed::now_ms());
-                        }
                     }
                 }
                 disk_before = disk_now;
@@ -1787,6 +1793,29 @@ mod tests {
             !body("cpm_boot_run").contains("show_held_print_notices"),
             "shown inside the run, the main menu wipes them"
         );
+    }
+
+    /// **A guest under a speed limit is never idle-napped.**  The pump calls a
+    /// seam idle when no console, printer, modem or disk byte moved -- which is
+    /// also every Dazzler game and demo -- and wrote each nap off as arrears,
+    /// so a 4 MHz guest settled near 3.2 (GDEMO measured 3.25 over six minutes,
+    /// SPACEWAR 1.83 at a 2 MHz setting).  The nap is for an unpaced guest only,
+    /// and nothing in the pump rebases the governor any more: dropping a stall
+    /// is `Governor::behind`'s job.  The loop (`cpm_boot_run_inner`) needs a
+    /// live session to drive, so the rule is read from its source.
+    #[test]
+    fn test_a_paced_guest_is_never_idle_napped() {
+        let src = include_str!("cpm_boot_ui.rs").replace("\r\n", "\n");
+        let src = &src[..src.find("#[cfg(test)]\nmod tests").expect("the test module")];
+        let at = src.find("async fn cpm_boot_run_inner(").expect("the pump loop");
+        let end = at + 1 + src[at + 1..].find("\n    }\n").expect("fn end");
+        let run = &src[at..end];
+        let nap = run.find("idle_nap(idle_seams)").expect("the idle nap");
+        let gate_text = "} else if governor.is_none() {";
+        let gate = run[..nap].rfind(gate_text).expect("the nap is not gated on the governor");
+        assert!(!run[gate + gate_text.len()..nap].contains('}'), "the governor gate does not enclose the nap");
+        assert!(!run.contains(".rebase("), "the pump rebases the governor again");
+        assert_eq!(run.matches("idle_nap(").count(), 1, "a second, ungated nap");
     }
 
     /// **A screen knows whether its joystick board is fitted from the moment
