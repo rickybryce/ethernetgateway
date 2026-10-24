@@ -1409,7 +1409,10 @@ impl TelnetSession {
             let cfg = config::get_config();
             (cfg.cpm_boot_speed.clone(), cfg.cpm_cpu.clone())
         };
-        let mut governor = crate::cpm::speed::mhz_for(&speed_setting, &cpu_setting)
+        let clock = crate::cpm::speed::mhz_for(&speed_setting, &cpu_setting);
+        // The Dazzler's frames are counted in this clock's cycles.
+        machine.set_clock_mhz(clock.unwrap_or_else(|| crate::cpm::speed::period_mhz(&cpu_setting)));
+        let mut governor = clock
             .map(|mhz| crate::cpm::speed::Governor::new(mhz, cpu.cycle_count(), crate::cpm::speed::now_ms()));
         if let Some(g) = governor.as_ref() {
             glog!("CP/M boot: holding the guest to {:.2} MHz", g.mhz());

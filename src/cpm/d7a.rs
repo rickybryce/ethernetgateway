@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn test_no_button_pressed_is_active_high() {
+    fn test_no_button_pressed_reads_all_ones() {
         assert_eq!(D7a::new().switches(), 0xFF, "active low: nothing pressed is all ones");
     }
 

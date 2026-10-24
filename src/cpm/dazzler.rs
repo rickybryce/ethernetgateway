@@ -32,7 +32,8 @@
 //! decode correctly under them, which is the cross-check.  Another emulator's
 //! source is a cross-check afterwards, never a source.
 
-/// The on/off bit and the picture's address.  Write-only.
+/// The on/off bit and the picture's address when written; the card's status
+/// (end of frame, line parity -- see [`status`]) when read.
 pub const ADDRESS_PORT: u8 = 0x0E;
 /// The format register.  Write-only.
 pub const FORMAT_PORT: u8 = 0x0F;
@@ -133,9 +134,10 @@ pub struct Picture {
 ///
 /// This is the whole correctness surface of the Dazzler and it is deliberately
 /// pure: no machine, no session, no display.  `bytes` is the guest's picture as
-/// sampled from [`base`]; short input is tolerated and shows as unlit, because
-/// a picture whose buffer runs off the top of memory is the guest's business
-/// and not a reason to refuse to draw.
+/// sampled from [`base`].  A picture that runs past the top of memory wraps
+/// into low memory, as the card's address counter does -- the sampler wraps,
+/// so this always gets a full buffer -- and short input here is tolerated and
+/// shows as unlit rather than panicking, for any other caller.
 ///
 /// The layout, from the manual, in the order it bites:
 ///
@@ -324,8 +326,9 @@ mod tests {
         assert_eq!(p.cells.iter().filter(|&&c| c != 0).count(), 8);
     }
 
-    /// A buffer that runs off the top of memory draws blank rather than
-    /// panicking — where a guest points its picture is the guest's business.
+    /// A short buffer draws blank rather than panicking.  The machine's own
+    /// sampler always passes a full one (it wraps past the top of memory), so
+    /// this guards `frame` as a pure function, not a guest's picture.
     #[test]
     fn test_a_short_buffer_is_unlit_not_a_panic() {
         let p = frame(&[0xFF, 0xFF], Format::from_byte(0x30));

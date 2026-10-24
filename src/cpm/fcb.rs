@@ -1,10 +1,11 @@
 //! CP/M 2.2 File Control Block (FCB) parsing + 8.3 filename helpers.
 //!
 //! A BDOS file call passes the address of a 36-byte FCB in `DE`.  We read
-//! the relevant fields, act on the host file it names (jailed under a
-//! `CPM/<drive>/` directory — see [`super::fs`]), and write back the
-//! updated position fields.  Everything here is pure logic so it is
-//! unit-testable without a live CPU or session.
+//! the relevant fields, act on the file it names -- a host file jailed under
+//! `CPM/<drive>/`, or an entry inside a mounted disk image (see
+//! [`super::fs`]) -- and write back the updated position fields.
+//! Everything here is pure logic so it is unit-testable without a live CPU
+//! or session.
 //!
 //! FCB layout (36 bytes):
 //! ```text
@@ -15,7 +16,7 @@
 //! 13     S1  reserved
 //! 14     S2  extent number, high
 //! 15     RC  record count in the current extent (0..128)
-//! 16..32 D0..D15  allocation map (unused by our directory-backed model)
+//! 16..32 D0..D15  allocation map (unused on a folder drive; an image's own)
 //! 32     CR  current record within the extent (0..127)
 //! 33..36 R0,R1,R2  random record number (little-endian, R2 = overflow)
 //! ```

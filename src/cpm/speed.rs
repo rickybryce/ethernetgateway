@@ -25,9 +25,8 @@
 //!
 //! `iz80` counts cycles per instruction from **separate tables for the 8080 and
 //! the Z80**, so pacing on `cycle_count()` is as accurate as the emulated
-//! instruction mix — no average has to be assumed on our side. This is a
-//! deliberate contrast with [`super::boot_machine::BootMachine::dazzler_phase`],
-//! which had no such counter available and says so.
+//! instruction mix — no average has to be assumed on our side. The Dazzler's
+//! frame clock (`BootMachine::dazzler_phase`) counts the same cycles.
 //!
 //! # Where the governor lives, and why it is not in `step`
 //!
@@ -128,7 +127,9 @@ pub fn parse(setting: &str) -> Speed {
         // `Duration` and panic the session, and `0.0001` slept for hours inside
         // the pump where ESC-ESC cannot reach.  `inf` is not a clock either.
         other => match other.parse::<f64>() {
-            Ok(0.0) => Speed::Unlimited,
+            // Not `-0`: it compares equal to `0.0` but is a negative clock,
+            // and a negative clock reads as `Auto` -- a typo keeps the governor.
+            Ok(m) if m == 0.0 && m.is_sign_positive() => Speed::Unlimited,
             Ok(m) if m.is_finite() && m > 0.0 => Speed::Mhz(m.max(MIN_MHZ)),
             _ => Speed::Auto,
         },
@@ -140,12 +141,18 @@ pub fn parse(setting: &str) -> Speed {
 /// `None` means unlimited — no pacing at all, which is what every version before
 /// this did.  See [`parse`] for how a setting is read.
 pub fn mhz_for(setting: &str, cpu: &str) -> Option<f64> {
-    let period = if cpu.trim().eq_ignore_ascii_case("8080") { MHZ_8080 } else { MHZ_Z80 };
+    let period = period_mhz(cpu);
     match parse(setting) {
         Speed::Unlimited => None,
         Speed::Auto => Some(period),
         Speed::Mhz(m) => Some(m),
     }
+}
+
+/// The clock of the period machine for `cpu`: what `auto` paces to, and the
+/// clock an unpaced guest's emulated time is counted in.
+pub fn period_mhz(cpu: &str) -> f64 {
+    if cpu.trim().eq_ignore_ascii_case("8080") { MHZ_8080 } else { MHZ_Z80 }
 }
 
 /// The slowest clock a setting may ask for.  Slower than any real machine of
@@ -328,6 +335,8 @@ mod tests {
     fn test_an_unknown_setting_falls_back_to_the_period_speed() {
         assert_eq!(mhz_for("nonsense", "8080"), Some(MHZ_8080));
         assert_eq!(mhz_for("-3", "z80"), Some(MHZ_Z80));
+        assert_eq!(mhz_for("-0", "z80"), Some(MHZ_Z80), "-0 is a negative clock, not zero");
+        assert_eq!(mhz_for("-0.0", "z80"), Some(MHZ_Z80));
         assert_eq!(mhz_for("", "z80"), Some(MHZ_Z80));
     }
 
@@ -342,7 +351,7 @@ mod tests {
         let auto = SPEED_CHOICES[0].1;
         for s in [
             "off", "none", "0", "0.0", "00", "unlimited", "UNLIMITED", "auto", "", "2", "2.0",
-            "4.5", "garbage", "-3", "inf", "nan", "0.0001",
+            "4.5", "garbage", "-3", "-0", "inf", "nan", "0.0001",
         ] {
             let clock = match mhz_for(s, "z80") {
                 None => "unlimited",

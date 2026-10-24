@@ -816,6 +816,16 @@ impl ImageFs {
         // medium; a record landing in a block the file already owns can only
         // ever expose the file's own old bytes, and is not worth a device
         // round trip per record.
+        // A fresh block is zeroed first. `delete` only stamps E5 on the
+        // entry, and `alloc_block` hands out the lowest free block -- usually
+        // one an erase just freed -- so the records a random write skipped
+        // over read back as the erased file's bytes. BDOS 40 promises zeros
+        // there, and BDOS 34 has no business showing another file's data.
+        if fresh {
+            for r in (0..self.params.records_per_block).filter(|&r| r != offset_in_block) {
+                self.write_block_record(block, r, &[0u8; 128])?;
+            }
+        }
         self.write_block_record(block, offset_in_block, data)?;
         if fresh {
             self.media.sync()?;
@@ -1032,8 +1042,8 @@ impl ImageFs {
     /// disagree about which files a wildcard covers, whichever kind of drive
     /// they are aimed at.
     ///
-    /// Deduplicated by name: a file over 16 KB has one directory entry per
-    /// extent, and a listing must still show it once.
+    /// Deduplicated by name: a file bigger than one directory entry can
+    /// address has several entries, and a listing must still show it once.
     pub fn matching(&self, user: u8, fcb: &Fcb) -> Vec<([u8; 8], [u8; 3])> {
         let mut out: Vec<([u8; 8], [u8; 3])> = self
             .dir
@@ -1247,7 +1257,10 @@ impl ImageFs {
         }
         let bsh = p.records_per_block.max(1).trailing_zeros() as u8;
         let dir_blocks = p.dir_records.div_ceil(p.records_per_block.max(1)).min(16);
-        let al: u16 = if dir_blocks == 0 { 0 } else { !(u16::MAX >> dir_blocks) };
+        // Shifted in from the top as a `u32`: a directory of exactly 16 blocks
+        // (z80pack's hard disk) is `FFFF`, and `u16::MAX >> 16` overflowed --
+        // a panic in the shipped build, under the image's lock, from `STAT`.
+        let al = (0xFFFF_u32 << (16 - dir_blocks)) as u16;
         let spt = self.fmt.sectrk;
         let off = (self.fmt.reserved_records / (spt as u32).max(1)) as u16;
         let mut d = [0u8; 15];
@@ -1789,6 +1802,17 @@ mod tests {
         fs.write_record(0, &b, &be, 0, &[0x55; 128]).unwrap();
         assert_eq!(fs.read_record(0, &b, &be, 0).unwrap().unwrap(), [0x55; 128]);
         assert!(fs.inconsistency().is_none());
+
+        // A random write past the start (BDOS 40, write random with zero
+        // fill) lands in the erased file's freed block: the records it skipped
+        // must read as zeros, not as FIRST.DAT.
+        let (c, ce) = name_of("THIRD.DAT");
+        fs.create(0, &c, &ce).unwrap();
+        fs.write_record(0, &c, &ce, 5, &[0x66; 128]).unwrap();
+        for rec in 0..5 {
+            assert_eq!(fs.read_record(0, &c, &ce, rec).unwrap().unwrap(), [0; 128], "record {rec}");
+        }
+        assert_eq!(fs.read_record(0, &c, &ce, 5).unwrap().unwrap(), [0x66; 128]);
     }
 
     #[test]
@@ -1888,7 +1912,13 @@ mod tests {
         log.lock().unwrap().clear();
         fs.write_record(0, &n, &e, 0, &[7; 128]).unwrap();
         let first = log.lock().unwrap().clone();
-        assert_eq!(&first[..3], ["write", "sync", "write"], "data, sync, then the claim: {first:?}");
+        // The block is zeroed record by record and the data written into it
+        // -- one write per record of the block -- then synced, then claimed.
+        let rpb = Params::derive(fmt).records_per_block as usize;
+        let sync = first.iter().position(|op| *op == "sync").expect("a fresh block is synced");
+        assert_eq!(sync, rpb, "the whole block, then the sync: {first:?}");
+        assert!(first[..sync].iter().all(|op| *op == "write"), "{first:?}");
+        assert_eq!(first.get(sync + 1), Some(&"write"), "then the claim: {first:?}");
 
         log.lock().unwrap().clear();
         fs.write_record(0, &n, &e, 1, &[8; 128]).unwrap();
@@ -1974,6 +2004,26 @@ mod tests {
         assert_eq!((d[2], d[3], d[4]), (5, 31, 1), "4 KB blocks, EXM 1");
         assert_eq!(u16::from_le_bytes([d[5], d[6]]), p.max_block, "DSM");
         assert_eq!(u16::from_le_bytes([d[7], d[8]]), hd_fmt.maxdir - 1, "DRM");
+    }
+
+    /// Every format the catalogue knows reports a DPB without panicking, and
+    /// its AL0/AL1 reserve exactly the directory's blocks.  z80pack's hard
+    /// disk has a directory of exactly sixteen blocks, the whole of AL0/AL1,
+    /// and a shift of sixteen on a `u16` panicked the session that ran `STAT`.
+    #[test]
+    fn test_every_format_reports_a_dpb_with_its_directory_blocks() {
+        let mut sixteen = false;
+        for fmt in super::super::format::FORMATS {
+            let fs = mount(blank(fmt), fmt);
+            let Some(d) = fs.dpb() else { continue };
+            let p = Params::derive(fmt);
+            let want = p.dir_records.div_ceil(p.records_per_block.max(1)).min(16);
+            let al = u16::from_be_bytes([d[9], d[10]]);
+            assert_eq!(al.count_ones(), want, "{}: AL0/AL1 {:04X}", fmt.token, al);
+            assert_eq!(al.leading_ones(), want, "{}: AL0/AL1 {:04X}", fmt.token, al);
+            sixteen |= want == 16;
+        }
+        assert!(sixteen, "no format with a sixteen-block directory was checked");
     }
 
     /// Search on an image matches the extent byte under the disk's own EXM,
@@ -2238,9 +2288,9 @@ mod tests {
         fs.create(0, &n, &e).unwrap();
         fs.write_record(0, &n, &e, 0, &[1; 128]).unwrap();
         fs.write_record(0, &n, &e, 2, &[3; 128]).unwrap();
-        // Record 1 was never written: it must read as the blank fill, not as a
-        // copy of a neighbour.
-        assert_eq!(fs.read_record(0, &n, &e, 1).unwrap().unwrap(), [E5; 128]);
+        // Record 1 was never written: it must read as zeros (a fresh block is
+        // zeroed), not as a copy of a neighbour.
+        assert_eq!(fs.read_record(0, &n, &e, 1).unwrap().unwrap(), [0; 128]);
 
         let mut after = vec![0u8; fmt.reserved_records as usize * 128];
         fs.media.read_at(0, &mut after).unwrap();

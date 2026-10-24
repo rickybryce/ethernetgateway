@@ -251,14 +251,6 @@ pub struct BootMachine {
     /// was previously offered to the modem and discarded, so the guest cannot
     /// tell the difference.
     vdm_scroll_latch: u8,
-    /// The Dazzler's address register, as the guest last wrote it: the on-bit
-    /// and A15..A9 of its picture.
-    ///
-    /// `None` until the guest writes it, and that is load-bearing rather than
-    /// tidy: while it is `None` the status port is *not* claimed, so a machine
-    /// that has never seen a Dazzler answers `IN 0Eh` exactly as it did before
-    /// this existed. A card the guest has not addressed is a card that is not
-    /// in the machine.
     /// The joystick board, when the operator has one switched on.
     ///
     /// `None` means ports `18h`-`1Ch` are unclaimed and answer exactly what
@@ -268,6 +260,14 @@ pub struct BootMachine {
     /// answers, and an unclaimed port reads `0xFF`, which on an axis is a stick
     /// pinned off-centre: the floating-sense-switch reading again.
     d7a: Option<super::d7a::D7a>,
+    /// The Dazzler's address register, as the guest last wrote it: the on-bit
+    /// and A15..A9 of its picture.
+    ///
+    /// `None` until the guest writes it, and that is load-bearing rather than
+    /// tidy: while it is `None` the status port is *not* claimed, so a machine
+    /// that has never seen a Dazzler answers `IN 0Eh` exactly as it did before
+    /// this existed. A card the guest has not addressed is a card that is not
+    /// in the machine.
     dazzler_address: Option<u8>,
     /// The Dazzler's format register.
     ///
@@ -275,14 +275,20 @@ pub struct BootMachine {
     /// rewrites it twenty-nine times while running, so it is sampled with each
     /// frame rather than configured once.
     dazzler_format: u8,
-    /// Instructions executed, which is this machine's only clock.
+    /// The CPU's cycle count at the start of the instruction being executed:
+    /// this machine's only clock.
     ///
     /// Used for one thing: the Dazzler's end-of-frame bit, which software polls
     /// tens of millions of times and which has to *change* or the guest waits
     /// for ever. A real card is timed by a crystal; we have no wall clock on
     /// this path and would not want one, since a paused or slow session must
-    /// still see frames go by in the order the guest expects.
-    instructions: u64,
+    /// still see frames go by in the order the guest expects.  Cycles, not
+    /// instructions: `iz80` counts them from the 8080's or the Z80's own
+    /// tables, so a frame is the same length whatever the guest is executing.
+    cycles: u64,
+    /// One Dazzler frame -- a 60th of a second -- in cycles of the clock this
+    /// machine runs at.  See [`Self::set_clock_mhz`].
+    frame_cycles: u64,
     /// Every byte of memory is a `DD`/`FD` prefix, so the CPU can never
     /// finish another instruction -- see `cpu::endless_prefix_run`.  Found
     /// once and remembered: nothing runs while it holds, so nothing can
@@ -420,7 +426,8 @@ impl BootMachine {
             d7a: None,
             dazzler_address: None,
             dazzler_format: 0,
-            instructions: 0,
+            cycles: 0,
+            frame_cycles: Self::frame_cycles_at(super::speed::MHZ_Z80),
             prefix_wedged: false,
             mmu: super::mmu::Mmu::default(),
             has_mmu: false,
@@ -589,7 +596,7 @@ impl BootMachine {
     /// CBIOS here uses one for the console, and if one ever does, this needs to
     /// hold the byte back rather than replay the instruction.
     pub fn step(&mut self, cpu: &mut Cpu) {
-        self.instructions = self.instructions.wrapping_add(1);
+        self.cycles = cpu.cycle_count();
         let before = cpu.registers().pc();
         self.rx_hold = self.rx_hold.saturating_sub(1);
         // A step iz80 could never return from is skipped, so the session
@@ -1044,17 +1051,32 @@ impl BootMachine {
         self.vdm_seen
     }
 
+    /// The clock this machine's guest runs at, in MHz, which sets how many
+    /// cycles a Dazzler frame lasts.  The session passes the clock its
+    /// governor holds the guest to, or the processor's period clock when it
+    /// runs unpaced -- emulated time then runs fast, and frames with it, which
+    /// is what "unlimited" means.  Until told, a 4 MHz Z80, the default CPU.
+    ///
+    /// Clamped: the speed setting has no ceiling, and `1e9` MHz made a frame
+    /// so long the end-of-frame bit never went low -- a guest waiting on it
+    /// looked hung.  Anything past a GHz is "as fast as possible" anyway.
+    pub fn set_clock_mhz(&mut self, mhz: f64) {
+        let mhz = if mhz.is_finite() { mhz.clamp(super::speed::MIN_MHZ, 1000.0) } else { super::speed::MHZ_Z80 };
+        self.frame_cycles = Self::frame_cycles_at(mhz);
+    }
+
+    fn frame_cycles_at(mhz: f64) -> u64 {
+        ((mhz * 1_000_000.0 / 60.0).round() as u64).max(1)
+    }
+
     /// Where this machine is in a Dazzler frame, `0.0..1.0`.
     ///
-    /// **Instructions rather than seconds, and the rate is an assumption that
-    /// is stated rather than measured** — nothing here can measure a 1976
-    /// crystal. A 2 MHz 8080 averages a few cycles per instruction, so ~400,000
-    /// instructions a second is the right order, and a 60 Hz frame is then
-    /// about 6,700 of them. What the software actually depends on is that the
-    /// bit *changes* at a plausible rate, which is the part a test can hold.
+    /// **Cycles of the guest's own clock.**  It counted instructions at an
+    /// assumed 400,000 a second, but the project's measured mix is 6.73 cycles
+    /// an instruction, so the default 4 MHz Z80 ran about 89 frames a second
+    /// and GDEMO, which times itself on this bit, ran half as fast again.
     fn dazzler_phase(&self) -> f32 {
-        const FRAME_INSTRUCTIONS: u64 = 6_667;
-        (self.instructions % FRAME_INSTRUCTIONS) as f32 / FRAME_INSTRUCTIONS as f32
+        (self.cycles % self.frame_cycles) as f32 / self.frame_cycles as f32
     }
 
     /// Hand this machine's screen to a watching viewer, if there is one.
@@ -1532,6 +1554,15 @@ impl Machine for BootMachine {
             // The front panel. Input only on real hardware, and the reason
             // every MITS operating system can find its console.
             SENSE_SWITCH_PORT => self.sense_switches,
+            // The joystick board, and only when the operator switched one on.
+            // After the controllers by construction -- this arm is below their
+            // guard in the same `match` -- which is the `0Eh` lesson: a disk
+            // register and a card register can share a number, and the disk
+            // must win.
+            p if self.d7a.is_some() && super::d7a::PORTS.contains(&p) => {
+                let now = super::speed::now_ms();
+                self.d7a.as_mut().and_then(|b| b.port_in(p, now)).unwrap_or(0xFF)
+            }
             // The Dazzler's status, and **only once a guest has addressed one**
             // — until then this port is not ours and falls through to the
             // answer it has always given, so no existing machine changes.
@@ -1542,19 +1573,10 @@ impl Machine for BootMachine {
             // means "a frame is never over": the guest polls for ever and looks
             // like a hang. That is the floating-sense-switch mistake exactly —
             // 0xFF is a *reading*, not the absence of one.
-            // The joystick board, and only when the operator switched one on.
-            // After the controllers by construction -- this arm is below their
-            // guard in the same `match` -- which is the `0Eh` lesson: a disk
-            // register and a card register can share a number, and the disk
-            // must win.
-            p if self.d7a.is_some() && super::d7a::PORTS.contains(&p) => {
-                let now = super::speed::now_ms();
-                self.d7a.as_mut().and_then(|b| b.port_in(p, now)).unwrap_or(0xFF)
-            }
             super::dazzler::ADDRESS_PORT if self.dazzler_address.is_some() => {
                 // The line parity alternates far faster than the frame does;
                 // deriving both from the one clock keeps them consistent.
-                let even_line = (self.instructions / 13).is_multiple_of(2);
+                let even_line = (self.cycles / (self.frame_cycles / 262).max(1)).is_multiple_of(2);
                 super::dazzler::status(self.dazzler_phase(), even_line)
             }
             // The virtual modem, if the operator gave this machine one. Asked
@@ -1609,18 +1631,6 @@ impl Machine for BootMachine {
                 self.print.push(value);
                 self.idle_status_reads = 0;
             }
-            // The VDM-1's scroll register.  Write-only, like the card: an `IN`
-            // here still falls through below, because a real VDM-1 answers
-            // nothing and a guest that reads a port we have started claiming
-            // must see exactly what it saw before.
-            //
-            // After the printer for the same reason the printer is after the
-            // console: a port the operator has assigned to a device the guest
-            // is really using must not be taken away by a display the guest
-            // cannot even detect.  Deliberately *not* counted as console
-            // activity — painting a memory-mapped screen produces no console
-            // bytes at all, which is exactly why a VDM-1 guest looks idle, and
-            // the pacing is right about that.
             // **After the controllers and the console, exactly as in `port_in`.**
             // The two dispatches must agree about precedence or a board could
             // be written through one door and read through another -- the `0Eh`
@@ -1637,9 +1647,30 @@ impl Machine for BootMachine {
                     b.port_out(p, value);
                 }
             }
+            // The VDM-1's scroll register.  Write-only, like the card: an `IN`
+            // here still falls through below, because a real VDM-1 answers
+            // nothing and a guest that reads a port we have started claiming
+            // must see exactly what it saw before.
+            //
+            // After the printer for the same reason the printer is after the
+            // console: a port the operator has assigned to a device the guest
+            // is really using must not be taken away by a display the guest
+            // cannot even detect.  Deliberately *not* counted as console
+            // activity — painting a memory-mapped screen produces no console
+            // bytes at all, which is exactly why a VDM-1 guest looks idle, and
+            // the pacing is right about that.
             super::vdm::SCROLL_PORT => {
                 self.vdm_scroll_latch = value;
                 self.vdm_seen = true;
+            }
+            // Cromemco's bank select.  After the disk controller, like every
+            // display here, so a board the operator's machine really has keeps
+            // its port; nothing else claims 40h today, but the ordering is the
+            // rule rather than the coincidence.  Gated on the machine having
+            // Cromemco boards: an Altair guest writing 40h must go on seeing
+            // nothing happen.
+            super::cromemco_bank::PORT if self.has_bank40 => {
+                self.bank40.port_out(value);
             }
             // The Cromemco Dazzler's two registers.  **Last of the displays and
             // after the controllers on purpose**: `0Eh` is also a z80pack disk
@@ -1650,15 +1681,6 @@ impl Machine for BootMachine {
             // Not console activity, for the VDM-1's reason: a card painted by
             // memory writes produces no console bytes, and the pacing is right
             // that such a guest looks idle.
-            // Cromemco's bank select.  After the disk controller, like every
-            // display here, so a board the operator's machine really has keeps
-            // its port; nothing else claims 40h today, but the ordering is the
-            // rule rather than the coincidence.  Gated on the machine having
-            // Cromemco boards: an Altair guest writing 40h must go on seeing
-            // nothing happen.
-            super::cromemco_bank::PORT if self.has_bank40 => {
-                self.bank40.port_out(value);
-            }
             super::dazzler::ADDRESS_PORT => {
                 self.dazzler_address = Some(value);
             }
@@ -2026,6 +2048,42 @@ pub(crate) mod tests {
             }
         }
         assert!(seen_low && seen_high, "the end-of-frame bit has to change, or a guest hangs");
+    }
+
+    /// A Dazzler frame is a 60th of a second **of the guest's clock**, counted
+    /// in cycles.  It was 6,667 instructions whatever they were, which at the
+    /// measured 6.73 cycles an instruction made a 4 MHz Z80 run about 89
+    /// frames a second.  A NOP guest (4 cycles each) shows the length directly:
+    /// 16,667 of them a frame at 4 MHz, and half that at 2.
+    #[test]
+    fn test_a_dazzler_frame_is_a_sixtieth_of_the_guests_clock() {
+        use crate::cpm::dazzler;
+        // 1e9 MHz is clamped to a GHz: a 4-cycle NOP is then 16.7 million a
+        // frame, past this loop, so it is checked through the field.
+        let mut huge = BootMachine::new();
+        huge.set_clock_mhz(1e9);
+        assert_eq!(huge.frame_cycles, 1000 * 1_000_000 / 60 + 1, "clamped to 1000 MHz");
+        for (mhz, want) in [(4.0, 16_667u64), (2.0, 8_333)] {
+            let mut m = BootMachine::new();
+            m.set_clock_mhz(mhz);
+            m.port_out(dazzler::ADDRESS_PORT as u16, 0x81);
+            let mut cpu = BootMachine::new_cpu();
+            let mut edges = Vec::new();
+            let mut was_low = false;
+            for n in 0..100_000u64 {
+                m.step(&mut cpu);
+                let low = m.port_in(dazzler::ADDRESS_PORT as u16) & 0x40 == 0;
+                if low && !was_low {
+                    edges.push(n);
+                }
+                was_low = low;
+            }
+            assert!(edges.len() >= 3, "{mhz} MHz: frames go by");
+            for w in edges.windows(2) {
+                let len = w[1] - w[0];
+                assert!(len.abs_diff(want) <= 1, "{mhz} MHz: a frame of {len} NOPs, want {want}");
+            }
+        }
     }
 
     /// The picture is sampled from wherever the guest put it, at the size its

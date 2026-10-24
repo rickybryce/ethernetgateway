@@ -61,9 +61,9 @@ pub type DirEntry = [u8; 32];
 /// Directory-backed CP/M filesystem: which drive is current, where the
 /// DMA buffer is, and the `CPM/` container base on the host.
 pub struct CpmFs {
-    /// Absolute path to the `CPM/` container (holds `A`..`H`).
+    /// Absolute path to the `CPM/` container (holds `A`..`P`).
     base: PathBuf,
-    /// Current drive, 0-based (0 = A:, 7 = H:).
+    /// Current drive, 0-based (0 = A:, 15 = P:).
     drive: u8,
     /// Current DMA transfer address in guest memory.
     dma: u16,
@@ -73,9 +73,9 @@ pub struct CpmFs {
     /// Cursor into `search` (index of the last entry returned).
     search_pos: usize,
     /// Current CP/M user number (0–15).  Tracked so BDOS 32 get/set and the
-    /// `USER` command are self-consistent; the directory is *not* segregated
-    /// by user (all files share one flat namespace), a documented
-    /// simplification of this host-directory-backed filesystem.
+    /// `USER` command are self-consistent.  A folder-backed drive is *not*
+    /// segregated by user (all files share one flat namespace), a documented
+    /// simplification; a mounted image is -- its entries carry their user.
     user: u8,
     /// Software write-protect bitmap, one bit per drive (bit 0 = A:).  Set by
     /// BDOS 28 (Write Protect Disk) for the current drive, reported by BDOS 29
@@ -802,9 +802,9 @@ impl CpmFs {
     /// deviation from the real thing.
     ///
     /// Real CP/M also requires the directory entry's user byte to match the
-    /// current user. This filesystem keeps one flat namespace per drive (a
-    /// documented simplification — see `user`), so there is no per-user
-    /// directory to filter and every visible file counts.
+    /// current user. A mounted image does, through the same matcher; a
+    /// folder-backed drive keeps one flat namespace (see `user`), so there
+    /// every visible file counts.
     pub fn has_temp_dollar_file(&self) -> bool {
         // `$` then all-wildcard: the same matcher every other directory
         // operation uses, rather than a second ad-hoc scan.
@@ -1181,7 +1181,15 @@ impl CpmFs {
                 .with_image(fcb, |img, user| {
                     img.write_record(user, &fcb.name, &fcb.ext, record, data)
                 })
-                .unwrap_or(Ok(()));
+                // Gone between the lookup above and this one: unmounted, or
+                // lent to a boot.  Nothing was written, so it is an error --
+                // `Ok` here reported a record as saved that went nowhere.
+                .unwrap_or_else(|| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "the drive's image was unmounted during the write",
+                    ))
+                });
             super::image::registry::session_done_writing(self.session, drive0);
             if r.is_err() {
                 // A claim not followed by a write is given back, matching the

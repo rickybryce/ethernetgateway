@@ -1300,11 +1300,11 @@ pub fn service_disk_bdos(cpm: &mut Cpm, fs: &mut CpmFs, func: u8) -> Option<u8> 
                 Ok(None) | Err(_) => 0x01,
             }
         })),
-        // 34 = write random; 40 = write random with zero-fill.  For our
-        // byte-exact host files the two are identical (a write past EOF is
-        // zero-filled by the OS either way), so 40 aliases 34 — without this
-        // it fell through to the "unknown" arm and returned 0 (fake success)
-        // while silently dropping the write.
+        // 34 = write random; 40 = write random with zero-fill.  The two are
+        // identical here: a host file past EOF is zero-filled by the OS, and
+        // an image zeroes every block it allocates (`ImageFs::write_record`),
+        // so 40 aliases 34 — without this it fell through to the "unknown"
+        // arm and returned 0 (fake success) while silently dropping the write.
         34 | 40 => Some(with_fcb(cpm, |cpm, fcb| {
             let rr = fcb.random_record();
             let dma = cpm.read_block(fs.dma(), 128);

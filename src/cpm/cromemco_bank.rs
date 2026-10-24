@@ -164,7 +164,9 @@ impl BankSelect {
         if self.upper.len() < BANKS - 1 {
             self.upper.resize_with(BANKS - 1, || None);
         }
-        let bank = self.upper[self.current - 1].get_or_insert_with(|| vec![0; 0x1_0000]);
+        // Only the banked half: everything from `COMMON_BASE` up is bank 0's,
+        // so a 64 KB bank left 32 KB of it never touched -- 224 KB a session.
+        let bank = self.upper[self.current - 1].get_or_insert_with(|| vec![0; COMMON_BASE as usize]);
         bank[addr as usize] = value;
     }
 }
