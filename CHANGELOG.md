@@ -73,8 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carrying data after a `?` -- the form's result page reloaded, gone back to
   or bookmarked, or a search.  A plain page address still falls back to HTTP
   with its warning.  A failure on the page a form leads to says the form was
-  sent, rather than inviting a second submission.  A form on a page that
-  itself fell back to HTTP asks before it is sent over `http://`.  A refused
+  sent, rather than inviting a second submission.  A form on a site whose
+  HTTPS failed asks before it is sent over `http://` -- on the page that fell
+  back, and on that site's pages reached after it by a link, Back or a
+  bookmark, until you leave the browser.  A refused
   form says it may or may not have reached the site, not "try again".
 - **Browser: a page with thousands of links no longer stalls the session.**
   Spacing and numbering the links took time that grew with the square of

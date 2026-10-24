@@ -1827,30 +1827,53 @@ pub(crate) fn resolve_url(base: &str, relative: &str) -> String {
 /// was read as part of the path: `/about.html` became type `a`, selector
 /// `bout.html`, and `..` could climb out through the `h`.  So the link is
 /// joined to the page's selector instead, and its type taken from what it
-/// names: a trailing `/` is a menu, an HTML file an `h`, anything else text.
-/// `None` for any other base, and for a link with a scheme of its own.
+/// names: a trailing `/` is a menu; an HTML file, a name with no extension
+/// or one with a query (`search.cgi?q=c64`) another page like this one; any
+/// other file text.  A query stays part of the selector, as a gopher server
+/// that runs scripts reads it.  `#top`, or an empty link, is this page.
+/// `None` for any other base, and for a link with a scheme of its own or a
+/// `//host` -- a whole gopher URL, read as one.
 fn resolve_gopher_html_link(base: &str, relative: &str) -> Option<String> {
     let (host, port, item_type, selector) = parse_gopher_url(base).ok()?;
-    if item_type != 'h' || url::Url::parse(relative).is_ok() {
+    if item_type != 'h' || relative.starts_with("//") || url::Url::parse(relative).is_ok() {
         return None;
     }
-    let page = url::Url::parse("http://gopher.invalid/").ok()?
-        .join(&encode_selector(selector.strip_prefix('/').unwrap_or(&selector)))
-        .ok()?;
+    // A `\` is a path separator to the URL parser; in a selector it is a
+    // character like any other.
+    let encoded = encode_selector(selector.strip_prefix('/').unwrap_or(&selector)).replace('\\', "%5C");
+    let page = url::Url::parse("http://gopher.invalid/").ok()?.join(&encoded).ok()?;
     let joined = page.join(relative).ok()?;
-    let mut target = decode_selector(joined.path());
+    if joined.path() == page.path() && joined.query() == page.query() {
+        return Some(base.to_string());
+    }
+    let path = decode_selector(joined.path());
+    let mut target = match joined.query() {
+        Some(query) => format!("{path}?{}", decode_selector(query)),
+        None => path.clone(),
+    };
     if !selector.starts_with('/') {
         target.remove(0);
     }
-    let lower = target.to_ascii_lowercase();
-    let ty = if target.is_empty() || target.ends_with('/') {
+    let name = path.rsplit('/').next().unwrap_or_default().to_ascii_lowercase();
+    let ty = if name.is_empty() {
         '1'
-    } else if [".html", ".htm", ".xhtml", ".shtml"].iter().any(|e| lower.ends_with(e)) {
+    } else if joined.query().is_some()
+        || !name.contains('.')
+        || [".html", ".htm", ".xhtml", ".shtml"].iter().any(|e| name.ends_with(e))
+    {
         'h'
     } else {
         '0'
     };
     Some(build_gopher_url(&host, port, ty, &target))
+}
+
+/// The site an `http://` URL is on, as `host:port` -- what the browser
+/// remembers HTTPS failing for (see `TelnetSession::web_fallback_hosts`).
+/// `None` for any other scheme.
+pub(crate) fn http_site(url: &str) -> Option<String> {
+    let url = url::Url::parse(url).ok().filter(|u| u.scheme() == "http")?;
+    Some(format!("{}:{}", url.host_str()?, url.port_or_known_default()?))
 }
 
 /// If `url` is a DuckDuckGo `/l/?uddg=<encoded_url>` redirect, return the
@@ -5402,6 +5425,15 @@ mod tests {
         assert_eq!(at(base, "my%20file.txt"), g('0', "/docs/my file.txt"));
         // A colon later in the link is not a scheme.
         assert_eq!(at(base, "/log/10:30.txt"), g('0', "/log/10:30.txt"));
+        // A name with no extension is a page like this one; a query stays in
+        // the selector, and makes a page.
+        assert_eq!(at(base, "cgi-bin/other"), g('h', "/docs/cgi-bin/other"));
+        assert_eq!(at(base, "search.cgi?q=c64"), g('h', "/docs/search.cgi?q=c64"));
+        assert_eq!(at(base, "?q=c64"), g('h', "/docs/index.html?q=c64"));
+        // `\` in the page's selector is a character, not a separator.
+        assert_eq!(at("gopher://g.example:7070/h/dir\\index.html", "a.html"), g('h', "/a.html"));
+        // `//host` is another server, read as a whole gopher URL.
+        assert_eq!(resolve_url(base, "//other.example/1/x"), "gopher://other.example/1/x");
         assert_eq!(at("gopher://g.example:7070/h/index.html", "../x.html"), g('h', "/x.html"));
         // A selector written without the leading slash keeps that form.
         assert_eq!(at("gopher://g.example:7070/hdocs/index.html", "a.html"), g('h', "docs/a.html"));
@@ -5409,8 +5441,11 @@ mod tests {
         assert_eq!(resolve_url(base, "http://web.example/"), "http://web.example/");
         assert_eq!(resolve_url(base, "gopher://o.example/1/x"), "gopher://o.example/1/x");
         assert_eq!(resolve_url("gopher://g.example/1/dir", "gopher://g.example/0/f"), "gopher://g.example/0/f");
-        // A fragment is this page.
+        // A fragment, or an empty link, is this page -- whatever its name.
         assert_eq!(resolve_url(base, "#top"), base);
+        assert_eq!(resolve_url("gopher://g.example/h/page", "#top"), "gopher://g.example/h/page");
+        assert_eq!(resolve_url("gopher://g.example/h/page", ""), "gopher://g.example/h/page");
+        assert_eq!(resolve_url("gopher://g.example/h/page.php", "#top"), "gopher://g.example/h/page.php");
         // Only an `h` page: on any other base a link joins as a URL does.
         assert_eq!(resolve_url("gopher://g.example/1/dir/", "x"), "gopher://g.example/1/dir/x");
     }

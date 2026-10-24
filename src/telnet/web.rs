@@ -658,7 +658,8 @@ impl TelnetSession {
         }
         let pages = total.div_ceil(Self::WEB_LIST_SHOWN);
         // Open on the page holding the current choice.
-        let mut page = current.map_or(0, |c| c / Self::WEB_LIST_SHOWN).min(pages - 1);
+        // Past the end (a drop-down with nothing chosen) is page one.
+        let mut page = current.filter(|&c| c < total).map_or(0, |c| c / Self::WEB_LIST_SHOWN);
         let max_item = if self.terminal_type == TerminalType::Petscii { 30 } else { 60 };
         loop {
             let first = page * Self::WEB_LIST_SHOWN;
@@ -949,13 +950,18 @@ impl TelnetSession {
         // relative form actions to `http://`, so the form would go out in the
         // clear with no HTTPS attempt -- on the very site whose HTTPS was just
         // broken, perhaps on purpose.  Not refused: an HTTP-only site's
-        // search box is what the fallback is for.  Asked, on an explicit Y.
+        // search box is what the fallback is for.  Asked, on an explicit Y,
+        // for any page of that site this visit (`web_fallback_hosts`).
         let action = {
             let form = &self.web_forms[form_idx];
             let base = self.web_url.clone().unwrap_or_default();
             if form.action.is_empty() { base } else { crate::webbrowser::resolve_url(&base, &form.action) }
         };
-        if self.web_fallback && action.starts_with("http://") {
+        let fell_back = |url: &str| {
+            crate::webbrowser::http_site(url).is_some_and(|site| self.web_fallback_hosts.contains(&site))
+        };
+        let page = self.web_url.clone().unwrap_or_default();
+        if action.starts_with("http://") && (fell_back(&action) || fell_back(&page)) {
             // A screen of its own: the form screen below is full.
             self.clear_screen().await?;
             let sep = self.separator();
@@ -1006,12 +1012,17 @@ impl TelnetSession {
                             self.web_history.remove(0);
                         }
                     }
+                if page.cleartext_fallback
+                    && let Some(site) = crate::webbrowser::http_site(&page.url)
+                    && !self.web_fallback_hosts.contains(&site)
+                {
+                    self.web_fallback_hosts.push(site);
+                }
                 self.web_url = Some(page.url);
                 self.web_title = page.title;
                 self.web_lines = page.lines;
                 self.web_links = page.links;
                 self.web_forms = page.forms;
-                self.web_fallback = page.cleartext_fallback;
                 self.web_scroll = 0;
                 Ok(true)
             }
@@ -1046,7 +1057,7 @@ impl TelnetSession {
         self.web_history.clear();
         self.web_url = None;
         self.web_title = None;
-        self.web_fallback = false;
+        self.web_fallback_hosts.clear();
         // Leaving the browser ends the visit, so the homepage is auto-loaded
         // again next time -- the once-only guard is per visit, not per session.
         self.web_home_tried = false;

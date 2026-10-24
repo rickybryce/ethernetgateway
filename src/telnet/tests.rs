@@ -1098,7 +1098,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         web_history: Vec::new(),
         web_url: None,
         web_home_tried: false,
-        web_fallback: false,
+        web_fallback_hosts: Vec::new(),
         web_title: None,
         web_forms: Vec::new(),
         weather_location: String::new(),
@@ -1165,7 +1165,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         web_history: Vec::new(),
         web_url: None,
         web_home_tried: false,
-        web_fallback: false,
+        web_fallback_hosts: Vec::new(),
         web_title: None,
         web_forms: Vec::new(),
         weather_location: String::new(),
@@ -16109,9 +16109,10 @@ async fn test_settling_a_trickled_command_is_bounded() {
     assert!(matches!(s.iac_resume, crate::telnet::io::SessionIac::Data), "the command was left half-read");
 }
 
-/// A form on a page that came over plain HTTP because HTTPS failed asks
-/// before it is sent over `http://`: N sends nothing, Y sends it, and a page
-/// that did not fall back is not asked about at all.
+/// A form on a site whose HTTPS failed asks before it is sent over
+/// `http://`: N sends nothing, Y sends it, and a site that did not fall back
+/// is not asked about at all.  Asked on the site's page as Back or a
+/// bookmark re-fetches it -- over `http://`, so not marked -- as well.
 #[tokio::test]
 async fn test_a_form_on_a_fallen_back_page_asks_before_plain_http() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16137,8 +16138,20 @@ async fn test_a_form_on_a_fallen_back_page_asks_before_plain_http() {
         });
         let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
         sess.color_enabled = false;
-        sess.web_url = Some(format!("http://127.0.0.1:{port}/"));
-        sess.web_fallback = fallback;
+        let page = |url: String, cleartext_fallback| crate::webbrowser::WebPage {
+            title: None,
+            lines: Vec::new(),
+            links: Vec::new(),
+            url,
+            forms: Vec::new(),
+            cleartext_fallback,
+        };
+        // The fallen-back page: this site, or another one.
+        let fell = if fallback { format!("http://127.0.0.1:{port}/") } else { "http://10.0.0.1/".into() };
+        assert!(sess.web_apply_result(Ok(page(fell, true)), false).await.unwrap());
+        // Then the site's page re-fetched over http://, unmarked.
+        let here = format!("http://127.0.0.1:{port}/");
+        assert!(sess.web_apply_result(Ok(page(here, false)), true).await.unwrap());
         sess.web_forms = vec![crate::webbrowser::WebForm {
             action: "/s".into(),
             method: "get".into(),
@@ -16179,4 +16192,35 @@ async fn test_a_form_on_a_fallen_back_page_asks_before_plain_http() {
         }
         assert_eq!(shown.contains("Send it anyway?"), fallback, "{shown}");
     }
+}
+
+/// A drop-down with nothing chosen -- a disabled placeholder, `selected`
+/// past the end -- opens its list on page one, with nothing marked.
+#[tokio::test]
+async fn test_a_pick_list_with_nothing_chosen_opens_on_page_one() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let (mut rd, mut wr) = tokio::io::split(peer);
+    let collector = tokio::spawn(async move {
+        let mut out = Vec::new();
+        let _ = rd.read_to_end(&mut out).await;
+        out
+    });
+    wr.write_all(b"\r").await.unwrap();
+    wr.shutdown().await.unwrap();
+    let items: Vec<String> = (1..=200).map(|i| format!("Option {i}")).collect();
+    let got = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sess.web_pick_from_list("COUNTRY", "Pick", &items, Some(usize::MAX)),
+    )
+    .await
+    .expect("the pick list hung")
+    .unwrap();
+    drop(sess);
+    drop(wr);
+    let text = String::from_utf8_lossy(&collector.await.unwrap()).to_ascii_lowercase();
+    assert_eq!(got, None);
+    assert!(text.contains("page 1/15") && text.contains(" 1.option 1\r"), "{text}");
+    assert!(!text.contains('>'), "{text}");
 }

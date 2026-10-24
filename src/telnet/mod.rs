@@ -1560,10 +1560,13 @@ pub(crate) struct TelnetSession {
     /// blocking fetch and made the user wait out the timeout again.  Cleared
     /// by `web_reset`, so leaving and re-entering the browser does retry.
     web_home_tried: bool,
-    /// The page on screen came over plain HTTP because HTTPS failed for it
-    /// (`WebPage::cleartext_fallback`): a form on it asks before it is sent
-    /// over `http://`.
-    web_fallback: bool,
+    /// The sites (`host:port`) whose HTTPS failed this visit, so a page of
+    /// theirs came over plain HTTP (`WebPage::cleartext_fallback`).  A form
+    /// sent over `http://` to one, or from a page of one, asks first.  Kept
+    /// per site, not per page: Back, a bookmark or a link re-fetches the
+    /// `http://` address with no HTTPS attempt, and that page is not marked.
+    /// Cleared by `web_reset`.
+    web_fallback_hosts: Vec<String>,
     web_title: Option<String>,
     web_forms: Vec<crate::webbrowser::WebForm>,
     weather_location: String,
@@ -1749,7 +1752,7 @@ impl TelnetSession {
             web_history: Vec::new(),
             web_url: None,
             web_home_tried: false,
-            web_fallback: false,
+            web_fallback_hosts: Vec::new(),
             web_title: None,
             web_forms: Vec::new(),
             weather_location: config::get_config().weather_location,
@@ -1836,7 +1839,7 @@ impl TelnetSession {
             web_history: Vec::new(),
             web_url: None,
             web_home_tried: false,
-            web_fallback: false,
+            web_fallback_hosts: Vec::new(),
             web_title: None,
             web_forms: Vec::new(),
             weather_location: config::get_config().weather_location,
@@ -1943,7 +1946,7 @@ impl TelnetSession {
             web_history: Vec::new(),
             web_url: None,
             web_home_tried: false,
-            web_fallback: false,
+            web_fallback_hosts: Vec::new(),
             web_title: None,
             web_forms: Vec::new(),
             weather_location: config::get_config().weather_location,
@@ -2837,7 +2840,7 @@ pub fn start_server(
                                     web_history: Vec::new(),
                                     web_url: None,
                                     web_home_tried: false,
-                                    web_fallback: false,
+                                    web_fallback_hosts: Vec::new(),
                                     web_title: None,
                                     web_forms: Vec::new(),
                                     weather_location: config::get_config().weather_location,
