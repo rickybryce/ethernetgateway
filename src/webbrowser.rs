@@ -1854,7 +1854,9 @@ fn resolve_gopher_html_link(base: &str, relative: &str) -> Option<String> {
     }
     // A `\` is a path separator to the URL parser; in a selector it is a
     // character like any other.  The page's own query stays a query, so a
-    // `?page=2` link replaces it rather than adding a second `?`.
+    // `?page=2` link replaces it rather than adding a second `?`.  As in
+    // HTTP, the first `?` starts it, even with a `/` after: a query holding
+    // a path (`x?path=/foo`) is likelier than a directory named `a?b`.
     let (own_path, own_query) = match selector.split_once('?') {
         Some((path, query)) => (path, Some(query)),
         None => (selector.as_str(), None),
@@ -1882,6 +1884,9 @@ fn resolve_gopher_html_link(base: &str, relative: &str) -> Option<String> {
     let ty = if name.is_empty() {
         '1'
     } else if query(&joined).is_some()
+        // This page under another query, or none (`?` on a results page):
+        // still the page it is, whatever its name says.
+        || joined.path() == page.path()
         || !name.contains('.')
         || [".html", ".htm", ".xhtml", ".shtml"].iter().any(|e| name.ends_with(e))
     {
@@ -5488,8 +5493,12 @@ mod tests {
         assert_eq!(at(results, "?q=c64&page=2"), g('h', "/docs/search.cgi?q=c64&page=2"));
         assert_eq!(at(results, "other.html"), g('h', "/docs/other.html"));
         assert_eq!(resolve_url(results, "#top"), results);
-        // `?` alone is this page, not `page?`.
+        // `?` alone is this page, not `page?`; on a results page, the page
+        // without its query -- still a page, not the script as text.
         assert_eq!(resolve_url(base, "?"), base);
+        assert_eq!(at(results, "?"), g('h', "/docs/search.cgi"));
+        // The first `?` starts the query, a `/` after it notwithstanding.
+        assert_eq!(at("gopher://g.example:7070/h/cgi-bin/x%3Fpath=/foo/bar.html", "baz.html"), g('h', "/cgi-bin/baz.html"));
         // `\` in the page's selector is a character, not a separator.
         assert_eq!(at("gopher://g.example:7070/h/dir\\index.html", "a.html"), g('h', "/a.html"));
         // `//host` is another server, read as a whole gopher URL.
