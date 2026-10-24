@@ -28,6 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     board's slots must be ones it reads, filled in order -- whichever screen
     they came from; a save that could not mount every disk says so first.
 
+- **Browser: all of Gopher, and Gopher+.**  Every item type in RFC 1436 is
+  now followed, where before only text, menus, searches and HTML were:
+  files (`5` `9` `g` `I` and the rest) are saved in the transfer folder to send
+  on with XMODEM, ZMODEM or Kermit; a telnet item (`8`, and `T` for tn3270)
+  connects you through the Telnet Gateway; a CSO phone book (`2`) is asked a
+  name; BinHexed and uuencoded files (`4`, `6`) are shown; and a `+` item is
+  the item above it on another server.  For a Gopher+ server, `I` shows an
+  item's information -- who keeps it, when it changed, its abstract and the
+  other forms it can be fetched in -- or every item's on a menu, and a
+  Gopher+ form is filled in on the form screen and sent: text, passwords,
+  several lines, checkboxes, a choice, a file from the transfer folder, and a
+  name to save the reply under.  Only items a server marks as Gopher+ are
+  asked for these, so a server that does not speak it is spoken to as before
+  (Floodgap and SDF ignore the request; quux.org answers -- all measured).
+
 ### Changed
 
 - **The CP/M joystick board is off by default** (`cpm_joystick` now defaults
@@ -92,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bookmarked Gopher search keeps its query, and a text file no longer ends
   with the protocol's `.` line -- while one whose own last line is `.`, from
   a server that sends no such line, keeps it.
+- **Browser: the help screen fits a C64.**  It was 24 rows on a 40-column
+  screen, two past it; it now pages as the other help screens do.  A test that
+  said it was 20 rows was adding up numbers, not counting what was drawn.
+- **Browser: a password field shows stars on the form screen**, not what was
+  typed.
 - **Browser: smaller fixes.**  A `<meta refresh>` address keeps everything
   after `url=`, semicolons included (`;jsessionid=...` was cut off); disabled
   form fields are not sent, nor disabled drop-down choices; links the browser cannot follow (`javascript:`,

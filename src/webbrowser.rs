@@ -1848,7 +1848,8 @@ pub(crate) fn resolve_url(base: &str, relative: &str) -> String {
 /// `None` for any other base, and for a link with a scheme of its own or a
 /// `//host` -- a whole gopher URL, read as one.
 fn resolve_gopher_html_link(base: &str, relative: &str) -> Option<String> {
-    let (host, port, item_type, selector) = parse_gopher_url(base).ok()?;
+    // The selector alone: a Gopher+ page's `%09%09+` is not part of a path.
+    let GopherUrl { host, port, ty: item_type, selector, .. } = GopherUrl::parse(base).ok()?;
     if item_type != 'h' || relative.starts_with("//") || url::Url::parse(relative).is_ok() {
         return None;
     }
@@ -2083,9 +2084,15 @@ fn find_forms(node: &Handle, forms: &mut Vec<WebForm>) {
     if let Element { ref name, .. } = node.data
         && &*name.local == "form" {
             let action = get_attr(node, "action").unwrap_or_default();
-            let method = get_attr(node, "method")
-                .unwrap_or_else(|| "get".to_string())
-                .to_lowercase();
+            // `post`, or else `get`, as a browser reads it -- and as
+            // `submit_form` always sent it.  Kept to the two, so no page can
+            // name a method the session treats differently: a page that said
+            // `method="gopher+ask"` was taken for a Gopher+ form, which sends
+            // a file from the transfer folder.
+            let method = match get_attr(node, "method").map(|m| m.to_ascii_lowercase()) {
+                Some(m) if m == "post" => "post".to_string(),
+                _ => "get".to_string(),
+            };
 
             let mut fields = Vec::new();
             let mut submit_label = None;
@@ -2558,21 +2565,36 @@ const GOPHER_TIMEOUT_SECS: u64 = 15;
 /// Maximum Gopher response size (512 KB).
 const GOPHER_MAX_BODY: usize = 512 * 1024;
 
+mod gopher;
+pub(crate) use gopher::{gopher_action, GopherAction, GopherUrl, ASK_METHOD, ASK_SAVE_AS, ASK_SEND_FILE};
+
 /// Read a response of at most `max` bytes, giving up at `deadline`.
 ///
 /// **One deadline for the whole body**, the counterpart of HTTP's
 /// `timeout_global`.  The socket's read timeout alone bounds each *read*, so a
 /// server sending one byte every fourteen seconds kept a 512 KB fetch -- and
 /// the session waiting on it, which no key can interrupt -- alive for weeks.
+#[cfg(test)]
 fn read_gopher_body(
     stream: &mut std::net::TcpStream,
     max: usize,
     deadline: std::time::Instant,
 ) -> Result<Vec<u8>, String> {
+    read_gopher_body_until(stream, max, deadline, &|_| false)
+}
+
+/// `read_gopher_body`, also ending when `done` says the body is whole: a
+/// Gopher+ reply that gave its length need not wait for the server to close.
+fn read_gopher_body_until(
+    stream: &mut std::net::TcpStream,
+    max: usize,
+    deadline: std::time::Instant,
+    done: &dyn Fn(&[u8]) -> bool,
+) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut body = Vec::new();
     let mut buf = [0u8; 8192];
-    while body.len() < max {
+    while body.len() < max && !done(&body) {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
             return Err("Read error: the server took too long to send the page".into());
@@ -2669,7 +2691,8 @@ fn parse_gopher_url(url: &str) -> Result<(String, u16, char, String), String> {
         ('1', String::new()) // root directory
     } else {
         let first = path.chars().next().unwrap();
-        if first.is_ascii_alphanumeric() || first == 'i' || first == '+' {
+        // Gopher+'s picture, movie and sound types are punctuation.
+        if first.is_ascii_alphanumeric() || matches!(first, '+' | ':' | ';' | '<') {
             (first, decode_selector(&path[1..]))
         } else {
             ('1', decode_selector(path))
@@ -2690,119 +2713,36 @@ fn build_gopher_url(host: &str, port: u16, item_type: char, selector: &str) -> S
     }
 }
 
-/// Fetch a Gopher resource and render it as a `WebPage`.
+/// Fetch a Gopher resource and render it as a `WebPage` (see the
+/// `gopher` module for what each kind of item does).
 ///
 /// Blocking call — run via `spawn_blocking`.
 pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
-    let (host, port, item_type, selector) = parse_gopher_url(url)?;
-
-    // Connect and send selector
-    let addr = format!("{}:{}", host, port);
-    let sock_addr = {
-        use std::net::ToSocketAddrs;
-        addr.to_socket_addrs()
-            .map_err(|e| format!("DNS error: {}", e))?
-            .next()
-            .ok_or_else(|| "Could not resolve host".to_string())?
-    };
-    // SSRF guard: gopher resolves and connects directly, so block an
-    // internal/loopback target before we dial it.
-    if !internal_fetch_allowed() && is_internal_ip(sock_addr.ip()) {
-        return Err(format!("Blocked: {} is an internal address", host));
-    }
-    let stream = std::net::TcpStream::connect_timeout(
-        &sock_addr,
-        std::time::Duration::from_secs(GOPHER_TIMEOUT_SECS),
-    )
-    .map_err(|e| format!("Connection failed: {}", e))?;
-
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(GOPHER_TIMEOUT_SECS)))
-        .ok();
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(GOPHER_TIMEOUT_SECS)))
-        .ok();
-
-    let mut stream = std::io::BufWriter::new(stream);
-    use std::io::Write;
-    // Strip CR/LF from the selector so a user-supplied search query
-    // containing literal \r\n can't inject extra protocol lines.
-    // Gopher selectors are single-line by spec; only TAB is meaningful
-    // (delimits item-type 7 search queries).  NUL is also stripped to
-    // avoid C-string-style truncation by old gopher daemons.
-    let safe_selector: String = selector
-        .chars()
-        .filter(|&c| c != '\r' && c != '\n' && c != '\0')
-        .collect();
-    stream
-        .write_all(format!("{}\r\n", safe_selector).as_bytes())
-        .map_err(|e| format!("Write error: {}", e))?;
-    stream.flush().map_err(|e| format!("Flush error: {}", e))?;
-
-    // Read response, against one deadline for the whole of it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(GOPHER_TIMEOUT_SECS);
-    let body = read_gopher_body(stream.get_mut(), GOPHER_MAX_BODY, deadline)?;
-
-    // A text file or HTML page ends with the protocol's `.` line on a
-    // server that sends one (RFC 1436), and not on one that sends the file
-    // as it is.  Bucktooth (Floodgap) writes `\r\n.\r\n`; SDF writes the
-    // file alone (both measured).  Only that CRLF line is dropped: a file
-    // whose own last line is `.` keeps it, Unix line ends and all.
-    let body = match item_type {
-        '0' | 'h' => strip_gopher_terminator(&body),
-        _ => &body[..],
-    };
-    let text = String::from_utf8_lossy(body);
-    let final_url = build_gopher_url(&host, port, item_type, &selector);
-
-    let mut page = match item_type {
-        '0' => {
-            // Plain text file — just wrap and display.
-            let lines: Vec<String> = text
-                .lines()
-                .flat_map(|line| wrap_line(line.trim_end_matches('\r'), width))
-                .take(MAX_RENDERED_LINES)
-                .collect();
-            WebPage {
-                title: Some(selector.rsplit('/').next().unwrap_or("Text").to_string()),
-                lines,
-                links: Vec::new(),
-                url: final_url,
-                forms: Vec::new(),
-                fallback_sites: Vec::new(),
-            }
-        }
-        '1' | '7' => {
-            // Directory listing or search results — parse Gopher menu
-            render_gopher_directory(&text, &host, port, width, final_url)?
-        }
-        // An HTML document the gopher server holds itself (an `h` item
-        // whose selector is not a `URL:` link): drawn as a web page is.
-        // Its refresh, if any, is not followed -- that is an HTTP fetch.
-        'h' => render_html_body(body, final_url, width)?.0,
-        _ => {
-            // Unsupported type — show as plain text
-            let lines: Vec<String> = text
-                .lines()
-                .flat_map(|line| wrap_line(line.trim_end_matches('\r'), width))
-                .take(MAX_RENDERED_LINES)
-                .collect();
-            WebPage {
-                title: Some(format!("Gopher (type {})", item_type)),
-                lines,
-                links: Vec::new(),
-                url: final_url,
-                forms: Vec::new(),
-                fallback_sites: Vec::new(),
-            }
-        }
-    };
-
+    let mut page = gopher::fetch(url, width)?;
     // Strip any terminal-control bytes a hostile gopher server smuggled into
     // the menu labels or text before they reach the terminal (see
     // WebPage::sanitize).
     page.sanitize();
     Ok(page)
+}
+
+/// Send a Gopher+ `+ASK` form's answers (and a `ChooseF` file); the reply
+/// drawn, and its bytes for an `AskF` to save.
+pub(crate) fn submit_gopher_ask(form: &WebForm, file: Option<&[u8]>, width: usize) -> Result<(WebPage, Vec<u8>), String> {
+    let (mut page, raw) = gopher::submit_ask(form, file, width)?;
+    page.sanitize();
+    Ok((page, raw))
+}
+
+/// A gopher file item, for the transfer folder.  Blocking.
+pub(crate) fn fetch_gopher_file(url: &str, max: usize) -> Result<Vec<u8>, String> {
+    gopher::fetch_file(url, max)
+}
+
+/// The SSRF rule for a host a gopher menu named, for the telnet hand-off:
+/// the address to dial, once all of `addrs` pass.
+pub(crate) fn gopher_dial_addr(addrs: &[std::net::SocketAddr], host: &str) -> Result<std::net::SocketAddr, String> {
+    gopher::checked_addr(addrs, host, &gopher::check_dial)
 }
 
 /// `body` without the `.` line a gopher server ends a document with: a
@@ -2825,6 +2765,20 @@ fn render_gopher_directory(
     let mut lines: Vec<String> = Vec::new();
     let mut links: Vec<String> = Vec::new();
 
+    // A `+` item is a redundant server for the last item that was not one
+    // (RFC 1436): the same thing, fetched the same way.
+    let mut primary: Option<char> = None;
+    let mut link = |lines: &mut Vec<String>, label: &str, url: String| {
+        links.push(url);
+        let link_num = links.len();
+        for (i, wrapped) in wrap_line(label, width.saturating_sub(5)).iter().enumerate() {
+            if i == 0 {
+                lines.push(format!("{}\x02{}\x03", wrapped, link_num));
+            } else {
+                lines.push(format!("  {}", wrapped));
+            }
+        }
+    };
     for raw_line in text.lines() {
         let line = raw_line.trim_end_matches('\r');
 
@@ -2837,19 +2791,21 @@ fn render_gopher_directory(
             continue;
         }
 
-        let item_type = line.chars().next().unwrap_or('i');
-        let rest = &line[item_type.len_utf8()..];
-        let fields: Vec<&str> = rest.split('\t').collect();
-
-        let display = fields.first().unwrap_or(&"");
-        let selector = fields.get(1).unwrap_or(&"");
-        // An empty host field means this server, as a missing one does: it
-        // was taken as written, giving `gopher:///1/sub` and "Empty host".
-        let host = fields.get(2).map(|h| h.trim()).filter(|h| !h.is_empty()).unwrap_or(current_host);
-        let port: u16 = fields
-            .get(3)
-            .and_then(|p| p.trim().parse().ok())
-            .unwrap_or(current_port);
+        let Some(item) = gopher::parse_menu_line(line, current_host, current_port) else {
+            continue;
+        };
+        let item_type = match item.ty {
+            // With nothing above it to stand in for, it is shown as unknown.
+            '+' => primary.unwrap_or('+'),
+            t => {
+                primary = Some(t);
+                t
+            }
+        };
+        let display = item.display.as_str();
+        // An alternate server says so; a Gopher+ form says it is one.
+        let display = if item.ty == '+' { format!("[ALT] {display}") } else { display.to_string() };
+        let display = if item.plus == Some('?') { format!("[FORM] {display}") } else { display };
 
         match item_type {
             'i' | '3' => {
@@ -2861,58 +2817,41 @@ fn render_gopher_directory(
                 }
             }
             '0' | '1' | '7' => {
-                // Text file, directory, or search — create a link
-                let link_url = if item_type == '7' {
-                    // Search items: mark with ?search so the browser knows to prompt
-                    format!("{}?search", build_gopher_url(host, port, item_type, selector))
-                } else {
-                    build_gopher_url(host, port, item_type, selector)
-                };
-                links.push(link_url);
-                let link_num = links.len();
+                // Text file, directory, or search — create a link.  A search
+                // is marked `?search` (`MenuItem::url`) so the browser asks
+                // for the words first.
                 let type_marker = match item_type {
                     '1' => "/",
                     '7' => "?",
                     _ => "",
                 };
-                let label = format!("{}{}", display, type_marker);
-                for (i, wrapped) in wrap_line(&label, width.saturating_sub(5)).iter().enumerate() {
-                    if i == 0 {
-                        lines.push(format!("{}\x02{}\x03", wrapped, link_num));
-                    } else {
-                        lines.push(format!("  {}", wrapped));
-                    }
-                }
+                link(&mut lines, &format!("{}{}", display, type_marker), item.url(item_type));
             }
-            'h' => {
-                // `URL:` is a link to the web; anything else is an HTML
-                // document on a gopher server, fetched as one.  The bare
-                // selector was taken for a URL, so `/index.html` resolved to
-                // `gopher://host/index.html` -- item type `i`, selector
-                // `ndex.html`.
-                let url = match selector.strip_prefix("URL:") {
-                    Some(web) => web.to_string(),
-                    None => build_gopher_url(host, port, 'h', selector),
+            // `URL:` is a link to the web; anything else is an HTML document
+            // on a gopher server, fetched as one.  The bare selector was taken
+            // for a URL, so `/index.html` resolved to `gopher://host/index.html`
+            // -- item type `i`, selector `ndex.html`.
+            'h' => link(&mut lines, &display, item.url('h')),
+            // The rest of RFC 1436 and Gopher+: what each does when followed
+            // is `gopher_action`'s.
+            '2' => link(&mut lines, &format!("[CSO] {display}"), item.url('2')),
+            '4' => link(&mut lines, &format!("[HQX] {display}"), item.url('4')),
+            '6' => link(&mut lines, &format!("[UUE] {display}"), item.url('6')),
+            '8' => link(&mut lines, &format!("[TEL] {display}"), item.url('8')),
+            'T' => link(&mut lines, &format!("[3270] {display}"), item.url('T')),
+            t if gopher::is_file_type(t) => {
+                let tag = match t {
+                    'g' | 'I' | ':' | 'p' => "[IMG]",
+                    's' | '<' => "[SND]",
+                    ';' => "[MOV]",
+                    'd' | 'P' => "[DOC]",
+                    _ => "[BIN]",
                 };
-                links.push(url);
-                let link_num = links.len();
-                for (i, wrapped) in wrap_line(display, width.saturating_sub(5)).iter().enumerate() {
-                    if i == 0 {
-                        lines.push(format!("{}\x02{}\x03", wrapped, link_num));
-                    } else {
-                        lines.push(format!("  {}", wrapped));
-                    }
-                }
+                link(&mut lines, &format!("{tag} {display}"), item.url(t));
             }
             _ => {
-                // Binary, image, etc. — show label but no link
-                let type_label = match item_type {
-                    '9' => "[BIN]",
-                    'g' | 'I' | 'p' => "[IMG]",
-                    's' => "[SND]",
-                    _ => "[???]",
-                };
-                for wrapped in wrap_line(&format!("{} {}", type_label, display), width) {
+                // A type this browser does not know -- shown, not followed.
+                for wrapped in wrap_line(&format!("[???] {}", display), width) {
                     lines.push(wrapped);
                 }
             }
@@ -2925,7 +2864,8 @@ fn render_gopher_directory(
 
     // Extract a title from the URL selector
     let title = {
-        let (_, _, _, sel) = parse_gopher_url(&final_url).unwrap_or_default();
+        // The selector alone: not a search's words or a Gopher+ string.
+        let sel = GopherUrl::parse(&final_url).map(|g| g.selector).unwrap_or_default();
         if sel.is_empty() {
             Some(format!("Gopher: {}", current_host))
         } else {
@@ -2951,13 +2891,11 @@ pub(crate) fn is_gopher_search(url: &str) -> bool {
 /// Strip the `?search` sentinel and append a tab + query to form the search URL.
 pub(crate) fn build_gopher_search_url(url: &str, query: &str) -> String {
     let base = url.strip_suffix("?search").unwrap_or(url);
-    // For Gopher search, the query is appended to the selector after a tab.
-    // Re-parse, append query to selector, rebuild.
-    if let Ok((host, port, item_type, selector)) = parse_gopher_url(base) {
-        let search_selector = format!("{}\t{}", selector, query);
-        build_gopher_url(&host, port, item_type, &search_selector)
-    } else {
-        base.to_string()
+    // The query follows the selector after a TAB (`%09` in the URL), and a
+    // Gopher+ string, if the item has one, after another.
+    match GopherUrl::parse(base) {
+        Ok(g) => GopherUrl { search: Some(query.to_string()), ..g }.to_url(),
+        Err(_) => base.to_string(),
     }
 }
 
@@ -4326,67 +4264,65 @@ mod tests {
     }
 
     #[test]
-    fn test_rfc1436_item_type_9_binary_label_no_link() {
-        // §3.6: type '9' = binary file.  We can't render a binary
-        // through a text terminal, so we display "[BIN]" and offer
-        // no link.
-        let page = render_one_item("9archive.zip\t/9/a.zip\texample.org\t70");
-        assert!(page.links.is_empty(), "binary items should not be linkable");
-        assert!(
-            page.lines.iter().any(|l| l.contains("[BIN]")),
-            "expected [BIN] label, got: {:?}",
-            page.lines
-        );
-    }
-
-    #[test]
-    fn test_rfc1436_item_type_image_label_no_link() {
-        // §3.6: 'g' = GIF, 'I' = image (generic), 'p' = PNG (gopher+).
-        // All non-linkable in a text browser, all rendered as [IMG].
-        for ty in ['g', 'I', 'p'] {
-            let line = format!("{ty}pic.png\t/sel\texample.org\t70");
-            let page = render_one_item(&line);
-            assert!(
-                page.links.is_empty(),
-                "type {} should not produce a link",
-                ty
-            );
-            assert!(
-                page.lines.iter().any(|l| l.contains("[IMG]")),
-                "type {} should render with [IMG] label",
-                ty
-            );
+    fn test_rfc1436_file_types_are_labelled_links() {
+        // §3.8: binary, image and sound items are files.  Labelled by kind,
+        // and linked: following one saves it in the transfer folder.
+        for (ty, tag) in [('9', "[BIN]"), ('5', "[BIN]"), ('g', "[IMG]"), ('I', "[IMG]"), ('p', "[IMG]"),
+                          ('s', "[SND]"), (':', "[IMG]"), (';', "[MOV]"), ('<', "[SND]"), ('d', "[DOC]")] {
+            let page = render_one_item(&format!("{ty}file.bin\t/f\texample.org\t70"));
+            assert_eq!(page.links, vec![format!("gopher://example.org/{ty}/f")], "type {ty}");
+            assert!(page.lines[0].starts_with(&format!("{tag} file.bin")), "type {ty}: {:?}", page.lines);
+            assert!(matches!(gopher_action(&page.links[0]), GopherAction::Download { ref name } if name == "f"), "type {ty}");
         }
     }
 
     #[test]
-    fn test_rfc1436_item_type_s_sound_label_no_link() {
-        // §3.6: 's' = sound.  Same treatment as binary/image —
-        // labeled, not linked.
-        let page = render_one_item("ssong.mp3\t/s\texample.org\t70");
+    fn test_rfc1436_session_and_text_types_are_links() {
+        // §3.8: telnet and tn3270 sessions, the CSO phone book, and the two
+        // text encodings of a file are all followed.  A telnet or CSO item's
+        // missing port is its own protocol's, not the gopher server's.
+        let cases = [
+            ("8Login\tguest\tbbs.example.org\t", "[TEL] Login", "gopher://bbs.example.org:23/8guest"),
+            ("TMainframe\t\tibm.example.org\t0", "[3270] Mainframe", "gopher://ibm.example.org:23/T"),
+            ("2Phone book\t\tns.example.org\t", "[CSO] Phone book", "gopher://ns.example.org:105/2?search"),
+            ("4Mac file\t/a.hqx\texample.org\t70", "[HQX] Mac file", "gopher://example.org/4/a.hqx"),
+            ("6Unix file\t/a.uue\texample.org\t70", "[UUE] Unix file", "gopher://example.org/6/a.uue"),
+        ];
+        for (line, label, url) in cases {
+            let page = render_one_item(line);
+            assert_eq!(page.links, vec![url.to_string()], "{line}");
+            assert!(page.lines[0].starts_with(label), "{line}: {:?}", page.lines);
+        }
+        assert_eq!(
+            gopher_action("gopher://bbs.example.org:23/8guest"),
+            GopherAction::Telnet { host: "bbs.example.org".into(), port: 23, login: "guest".into(), tn3270: false }
+        );
+        assert!(matches!(gopher_action("gopher://ibm.example.org:23/T"), GopherAction::Telnet { tn3270: true, .. }));
+        for page in ["gopher://example.org/4/a.hqx", "gopher://example.org/6/a.uue", "gopher://example.org/1/"] {
+            assert_eq!(gopher_action(page), GopherAction::Page, "{page}");
+        }
+    }
+
+    #[test]
+    fn test_a_redundant_server_is_its_primary() {
+        // §3.8 `+`: the same item on another server, fetched as the last
+        // item that was not a `+` -- and with none, shown as unknown.
+        let menu = "1Docs\t/docs\ta.example\t70\r\n+Docs\t/docs\tb.example\t7070\r\n";
+        let page = render_gopher_directory(menu, "h", 70, 72, "gopher://h/1".into()).unwrap();
+        assert_eq!(page.links, vec!["gopher://a.example/1/docs", "gopher://b.example:7070/1/docs"]);
+        assert!(page.lines[1].starts_with("[ALT] Docs/"), "{:?}", page.lines);
+        let page = render_one_item("+Orphan\t/o\texample.org\t70");
         assert!(page.links.is_empty());
-        assert!(page.lines.iter().any(|l| l.contains("[SND]")));
+        assert!(page.lines[0].contains("[???]"), "{:?}", page.lines);
     }
 
     #[test]
     fn test_rfc1436_item_type_unknown_label_no_link() {
-        // §3.6 lists 2/4/5/6/8/T/+ as defined types we don't have
-        // first-class rendering for.  Falling back to [???] is the
-        // safe behavior: never offer a link for a type we can't
-        // safely follow, but still surface that something is there.
-        for ty in ['2', '4', '5', '6', '8', 'T', '+'] {
-            let line = format!("{ty}Mystery\t/m\texample.org\t70");
-            let page = render_one_item(&line);
-            assert!(
-                page.links.is_empty(),
-                "unknown type {} must not produce a link",
-                ty
-            );
-            assert!(
-                page.lines.iter().any(|l| l.contains("[???]")),
-                "unknown type {} should render with [???] label",
-                ty
-            );
+        // A type no standard defines is shown, never followed.
+        for ty in ['X', 'Z', '!'] {
+            let page = render_one_item(&format!("{ty}Mystery\t/m\texample.org\t70"));
+            assert!(page.links.is_empty(), "unknown type {ty} must not produce a link");
+            assert!(page.lines.iter().any(|l| l.contains("[???]")), "type {ty}: {:?}", page.lines);
         }
     }
 
@@ -5378,6 +5314,18 @@ mod tests {
         server.join().unwrap();
         assert_eq!(page.url, elsewhere);
         assert_eq!(page.fallback_sites, vec![format!("127.0.0.1:{port}"), other]);
+    }
+
+    /// A form's method is `post` or `get`, as a browser reads it: no page can
+    /// name one the session treats as something else (a Gopher+ form sends a
+    /// file from the transfer folder).
+    #[test]
+    fn test_an_html_form_method_is_get_or_post() {
+        for (attr, want) in [("POST", "post"), ("post", "post"), ("GOPHER+ASK", "get"), ("gopher+ask", "get"), ("dialog", "get"), ("", "get")] {
+            let html = format!("<form method=\"{attr}\" action=\"gopher://evil/0/x%09%09+\"><select name=choosef></select></form>");
+            let (page, _) = render_html_body(html.as_bytes(), "http://h/".into(), 72).unwrap();
+            assert_eq!(page.forms[0].method, want, "{attr}");
+        }
     }
 
     /// A disabled option is not a choice, nor anything in a disabled

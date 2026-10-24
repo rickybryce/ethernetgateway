@@ -2072,12 +2072,16 @@ impl TelnetSession {
     fn browser_page_help_lines(petscii: bool) -> &'static [&'static str] {
         if petscii {
             &[
+                "  [1] [2] etc. next to text",
+                "  are links to other pages.",
+                "",
                 "  N/P  Next/Previous page",
                 "  T/E  Jump to Top/End",
                 "  S    Search text in page",
                 "  G    Go to URL or search",
                 "  L    Follow link (any #)",
                 "  F    Fill out forms",
+                "  I    Gopher+ item info",
                 "  K    Save bookmark",
                 "  B    Back to previous page",
                 "  R    Reload current page",
@@ -2091,12 +2095,16 @@ impl TelnetSession {
             ]
         } else {
             &[
+                "  [1], [2], etc. next to text are links",
+                "  to other pages.",
+                "",
                 "  N / P  Next page / Previous page",
                 "  T / E  Jump to Top / End of page",
                 "  S      Search for text in page",
                 "  G      Go to a URL or search query",
                 "  L      Follow a link (any number)",
                 "  F      Fill out and submit forms",
+                "  I      Gopher+ info on an item or page",
                 "  K      Save page as bookmark",
                 "  B      Back to previous page",
                 "  R      Reload current page",
@@ -2123,6 +2131,11 @@ impl TelnetSession {
             "  it is taken as a URL or a search,",
             "  so an address can be typed here",
             "  without pressing G first.",
+            "",
+            "  Examples:",
+            "    http://telnetbible.com",
+            "    gopher://gopher.floodgap.com",
+            "    rust programming (search)",
         ]
     }
 

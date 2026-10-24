@@ -5472,6 +5472,7 @@ follow.  A link the browser cannot follow &mdash; <code>javascript:</code>,
         <tr><td><span class="kbd">G</span></td><td>Go to a new URL or search.</td></tr>
         <tr><td><span class="kbd">S</span></td><td>Search for text in the page.</td></tr>
         <tr><td><span class="kbd">F</span></td><td>Fill out and submit forms.</td></tr>
+        <tr><td><span class="kbd">I</span></td><td>Gopher pages only: Gopher+ information on a link's item, or with no number on this page (see 13.5).</td></tr>
         <tr><td><span class="kbd">K</span></td><td>Save as bookmark; on the home screen, opens the bookmarks list.</td></tr>
         <tr><td><span class="kbd">B</span></td><td>Back to the previous page.</td></tr>
         <tr><td><span class="kbd">R</span></td><td>Reload.</td></tr>
@@ -5486,10 +5487,64 @@ follow.  A link the browser cannot follow &mdash; <code>javascript:</code>,
 <p>
 Up to 100 bookmarks are saved in <code>ethernetgateway-data/bookmarks.txt</code>. When a page has forms, press <span class="kbd">F</span> to interact —
 pick a form, edit fields by number, <span class="kbd">S</span> to submit or
-<span class="kbd">Q</span> to cancel.
+<span class="kbd">Q</span> to cancel.  A password field shows stars, not
+what was typed.
 </p>
 
-<h2>13.5 Limits</h2>
+<h2>13.5 Gopher</h2>
+
+<p>
+Every Gopher item type in RFC 1436 is followed, and Gopher+ servers'
+extras are used.  A menu labels each item by what it does:
+</p>
+
+<table>
+    <thead><tr><th>Shown as</th><th>Type</th><th>What following it does</th></tr></thead>
+    <tbody>
+        <tr><td>name<code>/</code></td><td><code>1</code></td><td>Opens the menu.</td></tr>
+        <tr><td>name</td><td><code>0</code>, <code>h</code></td><td>Shows the text file or HTML page.</td></tr>
+        <tr><td>name<code>?</code></td><td><code>7</code></td><td>Asks for words to search for, then shows the results.</td></tr>
+        <tr><td><code>[CSO]</code></td><td><code>2</code></td><td>A CSO phone book: asks for a name to look up and shows each match's entries.</td></tr>
+        <tr><td><code>[HQX]</code> <code>[UUE]</code></td><td><code>4</code>, <code>6</code></td><td>A BinHexed or uuencoded file, which is text: shown.</td></tr>
+        <tr><td><code>[BIN]</code> <code>[IMG]</code> <code>[SND]</code> <code>[MOV]</code> <code>[DOC]</code></td><td><code>5</code> <code>9</code> <code>g</code> <code>I</code> <code>s</code> <code>:</code> <code>;</code> <code>&lt;</code> <code>d</code> <code>p</code> <code>P</code></td><td>A file: asks, then saves it in the transfer folder under its own name (made safe, and numbered rather than overwriting one already there), to send on with XMODEM, ZMODEM or Kermit.  At most 8 MB, what those can send.</td></tr>
+        <tr><td><code>[TEL]</code></td><td><code>8</code></td><td>A telnet session: shows the host and the name to log in as, asks, then connects you through the Telnet Gateway.  ESC twice leaves it and returns to the menu.</td></tr>
+        <tr><td><code>[3270]</code></td><td><code>T</code></td><td>The same for a tn3270 session.  Such a host expects an IBM 3270 terminal, which the gateway is not, so it may not work over plain telnet; the screen says so.</td></tr>
+        <tr><td><code>[ALT]</code></td><td><code>+</code></td><td>The item above it on another server: followed the same way.</td></tr>
+        <tr><td><code>[FORM]</code></td><td>Gopher+ <code>?</code></td><td>Opens on the form's questions (below).</td></tr>
+        <tr><td><code>[???]</code></td><td>other</td><td>A type no standard defines: shown, not followed.</td></tr>
+    </tbody>
+</table>
+
+<p>
+<strong>Gopher+.</strong>  A Gopher+ server marks its items, and only those
+items are asked for Gopher+ extras; a server that does not mark them is
+spoken to exactly as before.  On a Gopher page, <span class="kbd">I</span>
+then a link number shows that item's information: who keeps it, when it
+changed, its abstract, the other forms it can be fetched in (each a link:
+following one fetches that form &mdash; a file one is saved, as above) and
+whether it has a form.  <span class="kbd">I</span> with no number shows the
+same for every item on a menu at once.
+</p>
+
+<p>
+<strong>Gopher+ forms.</strong>  An item with a form (<code>[FORM]</code>,
+or the <em>Form</em> link on its information page) opens the form screen on
+its questions: a line of text, a password (shown as stars), several lines (a
+blank line ends them), a checkbox, a choice of one, a filename to save the
+reply under in the transfer folder, or a file from the transfer folder to
+send.  <span class="kbd">S</span> sends the answers, and the server's reply
+is shown as the page.  Some servers (pygopherd) list a form but do not take
+answers; theirs is the item itself.
+</p>
+
+<p>
+A Gopher address can carry a search and a Gopher+ request after the selector,
+as the standard writes them: <code>gopher://host/7/find%09c64</code> searches for
+<code>c64</code>, and <code>gopher://host/0/doc%09%09+text/plain</code> asks for the
+plain-text form of a Gopher+ item.  Bookmarks, Back and Reload keep both.
+</p>
+
+<h2>13.6 Limits</h2>
 
 <ul>
     <li>Maximum page size: 1 MB.</li>

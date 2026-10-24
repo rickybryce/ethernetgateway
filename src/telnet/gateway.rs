@@ -2079,20 +2079,47 @@ impl TelnetSession {
             }
         };
 
+        self.gateway_telnet_dial(&host, port, None).await
+    }
+
+    /// Connect the user to `host:port` and bridge the session until either
+    /// side leaves -- the telnet gateway after its prompts, and the browser's
+    /// hand-off to a gopher menu's telnet item (RFC 1436 type `8`).  `pinned`
+    /// is the address to dial, already checked, when the host came from a
+    /// menu rather than the user: dialled exactly, not resolved again.
+    pub(in crate::telnet) async fn gateway_telnet_dial(
+        &mut self,
+        host: &str,
+        port: u16,
+        pinned: Option<std::net::SocketAddr>,
+    ) -> Result<(), std::io::Error> {
+        let cfg = config::get_config();
+        let esc_label = match self.terminal_type {
+            TerminalType::Petscii => "<-",
+            _ => "ESC",
+        };
+        // A gopher menu can name the host: shown as internet text is, and
+        // cut to a C64's 40 columns.
+        let mut shown = crate::aichat::display_for_terminal(host);
+        if self.terminal_type == TerminalType::Petscii {
+            shown = crate::webbrowser::truncate_to_width(&shown, 39 - 20 - port.to_string().len());
+        }
         self.send_line("").await?;
-        self.send_line(&format!(
-            "  Connecting to {}:{}...",
-            self.amber(&host),
-            port
-        ))
+        self.send_line(&format!("  Connecting to {}:{}...", self.amber(&shown), port))
         .await?;
         self.flush().await?;
 
         // Connect to remote telnet server
         let addr = format!("{}:{}", host, port);
+        let dial = async {
+            match pinned {
+                Some(a) => tokio::net::TcpStream::connect(a).await,
+                None => tokio::net::TcpStream::connect(&addr).await,
+            }
+        };
         let remote = match tokio::time::timeout(
             Self::GATEWAY_CONNECT_TIMEOUT,
-            tokio::net::TcpStream::connect(&addr),
+            dial,
         )
         .await
         {

@@ -26,6 +26,8 @@ impl TelnetSession {
     /// 3 header + 14 + the page row + blank + prompt = 20) and of the form
     /// editor's field list (the same plus its hint row, 21).
     pub(in crate::telnet) const WEB_LIST_SHOWN: usize = 14;
+    /// Most lines one Gopher+ `AskL` answer takes.
+    pub(in crate::telnet) const WEB_ASK_MAX_LINES: usize = 50;
 
     pub(in crate::telnet) fn web_page_height(&self) -> usize {
         if self.terminal_type == TerminalType::Petscii {
@@ -180,6 +182,9 @@ impl TelnetSession {
             if has_forms {
                 act.push(self.action_prompt("F", "Fm"));
             }
+            if self.web_url.as_deref().is_some_and(|u| u.starts_with("gopher://")) {
+                act.push(self.action_prompt("I", "In"));
+            }
             act.push(self.action_prompt("K", "Bm"));
             act.push(self.action_prompt("H", "?"));
             if !self.web_history.is_empty() {
@@ -296,6 +301,9 @@ impl TelnetSession {
                 "f" => {
                     self.web_show_forms().await?;
                 }
+                "i" => {
+                    self.web_gopher_info().await?;
+                }
                 "h" => {
                     self.web_show_help(true).await?;
                 }
@@ -381,7 +389,10 @@ impl TelnetSession {
     pub(in crate::telnet) async fn web_fetch_page(&mut self, url: &str, push_history: bool) -> Result<bool, std::io::Error> {
         // Gopher search URLs need a query term before fetching
         let url = if crate::webbrowser::is_gopher_search(url) {
-            self.send(&format!("  {}: ", self.cyan("Search"))).await?;
+            // A CSO phone book (type 2) is asked for a name, not words.
+            let phone_book = crate::webbrowser::GopherUrl::parse(url.trim_end_matches("?search")).is_ok_and(|g| g.ty == '2');
+            let label = if phone_book { "Look up" } else { "Search" };
+            self.send(&format!("  {}: ", self.cyan(label))).await?;
             self.flush().await?;
             let query = match self.get_line_input().await? {
                 Some(s) if !s.is_empty() => s,
@@ -392,12 +403,28 @@ impl TelnetSession {
             url.to_string()
         };
 
+        let is_gopher = url.starts_with("gopher://");
+        // A gopher item that is not a page: a file to save, or a telnet
+        // session to hand over to (RFC 1436 types 5/9/g/I..., 8 and T).
+        if is_gopher {
+            match crate::webbrowser::gopher_action(&url) {
+                crate::webbrowser::GopherAction::Page => {}
+                crate::webbrowser::GopherAction::Download { name } => {
+                    self.web_gopher_download(&url, &name).await?;
+                    return Ok(false);
+                }
+                crate::webbrowser::GopherAction::Telnet { host, port, login, tn3270 } => {
+                    self.web_gopher_telnet(&host, port, &login, tn3270).await?;
+                    return Ok(false);
+                }
+            }
+        }
+
         self.send_line(&format!("  {}...", self.dim("Loading"))).await?;
         self.flush().await?;
 
         let width = self.web_content_width();
         let url_owned = url.clone();
-        let is_gopher = url.starts_with("gopher://");
 
         let result = tokio::task::spawn_blocking(move || {
             if is_gopher {
@@ -409,62 +436,349 @@ impl TelnetSession {
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        self.web_apply_result(result, push_history).await
+        let shown = self.web_apply_result(result, push_history).await?;
+        // A Gopher+ form opens on its questions.
+        if shown && self.web_gopher_form(0) {
+            self.web_fill_ask_files().await;
+            if !self.web_forms[0].fields.is_empty() {
+                self.web_edit_form(0).await?;
+            }
+        }
+        Ok(shown)
     }
 
-    pub(in crate::telnet) async fn web_show_help(&mut self, page_view: bool) -> Result<(), std::io::Error> {
+    /// RFC 1436 file items (and Gopher+ views that are files): asked, then
+    /// saved in the transfer folder under the selector's last name, made
+    /// safe and numbered rather than overwriting, for XMODEM, ZMODEM or
+    /// Kermit to send on.  At most what those can send (`MAX_FILE_SIZE`).
+    pub(in crate::telnet) async fn web_gopher_download(&mut self, url: &str, name: &str) -> Result<(), std::io::Error> {
+        let name = Self::safe_upload_name(name).unwrap_or_else(|| "gopher.bin".to_string());
+        // The menu chose the host: shown as internet text is.
+        let host = crate::webbrowser::GopherUrl::parse(url).map(|g| g.host).unwrap_or_default();
+        let host = crate::aichat::display_for_terminal(&host);
+        // A safe name is up to 64 characters; a C64 has 40.
+        let room = if self.terminal_type == TerminalType::Petscii { 24 } else { 60 };
+        let shown_name = crate::webbrowser::truncate_to_width(&self.web_text(&name), room);
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("BROWSER HELP"))).await?;
+        self.send_line(&format!("  {}", self.yellow("GOPHER DOWNLOAD"))).await?;
         self.send_line(&sep).await?;
-
-        if page_view {
-            let is_petscii = self.terminal_type == TerminalType::Petscii;
-            // Intro (dim): link-number explanation, width-specific wording.
-            if is_petscii {
-                self.send_line(&format!("  {}",
-                    self.dim("[1] [2] etc. next to text")
-                )).await?;
-                self.send_line(&format!("  {}",
-                    self.dim("are links to other pages.")
-                )).await?;
-            } else {
-                self.send_line(&format!("  {}",
-                    self.dim("[1], [2], etc. next to text are links")
-                )).await?;
-                self.send_line(&format!("  {}",
-                    self.dim("to other pages.")
-                )).await?;
+        self.send_line("").await?;
+        self.send_line(&format!("  File: {}", self.amber(&shown_name))).await?;
+        let from = crate::webbrowser::truncate_to_width(&self.web_text(&host), 30);
+        self.send_line(&format!("  From: {}", from)).await?;
+        self.send_line("").await?;
+        self.send_line("  It is saved in the transfer folder,").await?;
+        self.send_line("  to send on from File Transfer.").await?;
+        self.send_line("").await?;
+        self.send("  Download it? (Y/N) ").await?;
+        self.flush().await?;
+        if !self.cpm_confirm().await? {
+            return Ok(());
+        }
+        self.send_line(&format!("  {}...", self.dim("Downloading"))).await?;
+        self.flush().await?;
+        let url_owned = url.to_string();
+        let max = crate::tnio::MAX_FILE_SIZE as usize;
+        let fetched = tokio::task::spawn_blocking(move || crate::webbrowser::fetch_gopher_file(&url_owned, max))
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let data = match fetched {
+            Ok(d) => d,
+            Err(e) => {
+                let safe = self.web_text(&crate::aichat::sanitize_for_terminal(&e));
+                self.show_error(&safe).await?;
+                return Ok(());
             }
+        };
+        self.ensure_transfer_dir().await?;
+        if !self.verify_transfer_path() {
+            self.show_error("The transfer folder is not available.").await?;
+            return Ok(());
+        }
+        let dir = self.transfer_path();
+        let size = data.len() as u64;
+        let saved = tokio::task::spawn_blocking(move || {
+            Self::save_received_file_collision_safe(&dir, &name, &data, None, false)
+        })
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        match saved {
+            Ok(as_name) => {
+                let room = if self.terminal_type == TerminalType::Petscii { 16 } else { 52 };
+                self.send_line(&format!(
+                    "  {} {} ({})",
+                    self.green("Saved as"),
+                    crate::webbrowser::truncate_to_width(&self.web_text(&as_name), room),
+                    Self::format_file_size(size)
+                ))
+                .await?;
+                self.send_line("").await?;
+                self.send("  Press any key to continue.").await?;
+                self.flush().await?;
+                self.wait_for_key().await?;
+            }
+            Err(_) => self.show_error("Could not save the file.").await?,
+        }
+        Ok(())
+    }
+
+    /// RFC 1436 telnet (`8`) and tn3270 (`T`) items: the session is handed
+    /// to the telnet gateway, after a screen that says where to and the name
+    /// to log in as.  The address is checked as a gopher fetch's is: a menu
+    /// chose it.  A tn3270 host wants an IBM 3270 terminal, which the
+    /// gateway cannot be; it is offered over plain telnet, and said so.
+    pub(in crate::telnet) async fn web_gopher_telnet(&mut self, host: &str, port: u16, login: &str, tn3270: bool) -> Result<(), std::io::Error> {
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        let title = if tn3270 { "TN3270 SESSION" } else { "TELNET SESSION" };
+        self.send_line(&format!("  {}", self.yellow(title))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        // Host and login are the menu's: shown as internet text is.
+        let shown = crate::aichat::display_for_terminal(&format!("{host}:{port}"));
+        let at = crate::webbrowser::truncate_to_width(&self.web_text(&shown), 30);
+        self.send_line(&format!("  Host: {}", self.amber(&at))).await?;
+        if !login.trim().is_empty() {
+            let login = crate::aichat::display_for_terminal(login);
+            let name = crate::webbrowser::truncate_to_width(&self.web_text(&login), 26);
+            self.send_line(&format!("  Log in as: {}", self.amber(&name))).await?;
+        }
+        if tn3270 {
             self.send_line("").await?;
-            for line in Self::browser_page_help_lines(is_petscii) {
-                self.send_line(line).await?;
+            self.send_line("  This host expects an IBM 3270").await?;
+            self.send_line("  terminal: plain telnet may not").await?;
+            self.send_line("  work.").await?;
+        }
+        self.send_line("").await?;
+        self.send("  Connect? (Y/N) ").await?;
+        self.flush().await?;
+        if !self.cpm_confirm().await? {
+            return Ok(());
+        }
+        // Every address the name has is checked, and the one dialled is the
+        // first of them: a connect by name would try the others too, and
+        // resolve again -- a LAN address behind a public one, or rebound.
+        let (h, p) = (host.to_string(), port);
+        let checked = tokio::task::spawn_blocking(move || {
+            use std::net::ToSocketAddrs;
+            let addrs: Vec<std::net::SocketAddr> =
+                (h.as_str(), p).to_socket_addrs().map_err(|e| format!("DNS error: {e}"))?.collect();
+            crate::webbrowser::gopher_dial_addr(&addrs, &h)
+        })
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let addr = match checked {
+            Ok(a) => a,
+            Err(e) => {
+                let safe = self.web_text(&crate::aichat::sanitize_for_terminal(&e));
+                self.show_error(&safe).await?;
+                return Ok(());
+            }
+        };
+        self.gateway_telnet_dial(host, port, Some(addr)).await
+    }
+
+    /// Whether form `idx` is a Gopher+ `+ASK` form: made from one (its
+    /// method), on a gopher page, sent to a gopher item.  All three, because
+    /// such a form can send a file from the transfer folder -- an HTML page
+    /// must never be able to make one.
+    pub(in crate::telnet) fn web_gopher_form(&self, idx: usize) -> bool {
+        self.web_forms.get(idx).is_some_and(|f| self.web_is_gopher_form(f))
+    }
+
+    /// `web_gopher_form`'s rule, for a form already in hand.
+    fn web_is_gopher_form(&self, f: &crate::webbrowser::WebForm) -> bool {
+        self.web_url.as_deref().is_some_and(|u| u.starts_with("gopher://"))
+            && f.method == crate::webbrowser::ASK_METHOD
+            && f.action.starts_with("gopher://")
+    }
+
+    /// A Gopher+ form's `ChooseF` question picks a file from the transfer
+    /// folder to send: its choices are that folder's files.
+    pub(in crate::telnet) async fn web_fill_ask_files(&mut self) {
+        let wants = (0..self.web_forms.len()).any(|i| {
+            self.web_gopher_form(i)
+                && self.web_forms[i].fields.iter().any(|x| {
+                    matches!(x, crate::webbrowser::FormField::Select { name, .. } if name == crate::webbrowser::ASK_SEND_FILE)
+                })
+        });
+        if !wants || self.ensure_transfer_dir().await.is_err() || !self.verify_transfer_path() {
+            return;
+        }
+        let files: Vec<(String, String)> = Self::list_transfer_entries_in(&self.transfer_path())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, size, dir)| !dir && *size <= crate::tnio::MAX_FILE_SIZE)
+            .map(|(name, _, _)| (name.clone(), name))
+            .collect();
+        for i in 0..self.web_forms.len() {
+            if !self.web_gopher_form(i) {
+                continue;
+            }
+            for field in self.web_forms[i].fields.iter_mut() {
+                // Nothing is chosen until the user picks (`parse_ask`): no
+                // file is sent that was not picked.
+                if let crate::webbrowser::FormField::Select { name, options, .. } = field
+                    && name == crate::webbrowser::ASK_SEND_FILE
+                {
+                    *options = files.clone();
+                }
+            }
+        }
+    }
+
+    /// Send a Gopher+ form: its `ChooseF` file read from the transfer
+    /// folder, and the reply also saved there when an `AskF` names a file.
+    pub(in crate::telnet) async fn web_submit_gopher_ask(&mut self, form_idx: usize) -> Result<(), std::io::Error> {
+        use crate::webbrowser::FormField;
+        let form = self.web_forms[form_idx].clone();
+        let chosen = form.fields.iter().find_map(|f| match f {
+            FormField::Select { name, options, selected, .. } if name == crate::webbrowser::ASK_SEND_FILE => {
+                options.get(*selected).map(|(v, _)| v.clone())
+            }
+            _ => None,
+        });
+        let file = match chosen {
+            Some(name) => {
+                // A name from the folder's own listing, checked again: the
+                // folder may have changed since.
+                if Self::validate_filename(&name).is_err() || !self.verify_transfer_path() {
+                    self.show_error("That file cannot be sent.").await?;
+                    return Ok(());
+                }
+                let path = self.transfer_path().join(&name);
+                if Self::is_symlink(&path).await {
+                    self.show_error("That file cannot be sent.").await?;
+                    return Ok(());
+                }
+                match tokio::fs::read(&path).await {
+                    Ok(d) if d.len() as u64 <= crate::tnio::MAX_FILE_SIZE => Some(d),
+                    _ => {
+                        self.show_error("That file cannot be read.").await?;
+                        return Ok(());
+                    }
+                }
+            }
+            None => None,
+        };
+        let save_as = form.fields.iter().find_map(|f| match f {
+            FormField::Text { input_type, value, .. } if input_type == crate::webbrowser::ASK_SAVE_AS && !value.trim().is_empty() => {
+                Self::safe_upload_name(value.trim())
+            }
+            _ => None,
+        });
+        self.send_line("").await?;
+        self.send_line(&format!("  {}...", self.dim("Sending"))).await?;
+        self.flush().await?;
+        let width = self.web_content_width();
+        let result = tokio::task::spawn_blocking(move || crate::webbrowser::submit_gopher_ask(&form, file.as_deref(), width))
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let page = match result {
+            Ok((mut page, raw)) => {
+                if let Some(name) = save_as {
+                    let note = match self.web_save_reply(&name, raw).await {
+                        Some(as_name) => format!("Reply saved as {as_name} in the transfer folder."),
+                        None => "The reply could not be saved.".to_string(),
+                    };
+                    let note = crate::aichat::sanitize_for_terminal(&note);
+                    let mut lines = crate::aichat::wrap_line(&note, width);
+                    lines.push(String::new());
+                    lines.append(&mut page.lines);
+                    page.lines = lines;
+                }
+                Ok(page)
+            }
+            Err(e) => Err(e),
+        };
+        self.web_apply_result(page, true).await?;
+        Ok(())
+    }
+
+    /// Save a Gopher+ reply for an `AskF` question; the name it got.
+    async fn web_save_reply(&mut self, name: &str, data: Vec<u8>) -> Option<String> {
+        if data.is_empty() || self.ensure_transfer_dir().await.is_err() || !self.verify_transfer_path() {
+            return None;
+        }
+        let dir = self.transfer_path();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || Self::save_received_file_collision_safe(&dir, &name, &data, None, false).ok())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// `I`: a gopher item's Gopher+ attributes -- a link's, or with no
+    /// number this page's (a menu's `$`, every item in it at once).
+    pub(in crate::telnet) async fn web_gopher_info(&mut self) -> Result<(), std::io::Error> {
+        let Some(page) = self.web_url.clone().filter(|u| u.starts_with("gopher://")) else {
+            self.show_error("Item info is for Gopher pages.").await?;
+            return Ok(());
+        };
+        self.send(&format!("  {} ", self.cyan("Info on link # (Enter=page):"))).await?;
+        self.flush().await?;
+        let input = match self.get_line_input().await? {
+            Some(s) => s.trim().to_string(),
+            None => return Ok(()),
+        };
+        self.drain_input().await;
+        let target = if input.is_empty() {
+            match crate::webbrowser::GopherUrl::parse(&page) {
+                // A phone book's results: the same rule as a link to one.
+                Ok(g) if matches!(g.ty, '8' | 'T' | '2') => {
+                    self.show_error("That item is not served by Gopher.").await?;
+                    return Ok(());
+                }
+                Ok(g) => {
+                    let all = if g.ty == '1' { "$" } else { "!" };
+                    g.with_plus(all).to_url()
+                }
+                Err(e) => {
+                    self.show_error(&e).await?;
+                    return Ok(());
+                }
             }
         } else {
-            for line in Self::browser_menu_help_lines() {
-                self.send_line(line).await?;
+            let link = match input.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).and_then(|i| self.web_links.get(i)) {
+                Some(l) => l.clone(),
+                None => {
+                    self.show_error("No such link.").await?;
+                    return Ok(());
+                }
+            };
+            let link = crate::webbrowser::resolve_url(&page, &link);
+            match crate::webbrowser::GopherUrl::parse(link.trim_end_matches("?search")) {
+                // A telnet session or a phone book is not served by a gopher
+                // server, so it has no Gopher+ information to ask for.
+                Ok(g) if matches!(g.ty, '8' | 'T' | '2') => {
+                    self.show_error("That item is not served by Gopher.").await?;
+                    return Ok(());
+                }
+                Ok(g) if link.starts_with("gopher://") => g.with_plus("!").to_url(),
+                _ => {
+                    self.show_error("That link is not a Gopher item.").await?;
+                    return Ok(());
+                }
             }
-            self.send_line("").await?;
-            self.send_line(&format!("  {}",
-                self.dim("Examples:")
-            )).await?;
-            self.send_line(&format!("  {}",
-                self.dim("  http://telnetbible.com")
-            )).await?;
-            self.send_line(&format!("  {}",
-                self.dim("  gopher://gopher.floodgap.com")
-            )).await?;
-            self.send_line(&format!("  {}",
-                self.dim("  rust programming (search)")
-            )).await?;
-        }
-
-        self.send_line("").await?;
-        self.send("  Press any key to continue.").await?;
-        self.flush().await?;
-        self.wait_for_key().await?;
+        };
+        self.web_fetch_page(&target, true).await?;
         Ok(())
+    }
+
+    /// Through the pager the other help screens use: the page-view help
+    /// ran to 24 rows on a C64, two past the screen, and a sum of numbers in
+    /// a test said it fit.
+    pub(in crate::telnet) async fn web_show_help(&mut self, page_view: bool) -> Result<(), std::io::Error> {
+        let lines = if page_view {
+            Self::browser_page_help_lines(self.terminal_type == TerminalType::Petscii)
+        } else {
+            Self::browser_menu_help_lines()
+        };
+        self.show_help_page("BROWSER HELP", lines).await
     }
 
     pub(in crate::telnet) async fn web_save_bookmark(&mut self) -> Result<(), std::io::Error> {
@@ -749,12 +1063,16 @@ impl TelnetSession {
                     crate::webbrowser::FormField::Text { label, value, .. }
                     | crate::webbrowser::FormField::TextArea { label, value, .. } => {
                         field_num += 1;
+                        let secret = matches!(field, crate::webbrowser::FormField::Text { input_type, .. } if input_type == "password");
                         // Sanitize the value for display only — the stored
                         // `value` is submitted verbatim, so we must not strip
                         // control bytes from it (M-8; labels/option-text are
-                        // already sanitized in WebPage::sanitize).
+                        // already sanitized in WebPage::sanitize).  A password
+                        // is shown as stars: it was typed unseen.
                         let display_val = if value.is_empty() {
                             "(empty)".to_string()
+                        } else if secret {
+                            "*".repeat(value.chars().count().min(12))
                         } else {
                             crate::aichat::sanitize_for_terminal(value)
                         };
@@ -891,6 +1209,31 @@ impl TelnetSession {
             }
         };
 
+        // A Gopher+ `AskL` question takes several lines, a blank one ending
+        // them.
+        if let FormField::TextArea { name, .. } = &form.fields[idx]
+            && name.ends_with(":askl")
+            && self.web_is_gopher_form(form)
+        {
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.cyan(&self.web_text(&label_str)))).await?;
+            self.send_line(&format!("  {}", self.dim("A blank line ends it."))).await?;
+            let mut rows: Vec<String> = Vec::new();
+            while rows.len() < Self::WEB_ASK_MAX_LINES {
+                self.send("  > ").await?;
+                self.flush().await?;
+                match self.get_line_input().await? {
+                    Some(line) if !line.is_empty() => rows.push(line),
+                    Some(_) => break,
+                    // ESC: the answer is left as it was.
+                    None => return Ok(()),
+                }
+            }
+            if let FormField::TextArea { value, .. } = &mut form.fields[idx] {
+                *value = rows.join("\n");
+            }
+            return Ok(());
+        }
         if is_text {
             self.send_line("").await?;
             self.send(&format!("  {}: ", self.cyan(&self.web_text(&label_str)))).await?;
@@ -946,6 +1289,9 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn web_submit_form(&mut self, form_idx: usize) -> Result<(), std::io::Error> {
+        if self.web_gopher_form(form_idx) {
+            return self.web_submit_gopher_ask(form_idx).await;
+        }
         // A page that came over plain HTTP because HTTPS failed resolves its
         // relative form actions to `http://`, so the form would go out in the
         // clear with no HTTPS attempt -- on the very site whose HTTPS was just

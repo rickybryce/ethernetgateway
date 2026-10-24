@@ -6784,9 +6784,10 @@ async fn test_the_browser_page_fills_the_screen_and_no_more() {
     use tokio::io::AsyncReadExt;
     // With forms the status row names them; without, it is the address --
     // a long one, cut to fit, beside the widest position a page can have.
-    for (term, forms) in [TerminalType::Ansi, TerminalType::Petscii, TerminalType::Ascii]
+    // A gopher page adds its own key (I, item info).
+    for (term, forms, gopher) in [TerminalType::Ansi, TerminalType::Petscii, TerminalType::Ascii]
         .into_iter()
-        .flat_map(|t| [(t, true), (t, false)])
+        .flat_map(|t| [(t, true, false), (t, false, false), (t, true, true)])
     {
         let (mut sess, mut peer) = make_test_session_with_peer(term);
         sess.color_enabled = false;
@@ -6805,7 +6806,8 @@ async fn test_the_browser_page_fills_the_screen_and_no_more() {
             }; 2];
         }
         sess.web_history = vec![("http://prev.test/".to_string(), 0)];
-        sess.web_url = Some(format!("https://example.test/{}", "long/".repeat(30)));
+        let scheme = if gopher { "gopher" } else { "https" };
+        sess.web_url = Some(format!("{scheme}://example.test/{}", "long/".repeat(30)));
         sess.web_title = Some("A page title that is longer than any screen is wide, by some way".into());
         sess.web_scroll = 4983;
         // One line exactly as wide as the page is laid out for, ending in a
@@ -6846,6 +6848,7 @@ async fn test_the_browser_page_fills_the_screen_and_no_more() {
             out.windows(6).any(|w| w.eq_ignore_ascii_case(b"z[123]")),
             "{term:?}: a line at the layout width is drawn whole"
         );
+        assert_eq!(out.windows(4).any(|w| w.eq_ignore_ascii_case(b"I=In")), gopher, "{term:?}: the info key");
         match term {
             TerminalType::Ansi => assert!(out.windows(2).any(|w| w == "í".as_bytes()), "ANSI keeps UTF-8"),
             _ => {
@@ -7087,11 +7090,28 @@ fn test_web_help_lines_fit_petscii() {
     }
 }
 
+/// The browser's help goes through the pager, so every page of it fits:
+/// counted from the lines themselves, not from a sum of numbers -- which said
+/// 20 rows while a C64 was shown 24.
 #[test]
-fn test_web_help_page_view_row_count() {
-    // header(3) + 2 link explanation + blank + 12 help lines + blank + "press any key" = 20 rows max
-    let rows = 3 + 2 + 1 + 12 + 1 + 1;
-    assert!(rows <= 22, "help screen is {} rows, exceeds 22", rows);
+fn test_web_help_pages_fit_the_screen() {
+    for lines in [
+        TelnetSession::browser_page_help_lines(true),
+        TelnetSession::browser_page_help_lines(false),
+        TelnetSession::browser_menu_help_lines(),
+    ] {
+        let pages = TelnetSession::paginate_help(lines, HELP_MAX_CONTENT_LINES);
+        assert!(!pages.is_empty());
+        for page in &pages {
+            // Title block (3), a blank, the lines, a blank, the prompt.
+            let rows = 3 + 1 + page.len() + 1 + 1;
+            assert!(rows <= 22, "a browser help page is {rows} rows: {page:?}");
+        }
+        // Nothing lost or repeated across the pages.
+        let joined: Vec<&str> = pages.concat();
+        let wanted: Vec<&str> = lines.iter().copied().filter(|l| !l.is_empty()).collect();
+        assert_eq!(joined.iter().copied().filter(|l| !l.is_empty()).collect::<Vec<_>>(), wanted);
+    }
 }
 
 // ─── URL/Search prompt ───────────────────────────────
@@ -16223,4 +16243,412 @@ async fn test_a_pick_list_with_nothing_chosen_opens_on_page_one() {
     assert_eq!(got, None);
     assert!(text.contains("page 1/15") && text.contains(" 1.option 1\r"), "{text}");
     assert!(!text.contains('>'), "{text}");
+}
+
+// ─── Gopher: files, telnet items, Gopher+ forms and info ─────────────
+
+/// A fixture serving one reply per connection, in order; returns what each
+/// connection sent (read until it pauses).
+fn serve_gopher_seq(replies: Vec<Vec<u8>>) -> (u16, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let h = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        for reply in replies {
+            let mut s = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(_) => return seen,
+                }
+            };
+            s.set_nonblocking(false).unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_millis(300))).ok();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = s.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+            }
+            let _ = s.write_all(&reply);
+            seen.push(got);
+        }
+        seen
+    });
+    (port, h)
+}
+
+/// Drive a session's screens: each step waits for its text to appear
+/// (after the previous step's), then types its keys -- after the 50 ms
+/// type-ahead drain a confirmation does, as a person would.  Returns all
+/// the session drew.
+fn script_peer(peer: tokio::io::DuplexStream, steps: Vec<(&'static str, &'static [u8])>) -> tokio::task::JoinHandle<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::spawn(async move {
+        let (mut rd, mut wr) = tokio::io::split(peer);
+        let mut out = Vec::new();
+        let mut buf = [0u8; 1024];
+        let mut steps = steps.into_iter();
+        let mut next = steps.next();
+        let mut from = 0;
+        loop {
+            match rd.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+            }
+            while let Some((wait, keys)) = next {
+                // Folded: PETSCII swaps the case of what it draws.
+                let text = String::from_utf8_lossy(&out[from..]).to_ascii_lowercase();
+                let Some(at) = text.find(&wait.to_ascii_lowercase()) else { break };
+                from += at + wait.len();
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let _ = wr.write_all(keys).await;
+                next = steps.next();
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    })
+}
+
+/// Point `transfer_dir` at a fresh folder for one test, and back after.
+struct GopherTransferDir {
+    old: String,
+    pub dir: std::path::PathBuf,
+}
+impl GopherTransferDir {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("eg_gopher_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = config::get_config().transfer_dir;
+        config::update_config_value("transfer_dir", &dir.to_string_lossy());
+        GopherTransferDir { old, dir }
+    }
+}
+impl Drop for GopherTransferDir {
+    fn drop(&mut self) {
+        config::update_config_value("transfer_dir", &self.old);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A gopher file item asks, then lands in the transfer folder under its
+/// own name; N fetches nothing.
+#[tokio::test]
+async fn test_a_gopher_file_is_saved_in_the_transfer_folder() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let folder = GopherTransferDir::new("download");
+    let (port, server) = serve_gopher_seq(vec![b"\x00GIF89a-ish\xff".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("(Y/N)", b"y"), ("Press any key", b"x")]);
+    let url = format!("gopher://127.0.0.1:{port}/9/pics/cat%20one.gif");
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_fetch_page(&url, true)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent, vec![b"/pics/cat one.gif\r\n".to_vec()]);
+    assert!(shown.contains("Saved as cat_one.gif"), "{shown}");
+    assert_eq!(std::fs::read(folder.dir.join("cat_one.gif")).unwrap(), b"\x00GIF89a-ish\xff");
+
+    // N: the server is never asked.
+    let (port, server) = serve_gopher_seq(vec![b"nope".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let screen = script_peer(peer, vec![("(Y/N)", b"n")]);
+    let url = format!("gopher://127.0.0.1:{port}/9/other.bin");
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_fetch_page(&url, true)).await.expect("hung").unwrap();
+    drop(sess);
+    screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert!(sent.is_empty(), "{sent:?}");
+    assert!(!folder.dir.join("other.bin").exists());
+}
+
+/// A telnet item hands the session to the telnet gateway, after saying the
+/// name to log in as.
+#[tokio::test]
+async fn test_a_gopher_telnet_item_hands_over_to_the_gateway() {
+    let (port, server) = serve_gopher_seq(vec![b"Welcome to the BBS\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("(Y/N)", b"y"), ("Press any key", b"x")]);
+    let url = format!("gopher://127.0.0.1:{port}/8guest");
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_fetch_page(&url, true)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent.len(), 1, "the gateway did not connect");
+    assert!(shown.contains("TELNET SESSION") && shown.contains("Log in as: guest"), "{shown}");
+    assert!(shown.contains("Welcome to the BBS"), "{shown}");
+}
+
+/// A Gopher+ form, end to end: its questions fetched with `!`, the form
+/// opened on them, a password shown as stars, and the answers sent in a
+/// counted data block -- the reply drawn as the page.
+#[tokio::test]
+async fn test_a_gopher_plus_form_is_answered_and_sent() {
+    let attrs = b"+-2\r\n+INFO: 0Order\t/order\th\t70\t?\r\n+ASK:\r\n Note: Two questions\r\n Ask: Name:\r\n AskP: Pin:\r\n".to_vec();
+    let (port, server) = serve_gopher_seq(vec![attrs, b"+-1\r\nThank you, Ricky\r\n.\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![
+        ("#/S/Q", b"1\r"),
+        ("Name:", b"Ricky\r"),
+        ("#/S/Q", b"2\r"),
+        ("Pin:", b"4321\r"),
+        ("#/S/Q", b"s\r"),
+    ]);
+    let url = format!("gopher://127.0.0.1:{port}/0/order%09%09%3F");
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_fetch_page(&url, true)).await.expect("hung").unwrap();
+    let lines = sess.web_lines.clone();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent[0], b"/order\t!\r\n");
+    assert_eq!(String::from_utf8_lossy(&sent[1]), "/order\t+\t1\r\n+13\r\nRicky\r\n4321\r\n");
+    assert_eq!(lines, vec!["Thank you, Ricky"]);
+    assert!(shown.contains("2.Pin:") && shown.contains("****"), "the password is masked: {shown}");
+    assert!(!shown.contains(": 4321"), "the password was shown: {shown}");
+}
+
+/// `I` asks a link's item for its attributes (`!`), or with no number
+/// the whole menu's (`$`).
+#[tokio::test]
+async fn test_the_info_key_asks_for_gopher_plus_attributes() {
+    let attrs = b"+-2\r\n+INFO: 0Doc\t/d\th.example\t70\t+\r\n+ADMIN:\r\n Admin: Frodo <f@b>\r\n".to_vec();
+    let (port, server) = serve_gopher_seq(vec![attrs.clone(), attrs]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_url = Some(format!("gopher://127.0.0.1:{port}/1/menu"));
+    sess.web_lines = vec!["Doc\u{2}1\u{3}".into()];
+    sess.web_links = vec![format!("gopher://127.0.0.1:{port}/0/d%09%09+")];
+    let screen = script_peer(peer, vec![("Enter=page", b"1\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_gopher_info()).await.expect("hung").unwrap();
+    assert!(sess.web_lines.iter().any(|l| l.contains("Admin: Frodo")), "{:?}", sess.web_lines);
+    // Back on the menu, no number: the menu's own attributes.
+    sess.web_url = Some(format!("gopher://127.0.0.1:{port}/1/menu"));
+    drop(screen);
+    let (mut sess2, peer2) = make_test_session_with_peer(TerminalType::Ansi);
+    sess2.web_url = sess.web_url.clone();
+    let screen2 = script_peer(peer2, vec![("Enter=page", b"\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess2.web_gopher_info()).await.expect("hung").unwrap();
+    drop(sess);
+    drop(sess2);
+    screen2.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent, vec![b"/d\t!\r\n".to_vec(), b"/menu\t$\r\n".to_vec()]);
+}
+
+/// The rest of a Gopher+ form: `AskL` takes lines until a blank one and
+/// sends their count first; `ChooseF` offers the transfer folder's files
+/// and sends the chosen one after the answers; `AskF` saves the reply there.
+#[tokio::test]
+async fn test_a_gopher_plus_form_sends_a_file_and_saves_the_reply() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let folder = GopherTransferDir::new("askfile");
+    std::fs::write(folder.dir.join("notes.txt"), b"FILEDATA").unwrap();
+    let attrs = b"+-2\r\n+INFO: 0Upload\t/up\th\t70\t?\r\n+ASK:\r\n AskL: Message\r\n ChooseF: Which file?\r\n AskF: Save reply as:\treply.txt\r\n".to_vec();
+    let (port, server) = serve_gopher_seq(vec![attrs, b"+2\r\nOK".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![
+        ("#/S/Q", b"1\r"),
+        ("blank line ends", b"line one\r"),
+        ("> ", b"line two\r"),
+        ("> ", b"\r"),
+        ("#/S/Q", b"2\r"),
+        ("Pick", b"1\r"),
+        ("#/S/Q", b"s\r"),
+    ]);
+    let url = format!("gopher://127.0.0.1:{port}/0/up%09%09%3F");
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_fetch_page(&url, true)).await.expect("hung").unwrap();
+    let lines = sess.web_lines.clone();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    let answers = "2\r\nline one\r\nline two\r\nnotes.txt\r\nreply.txt\r\nFILEDATA";
+    assert_eq!(String::from_utf8_lossy(&sent[1]), format!("/up\t+\t1\r\n+{}\r\n{answers}", answers.len()), "{shown}");
+    assert_eq!(std::fs::read(folder.dir.join("reply.txt")).unwrap(), b"OK");
+    assert!(lines[0].contains("Reply saved as reply.txt"), "{lines:?}");
+    // No file is chosen until one is picked.
+    assert!(shown.contains("Which file?: (none)"), "{shown}");
+}
+
+/// What a gopher menu names -- a telnet host, a login, a file -- reaches the
+/// screen as internet text does: no escape gets through, and a long name is
+/// cut to a C64's width.
+#[tokio::test]
+async fn test_a_gopher_menus_names_are_shown_safely() {
+    for term in [TerminalType::Ansi, TerminalType::Petscii] {
+        let (mut sess, peer) = make_test_session_with_peer(term);
+        sess.color_enabled = false;
+        let screen = script_peer(peer, vec![("(Y/N)", b"n")]);
+        sess.web_gopher_telnet("bbs\x1b]0;owned\x07.example", 23, "\x1b[2Jguest", false).await.unwrap();
+        drop(sess);
+        // The screen's own clear is the only escape it may hold.
+        let shown = screen.await.unwrap().replace("\x1b[2J\x1b[H", "");
+        assert!(!shown.contains('\x1b') && !shown.contains('\x07'), "{term:?}: {shown:?}");
+
+        let (mut sess, peer) = make_test_session_with_peer(term);
+        sess.color_enabled = false;
+        let screen = script_peer(peer, vec![("(Y/N)", b"n")]);
+        let long = "a".repeat(64);
+        sess.web_gopher_download(&format!("gopher://h\x1b[2J.example/9/{long}"), &long).await.unwrap();
+        drop(sess);
+        let shown = screen.await.unwrap().replace("\x1b[2J\x1b[H", "");
+        assert!(!shown.contains('\x1b'), "{term:?}: {shown:?}");
+        let width = if term == TerminalType::Petscii { 39 } else { 79 };
+        for row in shown.split('\n') {
+            // Printable ASCII: the PETSCII clear byte is not a column.
+            let n = row.chars().filter(|&c| (' '..'\u{7f}').contains(&c)).count();
+            assert!(n <= width, "{term:?}: {row:?} is {n} wide");
+        }
+    }
+}
+
+/// The hand-off dials the address it checked, not the name again: a name
+/// that does not resolve is still reached at its checked address.  The
+/// name, which a menu chose, is shown as internet text is.
+#[tokio::test]
+async fn test_the_telnet_hand_off_dials_the_checked_address() {
+    let (port, server) = serve_gopher_seq(vec![b"Pinned\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("Press any key", b"x")]);
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        sess.gateway_telnet_dial("no-such-host\x1b]0;PWNED\x07.invalid", port, Some(addr)),
+    )
+    .await
+    .expect("hung")
+    .unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent.len(), 1, "{shown}");
+    assert!(shown.contains("Pinned"), "{shown}");
+    assert!(shown.contains("Connecting to no-such-host"), "{shown}");
+    assert!(!shown.contains("\x1b]0;"), "{shown:?}");
+
+    // A long name is cut to a C64's line.
+    let (port, server) = serve_gopher_seq(vec![b"Pinned\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Petscii);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("any key", b"x")]);
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let long = format!("{}.invalid", "a".repeat(60));
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.gateway_telnet_dial(&long, port, Some(addr)))
+        .await
+        .expect("hung")
+        .unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    let row = shown.split('\n').find(|r| r.to_ascii_lowercase().contains("connecting to")).expect("no connecting line");
+    let n = row.chars().filter(|&c| (' '..'\u{7f}').contains(&c)).count();
+    assert!(n <= 39, "{row:?} is {n} wide");
+}
+
+/// `I` on a telnet or phone-book link says so: no gopher server serves it.
+#[tokio::test]
+async fn test_info_on_a_telnet_link_is_refused() {
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_url = Some("gopher://h.example/1/menu".into());
+    sess.web_links = vec!["gopher://bbs.example:23/8guest".into(), "gopher://ns.example:105/2?search".into()];
+    for n in [b"1\r", b"2\r"] {
+        let (mut s2, peer2) = make_test_session_with_peer(TerminalType::Ansi);
+        s2.web_url = sess.web_url.clone();
+        s2.web_links = sess.web_links.clone();
+        let screen = script_peer(peer2, vec![("Enter=page", n), ("Press any key", b"x")]);
+        tokio::time::timeout(std::time::Duration::from_secs(10), s2.web_gopher_info()).await.expect("hung").unwrap();
+        drop(s2);
+        let shown = screen.await.unwrap();
+        assert!(shown.contains("not served by Gopher"), "{shown}");
+    }
+    // Nor on a phone book's results page: its query would run again.
+    let (mut s2, peer2) = make_test_session_with_peer(TerminalType::Ansi);
+    s2.web_url = Some("gopher://ns.example:105/2%09smith".into());
+    let screen = script_peer(peer2, vec![("Enter=page", b"\r"), ("Press any key", b"x")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), s2.web_gopher_info()).await.expect("hung").unwrap();
+    drop(s2);
+    let shown = screen.await.unwrap();
+    assert!(shown.contains("not served by Gopher"), "{shown}");
+    drop(peer);
+}
+
+/// An HTML page's form is never a Gopher+ one, whatever it says.
+#[test]
+fn test_a_gopher_form_needs_a_gopher_page() {
+    let (mut sess, _peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let form = crate::webbrowser::WebForm {
+        action: "gopher://h/0/x%09%09+".into(),
+        method: crate::webbrowser::ASK_METHOD.into(),
+        label: "F".into(),
+        fields: Vec::new(),
+    };
+    sess.web_forms = vec![form.clone()];
+    sess.web_url = Some("http://evil.example/".into());
+    assert!(!sess.web_gopher_form(0));
+    sess.web_url = Some("gopher://h/0/x%09%09%3F".into());
+    assert!(sess.web_gopher_form(0));
+    sess.web_forms[0].action = "http://evil.example/up".into();
+    assert!(!sess.web_gopher_form(0));
+    // An HTML page a gopher `h` item served: gopher page, gopher action,
+    // but its own method.
+    sess.web_forms[0].action = "gopher://h/0/x%09%09+".into();
+    sess.web_forms[0].method = "get".into();
+    assert!(!sess.web_gopher_form(0));
+}
+
+/// An HTML textarea whose name ends `:askl` is typed as a textarea: only a
+/// Gopher+ form's `AskL` takes lines until a blank one.
+#[tokio::test]
+async fn test_an_html_askl_name_is_a_plain_textarea() {
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_url = Some("http://h.example/".into());
+    let mut form = crate::webbrowser::WebForm {
+        action: "http://h.example/post".into(),
+        method: "post".into(),
+        label: "F".into(),
+        fields: vec![crate::webbrowser::FormField::TextArea { name: "m:askl".into(), value: String::new(), label: "Msg".into() }],
+    };
+    let screen = script_peer(peer, vec![("Msg: ", b"hello\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_edit_field(&mut form, 0)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    assert!(!shown.contains("blank line ends"), "{shown}");
+    assert!(matches!(&form.fields[0], crate::webbrowser::FormField::TextArea { value, .. } if value == "hello"), "{shown}");
+}
+
+/// The hand-off dials the address `gopher_dial_addr` checked, and a form
+/// that sends a file is given a file's time: wiring a loopback test cannot
+/// see, since tests may fetch from internal addresses and a slow server
+/// would take minutes.
+#[test]
+fn test_the_hand_off_and_form_timeout_are_wired() {
+    fn body<'a>(src: &'a str, sig: &str) -> &'a str {
+        let at = src.find(sig).unwrap_or_else(|| panic!("{sig} not found"));
+        let rest = &src[at + sig.len()..];
+        let end = ["\n    pub(", "\n    async fn ", "\n    fn ", "\nfn ", "\npub(crate) fn "]
+            .iter()
+            .filter_map(|m| rest.find(m))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+    let web = include_str!("web.rs").replace("\r\n", "\n");
+    let f = body(&web, "async fn web_gopher_telnet(");
+    assert!(f.contains("crate::webbrowser::gopher_dial_addr(&addrs, &h)"), "{f}");
+    assert!(f.contains("self.gateway_telnet_dial(host, port, Some(addr))"), "{f}");
+    let gopher = include_str!("../webbrowser/gopher.rs").replace("\r\n", "\n");
+    let f = body(&gopher, "pub(crate) fn submit_ask(");
+    assert!(f.contains("ask_secs(file)"), "{f}");
 }
