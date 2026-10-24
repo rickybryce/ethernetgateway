@@ -1561,7 +1561,7 @@ pub(crate) struct TelnetSession {
     /// by `web_reset`, so leaving and re-entering the browser does retry.
     web_home_tried: bool,
     /// The sites (`host:port`) whose HTTPS failed this visit, so a page of
-    /// theirs came over plain HTTP (`WebPage::cleartext_fallback`).  A form
+    /// theirs came over plain HTTP (`WebPage::fallback_sites`).  A form
     /// sent over `http://` to one, or from a page of one, asks first.  Kept
     /// per site, not per page: Back, a bookmark or a link re-fetches the
     /// `http://` address with no HTTPS attempt, and that page is not marked.

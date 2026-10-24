@@ -5496,7 +5496,7 @@ pick a form, edit fields by number, <span class="kbd">S</span> to submit or
     <li>Maximum rendered lines: 5000.</li>
     <li>HTTP request timeout: 15 s.</li>
     <li>Page history depth: 50.</li>
-    <li>When HTTPS fails (a TLS error, or nothing answering on its port), a <em>page load</em> retries over HTTP with a warning.  A <em>form submission</em>, GET or POST, and any address carrying data after a <code>?</code> (a search, or a form's result reloaded or bookmarked) are refused instead, never re-sent in the clear; type the address with <code>http://</code> to send it anyway.  A form on a site whose HTTPS failed during this visit to the browser asks <em>Send it anyway? (Y/N)</em> before it goes out over <code>http://</code> &mdash; on the page that fell back, and on that site's pages reached afterwards by a link, Back or a bookmark.</li>
+    <li>When HTTPS fails (a TLS error, or nothing answering on its port), a <em>page load</em> retries over HTTP with a warning.  A <em>form submission</em>, GET or POST, and any address carrying data after a <code>?</code> (a search, or a form's result reloaded or bookmarked) are refused instead, never re-sent in the clear; type the address with <code>http://</code> to send it anyway.  A form on a site whose HTTPS failed during this visit to the browser (or a site it sent you on to over HTTP) asks <em>Send it anyway? (Y/N)</em> before it goes out over <code>http://</code> &mdash; on the page that fell back, and on that site's pages reached afterwards by a link, Back or a bookmark.</li>
 </ul>
 
 <!-- ═══════════════════ 14. Weather ═══════════════════ -->

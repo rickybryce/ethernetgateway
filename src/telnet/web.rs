@@ -1012,11 +1012,10 @@ impl TelnetSession {
                             self.web_history.remove(0);
                         }
                     }
-                if page.cleartext_fallback
-                    && let Some(site) = crate::webbrowser::http_site(&page.url)
-                    && !self.web_fallback_hosts.contains(&site)
-                {
-                    self.web_fallback_hosts.push(site);
+                for site in page.fallback_sites {
+                    if !self.web_fallback_hosts.contains(&site) {
+                        self.web_fallback_hosts.push(site);
+                    }
                 }
                 self.web_url = Some(page.url);
                 self.web_title = page.title;

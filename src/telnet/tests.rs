@@ -16138,13 +16138,13 @@ async fn test_a_form_on_a_fallen_back_page_asks_before_plain_http() {
         });
         let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
         sess.color_enabled = false;
-        let page = |url: String, cleartext_fallback| crate::webbrowser::WebPage {
+        let page = |url: String, fell: bool| crate::webbrowser::WebPage {
             title: None,
             lines: Vec::new(),
             links: Vec::new(),
+            fallback_sites: if fell { vec![crate::webbrowser::http_site(&url).unwrap()] } else { Vec::new() },
             url,
             forms: Vec::new(),
-            cleartext_fallback,
         };
         // The fallen-back page: this site, or another one.
         let fell = if fallback { format!("http://127.0.0.1:{port}/") } else { "http://10.0.0.1/".into() };

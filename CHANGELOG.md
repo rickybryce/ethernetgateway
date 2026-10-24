@@ -74,7 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or bookmarked, or a search.  A plain page address still falls back to HTTP
   with its warning.  A failure on the page a form leads to says the form was
   sent, rather than inviting a second submission.  A form on a site whose
-  HTTPS failed asks before it is sent over `http://` -- on the page that fell
+  HTTPS failed (or one it redirected to over HTTP) asks before it is sent
+  over `http://` -- on the page that fell
   back, and on that site's pages reached after it by a link, Back or a
   bookmark, until you leave the browser.  A refused
   form says it may or may not have reached the site, not "try again".

@@ -80,11 +80,13 @@ pub(crate) struct WebPage {
     pub url: String,
     /// HTML forms found on the page.
     pub forms: Vec<WebForm>,
-    /// The page came over plain HTTP because HTTPS failed for it (the
-    /// `[!]` notice).  Its relative form actions resolve to `http://`, so a
-    /// form on it would go out in the clear with no HTTPS attempt at all; the
-    /// form screen asks first (`web_submit_form`).
-    pub cleartext_fallback: bool,
+    /// The sites (`host:port`, see [`http_site`]) this fetch reached over
+    /// plain HTTP after HTTPS failed: the site whose HTTPS failed, and each
+    /// cleartext hop a redirect or refresh took from there.  Empty when
+    /// nothing fell back.  A form sent over `http://` to one of them, or from
+    /// a page of one, asks first (`web_submit_form`): its relative actions
+    /// resolve to `http://`, with no HTTPS attempt at all.
+    pub fallback_sites: Vec<String>,
 }
 
 impl WebPage {
@@ -418,7 +420,7 @@ fn guard_public_url(url_str: &str) -> Result<(), String> {
 /// This is a blocking call (uses ureq) and should be run via `spawn_blocking`.
 /// `width` is the target column count for word-wrapping (32 for PETSCII, 72 for ANSI).
 pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, String> {
-    fetch_and_render_from(url, width, 0, None, Fetch::Page)
+    fetch_and_render_from(url, width, 0, None, Fetch::Page, Vec::new())
 }
 
 /// What a fetch is for, which decides whether a failed HTTPS request may be
@@ -543,7 +545,7 @@ fn render_response(
             .take(MAX_RENDERED_LINES)
             .collect();
         (
-            WebPage { title: None, lines, links: Vec::new(), url: final_url, forms: Vec::new(), cleartext_fallback: false },
+            WebPage { title: None, lines, links: Vec::new(), url: final_url, forms: Vec::new(), fallback_sites: Vec::new() },
             None,
         )
     } else {
@@ -721,6 +723,7 @@ fn fetch_and_render_from(
     start_hops: usize,
     carried: Option<DowngradeReason>,
     fetch: Fetch,
+    mut sites: Vec<String>,
 ) -> Result<WebPage, String> {
     // Follow redirects manually (auto-follow disabled below) so EVERY hop
     // is SSRF-checked before we connect — otherwise ureq would follow a
@@ -757,6 +760,15 @@ fn fetch_and_render_from(
     let mut submitting = fetch == Fetch::FormSubmit;
     let (response, final_url) = loop {
         guard_public_url(&current)?;
+        // Every hop of a cleartext run is a site the reader was put on plain
+        // HTTP for -- the failed site's own retry, and wherever its `http://`
+        // pages redirect.  Recorded at the top, so all three ways here count.
+        if downgrade.is_some()
+            && let Some(site) = http_site(&current)
+            && !sites.contains(&site)
+        {
+            sites.push(site);
+        }
         let resp = match agent
             .get(&current)
             .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
@@ -825,7 +837,7 @@ fn fetch_and_render_from(
                 return Err("Too many redirects".to_string());
             }
             let fetch = if fetch == Fetch::FormSubmit { Fetch::AfterForm } else { fetch };
-            return fetch_and_render_from(&next, width, hops, downgrade, fetch);
+            return fetch_and_render_from(&next, width, hops, downgrade, fetch, sites);
         }
     }
 
@@ -841,8 +853,10 @@ fn fetch_and_render_from(
         && page.url.starts_with("http://")
     {
         prepend_downgrade_notice(&mut page, width, reason);
-        page.cleartext_fallback = true;
     }
+    // Even when the run ended on HTTPS: the failed site is still one whose
+    // `http://` pages a link or Back can bring up.
+    page.fallback_sites = sites;
     Ok(page)
 }
 
@@ -992,7 +1006,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             {
                 let next = resolve_url(&post_url, loc);
                 if next != post_url {
-                    return fetch_and_render_from(&next, width, 0, None, Fetch::AfterForm);
+                    return fetch_and_render_from(&next, width, 0, None, Fetch::AfterForm, Vec::new());
                 }
             }
             // 3xx with no usable / self-referential Location — render as-is.
@@ -1007,7 +1021,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
         if let Some(target) = meta_refresh {
             let next = resolve_url(&page.url, &target);
             if next != page.url {
-                return fetch_and_render_from(&next, width, 0, None, Fetch::AfterForm);
+                return fetch_and_render_from(&next, width, 0, None, Fetch::AfterForm, Vec::new());
             }
         }
 
@@ -1024,7 +1038,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
                 query.append_pair(k, v);
             }
         }
-        fetch_and_render_from(url.as_str(), width, 0, None, Fetch::FormSubmit)
+        fetch_and_render_from(url.as_str(), width, 0, None, Fetch::FormSubmit, Vec::new())
     }
 }
 
@@ -1794,7 +1808,7 @@ fn render_html_body(
             links,
             url: final_url,
             forms,
-            cleartext_fallback: false,
+            fallback_sites: Vec::new(),
         },
         meta_refresh,
     ))
@@ -1839,16 +1853,26 @@ fn resolve_gopher_html_link(base: &str, relative: &str) -> Option<String> {
         return None;
     }
     // A `\` is a path separator to the URL parser; in a selector it is a
-    // character like any other.
-    let encoded = encode_selector(selector.strip_prefix('/').unwrap_or(&selector)).replace('\\', "%5C");
+    // character like any other.  The page's own query stays a query, so a
+    // `?page=2` link replaces it rather than adding a second `?`.
+    let (own_path, own_query) = match selector.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (selector.as_str(), None),
+    };
+    let mut encoded = encode_selector(own_path.strip_prefix('/').unwrap_or(own_path)).replace('\\', "%5C");
+    if let Some(query) = own_query {
+        encoded = format!("{encoded}?{}", encode_selector(query));
+    }
     let page = url::Url::parse("http://gopher.invalid/").ok()?.join(&encoded).ok()?;
     let joined = page.join(relative).ok()?;
-    if joined.path() == page.path() && joined.query() == page.query() {
+    // An empty query (`?` alone) is none: no server reads `page?`.
+    let query = |url: &url::Url| url.query().filter(|q| !q.is_empty()).map(str::to_owned);
+    if joined.path() == page.path() && query(&joined) == query(&page) {
         return Some(base.to_string());
     }
     let path = decode_selector(joined.path());
-    let mut target = match joined.query() {
-        Some(query) => format!("{path}?{}", decode_selector(query)),
+    let mut target = match query(&joined) {
+        Some(query) => format!("{path}?{}", decode_selector(&query)),
         None => path.clone(),
     };
     if !selector.starts_with('/') {
@@ -1857,7 +1881,7 @@ fn resolve_gopher_html_link(base: &str, relative: &str) -> Option<String> {
     let name = path.rsplit('/').next().unwrap_or_default().to_ascii_lowercase();
     let ty = if name.is_empty() {
         '1'
-    } else if joined.query().is_some()
+    } else if query(&joined).is_some()
         || !name.contains('.')
         || [".html", ".htm", ".xhtml", ".shtml"].iter().any(|e| name.ends_with(e))
     {
@@ -2740,7 +2764,7 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
                 links: Vec::new(),
                 url: final_url,
                 forms: Vec::new(),
-                cleartext_fallback: false,
+                fallback_sites: Vec::new(),
             }
         }
         '1' | '7' => {
@@ -2764,7 +2788,7 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
                 links: Vec::new(),
                 url: final_url,
                 forms: Vec::new(),
-                cleartext_fallback: false,
+                fallback_sites: Vec::new(),
             }
         }
     };
@@ -2910,7 +2934,7 @@ fn render_gopher_directory(
         links,
         url: final_url,
         forms: Vec::new(),
-        cleartext_fallback: false,
+        fallback_sites: Vec::new(),
     })
 }
 
@@ -3019,7 +3043,7 @@ mod tests {
             links: vec![],
             forms: vec![],
             url: "http://example.com/".to_string(),
-            cleartext_fallback: false,
+            fallback_sites: Vec::new(),
         };
         prepend_downgrade_notice(&mut page, 80, DowngradeReason::TlsFailed);
         for line in &page.lines {
@@ -3043,7 +3067,7 @@ mod tests {
             links: vec![],
             forms: vec![],
             url: "http://textfiles.com/".to_string(),
-            cleartext_fallback: false,
+            fallback_sites: Vec::new(),
         };
         prepend_downgrade_notice(&mut plain, 80, DowngradeReason::NoHttps);
         for line in &plain.lines {
@@ -3390,7 +3414,7 @@ mod tests {
             links: vec![],
             forms: vec![],
             url: "https://ex.com/caf\u{e9}/\u{2014}path".to_string(),
-            cleartext_fallback: false,
+            fallback_sites: Vec::new(),
         };
         page.sanitize();
         assert_eq!(page.lines[0], "-line", "lines should fold");
@@ -3415,7 +3439,7 @@ mod tests {
             links: Vec::new(),
             url: "http://example.com/".to_string(),
             forms: Vec::new(),
-            cleartext_fallback: false,
+            fallback_sites: Vec::new(),
         };
         page.sanitize();
         assert_eq!(page.title.as_deref(), Some("evil[2Jtitle"));
@@ -3439,7 +3463,7 @@ mod tests {
             links: vec!["http://example.com/x".to_string()],
             url: "http://example.com/".to_string(),
             forms: Vec::new(),
-            cleartext_fallback: false,
+            fallback_sites: Vec::new(),
         };
         page.sanitize();
         // Sentinels intact; the escape inside and the bell outside are gone.
@@ -3454,7 +3478,7 @@ mod tests {
             links: Vec::new(),
             url: "http://example.com/".to_string(),
             forms: Vec::new(),
-            cleartext_fallback: false,
+            fallback_sites: Vec::new(),
         };
         page.sanitize();
         let title_once = page.title.clone();
@@ -3494,7 +3518,7 @@ mod tests {
                     },
                 ],
             }],
-            cleartext_fallback: false,
+            fallback_sites: Vec::new(),
         };
         page.sanitize();
         assert_eq!(page.url, "gopher://h/1sel[2J");
@@ -5169,6 +5193,11 @@ mod tests {
     /// reset instead: closed with the hello unread, which the kernel answers
     /// with RST -- "nothing serves HTTPS here", the other road to HTTP.
     fn serve_https_breaker(reset: bool) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        serve_https_breaker_replying(reset, response("200 OK", Some("text/plain"), b"ok"))
+    }
+
+    /// `serve_https_breaker`, its cleartext requests answered with `reply`.
+    fn serve_https_breaker_replying(reset: bool, reply: Vec<u8>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -5200,7 +5229,7 @@ mod tests {
                     cleartext.push(String::from_utf8_lossy(&buf[..n]).into_owned());
                 }
                 seen += 1;
-                let _ = s.write_all(&response("200 OK", Some("text/plain"), b"ok"));
+                let _ = s.write_all(&reply);
             }
             cleartext
         });
@@ -5316,10 +5345,34 @@ mod tests {
         assert_eq!(cleartext.len(), 1, "{cleartext:?}");
         assert!(page.lines[0].contains("HTTPS failed"), "{:?}", page.lines);
         // Marked, so a form on it asks before going out over http://.
-        assert!(page.cleartext_fallback);
+        assert_eq!(page.fallback_sites, vec![format!("127.0.0.1:{port}")]);
         // And a page that was asked for over http:// is not.
         let plain = fetch_and_render(&serve_raw(response("200 OK", Some("text/plain"), b"ok")), 72).unwrap();
-        assert!(!plain.cleartext_fallback);
+        assert!(plain.fallback_sites.is_empty());
+    }
+
+    /// A failed site that redirects elsewhere over HTTP: both are sites the
+    /// reader was put on plain HTTP for.  Only the last was recorded, so a
+    /// link back to the failed site's `http://` form went out unasked.
+    #[test]
+    fn test_every_site_of_a_cleartext_run_is_recorded() {
+        let elsewhere = serve_raw(response("200 OK", Some("text/plain"), b"ok"));
+        let other = http_site(&elsewhere).unwrap();
+        let moved = format!("HTTP/1.1 302 Found\r\nLocation: {elsewhere}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let (port, server) = serve_https_breaker_replying(false, moved.into_bytes());
+        let page = fetch_and_render(&format!("https://127.0.0.1:{port}/"), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.url, elsewhere);
+        assert_eq!(page.fallback_sites, vec![format!("127.0.0.1:{port}"), other]);
+        // And by a `<meta refresh>`, which is a fetch of its own.
+        let elsewhere = serve_raw(response("200 OK", Some("text/plain"), b"ok"));
+        let other = http_site(&elsewhere).unwrap();
+        let body = format!("<meta http-equiv=refresh content=\"0; url={elsewhere}\">");
+        let (port, server) = serve_https_breaker_replying(false, response("200 OK", Some("text/html"), body.as_bytes()));
+        let page = fetch_and_render(&format!("https://127.0.0.1:{port}/"), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.url, elsewhere);
+        assert_eq!(page.fallback_sites, vec![format!("127.0.0.1:{port}"), other]);
     }
 
     /// A disabled option is not a choice, nor anything in a disabled
@@ -5430,6 +5483,13 @@ mod tests {
         assert_eq!(at(base, "cgi-bin/other"), g('h', "/docs/cgi-bin/other"));
         assert_eq!(at(base, "search.cgi?q=c64"), g('h', "/docs/search.cgi?q=c64"));
         assert_eq!(at(base, "?q=c64"), g('h', "/docs/index.html?q=c64"));
+        // On a page reached by a query, a `?` link replaces that query.
+        let results = "gopher://g.example:7070/h/docs/search.cgi%3Fq=c64";
+        assert_eq!(at(results, "?q=c64&page=2"), g('h', "/docs/search.cgi?q=c64&page=2"));
+        assert_eq!(at(results, "other.html"), g('h', "/docs/other.html"));
+        assert_eq!(resolve_url(results, "#top"), results);
+        // `?` alone is this page, not `page?`.
+        assert_eq!(resolve_url(base, "?"), base);
         // `\` in the page's selector is a character, not a separator.
         assert_eq!(at("gopher://g.example:7070/h/dir\\index.html", "a.html"), g('h', "/a.html"));
         // `//host` is another server, read as a whole gopher URL.
