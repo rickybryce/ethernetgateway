@@ -65,6 +65,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Serial Kermit server: a cancelled upload no longer closes the port.**  On
+  a port in Kermit-server mode, any upload that failed -- cancelled by the
+  user, out of retries -- made the gateway close the port, log that the
+  device had gone, and reopen it a second later.  The failure is logged now
+  and the next request is served on the open port.
+- **Modem: `ATZ0` resets to the saved settings.**  `ATZ0` and `ATZ1` answered
+  `OK` and changed nothing; bare `ATE`, `ATV` and `ATQ` now mean `ATE0`,
+  `ATV0` and `ATQ0`, as a missing digit already did for `ATX`, `AT&C` and
+  the rest.
+- **Modem: `ATDT` to an IPv6 address.**  A bare address (`ATDT fe80::1`)
+  dialled the wrong host and port; it now calls the telnet port of that
+  address, and `[addr]:port` works as before.  A slave relays the same
+  strings the same way.
+- **Master/slave: a modem port follows a change of master made while it was
+  registering**, as a console port does.
+- **Peer dial: a caller giving up no longer drops the next caller's call** to
+  the same port (or the CP/M endpoint), which heard `NO CARRIER` at once
+  instead of being rung.
 - **Master/slave: a console port follows a change of master.**  After the
   master's host, port, username or password changed, a slave's console port
   went on registering with the old master until a restart.

@@ -4493,7 +4493,7 @@ crossbar dial needs the master's.
 <table>
     <thead><tr><th>Command</th><th>Action</th></tr></thead>
     <tbody>
-        <tr><td><code>ATZ</code></td><td>Reset to the stored profile (read from <code>egateway.conf</code>). Drops any active connection.</td></tr>
+        <tr><td><code>ATZ</code> / <code>ATZ0</code></td><td>Reset to the stored profile (read from <code>egateway.conf</code>). Drops any active connection. There is one stored profile, so <code>ATZ1</code> restores it too.</td></tr>
         <tr><td><code>AT&amp;F</code></td><td>Factory reset to gateway-friendly defaults. Does <em>not</em> overwrite the stored profile, but does drop any active connection (same as <code>ATZ</code> in that respect).</td></tr>
         <tr><td><code>AT&amp;W</code></td><td>Save current settings to <code>egateway.conf</code>. Persists echo, verbose, quiet, all 27 S-registers, <code>X</code>, <code>&amp;C</code>, <code>&amp;D</code>, <code>&amp;K</code>, the <code>+PETSCII</code> toggle, and the four stored-number slots.</td></tr>
         <tr><td><code>AT&amp;V</code></td><td>Display current configuration — one line of mode flags, a second line listing every S-register, and a third line listing stored numbers.</td></tr>

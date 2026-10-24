@@ -307,6 +307,7 @@ pub async fn request_peer_call(
 ) -> Result<tokio::io::DuplexStream, PeerCallOutcome> {
     let (caller_end, target_end) = tokio::io::duplex(65536);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
+    let mine = tx.downgrade();
     if try_place_peer_call(target, PeerCall { bridge: target_end, progress: tx }).is_err() {
         return Err(PeerCallOutcome::Busy);
     }
@@ -315,7 +316,7 @@ pub async fn request_peer_call(
     // stale PeerCall doesn't linger and spuriously Busy the next caller.
     // Disarmed on Answered (the target has claimed the slot); on any other
     // outcome the guard's drop does the reclaim (replacing an explicit take).
-    let mut slot_guard = PeerSlotGuard { id: target, armed: true };
+    let mut slot_guard = PeerSlotGuard { id: target, armed: true, mine };
 
     let outcome = await_peer_outcome(&mut rx, answer_wait).await;
 
@@ -334,16 +335,36 @@ pub async fn request_peer_call(
 /// Drop guard mirroring [`ConsoleSlotGuard`] for `PEER_CALL_REQUEST`: clears a
 /// placed-but-unclaimed peer call if [`request_peer_call`] is cancelled or
 /// exits without the target having taken the slot.
+///
+/// **Only its own call.**  Once the target has taken a call the slot is free,
+/// and a second caller may place one there while the first is still waiting
+/// on its ring.  Clearing the slot blind, the first caller's guard threw the
+/// second caller's call away when it gave up -- that caller heard `NO CARRIER`
+/// at once instead of being rung.  `mine` recognises this guard's own call.
 struct PeerSlotGuard {
     id: SerialPortId,
     armed: bool,
+    mine: tokio::sync::mpsc::WeakSender<u8>,
 }
 
 impl Drop for PeerSlotGuard {
     fn drop(&mut self) {
         if self.armed {
-            take_peer_call_request(self.id);
+            let mut slot = PEER_CALL_REQUEST[self.id.index()].lock().unwrap_or_else(|e| e.into_inner());
+            take_if_mine(&mut slot, &self.mine);
         }
+    }
+}
+
+/// Empty `slot` if the call in it is the one whose progress channel `mine`
+/// belongs to -- see [`PeerSlotGuard`].  Shared by both slot guards.
+fn take_if_mine(slot: &mut Option<PeerCall>, mine: &tokio::sync::mpsc::WeakSender<u8>) {
+    let ours = match (slot.as_ref(), mine.upgrade()) {
+        (Some(call), Some(tx)) => call.progress.same_channel(&tx),
+        _ => false,
+    };
+    if ours {
+        slot.take();
     }
 }
 
@@ -481,6 +502,7 @@ pub async fn request_cpm_call(
     }
     let (caller_end, target_end) = tokio::io::duplex(65536);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
+    let mine = tx.downgrade();
     if try_place_cpm_call(PeerCall { bridge: target_end, progress: tx }).is_err() {
         return Err(PeerCallOutcome::Busy);
     }
@@ -489,7 +511,7 @@ pub async fn request_cpm_call(
     // outcome, reclaim the slot so a stale PeerCall doesn't linger — a pool
     // member would otherwise "answer" a dead call and real callers would see
     // spurious BUSY.  Mirrors `PeerSlotGuard` for the single CP/M slot.
-    let mut slot_guard = CpmSlotGuard { armed: true };
+    let mut slot_guard = CpmSlotGuard { armed: true, mine };
     let outcome = await_peer_outcome(&mut rx, answer_wait).await;
     if outcome == PeerCallOutcome::Answered {
         // The emulator claimed the slot and is bridging; leave it be.
@@ -503,15 +525,18 @@ pub async fn request_cpm_call(
 
 /// Drop guard mirroring [`PeerSlotGuard`] for the single `CPM_CALL_REQUEST`
 /// slot: reclaims a placed-but-unclaimed CP/M call if [`request_cpm_call`] is
-/// cancelled or exits without the emulator having taken it.
+/// cancelled or exits without the emulator having taken it -- and, like that
+/// guard, only its own: the CP/M endpoint is a hunt group, so a second caller
+/// may well be waiting in the slot by then.
 struct CpmSlotGuard {
     armed: bool,
+    mine: tokio::sync::mpsc::WeakSender<u8>,
 }
 
 impl Drop for CpmSlotGuard {
     fn drop(&mut self) {
         if self.armed {
-            CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
+            take_if_mine(&mut CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()), &self.mine);
         }
     }
 }
@@ -958,7 +983,7 @@ struct ModemState {
     baud: u32,
     /// Connection preserved after +++ escape for ATO to resume.
     active_connection: Option<ActiveConnection>,
-    /// S-register values (S0–S12).
+    /// S-register values (S0–S26).
     s_regs: [u8; NUM_S_REGS],
     /// ATX result-code level (0-4).  Controls whether CONNECT includes a
     /// baud rate and whether BUSY/NO DIALTONE/NO ANSWER can be emitted.
@@ -1015,20 +1040,6 @@ struct ModemState {
 
 // ─── Public API ────────────────────────────────────────────
 
-/// Start the serial modem managers — one dedicated thread per port.
-///
-/// Returns immediately.  Each thread loops: if its port is enabled and
-/// configured it opens the wire and runs the modem (or console-bridge);
-/// when `restart_serial(id)` is called it re-reads config and re-opens
-/// the port (or stops if the port has been disabled).  The two threads
-/// are independent — restarts and bridge sessions on one port never
-/// disturb the other.
-/// Returns the spawned manager threads' `JoinHandle`s so the caller can join
-/// them (bounded) BEFORE dropping the tokio runtime on shutdown/restart — the
-/// threads `block_on` this runtime's handle, so a thread still running when the
-/// runtime is dropped would panic on its next `block_on`.  Their blocking work
-/// is abort-aware (reads time out in 100 ms; the dial connect is raced against
-/// `wait_for_serial_abort`), so they exit within ~100 ms of the shutdown flag.
 /// Register this slave's CP/M endpoint with the master for the lifetime of the
 /// server, the way Ports A and B are registered.
 ///
@@ -1070,6 +1081,21 @@ pub fn spawn_cpm_slave_announcer(shutdown: Arc<AtomicBool>) {
     tokio::spawn(cpm_slave_announce(shutdown, exit));
 }
 
+/// Start the serial modem managers — one dedicated thread per port.
+///
+/// Returns immediately.  Each thread loops: if its port is enabled and
+/// configured it opens the wire and runs the modem (or console-bridge);
+/// when `restart_serial(id)` is called it re-reads config and re-opens
+/// the port (or stops if the port has been disabled).  The two threads
+/// are independent — restarts and bridge sessions on one port never
+/// disturb the other.
+///
+/// Returns the spawned manager threads' `JoinHandle`s so the caller can join
+/// them (bounded) BEFORE dropping the tokio runtime on shutdown/restart — the
+/// threads `block_on` this runtime's handle, so a thread still running when the
+/// runtime is dropped would panic on its next `block_on`.  Their blocking work
+/// is abort-aware (reads time out in 100 ms; the dial connect is raced against
+/// `wait_for_serial_abort`), so they exit within ~100 ms of the shutdown flag.
 pub fn start_serial(
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
@@ -2418,6 +2444,16 @@ fn modem_slave_announce_tick(
         let user = cfg.slave_master_username.clone();
         let pass = cfg.slave_master_password.clone();
         let label = id.label();
+        // The mode and erase key are what the master will *display*, so they
+        // come from the same reading as the master's address -- the one this
+        // registration is made with.
+        let (mode, erase) = (p.mode.clone(), p.backspace.clone());
+        // **Formed before the connect, from that same reading**, as the console
+        // tick does.  Read after it, a change that landed during the connect
+        // was already in the fingerprint the idle wait compares against, so a
+        // registration made under the old master or password was never
+        // re-formed.
+        let registered_as = slave_link_fingerprint(&cfg, id);
 
         attempt = attempt.saturating_add(1);
         // Entering a connect attempt — "connecting" covers the retry and
@@ -2433,17 +2469,6 @@ fn modem_slave_announce_tick(
             attempt
         );
         let connected = handle.block_on(async {
-            // Read here rather than captured: this tick has only the port id,
-            // and the mode is what the master will *display* -- so the value at
-            // registration time is the honest one.
-            // The erase key travels beside the mode, read at the same moment and
-            // for the same reason: it is what the master will *say*, so the value
-            // at registration time is the honest one.
-            let (mode, erase) = {
-                let cfg = config::get_config();
-                let p = cfg.port(id);
-                (p.mode.clone(), p.backspace.clone())
-            };
             // Raced against a restart, as the console tick above.
             tokio::select! {
                 biased;
@@ -2478,6 +2503,7 @@ fn modem_slave_announce_tick(
         }
         last_outage = None;
         net_backoff = RECONNECT_BACKOFF_MIN;
+        attempt = 0; // registered: the next outage starts its own count
         crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Registered);
         glog!(
             "Serial modem (Port {}): REGISTERED with master; awaiting a call",
@@ -2488,7 +2514,6 @@ fn modem_slave_announce_tick(
         // summary in the log still calling it "connecting to the master".
         crate::relay::log_slave_link_summary(&host, mport);
 
-        let registered_as = slave_link_fingerprint(&config::get_config(), id);
         let crate::relay::MasterRelay { _session, mut stream } = relay;
         match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx, id, &registered_as) {
             ActivateOutcome::Activated => {
@@ -2675,9 +2700,6 @@ where
     }
 }
 
-/// Wait `backoff` before the next slave reconnect attempt, staying
-/// responsive to shutdown/restart (polls in 100 ms steps and returns early
-/// when either flag is set, so a long auth backoff never delays shutdown).
 /// Async poll that resolves as soon as shutdown or this port's restart flag
 /// is set.  Used to race an in-flight peer-dial ring/bridge in the announcer
 /// so a config restart isn't blocked waiting out the answer timeout.
@@ -2913,6 +2935,10 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>, _exit: AnnouncerExit) {
     }
 }
 
+/// Wait `backoff` before the next slave reconnect attempt, staying
+/// responsive to shutdown/restart (polls in 100 ms steps and returns early
+/// when either flag is set, so a long auth backoff never delays shutdown) and
+/// to an operator's new credentials (`relay::retry_generation`).
 fn slave_backoff(idx: usize, shutdown: &Arc<AtomicBool>, backoff: Duration) {
     let mut waited = Duration::ZERO;
     let step = Duration::from_millis(100);
@@ -3555,9 +3581,8 @@ fn run_console_bridge<S>(
 /// `kermit_server_with_outcome`: the receiver state machine only
 /// collects bytes in memory, so without a real hook here every upload
 /// would be silently discarded.  The serial paths have no terminal
-/// summary UI, so each file's outcome is logged instead.
-/// Commit one Kermit-server upload to disk: validate the name, re-check the
-/// subdir, and save collision-safe rather than clobbering.
+/// summary UI, so each file's outcome is logged instead.  The subdir is
+/// re-checked here and a name clash is saved collision-safe, never clobbered.
 ///
 /// `label` only names the source in the log — a local port ("A"), or a slave's
 /// port as the master sees it ("A@192.168.1.141") when the master is serving
@@ -3671,39 +3696,8 @@ fn run_kermit_server_port(
     let sd = shutdown.clone();
     let kermit_task = handle.spawn(async move {
         let (mut r, mut w) = tokio::io::split(async_stream);
-        loop {
-            if sd.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst) {
-                break;
-            }
-            // is_tcp = false: raw serial wire, no telnet IAC escaping.
-            // is_petscii = false: Kermit packets are protocol bytes,
-            // terminal type is irrelevant on a serial line.  The on_file
-            // hook commits each uploaded file to disk (the receiver state
-            // machine only buffers in memory — without this, uploads are
-            // silently dropped).
-            match crate::kermit::kermit_server_with_outcome(
-                &mut r, &mut w, false, false, verbose,
-                |rx| commit_kermit_upload(id.label(), &target_dir, rx),
-            )
-            .await
-            {
-                // A clean session end (Finish / BYE / idle timeout) returns
-                // Ok; so does a peer EOF (the wire closing looks like a
-                // client that hung up).  Loop to re-serve the next client.
-                // On device disconnect the reader is already at EOF, so the
-                // next server call returns immediately — but when
-                // `run_console_bridge` (below) returns it drops the
-                // `serial_stream` it owns, EOFing this task's reader, and we
-                // then call `kermit_task.abort()`, cancelling this task at
-                // its next await before it can busy-loop.  The
-                // shutdown/restart check at the top of the loop is the
-                // in-band stop.
-                Ok(_) => {}
-                // A hard protocol/IO error (not a clean EOF): stop and let
-                // the manager decide whether to reopen.
-                Err(_) => break,
-            }
-        }
+        let stop = || sd.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst);
+        serve_kermit_on_wire(&mut r, &mut w, id.label(), &target_dir, verbose, stop).await;
         let _ = w.shutdown().await;
     });
 
@@ -3723,6 +3717,53 @@ fn run_kermit_server_port(
     // If neither shutdown nor a per-port restart was requested, the bridge
     // ended because the wire closed — signal the manager to reopen.
     !shutdown.load(Ordering::SeqCst) && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
+}
+
+/// The always-on Kermit server's loop: serve one exchange after another until
+/// `stop` says the port is going away.
+///
+/// **A failed exchange is not a lost port.**  Any transfer that fails --
+/// the user cancelled (their Kermit sends an Error packet), it ran out of
+/// retries, a packet arrived garbled -- comes back from the server as `Err`,
+/// and this loop used to `break` on it.  The bridge then saw the server's half
+/// close, the manager took that for the device going away, logged "closed;
+/// reopening when it returns" and reopened the port a second later: a wrong
+/// log line, a second with nothing listening, and on a real UART a close that
+/// can drop DTR.  Measured with a Send-Init and an Error packet down a pty.
+/// The error is the transfer's, so it is logged and the next request served;
+/// whether the *wire* is gone is the bridge's question, and it answers it.
+///
+/// A clean end (Finish / BYE / idle timeout) and a peer EOF both return `Ok`
+/// and loop the same way.  When the device really goes, the bridge returns,
+/// drops its half -- so every read here ends at once -- and the caller aborts
+/// this task; the pause after an error keeps that short window from spinning.
+async fn serve_kermit_on_wire<R, W>(
+    r: &mut R,
+    w: &mut W,
+    label: &str,
+    target_dir: &std::path::Path,
+    verbose: bool,
+    stop: impl Fn() -> bool,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    while !stop() {
+        // is_tcp = false: raw serial wire, no telnet IAC escaping.
+        // is_petscii = false: Kermit packets are protocol bytes, terminal
+        // type is irrelevant on a serial line.  The on_file hook commits
+        // each uploaded file to disk (the receiver only buffers in memory,
+        // so without it uploads are silently dropped).
+        let served = crate::kermit::kermit_server_with_outcome(
+            r, w, false, false, verbose,
+            |rx| commit_kermit_upload(label, target_dir, rx),
+        )
+        .await;
+        if let Err(e) = served {
+            glog!("Serial Kermit server (Port {}): transfer ended: {}; serving again", label, e);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 }
 
 /// Inline (single-thread) pump for the always-on Kermit server path,
@@ -4142,7 +4183,7 @@ fn command_mode_tick(state: &mut ModemState) -> bool {
             // shifted letters are folded to ASCII first rather than dropped --
             // see `fold_petscii_command_byte`.
         }
-        // EOF: with the read timeout set (see `open_port`) an idle read is
+        // EOF: with the read timeout set (see `open_serial_port`) an idle read is
         // `Err(TimedOut)` below, so `Ok(0)` means the device closed rather
         // than "no data yet".  Signal a disconnect so the caller drops and
         // reopens the port — otherwise a PTY master whose slave exited (EOF,
@@ -4429,9 +4470,14 @@ fn parse_one_at_subcommand(
     quiet: &mut bool,
 ) -> Vec<AtResult> {
     match token_upper {
-        "Z" => vec![AtResult::ResetStored],
+        // A missing digit is 0, as `X`, `&C`, `&D`, `&K`, `H` and `O` already
+        // read it: `ATZ0` -- common in init strings -- answered OK and reset
+        // nothing, and bare `ATE` / `ATV` / `ATQ` changed nothing.  `Z1` names
+        // a second stored profile on a two-profile modem; this one has one,
+        // so it restores that.
+        "Z" | "Z0" | "Z1" => vec![AtResult::ResetStored],
         "H" | "H0" => vec![AtResult::Hangup],
-        "E0" => {
+        "E" | "E0" => {
             *echo = false;
             vec![AtResult::Ok]
         }
@@ -4439,7 +4485,7 @@ fn parse_one_at_subcommand(
             *echo = true;
             vec![AtResult::Ok]
         }
-        "V0" => {
+        "V" | "V0" => {
             *verbose = false;
             vec![AtResult::Ok]
         }
@@ -4447,7 +4493,7 @@ fn parse_one_at_subcommand(
             *verbose = true;
             vec![AtResult::Ok]
         }
-        "Q0" => {
+        "Q" | "Q0" => {
             *quiet = false;
             vec![AtResult::Ok]
         }
@@ -4613,13 +4659,13 @@ fn parse_one_at_subcommand(
 /// same byte range from the original line (preserves dial-string case).
 fn describe_at_token(token_upper: &str, token_orig: &str) -> String {
     match token_upper {
-        "Z" => "reset to saved settings".to_string(),
+        "Z" | "Z0" | "Z1" => "reset to saved settings".to_string(),
         "H" | "H0" => "hang up".to_string(),
-        "E0" => "command echo OFF".to_string(),
+        "E" | "E0" => "command echo OFF".to_string(),
         "E1" => "command echo ON".to_string(),
-        "V0" => "result codes as numbers".to_string(),
+        "V" | "V0" => "result codes as numbers".to_string(),
         "V1" => "result codes as words".to_string(),
-        "Q0" => "result codes shown".to_string(),
+        "Q" | "Q0" => "result codes shown".to_string(),
         "Q1" => "result codes suppressed (quiet)".to_string(),
         "?" => "show AT command help".to_string(),
         "O" | "O0" => "return to online/data mode".to_string(),
@@ -5476,16 +5522,9 @@ fn handle_dial(state: &mut ModemState, target: &str) {
             target.to_string()
         };
 
-        let (host, port) = if let Some((h, p)) = resolved.rsplit_once(':') {
-            match p.parse::<u16>() {
-                Ok(port) if port > 0 => (h.to_string(), port),
-                _ => {
-                    send_result(state, "ERROR");
-                    return;
-                }
-            }
-        } else {
-            (resolved, 23u16)
+        let Some((host, port)) = dial_host_port(&resolved) else {
+            send_result(state, "ERROR");
+            return;
         };
         dial_tcp(state, &host, port);
     }
@@ -5523,16 +5562,27 @@ fn slave_resolve_relay_target(
     } else {
         target.to_string()
     };
-    // A target with a ':' must be a well-formed host:port (or bracketed
-    // [ipv6]:port — F1); a bare host defaults to the telnet port.  Using the
-    // shared splitter keeps the slave's resolve and the master's parse in
-    // agreement on IPv6 bracketing.
-    let (host, port) = if resolved.contains(':') {
-        crate::relay::split_dial_host_port(&resolved)?
-    } else {
-        (resolved, 23u16)
-    };
+    let (host, port) = dial_host_port(&resolved)?;
     Some(RelayTarget::Dial { host, port })
+}
+
+/// Split a resolved dial target into the host and port to call -- **one rule
+/// for the local dial and the slave's relayed one**, which used to differ: the
+/// local path split at the last `:`, so `ATDT fe80::1` called host `fe80:` on
+/// port 1, while a slave refused it.
+///
+/// A bare host -- a name, an IPv4 address, or an IPv6 address on its own,
+/// bracketed or not -- takes the telnet port.  Anything else with a `:` must
+/// be `host:port` or `[ipv6]:port`, through the relay's splitter so the slave
+/// and the master parse it alike.  `None` is a malformed target.  The host
+/// comes back without brackets; [`dial_tcp`] resolves it as an address.
+fn dial_host_port(resolved: &str) -> Option<(String, u16)> {
+    let r = resolved.trim();
+    let bare = r.strip_prefix('[').and_then(|x| x.strip_suffix(']')).unwrap_or(r);
+    if !r.contains(':') || bare.parse::<std::net::Ipv6Addr>().is_ok() {
+        return Some((bare.to_string(), 23));
+    }
+    crate::relay::split_dial_host_port(r)
 }
 
 // ─── Peer-dial (call another port directly) ───────────────
@@ -6216,7 +6266,10 @@ fn dial_kermit_server(state: &mut ModemState) {
 fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
     use std::net::ToSocketAddrs;
 
-    let addr_str = format!("{}:{}", host, port);
+    // For the log, in the form a person would type it.  Resolution takes the
+    // pair, not this string: an IPv6 host arrives unbracketed (see
+    // `dial_host_port`), and `::1:23` is not an address.
+    let addr_str = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
     let label = state.port_id.label();
 
     // Resolve ALL candidate addresses, not just the first.  A name can
@@ -6227,7 +6280,7 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
     // a perfectly good address sits later in the list.  The shell
     // `telnet`/`nc` clients try every address, which is why they
     // "just work" where this dial used to fail.
-    let addrs: Vec<std::net::SocketAddr> = match addr_str.to_socket_addrs() {
+    let addrs: Vec<std::net::SocketAddr> = match (host, port).to_socket_addrs() {
         Ok(it) => it.collect(),
         Err(e) => {
             glog!(
@@ -6370,22 +6423,17 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
 
 // ─── Online mode (data passthrough) ────────────────────────
 
-/// Online mode for the duplex bridge (ATDT ethernet-gateway).
-///
-/// Uses `Handle::block_on` to perform async reads/writes on the duplex stream.
-/// This is safe because the serial thread is a `std::thread`, not a tokio task.
-/// Returns `Escaped` if the user sent +++, `Disconnected` on I/O error or EOF.
 /// Bridge the blocking UART's data phase to an async byte stream until
-/// the call ends (`+++` escape, carrier loss, or shutdown).
+/// the call ends: `Escaped` on `+++`, `Disconnected` on carrier loss, an I/O
+/// error, EOF or shutdown.  `Handle::block_on` drives the async side, which
+/// is safe because the serial thread is a `std::thread`, not a tokio task.
 ///
-/// Generic over the async halves so it serves **two** callers with one
-/// implementation:
-/// - the in-process dial bridges (`dial_ethernet_gateway`,
-///   `dial_kermit_server`) that pair the UART with a local
-///   [`tokio::io::DuplexStream`]; and
-/// - the master/slave **outward relay** (Phase 2): the same data phase
-///   bridged to a relay channel pointed at the master, instead of a local
-///   session — see `crate::relay`.
+/// Generic over the async halves, so every call that is not a direct TCP
+/// dial runs through this one loop: the in-process dials
+/// (`dial_ethernet_gateway`, `dial_kermit_server`), a slave's outward relay to
+/// its master (`dial_master_relay`, see `crate::relay`), a peer bridge
+/// (`bridge_duplex_online`, `process_peer_ring`), and `ATO` resuming any of
+/// them (`handle_return_online`).
 ///
 /// Only `AsyncRead`/`AsyncWrite` are required, so a `DuplexStream` half, a
 /// TCP socket half, or an SSH channel half all satisfy the bounds.
@@ -6791,20 +6839,16 @@ fn guard_time(state: &ModemState) -> Duration {
     Duration::from_millis(state.s_regs[12] as u64 * 20)
 }
 
-/// Whether to emit `+++` escape-sequence diagnostics.  Honors the same two
-/// switches as the SSH/Telnet gateway trace — the `gateway_debug` config
-/// flag (the "Gateway Debug Trace" toggle in the menu/GUI/web config) or
-/// the `EGATEWAY_GATEWAY_DEBUG` env var — so a caller debugging a stubborn
-/// escape (e.g. a C64 where bit-banged RX noise keeps breaking the
-/// sequence) can see exactly which byte defeated it.  The flag read is a
-/// single Mutex acquisition with no allocation; called once per read, not
-/// per byte, so it costs nothing meaningful when off.
 /// Is the modem trace armed?
 ///
 /// One gate for everything this module reports at byte level: the `[esc]`
-/// Hayes escape state machine and the result codes below.  Named for the
-/// modem rather than the escape because its scope grew -- a gate whose name
-/// understates what it covers is how the next reader fails to find it.
+/// Hayes escape state machine, the result codes, the AT command log and the
+/// wire-side `cpmkey PORT` lines.  Named for the modem rather than the escape
+/// because its scope grew -- a gate whose name understates what it covers is
+/// how the next reader fails to find it.  It honours the same two switches as
+/// the SSH/Telnet gateway trace: the `gateway_debug` setting (the "Gateway
+/// Debug Trace" toggle in all three UIs) and the `EGATEWAY_GATEWAY_DEBUG`
+/// environment variable.
 fn modem_trace_enabled() -> bool {
     config::get_gateway_debug()
         || std::env::var_os("EGATEWAY_GATEWAY_DEBUG").is_some_and(|v| !v.is_empty())
@@ -7658,6 +7702,30 @@ mod tests {
         assert_eq!(parse("at", &mut echo), vec![AtResult::Ok]);
         assert_eq!(parse("At", &mut echo), vec![AtResult::Ok]);
         assert_eq!(parse("aT", &mut echo), vec![AtResult::Ok]);
+    }
+
+    /// **A missing digit is 0.**  `ATZ0` and `ATZ1` answered OK and reset
+    /// nothing -- `ATZ0` is a common init string -- and bare `ATE`, `ATV` and
+    /// `ATQ` changed nothing, while `ATX`, `AT&C`, `ATH` and friends already
+    /// read the missing digit as 0.  Measured with a probe before the fix.
+    #[test]
+    fn test_a_missing_digit_is_zero() {
+        for cmd in ["ATZ0", "ATZ1", "atz0"] {
+            let (mut e, mut v, mut q) = (true, true, false);
+            assert_eq!(parse_full(cmd, &mut e, &mut v, &mut q), vec![AtResult::ResetStored], "{cmd}");
+        }
+        let (mut e, mut v, mut q) = (true, true, true);
+        assert_eq!(parse_full("ATE", &mut e, &mut v, &mut q), vec![AtResult::Ok]);
+        assert!(!e, "ATE is ATE0: echo off");
+        assert_eq!(parse_full("ATV", &mut e, &mut v, &mut q), vec![AtResult::Ok]);
+        assert!(!v, "ATV is ATV0: numeric result codes");
+        assert_eq!(parse_full("ATQ", &mut e, &mut v, &mut q), vec![AtResult::Ok]);
+        assert!(!q, "ATQ is ATQ0: result codes shown");
+        // Chained, the bare letter still takes no digit from its neighbour.
+        let (mut e, mut v, mut q) = (true, true, false);
+        assert_eq!(parse_full("ATEV1", &mut e, &mut v, &mut q), vec![AtResult::Ok, AtResult::Ok]);
+        assert!(!e && v);
+        assert_eq!(describe_at_command("ATZ0"), "reset to saved settings");
     }
 
     #[test]
@@ -8906,6 +8974,28 @@ mod tests {
         assert!(!before.contains("let host ="), "a copy of the master is taken before the loop again");
     }
 
+    /// The modem port's registration on a slave keeps the same rule as the
+    /// console one above: what it is registered under is fixed *before* the
+    /// connect, from the reading the connect uses.  It used to read the config
+    /// again after connecting, so a master or password change that landed
+    /// during the connect was already in the fingerprint the idle wait compared
+    /// against -- and a registration made under the old settings stood.  The
+    /// attempt counter now restarts on success, as its comment always said.
+    #[test]
+    fn test_the_modem_register_loop_fingerprints_what_it_connected_with() {
+        let src = include_str!("serial.rs").replace("\r\n", "\n");
+        let tick = &src[src.find("fn modem_slave_announce_tick(").expect("the modem tick")..];
+        let tick = &tick[..tick.find("\n}\n").expect("its end")];
+        let read = tick.find("let cfg = config::get_config();").expect("the config read");
+        let host = tick.find("let host = cfg.slave_master_host.clone();").expect("host taken");
+        let print = tick.find("let registered_as = slave_link_fingerprint(&cfg, id);").expect("fingerprint from that read");
+        let connect = tick.find(concat!("connect_master", "_register(")).expect("the connect");
+        assert!(read < host && host < print && print < connect, "the fingerprint is not formed before the connect");
+        assert_eq!(tick.matches("get_config()").count(), 1, "a second config reading crept back in");
+        let registered = tick.find("SlaveLinkState::Registered").expect("the success path");
+        assert!(tick[connect..registered].contains("attempt = 0;"), "the attempt count is not reset on success");
+    }
+
     /// A console port on a slave is dedicated to the master and must be
     /// excluded from local dialing (round-5 HIGH: dialing it wedged the
     /// caller's serial thread on a bridge nothing services).
@@ -9277,6 +9367,62 @@ mod tests {
             "place succeeds again once drained"
         );
         let _ = take_peer_call_request(id); // cleanup
+    }
+
+    /// **A caller that gives up takes only its own call out of the slot.**
+    /// Once the target has taken X's call and is ringing it, the slot is free
+    /// and Y may place a call there.  X's guard, on X giving up, used to empty
+    /// the slot blind -- Y's call was dropped and Y heard `NO CARRIER` at once
+    /// instead of being rung when the target came back.
+    #[test]
+    fn test_a_caller_giving_up_leaves_the_next_callers_call() {
+        // The lock is held outside the runtime, never across an await.
+        let _g = lock_global_state();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let id = SerialPortId::B;
+            let _ = take_peer_call_request(id);
+            let x = tokio::spawn(request_peer_call(id, Duration::from_millis(300)));
+            // The target picks X's call up and rings, holding it.
+            let mut taken = None;
+            for _ in 0..100 {
+                taken = take_peer_call_request(id);
+                if taken.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let x_call = taken.expect("the target never saw X's call");
+            x_call.progress.send(0).await.unwrap(); // RING
+            // Y dials the same port while X is still waiting on its ring.
+            let (y_bridge, _y_far) = tokio::io::duplex(64);
+            let (y_tx, _y_rx) = tokio::sync::mpsc::channel::<u8>(4);
+            let y_probe = y_tx.clone();
+            assert!(try_place_peer_call(id, PeerCall { bridge: y_bridge, progress: y_tx }).is_ok());
+            assert!(matches!(x.await.unwrap(), Err(PeerCallOutcome::NoAnswer)));
+            let left = take_peer_call_request(id).expect("X's guard threw away Y's call");
+            assert!(left.progress.same_channel(&y_probe), "the slot holds some other call");
+            drop(x_call);
+        });
+    }
+
+    /// The CP/M endpoint's guard follows the same rule, on its single slot.
+    #[test]
+    fn test_the_cpm_slot_guard_takes_only_its_own_call() {
+        let _g = lock_global_state();
+        let call = || {
+            let (bridge, _far) = tokio::io::duplex(64);
+            let (progress, rx) = tokio::sync::mpsc::channel::<u8>(4);
+            (PeerCall { bridge, progress }, rx)
+        };
+        let (theirs, _rx1) = call();
+        let (ours, _rx2) = call();
+        let mine = ours.progress.downgrade();
+        CPM_CALL_REQUEST.lock().unwrap().replace(theirs);
+        drop(CpmSlotGuard { armed: true, mine: mine.clone() });
+        assert!(CPM_CALL_REQUEST.lock().unwrap().is_some(), "another caller's call was taken");
+        CPM_CALL_REQUEST.lock().unwrap().replace(ours);
+        drop(CpmSlotGuard { armed: true, mine });
+        assert!(CPM_CALL_REQUEST.lock().unwrap().is_none(), "its own call was left behind");
     }
 
     #[test]
@@ -10029,6 +10175,38 @@ mod tests {
             slave_resolve_relay_target("host:notaport", "host:notaport"),
             None
         );
+    }
+
+    /// **One host/port rule for both dial paths.**  The local dial split at
+    /// the last `:`, so `ATDT fe80::1` called host `fe80:` on port 1, while a
+    /// slave refused the same string.  Both now go through `dial_host_port`,
+    /// and `dial_tcp` resolves the pair, since an unbracketed IPv6 host
+    /// glued to its port (`::1:23`) is not an address.
+    #[test]
+    fn test_both_dial_paths_split_a_host_alike() {
+        let hp = |h: &str, p: u16| Some((h.to_string(), p));
+        assert_eq!(dial_host_port("bbs.example.com"), hp("bbs.example.com", 23));
+        assert_eq!(dial_host_port("bbs.example.com:6400"), hp("bbs.example.com", 6400));
+        assert_eq!(dial_host_port("192.168.1.5:23"), hp("192.168.1.5", 23));
+        assert_eq!(dial_host_port("fe80::1"), hp("fe80::1", 23), "a bare IPv6 address");
+        assert_eq!(dial_host_port("[fe80::1]"), hp("fe80::1", 23));
+        assert_eq!(dial_host_port("[fe80::1]:6400"), hp("fe80::1", 6400));
+        assert_eq!(dial_host_port("host:0"), None);
+        assert_eq!(dial_host_port("host:notaport"), None);
+        assert_eq!(
+            slave_resolve_relay_target("fe80::1", "fe80::1"),
+            Some(crate::relay::RelayTarget::Dial { host: "fe80::1".into(), port: 23 })
+        );
+        // The local path takes the same rule, and resolves the pair.
+        let src = include_str!("serial.rs").replace("\r\n", "\n");
+        let body = |name: &str| {
+            let f = &src[src.find(&format!("fn {name}(")).expect(name)..];
+            f[..f.find("\n}\n").expect("fn end")].to_string()
+        };
+        let dial = body("handle_dial");
+        assert!(dial.contains("dial_host_port(&resolved)"), "the local dial has its own split again");
+        assert!(!dial.contains("rsplit_once"), "the local dial splits at the last colon again");
+        assert!(body("dial_tcp").contains("(host, port).to_socket_addrs()"), "dial_tcp resolves a glued string");
     }
 
     #[test]
@@ -11330,5 +11508,55 @@ mod tests {
         state.verbose = false;
         port_open_banner(&mut state);
         assert_eq!(&*written.lock().unwrap(), b"0\r");
+    }
+
+    /// **A cancelled upload leaves the serial Kermit server serving.**  The
+    /// peer's Error packet mid-transfer is how a user's cancel arrives, and the
+    /// server returns it as `Err`.  The always-on port's loop stopped on that,
+    /// so the manager closed and reopened a port nothing had happened to
+    /// (measured down a pty: "closed; reopening when it returns").  Here the
+    /// real loop is driven over a pipe: Send-Init, the peer's Error packet,
+    /// then a second Send-Init -- which must still be answered.
+    #[tokio::test]
+    async fn test_a_cancelled_upload_leaves_the_serial_kermit_server_serving() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = std::env::temp_dir().join(format!("egw-kserve-{}", std::process::id()));
+        let (server_end, mut peer) = tokio::io::duplex(4096);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_server = stop.clone();
+        let target = dir.clone();
+        let server = tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(server_end);
+            serve_kermit_on_wire(&mut r, &mut w, "T", &target, false, || stop_server.load(Ordering::SeqCst)).await;
+        });
+        let pkt = |kind: u8, seq: u8, data: &[u8]| crate::kermit::build_packet(kind, seq, data, b'1', 0, 0, b'\r');
+        // Read until a whole packet of `kind` has arrived, or give up.
+        async fn answered(peer: &mut tokio::io::DuplexStream, kind: u8) -> bool {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 256];
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            while tokio::time::Instant::now() < deadline {
+                match tokio::time::timeout(Duration::from_millis(200), peer.read(&mut buf)).await {
+                    Ok(Ok(0)) => return false,
+                    Ok(Ok(n)) => got.extend_from_slice(&buf[..n]),
+                    _ => {}
+                }
+                if got.windows(4).any(|w| w[0] == 0x01 && w[3] == kind) {
+                    return true;
+                }
+            }
+            false
+        }
+        peer.write_all(&pkt(b'S', 0, b"~* @-#N1")).await.unwrap();
+        assert!(answered(&mut peer, b'Y').await, "the first Send-Init is acknowledged");
+        peer.write_all(&pkt(b'E', 1, b"user cancelled")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!server.is_finished(), "the server stopped on a cancelled transfer");
+        peer.write_all(&pkt(b'S', 0, b"~* @-#N1")).await.unwrap();
+        assert!(answered(&mut peer, b'Y').await, "a new Send-Init after the cancel is not served");
+        stop.store(true, Ordering::SeqCst);
+        drop(peer);
+        let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
