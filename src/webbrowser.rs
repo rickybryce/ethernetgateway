@@ -1930,6 +1930,21 @@ fn unwrap_ddg_redirect(url: &str) -> String {
     url.to_string()
 }
 
+/// `url` with its scheme in lower case, if it is one the browser fetches:
+/// a scheme is case-insensitive (RFC 3986 3.1), so `GOPHER://h/` is
+/// `gopher://h/`, and everything after keys on the lower-case form.
+fn lower_scheme(url: &str) -> std::borrow::Cow<'_, str> {
+    for scheme in ["http://", "https://", "gopher://"] {
+        if let Some(head) = url.get(..scheme.len())
+            && head.eq_ignore_ascii_case(scheme)
+            && head != scheme
+        {
+            return std::borrow::Cow::Owned(format!("{scheme}{}", &url[scheme.len()..]));
+        }
+    }
+    std::borrow::Cow::Borrowed(url)
+}
+
 /// What was typed at the URL prompt, from the octets the terminal sent.
 ///
 /// A gopher URL's path keeps them as octets, any that are not ASCII
@@ -1938,7 +1953,7 @@ fn unwrap_ddg_redirect(url: &str) -> String {
 /// else Latin-1 (`decode_text`), which the web fetch then sends as UTF-8.
 pub(crate) fn typed_url(octets: &[u8]) -> String {
     let start = octets.len() - octets.trim_ascii_start().len();
-    if !octets[start..].starts_with(b"gopher://") {
+    if !octets[start..].get(..9).is_some_and(|s| s.eq_ignore_ascii_case(b"gopher://")) {
         return gopher::decode_text(octets).into_owned();
     }
     let path_at = octets[start + 9..].iter().position(|&b| b == b'/').map_or(octets.len(), |at| start + 9 + at);
@@ -1956,7 +1971,7 @@ pub(crate) fn typed_url(octets: &[u8]) -> String {
 /// Ensure a URL has a scheme, defaulting to https://.
 /// If the input has no dots and no scheme, treat it as a search query.
 pub(crate) fn normalize_url(input: &str) -> String {
-    let trimmed = input.trim();
+    let trimmed = &lower_scheme(input.trim());
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("gopher://") {
         return trimmed.to_string();
     }
@@ -2597,7 +2612,7 @@ const GOPHER_TIMEOUT_SECS: u64 = 15;
 const GOPHER_MAX_BODY: usize = 512 * 1024;
 
 mod gopher;
-pub(crate) use gopher::{gopher_action, GopherAction, GopherUrl, ASK_METHOD, ASK_SAVE_AS, ASK_SEND_FILE};
+pub(crate) use gopher::{decode_text, gopher_action, GopherAction, GopherUrl, ASK_METHOD, ASK_SAVE_AS, ASK_SEND_FILE};
 
 /// Read a response of at most `max` bytes, giving up at `deadline`.
 ///
@@ -4267,6 +4282,24 @@ mod tests {
         for typed in [&b"caf\xe9"[..], &b"caf\xc3\xa9"[..]] {
             assert_eq!(normalize_url(&typed_url(typed)), "https://lite.duckduckgo.com/lite/?q=caf%C3%A9");
         }
+    }
+
+    /// A scheme is case-insensitive (RFC 3986 3.1): `GOPHER://` typed or
+    /// linked is a gopher URL, not a web search.  The rest is left as is.
+    #[test]
+    fn test_an_upper_case_scheme_is_its_scheme() {
+        assert_eq!(normalize_url("GOPHER://H.example/1/Dir"), "gopher://H.example/1/Dir");
+        assert_eq!(normalize_url(" Https://example.org/A"), "https://example.org/A");
+        assert_eq!(normalize_url("HTTP://example.org/"), "http://example.org/");
+        assert_eq!(normalize_url(&typed_url(b"Gopher://h/0/caf\xe9")), "gopher://h/0/caf%E9");
+        assert_eq!(resolve_url("http://example.org/", "GOPHER://h.example/0/X"), "gopher://h.example/0/X");
+        // On an HTML page a gopher server holds, too, where a link is
+        // otherwise a selector on that server.
+        assert_eq!(resolve_url("gopher://g.example/h/index.html", "GOPHER://h.example/0/X"), "gopher://h.example/0/X");
+        // Not a scheme the browser fetches, or not at the start: untouched.
+        assert_eq!(lower_scheme("FTP://h/"), "FTP://h/");
+        assert_eq!(lower_scheme("a/GOPHER://h"), "a/GOPHER://h");
+        assert_eq!(lower_scheme("GOPHER:/"), "GOPHER:/");
     }
 
     #[test]

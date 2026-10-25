@@ -16656,6 +16656,23 @@ async fn test_a_typed_gopher_url_is_sent_as_typed() {
     }
 }
 
+/// An address typed straight at the browser's command line, without G,
+/// is taken the same way: the bytes typed, `à`'s last byte (A0) kept.
+#[tokio::test]
+async fn test_an_address_typed_at_the_command_line_is_sent_as_typed() {
+    let (port, server) = serve_gopher_seq(vec![b"hello\r\n.\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, Vec::new());
+    // As `get_line_input` gives it: one char per byte typed.
+    let typed: String = [format!("gopher://127.0.0.1:{port}/0/").as_bytes(), b"voil\xc3\xa0"].concat().iter().map(|&b| char::from(b)).collect();
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.handle_web_browser_command(&typed)).await.expect("hung").unwrap();
+    drop(sess);
+    screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent, vec![b"/voil\xc3\xa0\r\n".to_vec()]);
+}
+
 /// The words typed at `Search:` reach the server as the bytes the terminal
 /// sent, UTF-8 or Latin-1, not re-encoded (RFC 4266: octets).
 #[tokio::test]
@@ -16750,6 +16767,68 @@ async fn test_an_html_askl_name_is_a_plain_textarea() {
     let shown = screen.await.unwrap();
     assert!(!shown.contains("blank line ends"), "{shown}");
     assert!(matches!(&form.fields[0], crate::webbrowser::FormField::TextArea { value, .. } if value == "hello"), "{shown}");
+}
+
+/// A Gopher+ form with no questions stays on its page until F, even one
+/// the server wrote in Latin-1 (which carries a hidden charset field).
+#[tokio::test]
+async fn test_a_form_with_no_questions_is_not_sent_on_opening() {
+    let attrs = b"+-2\r\n+INFO: 0Caf\xe9\t/f\th\t70\t?\r\n+ASK:\r\n Note: Caf\xe9 au lait\r\n".to_vec();
+    let (port, server) = serve_gopher_seq(vec![attrs, b"+-1\r\nSENT\r\n.\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, Vec::new());
+    let url = format!("gopher://127.0.0.1:{port}/0/f%09%09%3F");
+    sess.web_url = Some(url.clone());
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_fetch_page(&url, false)).await.expect("hung").unwrap());
+    assert!(sess.web_forms[0].fields.iter().any(|f| matches!(f, crate::webbrowser::FormField::Hidden { .. })));
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent.len(), 1, "{shown}");
+    assert!(!shown.contains("SENT"), "{shown}");
+}
+
+/// A letter typed into a form field is that letter, whether the terminal
+/// sends UTF-8 or Latin-1: not two Latin-1 chars for a UTF-8 `é`.  On a
+/// web form and on a Gopher+ `AskL` alike.
+#[tokio::test]
+async fn test_a_typed_form_answer_is_the_letter_typed() {
+    for typed in [&b"caf\xc3\xa9\r"[..], &b"caf\xe9\r"[..]] {
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        sess.color_enabled = false;
+        sess.web_url = Some("http://h.example/".into());
+        let mut form = crate::webbrowser::WebForm {
+            action: "http://h.example/post".into(),
+            method: "post".into(),
+            label: "F".into(),
+            fields: vec![crate::webbrowser::FormField::Text {
+                name: "n".into(),
+                value: String::new(),
+                label: "Name".into(),
+                input_type: "text".into(),
+            }],
+        };
+        let screen = script_peer(peer, vec![("Name: ", typed)]);
+        tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_edit_field(&mut form, 0)).await.expect("hung").unwrap();
+        drop(sess);
+        let shown = screen.await.unwrap();
+        assert!(matches!(&form.fields[0], crate::webbrowser::FormField::Text { value, .. } if value == "caf\u{e9}"), "{shown}");
+    }
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_url = Some("gopher://h/1/".into());
+    let mut form = crate::webbrowser::WebForm {
+        action: "gopher://h/0/f%09%09+".into(),
+        method: crate::webbrowser::ASK_METHOD.into(),
+        label: "F".into(),
+        fields: vec![crate::webbrowser::FormField::TextArea { name: "0:askl".into(), value: String::new(), label: "Msg".into() }],
+    };
+    let screen = script_peer(peer, vec![("> ", b"caf\xc3\xa9\r"), ("> ", b"\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_edit_field(&mut form, 0)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    assert!(matches!(&form.fields[0], crate::webbrowser::FormField::TextArea { value, .. } if value == "caf\u{e9}"), "{shown}");
 }
 
 /// The hand-off dials the address `gopher_dial_addr` checked, and a form

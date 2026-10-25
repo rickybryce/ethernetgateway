@@ -93,6 +93,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Browser: a letter typed into a form is the letter typed.**  On a
+  terminal that sends UTF-8, an accented letter reached the field as two
+  Latin-1 characters and was sent to the site encoded twice (`cafÃ©`
+  for `café`); it is read as UTF-8 now, or as Latin-1 if it is not
+  UTF-8, on web and Gopher+ forms alike.  A Gopher+ form the server wrote
+  in Latin-1 is answered in Latin-1.  `GOPHER://`, `HTTP://` and `HTTPS://`
+  typed or linked in capitals are those schemes (RFC 3986: a scheme is
+  case-insensitive), not a web search.
+
 - **Browser: form data is never re-sent over plain HTTP.**  A search or
   login form that submits with GET puts its fields in the address, and when
   HTTPS failed it was retried over `http://` like any page -- a password

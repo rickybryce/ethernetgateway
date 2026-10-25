@@ -1000,6 +1000,12 @@ Hello              Hello              Hello
 <span class="prompt-char">C:</span> <span class="output-text">(an AskL: its line count, then its lines)</span>
 <span class="prompt-char">C:</span> <span class="output-text">(a ChooseF: the file's bytes, last)</span>
 <span class="prompt-char">S:</span> the reply, drawn as a page</code></pre>
+                <p>
+                    Neither specification says what character set the answers are in; only
+                    the display string is named, as ISO Latin-1. The gateway answers in the
+                    form's own: Latin-1 when its questions came in Latin-1, UTF-8
+                    otherwise. A letter Latin-1 lacks is sent as <code>?</code>.
+                </p>
                 <div class="callout callout-info">
                     <strong>Only a Gopher+ form can send a file.</strong> A form counts as
                     one only when it came from an <code>+ASK</code> block, on a gopher page,

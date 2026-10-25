@@ -376,7 +376,7 @@ pub(crate) fn split_plus_reply(body: &[u8]) -> PlusReply {
 /// both specs name for 8-bit text (RFC 1436 and Gopher+, the display
 /// string).  Every Latin-1 byte is a character, so a Latin-1 `é` is drawn
 /// as itself, not as `?`.
-pub(super) fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+pub(crate) fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     match std::str::from_utf8(bytes) {
         Ok(s) => std::borrow::Cow::Borrowed(s),
         Err(_) => std::borrow::Cow::Owned(bytes.iter().map(|&b| b as char).collect()),
@@ -478,6 +478,10 @@ pub(crate) struct AttrBlock {
     pub head: Vec<u8>,
     /// The block's lines, their leading space taken off.
     pub lines: Vec<String>,
+    /// Whether any of its lines was Latin-1, not UTF-8 (`decode_text`): an
+    /// `+ASK` block's answers go back the same way (`ASK_CHARSET_FIELD`).
+    /// Not the head: an `+INFO` head's selector is octets, not text.
+    pub latin1: bool,
 }
 
 impl ItemAttrs {
@@ -501,11 +505,12 @@ pub(crate) fn parse_attributes(data: &[u8]) -> Vec<ItemAttrs> {
                 items.push(ItemAttrs::default());
             }
             if let Some(item) = items.last_mut() {
-                item.blocks.push(AttrBlock { name, head, lines: Vec::new() });
+                item.blocks.push(AttrBlock { name, head, lines: Vec::new(), latin1: false });
             }
         } else if let Some(text) = line.strip_prefix(b" ")
             && let Some(block) = items.last_mut().and_then(|i| i.blocks.last_mut())
         {
+            block.latin1 |= std::str::from_utf8(text).is_err();
             block.lines.push(decode_text(text).into_owned());
         }
     }
@@ -622,6 +627,14 @@ fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_ur
 /// How an `+ASK` form's fields are sent back -- what `submit_ask` needs
 /// beyond the field itself.
 pub(crate) const ASK_METHOD: &str = "gopher+ask";
+
+/// A hidden field an `+ASK` form carries when the server wrote it in
+/// Latin-1: its answers go back in Latin-1 too, as its own text was.
+/// Neither spec names the answers' character set (only the display
+/// string's, Latin-1), so they follow the form's.  Hidden: not shown, and
+/// not an answer (`ask_answers`).
+pub(crate) const ASK_CHARSET_FIELD: &str = "gopher+charset";
+const ASK_LATIN1: &str = "ISO-8859-1";
 /// `AskF`: a filename the reply is also saved under.
 pub(crate) const ASK_SAVE_AS: &str = "askf";
 /// `ChooseF`: a file from the transfer folder, sent after the answers.  Its
@@ -720,6 +733,11 @@ fn render_ask(item: &ItemAttrs, at: &GopherUrl, width: usize, final_url: String)
     } else {
         lines.extend(wrap_line(&format!("{} question(s): F to answer them and send.", fields.len()), width));
     }
+    // The questions' own text decides.
+    let mut fields = fields;
+    if ask.latin1 {
+        fields.push(FormField::Hidden { name: ASK_CHARSET_FIELD.into(), value: ASK_LATIN1.into() });
+    }
     Ok(WebPage {
         title: Some(display.clone()),
         lines,
@@ -739,11 +757,19 @@ fn render_ask(item: &ItemAttrs, at: &GopherUrl, width: usize, final_url: String)
 /// The answers to an `+ASK` form, as its data block carries them: one line
 /// per question in order (`Note` has none), a checkbox `1` or `0`, `AskL`'s
 /// count of lines then the lines; then the `ChooseF` file, if any.
+///
+/// In UTF-8, or in Latin-1 for a form the server wrote in Latin-1
+/// (`ASK_CHARSET_FIELD`), a character Latin-1 lacks sent as `?`.
 fn ask_answers(form: &WebForm, file: Option<&[u8]>) -> Vec<u8> {
+    let latin1 = form.fields.iter().any(|f| matches!(f, FormField::Hidden { name, value } if name == ASK_CHARSET_FIELD && value == ASK_LATIN1));
     let one_line = |s: &str| s.chars().filter(|&c| c != '\r' && c != '\n' && c != '\0').collect::<String>();
     let mut out = Vec::new();
     let mut line = |s: &str| {
-        out.extend_from_slice(s.as_bytes());
+        if latin1 {
+            out.extend(s.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')));
+        } else {
+            out.extend_from_slice(s.as_bytes());
+        }
         out.extend_from_slice(b"\r\n");
     };
     for field in &form.fields {
@@ -1217,6 +1243,38 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&sent), String::from_utf8_lossy(&want));
         assert_eq!(page.lines, vec!["Thanks"]);
         assert_eq!(raw, b"Thanks\r\n");
+    }
+
+    /// A form the server wrote in Latin-1 is answered in Latin-1; one in
+    /// UTF-8 (or plain ASCII) in UTF-8.  The marker is hidden: not a
+    /// question, not an answer.
+    #[test]
+    fn test_a_form_is_answered_in_its_own_character_set() {
+        fn answered(info: &[u8], ask_line: &[u8], answer: &str) -> (usize, Vec<u8>) {
+            let attrs = [&b"+-2\r\n+INFO: "[..], info, b"\r\n+ASK:\r\n ", ask_line, b"\r\n"].concat();
+            let (port, server) = serve(attrs);
+            let page = fetch(&format!("gopher://127.0.0.1:{port}/0/f%09%09%3F"), 72).unwrap();
+            server.join().unwrap();
+            let mut form = page.forms[0].clone();
+            let questions = form.fields.iter().filter(|f| !matches!(f, FormField::Hidden { .. })).count();
+            if let Some(FormField::Text { value, .. }) = form.fields.first_mut() {
+                *value = answer.into();
+            }
+            let (port, server) = serve(b"+-1\r\nOK\r\n.\r\n".to_vec());
+            form.action = format!("gopher://127.0.0.1:{port}/0/f%09%09+");
+            submit_ask(&form, None, 72).unwrap();
+            let sent = server.join().unwrap();
+            let at = sent.windows(2).rposition(|w| w == b"\r\n".as_slice()).unwrap();
+            let body_at = sent[..at].windows(2).rposition(|w| w == b"\r\n".as_slice()).map_or(0, |i| i + 2);
+            (questions, sent[body_at..at].to_vec())
+        }
+        let info = b"0Form\t/f\th\t70\t?";
+        assert_eq!(answered(info, b"Ask: Caf\xe9 name:", "na\u{ef}ve \u{263a}"), (1, b"na\xefve ?".to_vec()));
+        assert_eq!(answered(info, b"Ask: Caf\xc3\xa9 name:", "na\u{ef}ve \u{263a}"), (1, "na\u{ef}ve \u{263a}".as_bytes().to_vec()));
+        assert_eq!(answered(info, b"Ask: Name:", "na\u{ef}ve"), (1, "na\u{ef}ve".as_bytes().to_vec()));
+        // The item's own line -- its name, its selector's octets -- is not
+        // the form's text: questions in ASCII are answered in UTF-8.
+        assert_eq!(answered(b"0Caf\xe9\t/caf\xe9\th\t70\t?", b"Ask: Name:", "na\u{ef}ve"), (1, "na\u{ef}ve".as_bytes().to_vec()));
     }
 
     /// A `?` item opens on its form: its attributes asked for with `!`.

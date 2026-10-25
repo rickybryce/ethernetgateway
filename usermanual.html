@@ -5581,8 +5581,10 @@ its questions: a line of text, a password (shown as stars), several lines (a
 blank line ends them), a checkbox, a choice of one, a filename to save the
 reply under in the transfer folder, or a file from the transfer folder to
 send.  <span class="kbd">S</span> sends the answers, and the server's reply
-is shown as the page.  Some servers (pygopherd) list a form but do not take
-answers; theirs is the item itself.
+is shown as the page.  Answers go back in the form's own character set:
+Latin-1 if the server wrote the questions in Latin-1, UTF-8 otherwise.  Some
+servers (pygopherd) list a form but do not take answers; theirs is the item
+itself.
 </p>
 
 <p>

@@ -212,9 +212,14 @@ impl TelnetSession {
         // screen and on a loaded page alike — on the home screen it is the
         // whole point, since it means you can type an address without pressing
         // G first.
-        let typed = input.trim();
+        // ASCII whitespace only, as `get_line_input` trims: a char here is
+        // a byte typed, and a UTF-8 letter's last byte can be Unicode
+        // whitespace as a char.
+        let typed = input.trim_matches(|c: char| c.is_ascii_whitespace());
         if typed.chars().count() > 1 {
-            let url = crate::webbrowser::normalize_url(typed);
+            // The bytes typed, as the URL prompt takes them (`typed_url`).
+            let typed = crate::webbrowser::typed_url(&crate::telnet::colors::to_latin1_bytes(typed));
+            let url = crate::webbrowser::normalize_url(&typed);
             self.web_fetch_page(&url, true).await?;
             return Ok(true);
         }
@@ -449,7 +454,9 @@ impl TelnetSession {
         // A Gopher+ form opens on its questions.
         if shown && self.web_gopher_form(0) {
             self.web_fill_ask_files().await;
-            if !self.web_forms[0].fields.is_empty() {
+            // Only with a question to ask: a hidden field is not one, and the
+            // form screen sends a form it has nothing to show for.
+            if self.web_forms[0].fields.iter().any(|f| !matches!(f, crate::webbrowser::FormField::Hidden { .. })) {
                 self.web_edit_form(0).await?;
             }
         }
@@ -607,6 +614,18 @@ impl TelnetSession {
     /// must never be able to make one.
     pub(in crate::telnet) fn web_gopher_form(&self, idx: usize) -> bool {
         self.web_forms.get(idx).is_some_and(|f| self.web_is_gopher_form(f))
+    }
+
+    /// A typed line as text.  The line holds one char per byte typed
+    /// (`get_line_input`), so a UTF-8 terminal's `é` arrives as two; read
+    /// back as UTF-8 if it is, else Latin-1 (`decode_text`), it is the
+    /// letter typed, whichever the terminal sends.  A C64's line is
+    /// already ASCII.
+    fn web_typed_text(&self, line: &str) -> String {
+        if self.terminal_type == TerminalType::Petscii {
+            return line.to_string();
+        }
+        crate::webbrowser::decode_text(&crate::telnet::colors::to_latin1_bytes(line)).into_owned()
     }
 
     /// `web_gopher_form`'s rule, for a form already in hand.
@@ -1243,7 +1262,7 @@ impl TelnetSession {
                 self.send("  > ").await?;
                 self.flush().await?;
                 match self.get_line_input().await? {
-                    Some(line) if !line.is_empty() => rows.push(line),
+                    Some(line) if !line.is_empty() => rows.push(self.web_typed_text(&line)),
                     Some(_) => break,
                     // ESC: the answer is left as it was.
                     None => return Ok(()),
@@ -1264,6 +1283,7 @@ impl TelnetSession {
                 self.get_line_input().await?
             };
             if let Some(new_val) = input {
+                let new_val = self.web_typed_text(&new_val);
                 match &mut form.fields[idx] {
                     FormField::Text { value, .. } | FormField::TextArea { value, .. } => {
                         *value = new_val;
