@@ -992,8 +992,14 @@ impl TelnetSession {
                 };
                 return Ok(LineEnd::Line(if is_password {
                     result
-                } else {
+                } else if self.terminal_type == TerminalType::Petscii {
                     result.trim().to_string()
+                } else {
+                    // ASCII whitespace only: a char here is a byte typed, and
+                    // the last byte of a UTF-8 `à` (A0) or `Å` (85) is
+                    // Unicode whitespace as a char -- `trim` would cut the
+                    // letter in half.
+                    result.trim_matches(|c: char| c.is_ascii_whitespace() || c == '\x0B').to_string()
                 }));
             }
 

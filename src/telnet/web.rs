@@ -342,6 +342,8 @@ impl TelnetSession {
             _ => return Ok(()),
         };
 
+        // The bytes typed: the line holds one per char (`get_line_input`).
+        let url_input = crate::webbrowser::typed_url(&crate::telnet::colors::to_latin1_bytes(&url_input));
         let url = crate::webbrowser::normalize_url(&url_input);
         self.web_fetch_page(&url, true).await?;
         Ok(())

@@ -46,12 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `.` that starts a line, and the browser takes one off.  Measured against
   the three specifications, line by line, and brought into them: a server
   that cannot be reached is left for its `+` copies, at most three
-  (RFC 1436 3.5), and a download says which copy sent it; a selector, and a search's words, are kept byte for byte, so a server whose selectors are Latin-1
-  is asked for what it listed; text that is not UTF-8 is read as Latin-1,
-  the standard's character set; and a server that holds the connection
-  open after the closing `.` line is waited for two seconds, not until the
-  page times out.  A new reference page, `gopherreference.html`, explains
-  the protocol and lists each requirement and where the gateway stands.
+  (RFC 1436 3.5), and a download says which copy sent it; a selector, a
+  search's words and a gopher address typed at `G` are kept byte for byte,
+  so a server whose selectors are Latin-1 is asked for what it listed;
+  text that is not UTF-8 is read as Latin-1, the standard's character set,
+  a line at a time (Gopher+ item information included); and a server
+  that holds the connection open after the closing `.` line is waited for
+  two seconds, not until the page times out.  A new reference page,
+  `gopherreference.html`, explains the protocol and lists each requirement
+  and where the gateway stands.
 
 ### Changed
 

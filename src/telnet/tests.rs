@@ -16634,12 +16634,36 @@ async fn test_a_download_falls_back_to_its_alternate() {
     assert!(shown.contains("From a copy: 127.0.0.1"), "{shown}");
 }
 
+/// A gopher URL typed at the URL prompt reaches its server as typed, UTF-8
+/// or Latin-1 (RFC 4266: octets).
+#[tokio::test]
+async fn test_a_typed_gopher_url_is_sent_as_typed() {
+    // `à` ends in A0 and `Å` in 85, both Unicode whitespace as a char.
+    for typed in [&b"caf\xc3\xa9"[..], &b"caf\xe9"[..], &b"voil\xc3\xa0"[..], &b"\xc3\x85"[..]] {
+        let (port, server) = serve_gopher_seq(vec![b"hello\r\n.\r\n".to_vec()]);
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        sess.color_enabled = false;
+        let answer: Vec<u8> = [format!("gopher://127.0.0.1:{port}/0/").as_bytes(), typed, b"\r"].concat();
+        // The port is the server's, so the answer is made here: leaked, as
+        // `script_peer` holds it for the test's life.
+        let answer: &'static [u8] = answer.leak();
+        let screen = script_peer(peer, vec![("URL/Search", answer)]);
+        tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_prompt_url()).await.expect("hung").unwrap();
+        drop(sess);
+        screen.await.unwrap();
+        let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+        assert_eq!(sent, vec![[&b"/"[..], typed, b"\r\n"].concat()]);
+    }
+}
+
 /// The words typed at `Search:` reach the server as the bytes the terminal
 /// sent, UTF-8 or Latin-1, not re-encoded (RFC 4266: octets).
 #[tokio::test]
 async fn test_typed_search_words_are_sent_as_typed() {
     // Each as typed, then with its Enter.
-    let cases: [(&[u8], &'static [u8]); 2] = [(b"caf\xc3\xa9", b"caf\xc3\xa9\r"), (b"caf\xe9", b"caf\xe9\r")];
+    // `à` ends in A0, Unicode whitespace as a char: not trimmed off.
+    let cases: [(&[u8], &'static [u8]); 3] =
+        [(b"caf\xc3\xa9", b"caf\xc3\xa9\r"), (b"caf\xe9", b"caf\xe9\r"), (b"voil\xc3\xa0", b"voil\xc3\xa0\r")];
     for (typed, answer) in cases {
         let (port, server) = serve_gopher_seq(vec![b"0Hit\t/hit\th\t70\r\n.\r\n".to_vec()]);
         let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);

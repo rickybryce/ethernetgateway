@@ -325,10 +325,10 @@ fn unstuff_dot_terminated(data: &[u8]) -> Vec<u8> {
 pub(crate) enum PlusReply {
     Data(Vec<u8>),
     /// `-` reply: the error code, if it gave one, and its message lines.
-    /// Code 3 is "moved", and its first line ends with where to.
-    /// `latin1`: read as Latin-1 (`decode_reply`), for a "moved" item's
-    /// selector.
-    Error { code: Option<u32>, lines: Vec<String>, latin1: bool },
+    /// Code 3 is "moved", and its first line ends with where to.  Lines
+    /// as sent, octets: a "moved" item's selector goes back as it came,
+    /// and each line is decoded on its own when shown (`decode_text`).
+    Error { code: Option<u32>, lines: Vec<Vec<u8>> },
 }
 
 /// Whether a Gopher+ reply arrived whole: a counted one has all its bytes,
@@ -354,18 +354,22 @@ pub(crate) fn split_plus_reply(body: &[u8]) -> PlusReply {
     if ok {
         return PlusReply::Data(data);
     }
-    let (text, latin1) = decode_reply(&data);
-    let mut lines: Vec<String> = text.lines().map(|l| l.trim_end_matches('\r').to_string()).collect();
+    let mut lines: Vec<Vec<u8>> = byte_lines(&data).map(<[u8]>::to_vec).collect();
     // The first token of the first line is the code; the administrator's
     // address may follow it in angle brackets.
-    let code = lines.first().and_then(|l| l.split_whitespace().next()).and_then(|t| t.parse().ok());
+    let code = lines
+        .first()
+        .and_then(|l| l.split(u8::is_ascii_whitespace).find(|t| !t.is_empty()))
+        .and_then(|t| std::str::from_utf8(t).ok()?.parse().ok());
     if code.is_some()
         && let Some(first) = lines.first_mut()
     {
-        *first = first.split_once(char::is_whitespace).map(|(_, r)| r.trim().to_string()).unwrap_or_default();
+        let line = first.trim_ascii_start();
+        let rest = line.iter().position(u8::is_ascii_whitespace).map_or(&[][..], |at| line[at..].trim_ascii());
+        *first = rest.to_vec();
     }
-    lines.retain(|l| !l.is_empty());
-    PlusReply::Error { code, lines, latin1 }
+    lines.retain(|l| !l.trim_ascii().is_empty());
+    PlusReply::Error { code, lines }
 }
 
 /// Text a gopher server sent: UTF-8 if it is, else ISO Latin-1, which
@@ -379,35 +383,17 @@ pub(super) fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Text's bytes as `decode_text` found them, `latin1` saying which way it
-/// read them: a selector inside decoded text goes back to its server as
-/// the octets it came as.
-fn text_octets(text: &str, latin1: bool) -> Vec<u8> {
-    if latin1 {
-        text.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')).collect()
-    } else {
-        text.as_bytes().to_vec()
-    }
-}
-
-/// A reply decoded (`decode_text`), and whether that was as Latin-1.
-fn decode_reply(bytes: &[u8]) -> (String, bool) {
-    let latin1 = std::str::from_utf8(bytes).is_err();
-    (decode_text(bytes).into_owned(), latin1)
+/// `data`'s lines as `str::lines` splits them, each without its LF or CR LF.
+fn byte_lines(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let any = !data.is_empty();
+    let data = data.strip_suffix(b"\n").unwrap_or(data);
+    data.split(|&b| b == b'\n').filter(move |_| any).map(|l| l.strip_suffix(b"\r").unwrap_or(l))
 }
 
 /// A text reply's lines, each decoded on its own (`decode_text`): one
 /// Latin-1 line does not turn a UTF-8 file's other lines to Latin-1.
 pub(super) fn text_lines(data: &[u8]) -> Vec<String> {
-    let mut lines: Vec<String> = data
-        .split(|&b| b == b'\n')
-        .map(|l| decode_text(l.strip_suffix(b"\r").unwrap_or(l)).into_owned())
-        .collect();
-    // As `str::lines`: a last line end does not start another line.
-    if data.ends_with(b"\n") || data.is_empty() {
-        lines.pop();
-    }
-    lines
+    byte_lines(data).map(|l| decode_text(l).into_owned()).collect()
 }
 
 /// One line of a gopher menu.
@@ -487,8 +473,9 @@ pub(crate) struct ItemAttrs {
 pub(crate) struct AttrBlock {
     /// With its `+`: `+INFO`, `+ADMIN`...
     pub name: String,
-    /// What follows the name on its line (`+INFO`'s item, a reference).
-    pub head: String,
+    /// What follows the name on its line (`+INFO`'s item, a reference):
+    /// octets, as a menu line's are.
+    pub head: Vec<u8>,
     /// The block's lines, their leading space taken off.
     pub lines: Vec<String>,
 }
@@ -499,14 +486,16 @@ impl ItemAttrs {
     }
 }
 
-/// Attribute information, split per item: each `+INFO` starts one.
-pub(crate) fn parse_attributes(text: &str) -> Vec<ItemAttrs> {
+/// Attribute information, split per item: each `+INFO` starts one.  Taken
+/// apart as bytes, each line decoded on its own (`decode_text`): one
+/// Latin-1 line does not garble the others, and a selector stays octets.
+pub(crate) fn parse_attributes(data: &[u8]) -> Vec<ItemAttrs> {
     let mut items: Vec<ItemAttrs> = Vec::new();
-    for line in text.lines().map(|l| l.trim_end_matches('\r')) {
-        if let Some(rest) = line.strip_prefix('+') {
-            let (name, head) = match rest.split_once(':') {
-                Some((n, h)) => (format!("+{n}"), h.trim().to_string()),
-                None => (format!("+{}", rest.trim()), String::new()),
+    for line in byte_lines(data) {
+        if let Some(rest) = line.strip_prefix(b"+") {
+            let (name, head) = match rest.iter().position(|&b| b == b':') {
+                Some(at) => (format!("+{}", decode_text(&rest[..at])), rest[at + 1..].trim_ascii().to_vec()),
+                None => (format!("+{}", decode_text(rest.trim_ascii())), Vec::new()),
             };
             if name == "+INFO" || items.is_empty() {
                 items.push(ItemAttrs::default());
@@ -514,10 +503,10 @@ pub(crate) fn parse_attributes(text: &str) -> Vec<ItemAttrs> {
             if let Some(item) = items.last_mut() {
                 item.blocks.push(AttrBlock { name, head, lines: Vec::new() });
             }
-        } else if let Some(text) = line.strip_prefix(' ')
+        } else if let Some(text) = line.strip_prefix(b" ")
             && let Some(block) = items.last_mut().and_then(|i| i.blocks.last_mut())
         {
-            block.lines.push(text.to_string());
+            block.lines.push(decode_text(text).into_owned());
         }
     }
     items
@@ -537,10 +526,7 @@ fn admin_date(line: &str) -> Option<String> {
 /// when it changed, its abstract, its views (each a link that fetches that
 /// view) and whether it has a form.  Blocks this does not know are shown as
 /// sent.
-///
-/// `latin1`: the reply was read as Latin-1 (`decode_reply`), so an item's
-/// selector is turned back into the octets it was.
-fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_url: String, latin1: bool) -> WebPage {
+fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_url: String) -> WebPage {
     let mut lines: Vec<String> = Vec::new();
     let mut links: Vec<String> = Vec::new();
     let mut link = |lines: &mut Vec<String>, label: &str, url: String| {
@@ -553,7 +539,7 @@ fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_ur
     let text = |lines: &mut Vec<String>, s: &str| lines.extend(wrap_line(s, width));
     for item in items {
         // The item itself, from its `+INFO`.
-        let info = item.block("+INFO").and_then(|b| parse_menu_line(text_octets(&b.head, latin1), &at.host, at.port));
+        let info = item.block("+INFO").and_then(|b| parse_menu_line(&b.head, &at.host, at.port));
         // A menu's `i` line is its text, not an item: shown as text, without
         // the administrator a server repeats for every one of them (quux.org
         // does, measured).
@@ -583,7 +569,7 @@ fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_ur
                     }
                 }
                 "+ABSTRACT" => {
-                    if let Some(r) = parse_menu_line(text_octets(&block.head, latin1), &at.host, at.port).filter(|r| !r.selector.is_empty()) {
+                    if let Some(r) = parse_menu_line(&block.head, &at.host, at.port).filter(|r| !r.selector.is_empty()) {
                         link(&mut lines, "  Abstract (in full)", r.url(r.ty));
                     }
                     for l in &block.lines {
@@ -608,7 +594,7 @@ fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_ur
                     link(&mut lines, &format!("  Form: {questions} question(s)"), base.with_plus("?").to_url());
                 }
                 other => {
-                    text(&mut lines, &format!("  {other}: {}", block.head));
+                    text(&mut lines, &format!("  {other}: {}", decode_text(&block.head)));
                     for l in &block.lines {
                         text(&mut lines, &format!("    {}", l.trim()));
                     }
@@ -812,8 +798,8 @@ fn ask_secs(file: Option<&[u8]>) -> u64 {
     if file.is_some() { FILE_TIMEOUT_SECS } else { GOPHER_TIMEOUT_SECS }
 }
 
-fn plus_error_text(lines: &[String]) -> String {
-    let text = lines.join(" ");
+fn plus_error_text(lines: &[Vec<u8>]) -> String {
+    let text = lines.iter().map(|l| decode_text(l)).collect::<Vec<_>>().join(" ");
     if text.trim().is_empty() { "The server refused the request.".into() } else { format!("Server: {text}") }
 }
 
@@ -936,16 +922,16 @@ fn render_gopher_reply(g: &GopherUrl, data: &[u8], width: usize, final_url: Stri
 
 /// A page for a Gopher+ error: its message, and for "moved" (code 3), a
 /// link to where the item went.
-fn render_plus_error(code: Option<u32>, lines: &[String], latin1: bool, g: &GopherUrl, width: usize) -> Result<WebPage, String> {
+fn render_plus_error(code: Option<u32>, lines: &[Vec<u8>], g: &GopherUrl, width: usize) -> Result<WebPage, String> {
     let moved = (code == Some(3)).then(|| {
-        lines.iter().find_map(|l| l.find('\t').and_then(|_| parse_menu_line(text_octets(l.trim(), latin1), &g.host, g.port)))
+        lines.iter().filter(|l| l.contains(&b'\t')).find_map(|l| parse_menu_line(l.trim_ascii(), &g.host, g.port))
     }).flatten();
     let Some(to) = moved else {
         return Err(plus_error_text(lines));
     };
     let mut out: Vec<String> = Vec::new();
-    for l in lines.iter().filter(|l| !l.contains('\t')) {
-        out.extend(wrap_line(l, width));
+    for l in lines.iter().filter(|l| !l.contains(&b'\t')) {
+        out.extend(wrap_line(&decode_text(l), width));
     }
     out.push(String::new());
     out.push(format!("Moved to: {}\x021\x03", to.display));
@@ -999,18 +985,17 @@ pub(crate) fn fetch(url: &str, width: usize) -> Result<WebPage, String> {
     }
     let data = match split_plus_reply(&body) {
         PlusReply::Data(d) => d,
-        PlusReply::Error { code, lines, latin1 } => return render_plus_error(code, &lines, latin1, &g, width),
+        PlusReply::Error { code, lines } => return render_plus_error(code, &lines, &g, width),
     };
     if !attributes {
         return render_gopher_reply(&g, &data, width, final_url);
     }
-    let (text, latin1) = decode_reply(&data);
-    let items = parse_attributes(&text);
+    let items = parse_attributes(&data);
     if g.plus.as_deref() == Some("?") {
         let item = items.first().ok_or("This item's form was not sent.")?;
         return render_ask(item, &g, width, final_url);
     }
-    Ok(render_attributes(&items, &g, width, final_url, latin1))
+    Ok(render_attributes(&items, &g, width, final_url))
 }
 
 /// Fetch a file item whole, for the transfer folder, refusing one larger
@@ -1132,7 +1117,7 @@ mod tests {
         assert_eq!(split_plus_reply(b"just text\r\n"), PlusReply::Data(b"just text\r\n".to_vec()));
         assert_eq!(
             split_plus_reply(b"--2\r\n1 Admin <a@b>\r\nNot here\r\n"),
-            PlusReply::Error { code: Some(1), lines: vec!["Admin <a@b>".into(), "Not here".into()], latin1: false }
+            PlusReply::Error { code: Some(1), lines: vec![b"Admin <a@b>".to_vec(), b"Not here".to_vec()] }
         );
         // A length past what a 32-bit `usize` holds is a reply not yet
         // whole, not an overflow.
@@ -1277,6 +1262,8 @@ mod tests {
         assert_eq!(text_lines(b"a\nb\n"), vec!["a", "b"]);
         assert_eq!(text_lines(b"a\nb"), vec!["a", "b"]);
         assert!(text_lines(b"").is_empty());
+        assert_eq!(text_lines(b"\n"), vec![""]);
+        assert_eq!(text_lines(b"a\r\n\r\nb"), vec!["a", "", "b"]);
     }
 
     /// RFC 1436: either side may close after the `.` line.  A server that
@@ -1365,11 +1352,26 @@ mod tests {
         assert_eq!(server.join().unwrap(), b"/caf\xe9\t!\r\n");
         assert_eq!(page.links[0], "gopher://h.example/0/caf%E9%09%09+");
         assert!(page.lines[0].starts_with("Caf\u{e9}"), "{:?}", page.lines);
-        let moved = b"--1\r\n3 <a@b>\r\n0Caf\xe9\t/new/caf\xe9\tn.example\t70\r\n.\r\n";
+        // Each line is read on its own: a Latin-1 one leaves a UTF-8 one
+        // (here an abstract) as written.
+        let attrs = b"+-1\r\n+INFO: 0Caf\xe9\t/caf\xe9\th.example\t70\t+\r\n+ABSTRACT:\r\n Na\xc3\xafve caf\xc3\xa9\r\n Caf\xe9 au lait\r\n.\r\n";
+        let (port, server) = serve(attrs.to_vec());
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/caf%E9%09%09!"), 72).unwrap();
+        server.join().unwrap();
+        assert!(page.lines[0].starts_with("Caf\u{e9}"), "{:?}", page.lines);
+        assert!(page.lines.iter().any(|l| l.trim() == "Na\u{ef}ve caf\u{e9}"), "{:?}", page.lines);
+        assert!(page.lines.iter().any(|l| l.trim() == "Caf\u{e9} au lait"), "{:?}", page.lines);
+        let moved = b"--1\r\n3 <a@b>\r\nCaf\xe9 moved\r\nNa\xc3\xafve\r\n0Caf\xe9\t/new/caf\xe9\tn.example\t70\r\n.\r\n";
         let (port, server) = serve(moved.to_vec());
         let page = fetch(&format!("gopher://127.0.0.1:{port}/0/old%09%09+"), 72).unwrap();
         server.join().unwrap();
         assert_eq!(page.links[0], "gopher://n.example/0/new/caf%E9");
+        assert_eq!(page.lines[..3], ["<a@b>", "Caf\u{e9} moved", "Na\u{ef}ve"]);
+        // An error that is not "moved": its lines, each read on its own.
+        let (port, server) = serve(b"--1\r\n1 <a@b>\r\nNo caf\xe9\r\nhere caf\xc3\xa9\r\n.\r\n".to_vec());
+        let Err(err) = fetch(&format!("gopher://127.0.0.1:{port}/0/x%09%09+"), 72) else { panic!("an error made a page") };
+        server.join().unwrap();
+        assert_eq!(err, "Server: <a@b> No caf\u{e9} here caf\u{e9}");
     }
 
     /// `!` gives a page of who keeps the item, when it changed, its

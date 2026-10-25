@@ -1930,6 +1930,29 @@ fn unwrap_ddg_redirect(url: &str) -> String {
     url.to_string()
 }
 
+/// What was typed at the URL prompt, from the octets the terminal sent.
+///
+/// A gopher URL's path keeps them as octets, any that are not ASCII
+/// written `%XX`, so a selector typed in Latin-1 or UTF-8 reaches its
+/// server as typed (RFC 4266).  Anything else is text: UTF-8 if it is,
+/// else Latin-1 (`decode_text`), which the web fetch then sends as UTF-8.
+pub(crate) fn typed_url(octets: &[u8]) -> String {
+    let start = octets.len() - octets.trim_ascii_start().len();
+    if !octets[start..].starts_with(b"gopher://") {
+        return gopher::decode_text(octets).into_owned();
+    }
+    let path_at = octets[start + 9..].iter().position(|&b| b == b'/').map_or(octets.len(), |at| start + 9 + at);
+    let mut url = gopher::decode_text(&octets[..path_at]).into_owned();
+    for &b in &octets[path_at..] {
+        if b.is_ascii() {
+            url.push(char::from(b));
+        } else {
+            url.push_str(&format!("%{b:02X}"));
+        }
+    }
+    url
+}
+
 /// Ensure a URL has a scheme, defaulting to https://.
 /// If the input has no dots and no scheme, treat it as a search query.
 pub(crate) fn normalize_url(input: &str) -> String {
@@ -4228,6 +4251,22 @@ mod tests {
         assert!(is_gopher_search("gopher://example.com/7/search?search"));
         assert!(!is_gopher_search("gopher://example.com/1/dir"));
         assert!(!is_gopher_search("https://example.com?search"));
+    }
+
+    /// A URL typed in Latin-1 or UTF-8: a gopher path keeps the octets as
+    /// `%XX`; anything else is read as text, so the web gets UTF-8 either way.
+    #[test]
+    fn test_a_typed_url_keeps_what_was_typed() {
+        assert_eq!(typed_url(b"gopher://h.example/0/caf\xe9"), "gopher://h.example/0/caf%E9");
+        assert_eq!(typed_url(b"gopher://h.example/0/caf\xc3\xa9"), "gopher://h.example/0/caf%C3%A9");
+        assert_eq!(typed_url(b" gopher://h.example:7070/1/a b"), " gopher://h.example:7070/1/a b");
+        assert_eq!(typed_url(b"gopher://h.example"), "gopher://h.example");
+        assert_eq!(typed_url(b"example.org/caf\xe9"), "example.org/caf\u{e9}");
+        assert_eq!(typed_url(b"example.org/caf\xc3\xa9"), "example.org/caf\u{e9}");
+        // A search: DuckDuckGo is asked in UTF-8 whichever was typed.
+        for typed in [&b"caf\xe9"[..], &b"caf\xc3\xa9"[..]] {
+            assert_eq!(normalize_url(&typed_url(typed)), "https://lite.duckduckgo.com/lite/?q=caf%C3%A9");
+        }
     }
 
     #[test]

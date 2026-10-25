@@ -901,7 +901,9 @@ Hello              Hello              Hello
                     but TAB, CR and LF. The gateway keeps a selector as the exact bytes the
                     menu gave: a Latin-1 <code>&eacute;</code> is written <code>%E9</code> in
                     the URL and sent as that one byte, so a server whose selectors are not
-                    UTF-8 is asked for what it listed. Bookmarks, Back and Reload keep the
+                    UTF-8 is asked for what it listed. A gopher address typed at
+                    <code>G</code>, and the words typed at a search prompt, go the same way:
+                    as the bytes the terminal sent. Bookmarks, Back and Reload keep the
                     whole URL, search and Gopher+ string included.
                 </p>
             </div>
