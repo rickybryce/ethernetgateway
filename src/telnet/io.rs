@@ -1009,7 +1009,7 @@ impl TelnetSession {
 
             if is_backspace_key(byte, self.erase_char) {
                 if !buf.is_empty() {
-                    buf.pop();
+                    pop_typed_char(buf, self.terminal_type != TerminalType::Petscii);
                     self.echo_backspace().await?;
                     self.flush().await?;
                 }
@@ -1021,7 +1021,8 @@ impl TelnetSession {
                 // Erase the current line both in the buffer and on the
                 // user's terminal.
                 while !buf.is_empty() {
-                    buf.pop();
+                    // A column per character, not per byte.
+                    pop_typed_char(buf, self.terminal_type != TerminalType::Petscii);
                     self.echo_backspace().await?;
                 }
                 self.flush().await?;

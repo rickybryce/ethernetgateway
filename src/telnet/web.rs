@@ -371,7 +371,9 @@ impl TelnetSession {
         // Drain any stray bytes (e.g. NUL from telnet CR+NUL) before following
         self.drain_input().await;
 
-        if let Ok(num) = input.parse::<usize>() {
+        // Any whitespace round a number, a Latin-1 terminal's no-break space
+        // (A0) too: the line reader trims only ASCII's.
+        if let Ok(num) = input.trim().parse::<usize>() {
             self.web_follow_link(num).await?;
         } else {
             self.show_error("Enter a number.").await?;
@@ -953,9 +955,15 @@ impl TelnetSession {
         self.flush().await?;
 
         let query = match self.get_line_input().await? {
-            Some(s) if !s.is_empty() => s.to_ascii_lowercase(),
-            _ => return Ok(()),
+            // The letters typed (`web_typed_text`), matched without case,
+            // accented ones too: `É` finds `é`.
+            Some(s) => self.web_typed_text(&s).trim().to_lowercase(),
+            None => return Ok(()),
         };
+        // Nothing but spaces would be found on every line.
+        if query.is_empty() {
+            return Ok(());
+        }
 
         // Search from line after current scroll position, then wrap around
         let total = self.web_lines.len();
@@ -963,7 +971,7 @@ impl TelnetSession {
         for offset in 0..total {
             let idx = (start_line + offset) % total;
             // The text as shown: a C64 user who sees "Bahia" searches for it.
-            if self.web_text(&self.web_lines[idx]).to_ascii_lowercase().contains(&query) {
+            if self.web_text(&self.web_lines[idx]).to_lowercase().contains(&query) {
                 // Scroll to put the match at the top of the page
                 self.web_scroll = idx;
                 return Ok(());

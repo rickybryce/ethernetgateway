@@ -604,6 +604,14 @@ impl TelnetSession {
         let Some(v) = self.other_prompt_value(label, current_display, is_secret).await? else {
             return Ok(false);
         };
+        // An address is taken as the browser's URL prompt takes it: the bytes
+        // typed (`typed_url`), so a homepage set here goes to its server as
+        // the same address typed at G does.
+        let v = if key == "browser_homepage" {
+            crate::webbrowser::typed_url(&crate::telnet::colors::to_latin1_bytes(&v))
+        } else {
+            v
+        };
         let k = key.to_string();
         tokio::task::spawn_blocking(move || {
             config::update_config_value(&k, &v);

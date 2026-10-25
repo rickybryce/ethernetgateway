@@ -376,11 +376,19 @@ pub(crate) fn split_plus_reply(body: &[u8]) -> PlusReply {
 /// both specs name for 8-bit text (RFC 1436 and Gopher+, the display
 /// string).  Every Latin-1 byte is a character, so a Latin-1 `é` is drawn
 /// as itself, not as `?`.
+///
+/// Without 0x02 and 0x03: those frame the browser's own link numbers
+/// (`\x02N\x03`), and the page's own copies would show a number that is
+/// not a link -- dropped as the HTML renderer drops them.
 pub(crate) fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
-    match std::str::from_utf8(bytes) {
+    let text = match std::str::from_utf8(bytes) {
         Ok(s) => std::borrow::Cow::Borrowed(s),
         Err(_) => std::borrow::Cow::Owned(bytes.iter().map(|&b| b as char).collect()),
+    };
+    if text.contains(['\u{2}', '\u{3}']) {
+        return std::borrow::Cow::Owned(text.chars().filter(|&c| c != '\u{2}' && c != '\u{3}').collect());
     }
+    text
 }
 
 /// `data`'s lines as `str::lines` splits them, each without its LF or CR LF.
@@ -493,14 +501,23 @@ impl ItemAttrs {
 /// Attribute information, split per item: each `+INFO` starts one.  Taken
 /// apart as bytes, each line decoded on its own (`decode_text`): one
 /// Latin-1 line does not garble the others, and a selector stays octets.
+///
+/// An `+ASK` block with any Latin-1 line is read as Latin-1 throughout: its
+/// answers go back in Latin-1 (`ASK_CHARSET_FIELD`), and a choice must go
+/// back as the very octets the server listed -- which a line read as UTF-8
+/// would not.
 pub(crate) fn parse_attributes(data: &[u8]) -> Vec<ItemAttrs> {
     let mut items: Vec<ItemAttrs> = Vec::new();
+    // The `+ASK` lines as sent, in case the block turns out to be Latin-1.
+    let mut ask_raw: Vec<&[u8]> = Vec::new();
     for line in byte_lines(data) {
         if let Some(rest) = line.strip_prefix(b"+") {
             let (name, head) = match rest.iter().position(|&b| b == b':') {
                 Some(at) => (format!("+{}", decode_text(&rest[..at])), rest[at + 1..].trim_ascii().to_vec()),
                 None => (format!("+{}", decode_text(rest.trim_ascii())), Vec::new()),
             };
+            latin1_ask(&mut items, &ask_raw);
+            ask_raw.clear();
             if name == "+INFO" || items.is_empty() {
                 items.push(ItemAttrs::default());
             }
@@ -512,9 +529,22 @@ pub(crate) fn parse_attributes(data: &[u8]) -> Vec<ItemAttrs> {
         {
             block.latin1 |= std::str::from_utf8(text).is_err();
             block.lines.push(decode_text(text).into_owned());
+            ask_raw.push(text);
         }
     }
+    latin1_ask(&mut items, &ask_raw);
     items
+}
+
+/// The block just read, if it is a Latin-1 `+ASK`: its lines read again
+/// from `raw`, all as Latin-1 (see `parse_attributes`).
+fn latin1_ask(items: &mut [ItemAttrs], raw: &[&[u8]]) {
+    if let Some(block) = items.last_mut().and_then(|i| i.blocks.last_mut())
+        && block.latin1
+        && block.name == "+ASK"
+    {
+        block.lines = raw.iter().map(|l| l.iter().map(|&b| char::from(b)).collect()).collect();
+    }
 }
 
 /// `<YYYYMMDDhhmmss>` from an `+ADMIN` date line, written readably.
@@ -1275,6 +1305,33 @@ mod tests {
         // The item's own line -- its name, its selector's octets -- is not
         // the form's text: questions in ASCII are answered in UTF-8.
         assert_eq!(answered(b"0Caf\xe9\t/caf\xe9\th\t70\t?", b"Ask: Name:", "na\u{ef}ve"), (1, "na\u{ef}ve".as_bytes().to_vec()));
+    }
+
+    /// A form with a Latin-1 line is read as Latin-1 throughout, so a choice
+    /// goes back as the very octets the server listed -- even one that was
+    /// valid UTF-8.
+    #[test]
+    fn test_a_choice_goes_back_as_the_server_listed_it() {
+        let attrs = b"+-2\r\n+INFO: 0Form\t/f\th\t70\t?\r\n+ASK:\r\n Note: Caf\xe9\r\n Choose: Drink:\tCaf\xc3\xa9\tTea\r\n".to_vec();
+        let (port, server) = serve(attrs);
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/f%09%09%3F"), 72).unwrap();
+        server.join().unwrap();
+        let mut form = page.forms[0].clone();
+        let (port, server) = serve(b"+-1\r\nOK\r\n.\r\n".to_vec());
+        form.action = format!("gopher://127.0.0.1:{port}/0/f%09%09+");
+        submit_ask(&form, None, 72).unwrap();
+        let sent = server.join().unwrap();
+        assert!(sent.ends_with(b"\r\nCaf\xc3\xa9\r\n"), "{:?}", String::from_utf8_lossy(&sent));
+    }
+
+    /// A server's text cannot draw a link number: the bytes that frame one
+    /// are dropped from it, in a menu and in a text file.
+    #[test]
+    fn test_server_text_cannot_fake_a_link_number() {
+        let page = render_gopher_directory("iSee link \x02 99\x03 here\t\th\t70\r\n0Real\t/r\th\t70\r\n", "h", 70, 72, "gopher://h/1".into()).unwrap();
+        assert_eq!(page.lines[0], "See link  99 here");
+        assert_eq!(page.lines.concat().matches('\u{2}').count(), page.links.len());
+        assert_eq!(text_lines(b"a\x02 7\x03b\r\n"), vec!["a 7b"]);
     }
 
     /// A `?` item opens on its form: its attributes asked for with `!`.

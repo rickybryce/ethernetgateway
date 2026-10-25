@@ -81,7 +81,7 @@ pub(crate) fn is_normal_disconnect(e: &std::io::Error) -> bool {
 /// than staying `pub(in crate::telnet)` like the rest of the CP/M helpers.
 pub(crate) use cpm_emu::{place_bundled_terminals, DriveA};
 mod session;
-pub(crate) use session::is_backspace_key;
+pub(crate) use session::{is_backspace_key, pop_typed_char};
 // The main menu's optional items, as a named pair -- see its own comment for
 // why it is not two `bool` parameters.  Named here rather than only in
 // `session` because `main_help_lines` below takes it too: the help page and

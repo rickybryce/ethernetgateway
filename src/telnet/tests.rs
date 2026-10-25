@@ -16656,6 +16656,128 @@ async fn test_a_typed_gopher_url_is_sent_as_typed() {
     }
 }
 
+/// Backspace takes off the character typed, not one byte of it: a UTF-8
+/// terminal's `é` is two bytes and one column.
+#[test]
+fn test_backspace_takes_off_a_whole_typed_letter() {
+    let after = |typed: &[u8], utf8: bool| {
+        let mut buf = typed.to_vec();
+        pop_typed_char(&mut buf, utf8);
+        buf
+    };
+    assert_eq!(after(b"caf\xc3\xa9", true), b"caf");
+    assert_eq!(after(b"1\xe2\x82\xac", true), b"1");
+    assert_eq!(after(b"x\xf0\x9f\x98\x80", true), b"x");
+    // Latin-1: one byte each.
+    assert_eq!(after(b"caf\xe9", true), b"caf");
+    assert_eq!(after(b"a\xa9", true), b"a");
+    // A C64's bytes are PETSCII: one each, whatever they look like.
+    assert_eq!(after(b"caf\xc3\xa9", false), b"caf\xc3");
+    assert_eq!(after(b"", true), b"");
+}
+
+/// Typed with a correction, an answer is still the letters on the screen.
+#[tokio::test]
+async fn test_a_corrected_answer_is_the_letters_shown() {
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_url = Some("http://h.example/".into());
+    let mut form = crate::webbrowser::WebForm {
+        action: "http://h.example/post".into(),
+        method: "post".into(),
+        label: "F".into(),
+        fields: vec![crate::webbrowser::FormField::Text {
+            name: "n".into(),
+            value: String::new(),
+            label: "Name".into(),
+            input_type: "text".into(),
+        }],
+    };
+    // caf, é, Backspace, e: "cafe" on the screen.
+    let screen = script_peer(peer, vec![("Name: ", b"caf\xc3\xa9\x7fe\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_edit_field(&mut form, 0)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    assert!(matches!(&form.fields[0], crate::webbrowser::FormField::Text { value, .. } if value == "cafe"), "{shown}");
+
+    // Erasing the line (Ctrl-U, 0x15) rubs out a column per letter: four
+    // for "café", not five, which would eat into the prompt.
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_url = Some("http://h.example/".into());
+    let screen = script_peer(peer, vec![("Name: ", b"caf\xc3\xa9\x15x\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_edit_field(&mut form, 0)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    assert!(matches!(&form.fields[0], crate::webbrowser::FormField::Text { value, .. } if value == "x"), "{shown}");
+    assert_eq!(shown.matches("\x08 \x08").count(), 4, "{shown:?}");
+}
+
+/// Find (S) finds an accented word as typed, in either case; a link number
+/// with a Latin-1 no-break space after it is still that number.
+#[tokio::test]
+async fn test_find_and_link_numbers_take_what_was_typed() {
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    // Typed in capitals, the page in lower case -- and the other way round.
+    sess.web_lines = vec!["nothing".into(), "un caf\u{e9} noir".into()];
+    let screen = script_peer(peer, vec![("Find", b"CAF\xc3\x89\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_search_in_page()).await.expect("hung").unwrap();
+    assert_eq!(sess.web_scroll, 1);
+    drop(sess);
+    screen.await.unwrap();
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_lines = vec!["nothing".into(), "UN CAF\u{c9} NOIR".into()];
+    let screen = script_peer(peer, vec![("Find", b"caf\xc3\xa9\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_search_in_page()).await.expect("hung").unwrap();
+    assert_eq!(sess.web_scroll, 1);
+    drop(sess);
+    screen.await.unwrap();
+    // Only a no-break space: nothing to find, not every line.
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_lines = vec!["a".into(), "b".into()];
+    let screen = script_peer(peer, vec![("Find", b"\xa0\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_search_in_page()).await.expect("hung").unwrap();
+    assert_eq!(sess.web_scroll, 0);
+    drop(sess);
+    let shown = screen.await.unwrap();
+    assert!(!shown.contains("Not found"), "{shown}");
+
+    let (port, server) = serve_gopher_seq(vec![b"hello\r\n.\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_links = vec![format!("gopher://127.0.0.1:{port}/0/t")];
+    let screen = script_peer(peer, vec![("Link #", b"1\xa0\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_prompt_link()).await.expect("hung").unwrap();
+    assert_eq!(sess.web_lines, vec!["hello"]);
+    drop(sess);
+    screen.await.unwrap();
+    tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+}
+
+/// A homepage typed on the settings screen is kept as the URL prompt keeps
+/// an address: a gopher one's bytes as typed (`%C3%A9`), not `Ã©`.
+#[tokio::test]
+async fn test_a_homepage_typed_in_settings_keeps_its_bytes() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let before = crate::config::get_config().browser_homepage.clone();
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("New value", b"gopher://h.example/0/caf\xc3\xa9\r"), ("Press any key", b"x")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.other_set_field("Browser homepage", "browser_homepage", &before, false))
+        .await
+        .expect("hung")
+        .unwrap();
+    drop(sess);
+    screen.await.unwrap();
+    let saved = crate::config::get_config().browser_homepage.clone();
+    crate::config::update_config_value("browser_homepage", &before);
+    assert_eq!(saved, "gopher://h.example/0/caf%C3%A9");
+}
+
 /// An address typed straight at the browser's command line, without G,
 /// is taken the same way: the bytes typed, `à`'s last byte (A0) kept.
 #[tokio::test]

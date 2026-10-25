@@ -53,6 +53,29 @@ pub(crate) fn is_backspace_key(byte: u8, erase_char: u8) -> bool {
     byte == erase_char || byte == 0x08 || byte == 0x7F || byte == 0x14
 }
 
+/// Take the last character typed off a line's bytes, for one Backspace.
+///
+/// A UTF-8 terminal sends `é` as two bytes but shows one column, so its
+/// whole sequence goes: popping one byte left a stray lead byte the screen
+/// no longer showed, and the line was then not UTF-8.  `utf8` false (a
+/// C64, whose bytes are PETSCII) pops one.  A Latin-1 terminal's bytes are
+/// one each, and the one pair it could type that reads as UTF-8 (`Ã©`) is
+/// read as `é` everywhere else too (`decode_text`), so it goes as one.
+pub(crate) fn pop_typed_char(buf: &mut Vec<u8>, utf8: bool) {
+    let Some(last) = buf.pop() else { return };
+    if !utf8 || !(0x80..=0xBF).contains(&last) {
+        return;
+    }
+    for n in 1..=3 {
+        let Some(at) = buf.len().checked_sub(n) else { return };
+        let seq = [&buf[at..], &[last][..]].concat();
+        if std::str::from_utf8(&seq).is_ok_and(|s| s.chars().count() == 1) {
+            buf.truncate(at);
+            return;
+        }
+    }
+}
+
 /// The erase character to use when the detection prompt was answered with
 /// something that cannot be a backspace key.
 ///
