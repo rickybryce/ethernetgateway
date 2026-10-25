@@ -5530,7 +5530,7 @@ extras are used.  A menu labels each item by what it does:
         <tr><td><code>[BIN]</code> <code>[IMG]</code> <code>[SND]</code> <code>[MOV]</code> <code>[DOC]</code></td><td><code>5</code> <code>9</code> <code>g</code> <code>I</code> <code>s</code> <code>:</code> <code>;</code> <code>&lt;</code> <code>d</code> <code>p</code> <code>P</code></td><td>A file: asks, then saves it in the transfer folder under its own name (made safe, and numbered rather than overwriting one already there), to send on with XMODEM, ZMODEM or Kermit.  At most 8 MB, what those can send.</td></tr>
         <tr><td><code>[TEL]</code></td><td><code>8</code></td><td>A telnet session: shows the host and the name to log in as, asks, then connects you through the Telnet Gateway.  ESC twice leaves it and returns to the menu.</td></tr>
         <tr><td><code>[3270]</code></td><td><code>T</code></td><td>The same for a tn3270 session.  Such a host expects an IBM 3270 terminal, which the gateway is not, so it may not work over plain telnet; the screen says so.</td></tr>
-        <tr><td><code>[ALT]</code></td><td><code>+</code></td><td>The item above it on another server: followed the same way.</td></tr>
+        <tr><td><code>[ALT]</code></td><td><code>+</code></td><td>The item above it on another server: followed the same way.  When a server cannot be reached, following it or its copy tries the others in menu order, at most three.</td></tr>
         <tr><td><code>[FORM]</code></td><td>Gopher+ <code>?</code></td><td>Opens on the form's questions (below).</td></tr>
         <tr><td><code>[???]</code></td><td>other</td><td>A type no standard defines: shown, not followed.</td></tr>
     </tbody>
@@ -5549,6 +5549,17 @@ the closing <code>.</code> line, and takes one dot off any line that starts
 with two.  Many servers today skip their part and send files as they are,
 so from those a line that really begins with two or more dots &mdash; a
 row of <code>...</code> in a poem, say &mdash; is shown with one dot fewer.
+A server that keeps the connection open after the closing line (a dot,
+then CR LF) is given two seconds, not the full wait.
+</p>
+
+<p>
+<strong>Accented letters.</strong>  The standard's character set is ISO
+Latin-1; most servers now send UTF-8.  The browser reads each line as UTF-8
+if it is, and as Latin-1 if not, so an <code>&eacute;</code> is shown either
+way (folded to plain letters on a C64 or 7-bit terminal, as all internet
+text is).  An item's selector &mdash; what the browser sends back to fetch
+it &mdash; is kept exactly as the server wrote it, byte for byte.
 </p>
 
 <p>
@@ -5579,6 +5590,15 @@ as the standard writes them: <code>gopher://host/7/find%09c64</code> searches fo
 <code>c64</code>, and <code>gopher://host/0/doc%09%09+text/plain</code> asks for the
 plain-text form of a Gopher+ item.  Bookmarks, Back and Reload keep both.
 </p>
+
+<aside class="tip">
+<span class="label">Full Gopher reference</span>
+A standalone reference page <code>gopherreference.html</code> explains the
+protocol on the wire &mdash; menus, every item type, the dot line, searches
+and phone books, Gopher+ requests, replies, attributes and forms &mdash; with
+example exchanges and a table of what each specification asks and where the
+gateway stands.  See it on the project website alongside this manual.
+</aside>
 
 <h2>13.6 Limits</h2>
 

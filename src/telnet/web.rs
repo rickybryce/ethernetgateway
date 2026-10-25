@@ -375,6 +375,7 @@ impl TelnetSession {
     pub(in crate::telnet) async fn web_follow_link(&mut self, num: usize) -> Result<(), std::io::Error> {
         if num >= 1 && num <= self.web_links.len() {
             let link = self.web_links[num - 1].clone();
+            self.web_next_alternates = self.web_alternates.get(num - 1).cloned().unwrap_or_default();
             let resolved = match &self.web_url {
                 Some(base) => crate::webbrowser::resolve_url(base, &link),
                 None => crate::webbrowser::normalize_url(&link),
@@ -387,6 +388,8 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn web_fetch_page(&mut self, url: &str, push_history: bool) -> Result<bool, std::io::Error> {
+        // Only the fetch of the link they came with tries them.
+        let mut alternates = std::mem::take(&mut self.web_next_alternates);
         // Gopher search URLs need a query term before fetching
         let url = if crate::webbrowser::is_gopher_search(url) {
             // A CSO phone book (type 2) is asked for a name, not words.
@@ -398,6 +401,10 @@ impl TelnetSession {
                 Some(s) if !s.is_empty() => s,
                 _ => return Ok(false),
             };
+            // The bytes typed: the line holds one per char (`get_line_input`).
+            let query = crate::telnet::colors::to_latin1_bytes(&query);
+            // An alternate server is asked the same words.
+            alternates = alternates.iter().map(|a| crate::webbrowser::build_gopher_search_url(a, &query)).collect();
             crate::webbrowser::build_gopher_search_url(url, &query)
         } else {
             url.to_string()
@@ -410,7 +417,7 @@ impl TelnetSession {
             match crate::webbrowser::gopher_action(&url) {
                 crate::webbrowser::GopherAction::Page => {}
                 crate::webbrowser::GopherAction::Download { name } => {
-                    self.web_gopher_download(&url, &name).await?;
+                    self.web_gopher_download(&url, &name, &alternates).await?;
                     return Ok(false);
                 }
                 crate::webbrowser::GopherAction::Telnet { host, port, login, tn3270 } => {
@@ -428,7 +435,7 @@ impl TelnetSession {
 
         let result = tokio::task::spawn_blocking(move || {
             if is_gopher {
-                crate::webbrowser::fetch_gopher(&url_owned, width)
+                crate::webbrowser::fetch_gopher_any(&url_owned, &alternates, width)
             } else {
                 crate::webbrowser::fetch_and_render(&url_owned, width)
             }
@@ -451,7 +458,10 @@ impl TelnetSession {
     /// saved in the transfer folder under the selector's last name, made
     /// safe and numbered rather than overwriting, for XMODEM, ZMODEM or
     /// Kermit to send on.  At most what those can send (`MAX_FILE_SIZE`).
-    pub(in crate::telnet) async fn web_gopher_download(&mut self, url: &str, name: &str) -> Result<(), std::io::Error> {
+    ///
+    /// `alternates`: other servers that hold the file (`+` items), tried in
+    /// turn if this one is down.
+    pub(in crate::telnet) async fn web_gopher_download(&mut self, url: &str, name: &str, alternates: &[String]) -> Result<(), std::io::Error> {
         let name = Self::safe_upload_name(name).unwrap_or_else(|| "gopher.bin".to_string());
         // The menu chose the host: shown as internet text is.
         let host = crate::webbrowser::GopherUrl::parse(url).map(|g| g.host).unwrap_or_default();
@@ -481,10 +491,11 @@ impl TelnetSession {
         self.flush().await?;
         let url_owned = url.to_string();
         let max = crate::tnio::MAX_FILE_SIZE as usize;
-        let fetched = tokio::task::spawn_blocking(move || crate::webbrowser::fetch_gopher_file(&url_owned, max))
+        let alternates = alternates.to_vec();
+        let fetched = tokio::task::spawn_blocking(move || crate::webbrowser::fetch_gopher_file_any(&url_owned, &alternates, max))
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let data = match fetched {
+        let (data, served) = match fetched {
             Ok(d) => d,
             Err(e) => {
                 let safe = self.web_text(&crate::aichat::sanitize_for_terminal(&e));
@@ -492,6 +503,13 @@ impl TelnetSession {
                 return Ok(());
             }
         };
+        // Its server was down and a `+` copy sent it: say which.
+        if served != url {
+            let copy = crate::webbrowser::GopherUrl::parse(&served).map(|g| g.host).unwrap_or_default();
+            let copy = crate::aichat::display_for_terminal(&copy);
+            let copy = crate::webbrowser::truncate_to_width(&self.web_text(&copy), 22);
+            self.send_line(&format!("  From a copy: {}", copy)).await?;
+        }
         self.ensure_transfer_dir().await?;
         if !self.verify_transfer_path() {
             self.show_error("The transfer folder is not available.").await?;
@@ -1367,6 +1385,7 @@ impl TelnetSession {
                 self.web_title = page.title;
                 self.web_lines = page.lines;
                 self.web_links = page.links;
+                self.web_alternates = page.alternates;
                 self.web_forms = page.forms;
                 self.web_scroll = 0;
                 Ok(true)
@@ -1398,6 +1417,7 @@ impl TelnetSession {
         self.web_lines.clear();
         self.web_scroll = 0;
         self.web_links.clear();
+        self.web_alternates.clear();
         self.web_forms.clear();
         self.web_history.clear();
         self.web_url = None;

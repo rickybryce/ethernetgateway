@@ -39,8 +39,10 @@ pub(crate) struct GopherUrl {
     pub host: String,
     pub port: u16,
     pub ty: char,
-    pub selector: String,
-    pub search: Option<String>,
+    /// Octets, not text (RFC 1436): any byte but TAB, CR and LF.
+    pub selector: Vec<u8>,
+    /// A search's words: octets too, as RFC 4266 has the whole path.
+    pub search: Option<Vec<u8>>,
     pub plus: Option<String>,
 }
 
@@ -49,10 +51,11 @@ impl GopherUrl {
         let (host, port, ty, path) = parse_gopher_url(url)?;
         // A selector holds no TAB (RFC 1436), so the first two are the
         // search's and the Gopher+ string's.
-        let mut parts = path.splitn(3, '\t');
-        let selector = parts.next().unwrap_or_default().to_string();
-        let search = parts.next().map(str::to_string);
-        let plus = parts.next().map(str::to_string).filter(|p| !p.is_empty());
+        let mut parts = path.splitn(3, |&b| b == b'\t');
+        let selector = parts.next().unwrap_or_default().to_vec();
+        let search = parts.next().map(<[u8]>::to_vec);
+        // A Gopher+ string is a view's name and language: ASCII.
+        let plus = parts.next().map(|p| String::from_utf8_lossy(p).into_owned()).filter(|p| !p.is_empty());
         let search = search.filter(|s| !s.is_empty() || plus.is_none());
         Ok(GopherUrl { host, port, ty, selector, search, plus })
     }
@@ -60,12 +63,12 @@ impl GopherUrl {
     pub(crate) fn to_url(&self) -> String {
         let mut path = self.selector.clone();
         if self.search.is_some() || self.plus.is_some() {
-            path.push('\t');
-            path.push_str(self.search.as_deref().unwrap_or(""));
+            path.push(b'\t');
+            path.extend_from_slice(self.search.as_deref().unwrap_or_default());
         }
         if let Some(plus) = &self.plus {
-            path.push('\t');
-            path.push_str(plus);
+            path.push(b'\t');
+            path.extend_from_slice(plus.as_bytes());
         }
         build_gopher_url(&self.host, self.port, self.ty, &path)
     }
@@ -81,20 +84,27 @@ impl GopherUrl {
     /// Gopher+ spec has it.  CR, LF and NUL are dropped: a selector is one
     /// line, and a typed search must not add a second (old daemons also
     /// stop at a NUL).
-    pub(crate) fn request(&self, plus: Option<&str>) -> String {
+    pub(crate) fn request(&self, plus: Option<&str>) -> Vec<u8> {
         let mut line = self.selector.clone();
         if let Some(search) = &self.search {
-            line.push('\t');
-            line.push_str(search);
+            line.push(b'\t');
+            line.extend_from_slice(search);
         }
         if let Some(plus) = plus {
             if self.search.is_none() && self.ty == '7' {
-                line.push('\t');
+                line.push(b'\t');
             }
-            line.push('\t');
-            line.push_str(plus);
+            line.push(b'\t');
+            line.extend_from_slice(plus.as_bytes());
         }
-        line.chars().filter(|&c| c != '\r' && c != '\n' && c != '\0').collect()
+        line.retain(|&b| b != b'\r' && b != b'\n' && b != 0);
+        line
+    }
+
+    /// The selector as text, for a title or a file name: UTF-8 if it is,
+    /// else Latin-1 (`decode_text`).
+    pub(crate) fn selector_text(&self) -> String {
+        decode_text(&self.selector).into_owned()
     }
 
     /// The item type the reply is drawn as: a Gopher+ view names its own
@@ -142,7 +152,7 @@ pub(crate) fn gopher_action(url: &str) -> GopherAction {
         '8' | 'T' => GopherAction::Telnet {
             host: g.host.clone(),
             port: g.port,
-            login: g.selector.clone(),
+            login: g.selector_text(),
             tn3270: g.ty == 'T',
         },
         // Attributes and forms are pages whatever the item is.
@@ -150,7 +160,8 @@ pub(crate) fn gopher_action(url: &str) -> GopherAction {
             GopherAction::Page
         }
         _ if is_file_type(g.shown_as()) => {
-            let name = g.selector.rsplit(['/', '\\', ':']).find(|s| !s.is_empty()).unwrap_or("gopher.bin");
+            let selector = g.selector_text();
+            let name = selector.rsplit(['/', '\\', ':']).find(|s| !s.is_empty()).unwrap_or("gopher.bin");
             GopherAction::Download { name: name.to_string() }
         }
         _ => GopherAction::Page,
@@ -165,16 +176,16 @@ pub(crate) fn connect(host: &str, port: u16) -> Result<std::net::TcpStream, Stri
     let sock_addr = {
         use std::net::ToSocketAddrs;
         addr.to_socket_addrs()
-            .map_err(|e| format!("DNS error: {}", e))?
+            .map_err(|e| format!("{DOWN_DNS}: {e}"))?
             .next()
-            .ok_or_else(|| "Could not resolve host".to_string())?
+            .ok_or_else(|| DOWN_NO_HOST.to_string())?
     };
     check_dial(sock_addr.ip(), host)?;
     let stream = std::net::TcpStream::connect_timeout(
         &sock_addr,
         std::time::Duration::from_secs(GOPHER_TIMEOUT_SECS),
     )
-    .map_err(|e| format!("Connection failed: {}", e))?;
+    .map_err(|e| format!("{DOWN_CONNECT}: {e}"))?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(GOPHER_TIMEOUT_SECS)))
         .ok();
@@ -183,6 +194,17 @@ pub(crate) fn connect(host: &str, port: u16) -> Result<std::net::TcpStream, Stri
         .ok();
     Ok(stream)
 }
+
+/// Whether `connect` failed because the server could not be reached -- its
+/// name did not resolve, or nothing answered -- so a `+` alternate is worth
+/// trying.  Its own error messages, so a test pins the two together.
+pub(crate) fn server_seems_down(err: &str) -> bool {
+    [DOWN_DNS, DOWN_NO_HOST, DOWN_CONNECT].iter().any(|p| err.starts_with(p))
+}
+
+const DOWN_DNS: &str = "DNS error";
+const DOWN_NO_HOST: &str = "Could not resolve host";
+const DOWN_CONNECT: &str = "Connection failed";
 
 /// The SSRF rule for an address a gopher server named: an internal one is
 /// refused unless internal fetches are allowed.  Shared with the telnet
@@ -218,6 +240,7 @@ fn exchange(
     max: usize,
     secs: u64,
     done: &dyn Fn(&[u8]) -> bool,
+    ended: &dyn Fn(&[u8]) -> bool,
 ) -> Result<Vec<u8>, String> {
     use std::io::Write;
     let mut stream = connect(host, port)?;
@@ -247,7 +270,7 @@ fn exchange(
         }
     }
     stream.flush().map_err(|e| format!("Flush error: {}", e))?;
-    read_gopher_body_until(&mut stream, max, deadline, done)
+    read_gopher_body_until(&mut stream, max, deadline, done, ended)
 }
 
 /// A Gopher+ reply's header: success, and the transfer -- a byte count,
@@ -303,7 +326,9 @@ pub(crate) enum PlusReply {
     Data(Vec<u8>),
     /// `-` reply: the error code, if it gave one, and its message lines.
     /// Code 3 is "moved", and its first line ends with where to.
-    Error { code: Option<u32>, lines: Vec<String> },
+    /// `latin1`: read as Latin-1 (`decode_reply`), for a "moved" item's
+    /// selector.
+    Error { code: Option<u32>, lines: Vec<String>, latin1: bool },
 }
 
 /// Whether a Gopher+ reply arrived whole: a counted one has all its bytes,
@@ -329,7 +354,7 @@ pub(crate) fn split_plus_reply(body: &[u8]) -> PlusReply {
     if ok {
         return PlusReply::Data(data);
     }
-    let text = String::from_utf8_lossy(&data);
+    let (text, latin1) = decode_reply(&data);
     let mut lines: Vec<String> = text.lines().map(|l| l.trim_end_matches('\r').to_string()).collect();
     // The first token of the first line is the code; the administrator's
     // address may follow it in angle brackets.
@@ -340,7 +365,49 @@ pub(crate) fn split_plus_reply(body: &[u8]) -> PlusReply {
         *first = first.split_once(char::is_whitespace).map(|(_, r)| r.trim().to_string()).unwrap_or_default();
     }
     lines.retain(|l| !l.is_empty());
-    PlusReply::Error { code, lines }
+    PlusReply::Error { code, lines, latin1 }
+}
+
+/// Text a gopher server sent: UTF-8 if it is, else ISO Latin-1, which
+/// both specs name for 8-bit text (RFC 1436 and Gopher+, the display
+/// string).  Every Latin-1 byte is a character, so a Latin-1 `é` is drawn
+/// as itself, not as `?`.
+pub(super) fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => std::borrow::Cow::Borrowed(s),
+        Err(_) => std::borrow::Cow::Owned(bytes.iter().map(|&b| b as char).collect()),
+    }
+}
+
+/// Text's bytes as `decode_text` found them, `latin1` saying which way it
+/// read them: a selector inside decoded text goes back to its server as
+/// the octets it came as.
+fn text_octets(text: &str, latin1: bool) -> Vec<u8> {
+    if latin1 {
+        text.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')).collect()
+    } else {
+        text.as_bytes().to_vec()
+    }
+}
+
+/// A reply decoded (`decode_text`), and whether that was as Latin-1.
+fn decode_reply(bytes: &[u8]) -> (String, bool) {
+    let latin1 = std::str::from_utf8(bytes).is_err();
+    (decode_text(bytes).into_owned(), latin1)
+}
+
+/// A text reply's lines, each decoded on its own (`decode_text`): one
+/// Latin-1 line does not turn a UTF-8 file's other lines to Latin-1.
+pub(super) fn text_lines(data: &[u8]) -> Vec<String> {
+    let mut lines: Vec<String> = data
+        .split(|&b| b == b'\n')
+        .map(|l| decode_text(l.strip_suffix(b"\r").unwrap_or(l)).into_owned())
+        .collect();
+    // As `str::lines`: a last line end does not start another line.
+    if data.ends_with(b"\n") || data.is_empty() {
+        lines.pop();
+    }
+    lines
 }
 
 /// One line of a gopher menu.
@@ -348,7 +415,8 @@ pub(crate) fn split_plus_reply(body: &[u8]) -> PlusReply {
 pub(crate) struct MenuItem {
     pub ty: char,
     pub display: String,
-    pub selector: String,
+    /// Octets, as the server wrote them (RFC 1436).
+    pub selector: Vec<u8>,
     pub host: String,
     pub port: u16,
     /// Gopher+'s fifth field: `+` for a Gopher+ item, `?` for one with a
@@ -359,22 +427,27 @@ pub(crate) struct MenuItem {
 /// A menu line taken apart.  An empty or missing host is this server, as a
 /// missing port is its port -- except for a telnet or CSO item, whose
 /// missing (or `0`) port is its own protocol's.
-pub(crate) fn parse_menu_line(line: &str, current_host: &str, current_port: u16) -> Option<MenuItem> {
-    let ty = line.chars().next()?;
-    let fields: Vec<&str> = line[ty.len_utf8()..].split('\t').collect();
-    let host = fields.get(2).map(|h| h.trim()).filter(|h| !h.is_empty()).unwrap_or(current_host);
-    let port = fields.get(3).and_then(|p| p.trim().parse::<u16>().ok()).filter(|&p| p > 0);
+///
+/// Taken apart as bytes: the selector is octets, and the display string
+/// text in UTF-8 or Latin-1 (`decode_text`).
+pub(crate) fn parse_menu_line(line: impl AsRef<[u8]>, current_host: &str, current_port: u16) -> Option<MenuItem> {
+    let line = line.as_ref();
+    let ty = char::from(*line.first()?);
+    let fields: Vec<&[u8]> = line[1..].split(|&b| b == b'\t').collect();
+    let field = |i: usize| String::from_utf8_lossy(fields.get(i).copied().unwrap_or_default()).trim().to_string();
+    let host = Some(field(2)).filter(|h| !h.is_empty()).unwrap_or_else(|| current_host.to_string());
+    let port = field(3).parse::<u16>().ok().filter(|&p| p > 0);
     let port = match ty {
         '8' | 'T' => port.unwrap_or(TELNET_PORT),
         '2' => port.unwrap_or(CSO_PORT),
         _ => port.unwrap_or(current_port),
     };
-    let plus = fields.get(4).and_then(|f| f.trim().chars().next()).filter(|c| matches!(c, '+' | '?'));
+    let plus = field(4).chars().next().filter(|c| matches!(c, '+' | '?'));
     Some(MenuItem {
         ty,
-        display: fields.first().unwrap_or(&"").to_string(),
-        selector: fields.get(1).unwrap_or(&"").to_string(),
-        host: host.to_string(),
+        display: decode_text(fields.first().copied().unwrap_or_default()).into_owned(),
+        selector: fields.get(1).copied().unwrap_or_default().to_vec(),
+        host,
         port,
         plus,
     })
@@ -387,9 +460,9 @@ impl MenuItem {
     /// marker as the URL's Gopher+ string.
     pub(crate) fn url(&self, ty: char) -> String {
         if ty == 'h'
-            && let Some(web) = self.selector.strip_prefix("URL:")
+            && let Some(web) = self.selector.strip_prefix(b"URL:")
         {
-            return web.to_string();
+            return String::from_utf8_lossy(web).into_owned();
         }
         let g = GopherUrl {
             host: self.host.clone(),
@@ -464,7 +537,10 @@ fn admin_date(line: &str) -> Option<String> {
 /// when it changed, its abstract, its views (each a link that fetches that
 /// view) and whether it has a form.  Blocks this does not know are shown as
 /// sent.
-fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_url: String) -> WebPage {
+///
+/// `latin1`: the reply was read as Latin-1 (`decode_reply`), so an item's
+/// selector is turned back into the octets it was.
+fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_url: String, latin1: bool) -> WebPage {
     let mut lines: Vec<String> = Vec::new();
     let mut links: Vec<String> = Vec::new();
     let mut link = |lines: &mut Vec<String>, label: &str, url: String| {
@@ -477,7 +553,7 @@ fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_ur
     let text = |lines: &mut Vec<String>, s: &str| lines.extend(wrap_line(s, width));
     for item in items {
         // The item itself, from its `+INFO`.
-        let info = item.block("+INFO").and_then(|b| parse_menu_line(&b.head, &at.host, at.port));
+        let info = item.block("+INFO").and_then(|b| parse_menu_line(text_octets(&b.head, latin1), &at.host, at.port));
         // A menu's `i` line is its text, not an item: shown as text, without
         // the administrator a server repeats for every one of them (quux.org
         // does, measured).
@@ -507,7 +583,7 @@ fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_ur
                     }
                 }
                 "+ABSTRACT" => {
-                    if let Some(r) = parse_menu_line(&block.head, &at.host, at.port).filter(|r| !r.selector.is_empty()) {
+                    if let Some(r) = parse_menu_line(text_octets(&block.head, latin1), &at.host, at.port).filter(|r| !r.selector.is_empty()) {
                         link(&mut lines, "  Abstract (in full)", r.url(r.ty));
                     }
                     for l in &block.lines {
@@ -546,13 +622,14 @@ fn render_attributes(items: &[ItemAttrs], at: &GopherUrl, width: usize, final_ur
     WebPage {
         title: Some(format!(
             "Gopher+ info: {}",
-            at.selector.rsplit('/').find(|s| !s.is_empty()).unwrap_or(&at.host)
+            at.selector_text().rsplit('/').find(|s| !s.is_empty()).unwrap_or(&at.host)
         )),
         lines,
         links,
         url: final_url,
         forms: Vec::new(),
         fallback_sites: Vec::new(),
+        alternates: Vec::new(),
     }
 }
 
@@ -669,6 +746,7 @@ fn render_ask(item: &ItemAttrs, at: &GopherUrl, width: usize, final_url: String)
             fields,
         }],
         fallback_sites: Vec::new(),
+        alternates: Vec::new(),
     })
 }
 
@@ -712,9 +790,10 @@ pub(crate) fn submit_ask(form: &WebForm, file: Option<&[u8]>, width: usize) -> R
     let data = ask_answers(form, file);
     // `selector<TAB>+<TAB>1`, then the data block -- counted, so nothing in
     // the answers can end it early.
-    let mut request = format!("{}\t1\r\n+{}\r\n", g.request(Some("+")), data.len()).into_bytes();
+    let mut request = g.request(Some("+"));
+    request.extend_from_slice(format!("\t1\r\n+{}\r\n", data.len()).as_bytes());
     request.extend_from_slice(&data);
-    let body = exchange(&g.host, g.port, &request, GOPHER_MAX_BODY, ask_secs(file), &plus_reply_complete)?;
+    let body = exchange(&g.host, g.port, &request, GOPHER_MAX_BODY, ask_secs(file), &plus_reply_complete, &|_| false)?;
     let data = match split_plus_reply(&body) {
         PlusReply::Data(d) => d,
         PlusReply::Error { lines, .. } => return Err(plus_error_text(&lines)),
@@ -743,13 +822,16 @@ fn plus_error_text(lines: &[String]) -> String {
 /// `code:text`, or `-code:entry:field: value` for an entry's fields;
 /// 5xx is an error.
 fn cso_query(g: &GopherUrl, width: usize) -> Result<WebPage, String> {
-    let words: String = g.search.clone().unwrap_or_default().chars().filter(|&c| c != '\r' && c != '\n' && c != '\0').collect();
-    if words.trim().is_empty() {
+    let mut words = g.search.clone().unwrap_or_default();
+    words.retain(|&b| b != b'\r' && b != b'\n' && b != 0);
+    let words = words.trim_ascii();
+    if words.is_empty() {
         return Err("Type a name to look up.".into());
     }
-    let request = format!("query {}\r\nquit\r\n", words.trim());
-    let body = exchange(&g.host, g.port, request.as_bytes(), GOPHER_MAX_BODY, GOPHER_TIMEOUT_SECS, &|_| false)?;
-    let text = String::from_utf8_lossy(&body);
+    let request = [b"query ", words, b"\r\nquit\r\n"].concat();
+    let body = exchange(&g.host, g.port, &request, GOPHER_MAX_BODY, GOPHER_TIMEOUT_SECS, &|_| false, &|_| false)?;
+    // Line by line (`text_lines`): one Latin-1 entry does not garble the rest.
+    let text = text_lines(&body).join("\n");
     let mut lines: Vec<String> = Vec::new();
     let mut entry: Option<String> = None;
     for raw in text.lines().map(|l| l.trim_end_matches('\r')) {
@@ -787,6 +869,7 @@ fn cso_query(g: &GopherUrl, width: usize) -> Result<WebPage, String> {
         url: g.to_url(),
         forms: Vec::new(),
         fallback_sites: Vec::new(),
+        alternates: Vec::new(),
     })
 }
 
@@ -808,34 +891,34 @@ fn render_gopher_reply(g: &GopherUrl, data: &[u8], width: usize, final_url: Stri
         '0' | '4' | '6' | 'h' => strip_gopher_terminator(data),
         _ => data,
     };
-    let text = String::from_utf8_lossy(data);
     Ok(match ty {
         // Text, and the two text encodings of a file (BinHex, uuencode),
         // which RFC 1436 sends as text.
         '0' | '4' | '6' => {
-            let lines: Vec<String> = text
-                .lines()
-                .flat_map(|line| wrap_line(unstuff_line(line.trim_end_matches('\r')), width))
+            let lines: Vec<String> = text_lines(data)
+                .iter()
+                .flat_map(|line| wrap_line(unstuff_line(line), width))
                 .take(MAX_RENDERED_LINES)
                 .collect();
             WebPage {
-                title: Some(g.selector.rsplit('/').next().unwrap_or("Text").to_string()),
+                title: Some(g.selector_text().rsplit('/').next().unwrap_or("Text").to_string()),
                 lines,
                 links: Vec::new(),
                 url: final_url,
                 forms: Vec::new(),
                 fallback_sites: Vec::new(),
+                alternates: Vec::new(),
             }
         }
-        '1' | '7' => render_gopher_directory(&text, &g.host, g.port, width, final_url)?,
+        '1' | '7' => render_gopher_directory(data, &g.host, g.port, width, final_url)?,
         // An HTML document the gopher server holds itself (an `h` item
         // whose selector is not a `URL:` link): drawn as a web page is.
         // Its refresh, if any, is not followed -- that is an HTTP fetch.
         'h' => render_html_body(data, final_url, width)?.0,
         _ => {
-            let lines: Vec<String> = text
-                .lines()
-                .flat_map(|line| wrap_line(line.trim_end_matches('\r'), width))
+            let lines: Vec<String> = text_lines(data)
+                .iter()
+                .flat_map(|line| wrap_line(line, width))
                 .take(MAX_RENDERED_LINES)
                 .collect();
             WebPage {
@@ -845,6 +928,7 @@ fn render_gopher_reply(g: &GopherUrl, data: &[u8], width: usize, final_url: Stri
                 url: final_url,
                 forms: Vec::new(),
                 fallback_sites: Vec::new(),
+                alternates: Vec::new(),
             }
         }
     })
@@ -852,9 +936,9 @@ fn render_gopher_reply(g: &GopherUrl, data: &[u8], width: usize, final_url: Stri
 
 /// A page for a Gopher+ error: its message, and for "moved" (code 3), a
 /// link to where the item went.
-fn render_plus_error(code: Option<u32>, lines: &[String], g: &GopherUrl, width: usize) -> Result<WebPage, String> {
+fn render_plus_error(code: Option<u32>, lines: &[String], latin1: bool, g: &GopherUrl, width: usize) -> Result<WebPage, String> {
     let moved = (code == Some(3)).then(|| {
-        lines.iter().find_map(|l| l.find('\t').and_then(|_| parse_menu_line(l.trim(), &g.host, g.port)))
+        lines.iter().find_map(|l| l.find('\t').and_then(|_| parse_menu_line(text_octets(l.trim(), latin1), &g.host, g.port)))
     }).flatten();
     let Some(to) = moved else {
         return Err(plus_error_text(lines));
@@ -872,6 +956,7 @@ fn render_plus_error(code: Option<u32>, lines: &[String], g: &GopherUrl, width: 
         url: g.to_url(),
         forms: Vec::new(),
         fallback_sites: Vec::new(),
+        alternates: Vec::new(),
     })
 }
 
@@ -889,13 +974,20 @@ pub(crate) fn fetch(url: &str, width: usize) -> Result<WebPage, String> {
         Some("?") => Some("!"),
         p => p,
     };
+    // A plain text file or menu ends with the `.` line (RFC 1436), and a
+    // server that keeps the connection open after it is not waited out --
+    // nor one that ignored a Gopher+ request and sent the plain reply.
+    let lined = matches!(g.shown_as(), '0' | '1' | '4' | '6' | '7' | 'h');
     let body = exchange(
         &g.host,
         g.port,
-        format!("{}\r\n", g.request(plus)).as_bytes(),
+        &[g.request(plus), b"\r\n".to_vec()].concat(),
         GOPHER_MAX_BODY,
         GOPHER_TIMEOUT_SECS,
         &|b| plus.is_some() && plus_reply_complete(b),
+        // A plain reply's first line is text, even one that looks like a
+        // Gopher+ header.
+        &|b| lined && (plus.is_none() || plus_header(b).is_none()) && ends_with_gopher_lastline(b),
     )?;
     let Some(plus) = plus else {
         return render_gopher_reply(&g, &body, width, final_url);
@@ -907,17 +999,18 @@ pub(crate) fn fetch(url: &str, width: usize) -> Result<WebPage, String> {
     }
     let data = match split_plus_reply(&body) {
         PlusReply::Data(d) => d,
-        PlusReply::Error { code, lines } => return render_plus_error(code, &lines, &g, width),
+        PlusReply::Error { code, lines, latin1 } => return render_plus_error(code, &lines, latin1, &g, width),
     };
     if !attributes {
         return render_gopher_reply(&g, &data, width, final_url);
     }
-    let items = parse_attributes(&String::from_utf8_lossy(&data));
+    let (text, latin1) = decode_reply(&data);
+    let items = parse_attributes(&text);
     if g.plus.as_deref() == Some("?") {
         let item = items.first().ok_or("This item's form was not sent.")?;
         return render_ask(item, &g, width, final_url);
     }
-    Ok(render_attributes(&items, &g, width, final_url))
+    Ok(render_attributes(&items, &g, width, final_url, latin1))
 }
 
 /// Fetch a file item whole, for the transfer folder, refusing one larger
@@ -929,10 +1022,12 @@ pub(crate) fn fetch_file(url: &str, max: usize) -> Result<Vec<u8>, String> {
     let body = exchange(
         &g.host,
         g.port,
-        format!("{}\r\n", g.request(plus)).as_bytes(),
+        &[g.request(plus), b"\r\n".to_vec()].concat(),
         max + 64,
         FILE_TIMEOUT_SECS,
         &|b| plus.is_some() && plus_reply_complete(b),
+        // A binary file is read until the server closes (RFC 1436).
+        &|_| false,
     )?;
     // Stopped at the cap, or said it is bigger: too large, not cut short.
     let said = if plus.is_some() { plus_header(&body).map_or(0, |(_, n, _)| n) } else { 0 };
@@ -990,16 +1085,16 @@ mod tests {
     #[test]
     fn test_a_gopher_url_round_trips_its_search_and_plus_string() {
         let g = GopherUrl::parse("gopher://h.example:7070/7/find%09c64%09+").unwrap();
-        assert_eq!((g.ty, g.selector.as_str(), g.search.as_deref(), g.plus.as_deref()), ('7', "/find", Some("c64"), Some("+")));
+        assert_eq!((g.ty, g.selector.as_slice(), g.search.as_deref(), g.plus.as_deref()), ('7', &b"/find"[..], Some(&b"c64"[..]), Some("+")));
         assert_eq!(g.to_url(), "gopher://h.example:7070/7/find%09c64%09+");
         // RFC 4266 2.3: a Gopher+ string after an empty search.
         let g = GopherUrl::parse("gopher://h.example/0/a%09%09+text/plain%20En_US").unwrap();
-        assert_eq!((g.search.as_deref(), g.plus.as_deref()), (None, Some("+text/plain En_US")));
+        assert_eq!((g.search.as_deref(), g.plus.as_deref()), (None::<&[u8]>, Some("+text/plain En_US")));
         assert_eq!(g.to_url(), "gopher://h.example/0/a%09%09+text/plain%20En_US");
         // A plain search, and a plain item, are as they always were.
         assert_eq!(GopherUrl::parse("gopher://h/7/v%09hi").unwrap().to_url(), "gopher://h/7/v%09hi");
         assert_eq!(GopherUrl::parse("gopher://h/1/x").unwrap().to_url(), "gopher://h/1/x");
-        assert_eq!(build_gopher_search_url("gopher://h/7/v%09%09+?search", "c 64"), "gopher://h/7/v%09c%2064%09+");
+        assert_eq!(build_gopher_search_url("gopher://h/7/v%09%09+?search", b"c 64"), "gopher://h/7/v%09c%2064%09+");
     }
 
     /// On the wire the Gopher+ spec, not RFC 4266's example: one TAB before
@@ -1007,16 +1102,21 @@ mod tests {
     #[test]
     fn test_a_gopher_plus_request_line() {
         let item = GopherUrl::parse("gopher://h/0/a%09%09+").unwrap();
-        assert_eq!(item.request(None), "/a");
-        assert_eq!(item.request(Some("+")), "/a\t+");
-        assert_eq!(item.request(Some("!")), "/a\t!");
+        assert_eq!(item.request(None), b"/a");
+        assert_eq!(item.request(Some("+")), b"/a\t+");
+        assert_eq!(item.request(Some("!")), b"/a\t!");
         let search = GopherUrl::parse("gopher://h/7/s%09%09+").unwrap();
-        assert_eq!(search.request(Some("!")), "/s\t\t!");
+        assert_eq!(search.request(Some("!")), b"/s\t\t!");
         let asked = GopherUrl::parse("gopher://h/7/s%09c64%09+").unwrap();
-        assert_eq!(asked.request(Some("+")), "/s\tc64\t+");
+        assert_eq!(asked.request(Some("+")), b"/s\tc64\t+");
         // Nothing typed can add a line.
         let typed = GopherUrl::parse("gopher://h/7/s%09a%0D%0Ab").unwrap();
-        assert_eq!(typed.request(None), "/s\tab");
+        assert_eq!(typed.request(None), b"/s\tab");
+        // A search's words are octets too (RFC 4266): a Latin-1 word goes
+        // as itself, and the URL keeps it.
+        let latin = GopherUrl::parse("gopher://h/7/find%09caf%E9").unwrap();
+        assert_eq!(latin.request(None), b"/find\tcaf\xe9");
+        assert_eq!(latin.to_url(), "gopher://h/7/find%09caf%E9");
     }
 
     #[test]
@@ -1032,7 +1132,7 @@ mod tests {
         assert_eq!(split_plus_reply(b"just text\r\n"), PlusReply::Data(b"just text\r\n".to_vec()));
         assert_eq!(
             split_plus_reply(b"--2\r\n1 Admin <a@b>\r\nNot here\r\n"),
-            PlusReply::Error { code: Some(1), lines: vec!["Admin <a@b>".into(), "Not here".into()] }
+            PlusReply::Error { code: Some(1), lines: vec!["Admin <a@b>".into(), "Not here".into()], latin1: false }
         );
         // A length past what a 32-bit `usize` holds is a reply not yet
         // whole, not an overflow.
@@ -1149,6 +1249,129 @@ mod tests {
         assert_eq!(page.forms[0].action, format!("gopher://127.0.0.1:{port}/0/shirt%09%09+"));
     }
 
+    /// A selector is octets (RFC 1436, RFC 4266): a Latin-1 one goes from
+    /// the menu, through the URL as `%E9`, to the server byte for byte.  A
+    /// display string is UTF-8 if it is, else Latin-1 (both specs name it).
+    #[test]
+    fn test_a_latin1_selector_reaches_its_server_as_it_was() {
+        let menu = b"0Caf\xe9 menu\t/caf\xe9.txt\th.example\t70\r\n0Na\xc3\xafve\t/na\xc3\xafve\th.example\t70\r\n.\r\n";
+        let (port, server) = serve(menu.to_vec());
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/1/"), 72).unwrap();
+        server.join().unwrap();
+        assert!(page.lines[0].starts_with("Caf\u{e9} menu"), "{:?}", page.lines);
+        assert!(page.lines[1].starts_with("Na\u{ef}ve"), "{:?}", page.lines);
+        assert_eq!(page.links[0], "gopher://h.example/0/caf%E9.txt");
+        assert_eq!(page.links[1], "gopher://h.example/0/na%C3%AFve");
+        let g = GopherUrl::parse(&page.links[0]).unwrap();
+        assert_eq!(g.selector, b"/caf\xe9.txt");
+        assert_eq!(g.request(None), b"/caf\xe9.txt");
+        // And on the wire.
+        let (port, server) = serve(b"x\r\n".to_vec());
+        fetch(&format!("gopher://127.0.0.1:{port}/0/caf%E9.txt"), 72).unwrap();
+        assert_eq!(server.join().unwrap(), b"/caf\xe9.txt\r\n");
+        // A text file: each line read as UTF-8 or Latin-1 on its own.
+        let (port, server) = serve(b"caf\xe9\r\ncaf\xc3\xa9\r\n".to_vec());
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/t"), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.lines, vec!["caf\u{e9}", "caf\u{e9}"]);
+        assert_eq!(text_lines(b"a\nb\n"), vec!["a", "b"]);
+        assert_eq!(text_lines(b"a\nb"), vec!["a", "b"]);
+        assert!(text_lines(b"").is_empty());
+    }
+
+    /// RFC 1436: either side may close after the `.` line.  A server that
+    /// keeps the connection open is not waited out to an error; one that
+    /// sends a `.` line mid-file (it does not double dots) still delivers
+    /// the rest.
+    #[test]
+    fn test_the_lastline_ends_a_reply_the_server_holds_open() {
+        // `parts` sent with a pause between, then held open `hold`.
+        fn hold_open(parts: Vec<&'static [u8]>, hold: std::time::Duration) -> (u16, std::thread::JoinHandle<()>) {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let h = std::thread::spawn(move || {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 256];
+                let _ = s.read(&mut buf);
+                for part in parts {
+                    s.write_all(part).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+                std::thread::sleep(hold);
+            });
+            (port, h)
+        }
+        let (port, server) = hold_open(vec![b"Hello\r\n.\r\n"], std::time::Duration::from_secs(4));
+        let started = std::time::Instant::now();
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/t"), 72).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_millis(3500), "{:?}", started.elapsed());
+        assert_eq!(page.lines, vec!["Hello"]);
+        let (port, server2) = hold_open(vec![b"0Doc\t/d\th\t70\r\n.\r\n"], std::time::Duration::from_secs(4));
+        let started = std::time::Instant::now();
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/1/"), 72).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_millis(3500), "{:?}", started.elapsed());
+        assert_eq!(page.links, vec!["gopher://h/0/d".to_string()]);
+        // More after a `.` line: it is not the end after all.
+        let (port, server3) = hold_open(vec![b"a\r\n.\r\n", b"b\r\n"], std::time::Duration::ZERO);
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/t"), 72).unwrap();
+        assert_eq!(page.lines, vec!["a", ".", "b"]);
+        // A plain text file whose first line looks like a Gopher+ header is
+        // still text, and still ends at its `.` line.
+        let (port, server5) = hold_open(vec![b"-1\r\nminus one\r\n.\r\n"], std::time::Duration::from_secs(4));
+        let started = std::time::Instant::now();
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/t"), 72).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_millis(3500), "{:?}", started.elapsed());
+        assert_eq!(page.lines, vec!["-1", "minus one"]);
+        server5.join().unwrap();
+        // A binary file is read to the close, `.` line or not.
+        let (port, server4) = hold_open(vec![b"x\r\n.\r\n"], std::time::Duration::ZERO);
+        let data = fetch_file(&format!("gopher://127.0.0.1:{port}/9/f"), 100).unwrap();
+        assert_eq!(data, b"x\r\n.\r\n");
+        for s in [server, server2, server3, server4] {
+            s.join().unwrap();
+        }
+    }
+
+    /// A Gopher+ reply is framed by its own header, not by RFC 1436's `.`
+    /// line: one whose data has a `.` line and then a pause is read on, not
+    /// ended by the grace.
+    #[test]
+    fn test_the_lastline_grace_leaves_a_gopher_plus_reply_alone() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 256];
+            let _ = s.read(&mut buf);
+            // Read to the close (`-2`), with a pause longer than the grace.
+            s.write_all(b"+-2\r\nfirst\r\n.\r\n").unwrap();
+            std::thread::sleep(GOPHER_LASTLINE_GRACE + std::time::Duration::from_millis(800));
+            s.write_all(b"second\r\n").unwrap();
+        });
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/t%09%09+"), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.lines.last().map(String::as_str), Some("second"), "{:?}", page.lines);
+    }
+
+    /// The same octets inside Gopher+ text: an attribute page's `+INFO`, and
+    /// where a "moved" error says the item went.
+    #[test]
+    fn test_a_latin1_selector_in_gopher_plus_text_is_kept() {
+        let attrs = b"+-1\r\n+INFO: 0Caf\xe9\t/caf\xe9\th.example\t70\t+\r\n+ADMIN:\r\n Admin: A <a@b>\r\n.\r\n";
+        let (port, server) = serve(attrs.to_vec());
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/caf%E9%09%09!"), 72).unwrap();
+        assert_eq!(server.join().unwrap(), b"/caf\xe9\t!\r\n");
+        assert_eq!(page.links[0], "gopher://h.example/0/caf%E9%09%09+");
+        assert!(page.lines[0].starts_with("Caf\u{e9}"), "{:?}", page.lines);
+        let moved = b"--1\r\n3 <a@b>\r\n0Caf\xe9\t/new/caf\xe9\tn.example\t70\r\n.\r\n";
+        let (port, server) = serve(moved.to_vec());
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/old%09%09+"), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.links[0], "gopher://n.example/0/new/caf%E9");
+    }
+
     /// `!` gives a page of who keeps the item, when it changed, its
     /// abstract, and a link per view; a server that does not speak Gopher+
     /// is said to be one, not drawn as attributes.
@@ -1225,6 +1448,13 @@ mod tests {
         let page = fetch(&format!("gopher://127.0.0.1:{port}/2%09nobody"), 72).unwrap();
         server.join().unwrap();
         assert_eq!(page.lines, vec!["No matches to your query."]);
+        // A name typed as Latin-1 is asked as it is, and each reply line is
+        // read on its own: a Latin-1 entry leaves a UTF-8 one alone.
+        let reply = b"-200:1:     name: Caf\xe9 Ann\r\n-200:2:     name: Caf\xc3\xa9 Bo\r\n200:Ok.\r\n";
+        let (port, server) = serve(reply.to_vec());
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/2%09caf%E9"), 72).unwrap();
+        assert_eq!(server.join().unwrap(), b"query caf\xe9\r\nquit\r\n");
+        assert_eq!(page.lines, vec!["name: Caf\u{e9} Ann", "", "name: Caf\u{e9} Bo"]);
     }
 
     /// A file item is fetched whole, its Gopher+ header off, and one larger
@@ -1309,7 +1539,7 @@ mod tests {
         });
         let request = vec![b'x'; 64 << 20];
         let started = std::time::Instant::now();
-        let err = exchange("127.0.0.1", port, &request, 100, 2, &|_| false).unwrap_err();
+        let err = exchange("127.0.0.1", port, &request, 100, 2, &|_| false, &|_| false).unwrap_err();
         let took = started.elapsed();
         assert!(err.contains("Write error: the server took too long"), "{err}");
         assert!(took < std::time::Duration::from_millis(2800), "took {took:?}");

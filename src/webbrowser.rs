@@ -87,6 +87,11 @@ pub(crate) struct WebPage {
     /// a page of one, asks first (`web_submit_form`): its relative actions
     /// resolve to `http://`, with no HTTPS attempt at all.
     pub fallback_sites: Vec<String>,
+    /// For each link (`links[i]`), the other servers that hold the same
+    /// thing: a gopher menu's `+` items and the item they stand in for
+    /// (RFC 1436).  Following a link whose server is down tries them in
+    /// turn.  Empty where nothing has an alternate.
+    pub alternates: Vec<Vec<String>>,
 }
 
 impl WebPage {
@@ -545,7 +550,7 @@ fn render_response(
             .take(MAX_RENDERED_LINES)
             .collect();
         (
-            WebPage { title: None, lines, links: Vec::new(), url: final_url, forms: Vec::new(), fallback_sites: Vec::new() },
+            WebPage { title: None, lines, links: Vec::new(), url: final_url, forms: Vec::new(), fallback_sites: Vec::new(), alternates: Vec::new() },
             None,
         )
     } else {
@@ -1809,6 +1814,7 @@ fn render_html_body(
             url: final_url,
             forms,
             fallback_sites: Vec::new(),
+            alternates: Vec::new(),
         },
         meta_refresh,
     ))
@@ -1858,11 +1864,11 @@ fn resolve_gopher_html_link(base: &str, relative: &str) -> Option<String> {
     // `?page=2` link replaces it rather than adding a second `?`.  As in
     // HTTP, the first `?` starts it, even with a `/` after: a query holding
     // a path (`x?path=/foo`) is likelier than a directory named `a?b`.
-    let (own_path, own_query) = match selector.split_once('?') {
-        Some((path, query)) => (path, Some(query)),
-        None => (selector.as_str(), None),
+    let (own_path, own_query) = match selector.iter().position(|&b| b == b'?') {
+        Some(at) => (&selector[..at], Some(&selector[at + 1..])),
+        None => (&selector[..], None),
     };
-    let mut encoded = encode_selector(own_path.strip_prefix('/').unwrap_or(own_path)).replace('\\', "%5C");
+    let mut encoded = encode_selector(own_path.strip_prefix(b"/").unwrap_or(own_path)).replace('\\', "%5C");
     if let Some(query) = own_query {
         encoded = format!("{encoded}?{}", encode_selector(query));
     }
@@ -1874,13 +1880,15 @@ fn resolve_gopher_html_link(base: &str, relative: &str) -> Option<String> {
         return Some(base.to_string());
     }
     let path = decode_selector(joined.path());
-    let mut target = match query(&joined) {
-        Some(query) => format!("{path}?{}", decode_selector(&query)),
-        None => path.clone(),
-    };
-    if !selector.starts_with('/') {
+    let mut target = path.clone();
+    if let Some(query) = query(&joined) {
+        target.push(b'?');
+        target.extend(decode_selector(&query));
+    }
+    if !selector.starts_with(b"/") {
         target.remove(0);
     }
+    let path = String::from_utf8_lossy(&path);
     let name = path.rsplit('/').next().unwrap_or_default().to_ascii_lowercase();
     let ty = if name.is_empty() {
         '1'
@@ -2580,16 +2588,27 @@ fn read_gopher_body(
     max: usize,
     deadline: std::time::Instant,
 ) -> Result<Vec<u8>, String> {
-    read_gopher_body_until(stream, max, deadline, &|_| false)
+    read_gopher_body_until(stream, max, deadline, &|_| false, &|_| false)
 }
+
+/// How long a reply that may be whole (`ended`) waits for more before it is
+/// taken as whole.
+const GOPHER_LASTLINE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// `read_gopher_body`, also ending when `done` says the body is whole: a
 /// Gopher+ reply that gave its length need not wait for the server to close.
+///
+/// `ended` says the body may be whole -- it ends with RFC 1436's `.` line.
+/// Either side may close then, so a server that keeps the connection open
+/// is waited for only `GOPHER_LASTLINE_GRACE`, not to the deadline and an
+/// error.  Not at once: a server that does not double a text file's dots
+/// can send a `.` line mid-file, and the rest of it still comes.
 fn read_gopher_body_until(
     stream: &mut std::net::TcpStream,
     max: usize,
     deadline: std::time::Instant,
     done: &dyn Fn(&[u8]) -> bool,
+    ended: &dyn Fn(&[u8]) -> bool,
 ) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut body = Vec::new();
@@ -2599,19 +2618,28 @@ fn read_gopher_body_until(
         if left.is_zero() {
             return Err("Read error: the server took too long to send the page".into());
         }
+        let may_end = ended(&body);
+        let wait = if may_end { left.min(GOPHER_LASTLINE_GRACE) } else { left };
         // `set_read_timeout(Some(0))` is an error, hence the floor.
         stream
-            .set_read_timeout(Some(left.max(std::time::Duration::from_millis(1))))
+            .set_read_timeout(Some(wait.max(std::time::Duration::from_millis(1))))
             .map_err(|e| format!("Read error: {}", e))?;
         let want = buf.len().min(max - body.len());
         match stream.read(&mut buf[..want]) {
             Ok(0) => break,
             Ok(n) => body.extend_from_slice(&buf[..n]),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if may_end && matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
             Err(e) => return Err(format!("Read error: {}", e)),
         }
     }
     Ok(body)
+}
+
+/// Whether `body` ends with RFC 1436's last line, `.` CR LF, on a line of its
+/// own -- where a text file or menu may end (see `strip_gopher_terminator`).
+fn ends_with_gopher_lastline(body: &[u8]) -> bool {
+    body.strip_suffix(b".\r\n").is_some_and(|rest| rest.is_empty() || rest.ends_with(b"\n"))
 }
 
 /// A selector as a URL writes it: percent-encoded (RFC 4266 section 2.1).
@@ -2621,10 +2649,12 @@ fn read_gopher_body_until(
 /// [`is_gopher_search`]) and `#`.  A search's TAB goes in as `%09`, which is
 /// also what keeps it through a bookmark: the bookmark file strips
 /// whitespace, and a raw TAB in the URL was stripped with it, joining the
-/// query to the selector.
-fn encode_selector(selector: &str) -> String {
+/// query to the selector.  A selector is octets (RFC 1436), not text: a
+/// byte that is not ASCII is written as itself, `%E9`, not as UTF-8.
+fn encode_selector(selector: impl AsRef<[u8]>) -> String {
+    let selector = selector.as_ref();
     let mut out = String::with_capacity(selector.len());
-    for b in selector.bytes() {
+    for &b in selector {
         if b.is_ascii_graphic() && !matches!(b, b'%' | b'?' | b'#') {
             out.push(b as char);
         } else {
@@ -2634,9 +2664,11 @@ fn encode_selector(selector: &str) -> String {
     out
 }
 
-/// The selector a URL's path stands for, its `%XX` escapes decoded.  A `%`
-/// not followed by two hex digits is kept as written.
-fn decode_selector(path: &str) -> String {
+/// The selector a URL's path stands for, its `%XX` escapes decoded to the
+/// octets they name (RFC 4266) -- not taken as UTF-8, so a Latin-1
+/// selector reaches its server as it was written.  A `%` not followed by
+/// two hex digits is kept as written.
+fn decode_selector(path: &str) -> Vec<u8> {
     let bytes = path.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -2652,7 +2684,7 @@ fn decode_selector(path: &str) -> String {
             i += 1;
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 /// Parse a gopher:// URL into (host, port, item_type, selector).
@@ -2661,7 +2693,7 @@ fn decode_selector(path: &str) -> String {
 /// Default port is 70, default type is '1' (directory), default selector is empty.
 /// The selector is percent-decoded: a link from a web page writes
 /// `my%20file`, and the server's selector is `my file`.
-fn parse_gopher_url(url: &str) -> Result<(String, u16, char, String), String> {
+fn parse_gopher_url(url: &str) -> Result<(String, u16, char, Vec<u8>), String> {
     let rest = url.strip_prefix("gopher://").ok_or("Not a gopher URL")?;
 
     // Split host[:port] from /path
@@ -2688,7 +2720,7 @@ fn parse_gopher_url(url: &str) -> Result<(String, u16, char, String), String> {
 
     // Parse item type and selector from path
     let (item_type, selector) = if path.is_empty() {
-        ('1', String::new()) // root directory
+        ('1', Vec::new()) // root directory
     } else {
         let first = path.chars().next().unwrap();
         // Gopher+'s picture, movie and sound types are punctuation.
@@ -2704,7 +2736,7 @@ fn parse_gopher_url(url: &str) -> Result<(String, u16, char, String), String> {
 
 /// Build a gopher:// URL from components, the selector percent-encoded
 /// (see [`encode_selector`]).
-fn build_gopher_url(host: &str, port: u16, item_type: char, selector: &str) -> String {
+fn build_gopher_url(host: &str, port: u16, item_type: char, selector: impl AsRef<[u8]>) -> String {
     let selector = encode_selector(selector);
     if port == GOPHER_PORT {
         format!("gopher://{}/{}{}", host, item_type, selector)
@@ -2734,9 +2766,40 @@ pub(crate) fn submit_gopher_ask(form: &WebForm, file: Option<&[u8]>, width: usiz
     Ok((page, raw))
 }
 
-/// A gopher file item, for the transfer folder.  Blocking.
-pub(crate) fn fetch_gopher_file(url: &str, max: usize) -> Result<Vec<u8>, String> {
-    gopher::fetch_file(url, max)
+/// `fetch_gopher`, moving on to `alternates` -- other servers holding the
+/// same thing, a menu's `+` items -- while the server seems to be down
+/// (RFC 1436 3.5: a client "moving to one if the other seems to be down").
+pub(crate) fn fetch_gopher_any(url: &str, alternates: &[String], width: usize) -> Result<WebPage, String> {
+    first_server_up(url, alternates, |u| fetch_gopher(u, width))
+}
+
+/// A gopher file item, for the transfer folder, moving on to `alternates`
+/// the same way, and the URL that served it.  Blocking.
+pub(crate) fn fetch_gopher_file_any(url: &str, alternates: &[String], max: usize) -> Result<(Vec<u8>, String), String> {
+    first_server_up(url, alternates, |u| gopher::fetch_file(u, max).map(|data| (data, u.to_string())))
+}
+
+/// How many alternates a follow tries after its own server: each costs up
+/// to `GOPHER_TIMEOUT_SECS` to find down, and a menu can list any number.
+pub(crate) const GOPHER_MAX_ALTERNATES: usize = 3;
+
+/// `fetch` on `url`, then on each alternate (the first
+/// `GOPHER_MAX_ALTERNATES`) while the one before could not be reached.  A
+/// server that answered -- with an error, or a file it does not have -- is
+/// up, and its answer stands.
+fn first_server_up<T>(url: &str, alternates: &[String], fetch: impl Fn(&str) -> Result<T, String>) -> Result<T, String> {
+    let mut result = fetch(url);
+    let mut tried = url;
+    for alt in alternates.iter().take(GOPHER_MAX_ALTERNATES) {
+        match &result {
+            Err(e) if gopher::server_seems_down(e) => {}
+            _ => break,
+        }
+        glog!("Gopher: {} could not be reached; trying {}", tried, alt);
+        result = fetch(alt);
+        tried = alt;
+    }
+    result
 }
 
 /// The SSRF rule for a host a gopher menu named, for the telnet hand-off:
@@ -2748,15 +2811,12 @@ pub(crate) fn gopher_dial_addr(addrs: &[std::net::SocketAddr], host: &str) -> Re
 /// `body` without the `.` line a gopher server ends a document with: a
 /// last line that is exactly `.` and ends in CRLF (see `fetch_gopher`).
 fn strip_gopher_terminator(body: &[u8]) -> &[u8] {
-    match body.strip_suffix(b".\r\n") {
-        Some(rest) if rest.is_empty() || rest.ends_with(b"\n") => rest,
-        _ => body,
-    }
+    if ends_with_gopher_lastline(body) { &body[..body.len() - 3] } else { body }
 }
 
 /// Parse a Gopher directory listing into a WebPage with numbered links.
 fn render_gopher_directory(
-    text: &str,
+    text: impl AsRef<[u8]>,
     current_host: &str,
     current_port: u16,
     width: usize,
@@ -2768,8 +2828,12 @@ fn render_gopher_directory(
     // A `+` item is a redundant server for the last item that was not one
     // (RFC 1436): the same thing, fetched the same way.
     let mut primary: Option<char> = None;
+    // Whether each link is such an alternate, to group them after.
+    let is_alt = std::cell::Cell::new(false);
+    let mut alt_links: Vec<bool> = Vec::new();
     let mut link = |lines: &mut Vec<String>, label: &str, url: String| {
         links.push(url);
+        alt_links.push(is_alt.get());
         let link_num = links.len();
         for (i, wrapped) in wrap_line(label, width.saturating_sub(5)).iter().enumerate() {
             if i == 0 {
@@ -2779,11 +2843,15 @@ fn render_gopher_directory(
             }
         }
     };
-    for raw_line in text.lines() {
-        let line = raw_line.trim_end_matches('\r');
+    // Taken apart as bytes (`parse_menu_line`): a selector is octets.
+    let text = text.as_ref();
+    // As `str::lines`: a last line end does not start another line.
+    let text = text.strip_suffix(b"\n").unwrap_or(text);
+    for raw_line in text.split(|&b| b == b'\n').filter(|_| !text.is_empty()) {
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
 
         // End of listing
-        if line == "." {
+        if line == b"." {
             break;
         }
         if line.is_empty() {
@@ -2794,6 +2862,7 @@ fn render_gopher_directory(
         let Some(item) = gopher::parse_menu_line(line, current_host, current_port) else {
             continue;
         };
+        is_alt.set(item.ty == '+');
         let item_type = match item.ty {
             // With nothing above it to stand in for, it is shown as unknown.
             '+' => primary.unwrap_or('+'),
@@ -2862,10 +2931,28 @@ fn render_gopher_directory(
         }
     }
 
+    // Each link and the `+` links right after it hold the same thing.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, &alt) in alt_links.iter().enumerate() {
+        match groups.last_mut() {
+            Some(group) if alt => group.push(i),
+            _ => groups.push(vec![i]),
+        }
+    }
+    let mut alternates: Vec<Vec<String>> = Vec::new();
+    if groups.iter().any(|g| g.len() > 1) {
+        alternates = vec![Vec::new(); links.len()];
+        for group in groups.iter().filter(|g| g.len() > 1) {
+            for &i in group {
+                alternates[i] = group.iter().filter(|&&j| j != i).map(|&j| links[j].clone()).collect();
+            }
+        }
+    }
+
     // Extract a title from the URL selector
     let title = {
         // The selector alone: not a search's words or a Gopher+ string.
-        let sel = GopherUrl::parse(&final_url).map(|g| g.selector).unwrap_or_default();
+        let sel = GopherUrl::parse(&final_url).map(|g| g.selector_text()).unwrap_or_default();
         if sel.is_empty() {
             Some(format!("Gopher: {}", current_host))
         } else {
@@ -2880,6 +2967,7 @@ fn render_gopher_directory(
         url: final_url,
         forms: Vec::new(),
         fallback_sites: Vec::new(),
+        alternates,
     })
 }
 
@@ -2889,12 +2977,15 @@ pub(crate) fn is_gopher_search(url: &str) -> bool {
 }
 
 /// Strip the `?search` sentinel and append a tab + query to form the search URL.
-pub(crate) fn build_gopher_search_url(url: &str, query: &str) -> String {
+///
+/// `query` is octets, as typed: a search's words go to the server byte for
+/// byte (RFC 4266), so a terminal's Latin-1 or UTF-8 is not re-encoded.
+pub(crate) fn build_gopher_search_url(url: &str, query: &[u8]) -> String {
     let base = url.strip_suffix("?search").unwrap_or(url);
     // The query follows the selector after a TAB (`%09` in the URL), and a
     // Gopher+ string, if the item has one, after another.
     match GopherUrl::parse(base) {
-        Ok(g) => GopherUrl { search: Some(query.to_string()), ..g }.to_url(),
+        Ok(g) => GopherUrl { search: Some(query.to_vec()), ..g }.to_url(),
         Err(_) => base.to_string(),
     }
 }
@@ -2987,6 +3078,7 @@ mod tests {
             forms: vec![],
             url: "http://example.com/".to_string(),
             fallback_sites: Vec::new(),
+            alternates: Vec::new(),
         };
         prepend_downgrade_notice(&mut page, 80, DowngradeReason::TlsFailed);
         for line in &page.lines {
@@ -3011,6 +3103,7 @@ mod tests {
             forms: vec![],
             url: "http://textfiles.com/".to_string(),
             fallback_sites: Vec::new(),
+            alternates: Vec::new(),
         };
         prepend_downgrade_notice(&mut plain, 80, DowngradeReason::NoHttps);
         for line in &plain.lines {
@@ -3358,6 +3451,7 @@ mod tests {
             forms: vec![],
             url: "https://ex.com/caf\u{e9}/\u{2014}path".to_string(),
             fallback_sites: Vec::new(),
+            alternates: Vec::new(),
         };
         page.sanitize();
         assert_eq!(page.lines[0], "-line", "lines should fold");
@@ -3383,6 +3477,7 @@ mod tests {
             url: "http://example.com/".to_string(),
             forms: Vec::new(),
             fallback_sites: Vec::new(),
+            alternates: Vec::new(),
         };
         page.sanitize();
         assert_eq!(page.title.as_deref(), Some("evil[2Jtitle"));
@@ -3407,6 +3502,7 @@ mod tests {
             url: "http://example.com/".to_string(),
             forms: Vec::new(),
             fallback_sites: Vec::new(),
+            alternates: Vec::new(),
         };
         page.sanitize();
         // Sentinels intact; the escape inside and the bell outside are gone.
@@ -3422,6 +3518,7 @@ mod tests {
             url: "http://example.com/".to_string(),
             forms: Vec::new(),
             fallback_sites: Vec::new(),
+            alternates: Vec::new(),
         };
         page.sanitize();
         let title_once = page.title.clone();
@@ -3462,6 +3559,7 @@ mod tests {
                 ],
             }],
             fallback_sites: Vec::new(),
+            alternates: Vec::new(),
         };
         page.sanitize();
         assert_eq!(page.url, "gopher://h/1sel[2J");
@@ -4053,7 +4151,7 @@ mod tests {
         assert_eq!(host, "gopher.floodgap.com");
         assert_eq!(port, 70);
         assert_eq!(item_type, '1');
-        assert_eq!(selector, "");
+        assert_eq!(selector, b"");
     }
 
     #[test]
@@ -4063,7 +4161,7 @@ mod tests {
         assert_eq!(host, "gopher.floodgap.com");
         assert_eq!(port, 70);
         assert_eq!(item_type, '1');
-        assert_eq!(selector, "/overbite");
+        assert_eq!(selector, b"/overbite");
     }
 
     #[test]
@@ -4071,7 +4169,7 @@ mod tests {
         let (_, _, item_type, selector) =
             parse_gopher_url("gopher://example.com/0/docs/readme.txt").unwrap();
         assert_eq!(item_type, '0');
-        assert_eq!(selector, "/docs/readme.txt");
+        assert_eq!(selector, b"/docs/readme.txt");
     }
 
     #[test]
@@ -4106,7 +4204,7 @@ mod tests {
         let (_, _, item_type, selector) =
             parse_gopher_url("gopher://example.com/").unwrap();
         assert_eq!(item_type, '1');
-        assert_eq!(selector, "");
+        assert_eq!(selector, b"");
     }
 
     #[test]
@@ -4136,13 +4234,13 @@ mod tests {
     fn test_build_gopher_search_url() {
         let url = build_gopher_search_url(
             "gopher://example.com/7/v2/vs?search",
-            "hello world",
+            b"hello world",
         );
         // Percent-encoded in the URL (RFC 4266), the TAB included, and
         // decoded back into the selector the server is sent.
         assert_eq!(url, "gopher://example.com/7/v2/vs%09hello%20world");
         let (_, _, _, selector) = parse_gopher_url(&url).unwrap();
-        assert_eq!(selector, "/v2/vs\thello world");
+        assert_eq!(selector, b"/v2/vs\thello world");
     }
 
     #[test]
@@ -4314,6 +4412,66 @@ mod tests {
         let page = render_one_item("+Orphan\t/o\texample.org\t70");
         assert!(page.links.is_empty());
         assert!(page.lines[0].contains("[???]"), "{:?}", page.lines);
+        // Each link of a group knows the others, to try if its server is
+        // down (§3.5); a link with no `+` has none.
+        let menu = "1Docs\t/docs\ta.example\t70\r\n+Docs\t/docs\tb.example\t70\r\n+Docs\t/docs\tc.example\t70\r\n\
+                    0Other\t/o\ta.example\t70\r\n+Other\t/o\tb.example\t70\r\n0Alone\t/x\ta.example\t70\r\n";
+        let page = render_gopher_directory(menu, "h", 70, 72, "gopher://h/1".into()).unwrap();
+        assert_eq!(page.alternates, vec![
+            vec!["gopher://b.example/1/docs".to_string(), "gopher://c.example/1/docs".to_string()],
+            vec!["gopher://a.example/1/docs".to_string(), "gopher://c.example/1/docs".to_string()],
+            vec!["gopher://a.example/1/docs".to_string(), "gopher://b.example/1/docs".to_string()],
+            vec!["gopher://b.example/0/o".to_string()],
+            vec!["gopher://a.example/0/o".to_string()],
+            Vec::new(),
+        ]);
+        let page = render_gopher_directory("0A\t/a\th\t70\r\n0B\t/b\th\t70\r\n", "h", 70, 72, "gopher://h/1".into()).unwrap();
+        assert!(page.alternates.is_empty());
+    }
+
+    /// RFC 1436 §3.5: a server that seems down is left for a clone of it.
+    /// One that answers -- even with an error -- is not.
+    #[test]
+    fn test_a_down_server_is_left_for_its_alternate() {
+        // A port nothing listens on.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let down = format!("gopher://127.0.0.1:{closed}/0/t");
+        let Err(err) = fetch_gopher(&down, 72) else { panic!("a closed port answered") };
+        assert!(gopher::server_seems_down(&err), "{err}");
+        assert!(!gopher::server_seems_down("Blocked: h is an internal address"));
+        assert!(!gopher::server_seems_down("Read error: the server took too long to send the page"));
+        let (port, server) = serve_gopher(b"From the clone\r\n.\r\n");
+        let up = format!("gopher://127.0.0.1:{port}/0/t");
+        let page = fetch_gopher_any(&down, std::slice::from_ref(&up), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.lines, vec!["From the clone"]);
+        assert_eq!(page.url, up);
+        // And a file.
+        let (port, server) = serve_gopher(b"DATA");
+        let copy = format!("gopher://127.0.0.1:{port}/9/f");
+        let (data, from) = fetch_gopher_file_any(&down, std::slice::from_ref(&copy), 100).unwrap();
+        server.join().unwrap();
+        assert_eq!((data.as_slice(), from), (&b"DATA"[..], copy));
+        // A server that answered is not left, whatever it said.
+        let calls = std::cell::Cell::new(0);
+        let got = first_server_up("a", &["b".to_string()], |_| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>("Server: no such item".to_string())
+        });
+        assert_eq!((got, calls.get()), (Err("Server: no such item".to_string()), 1));
+        // All down: the last one's error.
+        let got = first_server_up("a", &["b".to_string(), "c".to_string()], |u| Err::<(), _>(format!("Connection failed: {u}")));
+        assert_eq!(got, Err("Connection failed: c".to_string()));
+        // However many copies a menu lists, only the first few are tried:
+        // each down one can cost the whole connect timeout.
+        let many: Vec<String> = (0..10).map(|i| i.to_string()).collect();
+        let calls = std::cell::Cell::new(0);
+        let got = first_server_up("a", &many, |u| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(format!("Connection failed: {u}"))
+        });
+        assert_eq!(calls.get(), 1 + GOPHER_MAX_ALTERNATES);
+        assert_eq!(got, Err(format!("Connection failed: {}", GOPHER_MAX_ALTERNATES - 1)));
     }
 
     #[test]
@@ -4389,7 +4547,7 @@ mod tests {
         assert_eq!(host, "example.org");
         assert_eq!(port, 9999);
         assert_eq!(ty, '0');
-        assert_eq!(sel, "/path/to/file.txt");
+        assert_eq!(sel, b"/path/to/file.txt");
         let rebuilt = build_gopher_url(&host, port, ty, &sel);
         assert_eq!(rebuilt, original);
     }
@@ -5409,7 +5567,7 @@ mod tests {
         assert_eq!(page.links[1], "http://example.com/");
         assert_eq!(page.links[2], "gopher://here.example/1/sub");
         let (host, _, ty, sel) = parse_gopher_url(&resolve_url(&page.url, &page.links[0])).unwrap();
-        assert_eq!((host.as_str(), ty, sel.as_str()), ("gopher.example", 'h', "/index.html"));
+        assert_eq!((host.as_str(), ty, sel.as_slice()), ("gopher.example", 'h', &b"/index.html"[..]));
     }
 
     /// A link on an HTML page a gopher server holds is a selector on that
@@ -5422,7 +5580,7 @@ mod tests {
             (host, port, ty, sel)
         };
         let base = "gopher://g.example:7070/h/docs/index.html";
-        let g = |ty, sel: &str| ("g.example".to_string(), 7070, ty, sel.to_string());
+        let g = |ty, sel: &str| ("g.example".to_string(), 7070, ty, sel.as_bytes().to_vec());
         assert_eq!(at(base, "/about.html"), g('h', "/about.html"));
         assert_eq!(at(base, "../up.htm"), g('h', "/up.htm"));
         assert_eq!(at(base, "page2.html"), g('h', "/docs/page2.html"));
@@ -5535,9 +5693,9 @@ mod tests {
         let page = render_gopher_directory("0A file\t/a b%c?search\th\t70\r\n", "h", 70, 72, "gopher://h/1".into()).unwrap();
         assert_eq!(page.links[0], "gopher://h/0/a%20b%25c%3Fsearch");
         assert!(!is_gopher_search(&page.links[0]));
-        assert_eq!(parse_gopher_url(&page.links[0]).unwrap().3, "/a b%c?search");
+        assert_eq!(parse_gopher_url(&page.links[0]).unwrap().3, b"/a b%c?search");
         // A `%` not starting an escape is kept.
-        assert_eq!(decode_selector("/100%"), "/100%");
+        assert_eq!(decode_selector("/100%"), b"/100%");
     }
 
     #[test]

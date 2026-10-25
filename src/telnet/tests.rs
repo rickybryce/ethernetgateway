@@ -1095,6 +1095,8 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         web_lines: Vec::new(),
         web_scroll: 0,
         web_links: Vec::new(),
+        web_alternates: Vec::new(),
+        web_next_alternates: Vec::new(),
         web_history: Vec::new(),
         web_url: None,
         web_home_tried: false,
@@ -1162,6 +1164,8 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         web_lines: Vec::new(),
         web_scroll: 0,
         web_links: Vec::new(),
+        web_alternates: Vec::new(),
+        web_next_alternates: Vec::new(),
         web_history: Vec::new(),
         web_url: None,
         web_home_tried: false,
@@ -16163,6 +16167,7 @@ async fn test_a_form_on_a_fallen_back_page_asks_before_plain_http() {
             lines: Vec::new(),
             links: Vec::new(),
             fallback_sites: if fell { vec![crate::webbrowser::http_site(&url).unwrap()] } else { Vec::new() },
+            alternates: Vec::new(),
             url,
             forms: Vec::new(),
         };
@@ -16498,7 +16503,7 @@ async fn test_a_gopher_menus_names_are_shown_safely() {
         sess.color_enabled = false;
         let screen = script_peer(peer, vec![("(Y/N)", b"n")]);
         let long = "a".repeat(64);
-        sess.web_gopher_download(&format!("gopher://h\x1b[2J.example/9/{long}"), &long).await.unwrap();
+        sess.web_gopher_download(&format!("gopher://h\x1b[2J.example/9/{long}"), &long, &[]).await.unwrap();
         drop(sess);
         let shown = screen.await.unwrap().replace("\x1b[2J\x1b[H", "");
         assert!(!shown.contains('\x1b'), "{term:?}: {shown:?}");
@@ -16553,6 +16558,101 @@ async fn test_the_telnet_hand_off_dials_the_checked_address() {
     let row = shown.split('\n').find(|r| r.to_ascii_lowercase().contains("connecting to")).expect("no connecting line");
     let n = row.chars().filter(|&c| (' '..'\u{7f}').contains(&c)).count();
     assert!(n <= 39, "{row:?} is {n} wide");
+}
+
+/// Following a gopher link whose server is down goes to its `+` alternate
+/// (RFC 1436 §3.5); a link followed any other way has none to try.
+#[tokio::test]
+async fn test_a_followed_link_falls_back_to_its_alternate() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (port, server) = serve_gopher_seq(vec![b"From the clone\r\n.\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, Vec::new());
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_links = vec![format!("gopher://127.0.0.1:{closed}/0/t")];
+    sess.web_alternates = vec![vec![format!("gopher://127.0.0.1:{port}/0/t")]];
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
+    assert_eq!(sess.web_lines, vec!["From the clone"]);
+    assert!(sess.web_next_alternates.is_empty());
+    drop(sess);
+    screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent.len(), 1);
+
+    // A search: the copy is asked the same words.
+    let (port, server) = serve_gopher_seq(vec![b"0Hit\t/hit\th\t70\r\n.\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("Search", b"c64\r")]);
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_links = vec![format!("gopher://127.0.0.1:{closed}/7/find?search")];
+    sess.web_alternates = vec![vec![format!("gopher://127.0.0.1:{port}/7/find?search")]];
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
+    drop(sess);
+    screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent, vec![b"/find\tc64\r\n".to_vec()]);
+}
+
+/// A menu's `+` alternates are kept with its links when it is shown, and
+/// go when the browser is left.
+#[tokio::test]
+async fn test_a_shown_menu_keeps_its_alternates() {
+    let menu = b"0Doc\t/d\ta.example\t70\r\n+Doc\t/d\tb.example\t70\r\n.\r\n".to_vec();
+    let (port, server) = serve_gopher_seq(vec![menu]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, Vec::new());
+    assert!(sess.web_fetch_page(&format!("gopher://127.0.0.1:{port}/1/"), false).await.unwrap());
+    assert_eq!(sess.web_alternates, vec![vec!["gopher://b.example/0/d".to_string()], vec!["gopher://a.example/0/d".to_string()]]);
+    sess.web_reset();
+    assert!(sess.web_alternates.is_empty());
+    drop(sess);
+    screen.await.unwrap();
+    tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+}
+
+/// A file whose server is down is fetched from its `+` copy.
+#[tokio::test]
+async fn test_a_download_falls_back_to_its_alternate() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let folder = GopherTransferDir::new("download-alt");
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let (port, server) = serve_gopher_seq(vec![b"FROM-CLONE".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("(Y/N)", b"y"), ("Press any key", b"x")]);
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_links = vec![format!("gopher://127.0.0.1:{closed}/9/f.bin")];
+    sess.web_alternates = vec![vec![format!("gopher://127.0.0.1:{port}/9/f.bin")]];
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(std::fs::read(folder.dir.join("f.bin")).unwrap(), b"FROM-CLONE", "{shown}");
+    assert!(shown.contains("From a copy: 127.0.0.1"), "{shown}");
+}
+
+/// The words typed at `Search:` reach the server as the bytes the terminal
+/// sent, UTF-8 or Latin-1, not re-encoded (RFC 4266: octets).
+#[tokio::test]
+async fn test_typed_search_words_are_sent_as_typed() {
+    // Each as typed, then with its Enter.
+    let cases: [(&[u8], &'static [u8]); 2] = [(b"caf\xc3\xa9", b"caf\xc3\xa9\r"), (b"caf\xe9", b"caf\xe9\r")];
+    for (typed, answer) in cases {
+        let (port, server) = serve_gopher_seq(vec![b"0Hit\t/hit\th\t70\r\n.\r\n".to_vec()]);
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        sess.color_enabled = false;
+        let screen = script_peer(peer, vec![("Search", answer)]);
+        sess.web_url = Some("gopher://127.0.0.1/1/".into());
+        sess.web_links = vec![format!("gopher://127.0.0.1:{port}/7/find?search")];
+        tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
+        drop(sess);
+        screen.await.unwrap();
+        let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+        assert_eq!(sent, vec![[&b"/find\t"[..], typed, b"\r\n"].concat()]);
+    }
 }
 
 /// `I` on a telnet or phone-book link says so: no gopher server serves it.

@@ -122,6 +122,8 @@ web/diskreference.html       # <title>, .hdr-version, footer
 #                              bumped it -- the next bump would have skipped it.
 #                              When you add a page, add it here in the same
 #                              commit; see FILES THAT ARE NOT VERSION STRINGS.
+web/gopherreference.html     # <title>, .hdr-version, footer
+#                              ADDED 2026-10-25, listed here in the same commit.
 #
 # ── FILES THAT ARE NOT VERSION STRINGS ──────────────────────────
 #

@@ -1,0 +1,1244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gopher Protocol Reference &mdash; Ethernet Gateway v1.0.6</title>
+    <meta name="description" content="How the Gopher protocol works and how the Ethernet Gateway speaks it: menus and every RFC 1436 item type, text files and dot doubling, searches and CSO phone books, redundant servers, telnet items, gopher:// URLs (RFC 4266) and selector bytes, Gopher+ attributes, views and +ASK forms, safety limits, and a compliance table.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+            /* Let wide reference tables wrap rather than widening the page. */
+            overflow-wrap: anywhere;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+            /* Long unbreakable tokens (config keys, command lines) otherwise set
+               the page's minimum width, and the WHOLE page scrolls sideways on a
+               narrow screen — which breaks reading the prose, not just the token.
+               Measured: every one of these 12 pages overflowed at 390px. */
+            overflow-wrap: anywhere;
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            /* The two header images sit side by side in one bordered banner.  At
+               120px tall the pair is still ~420px wide, so on a phone it pushed
+               the page ~50px past the viewport.  `max-width` lets them scale down
+               together (the flex row needs `min-width: 0` to shrink an image below
+               its intrinsic width), and `height: auto` with a `max-height` cap
+               keeps the aspect ratio instead of squashing them. */
+            .header-photos { max-width: 100%; }
+            /* Prose can carry an unbreakable token too (a long URL, a wide
+               identifier).  Those live in bare text nodes, so no element's box
+               grows and the page just scrolls sideways with nothing to blame —
+               which is exactly how this one hid.  Tables shed some padding here
+               as well: three columns of 14px each is 84px of a phone's width. */
+            .body-content { overflow-wrap: anywhere; }
+            .data-table th,
+            .data-table td { padding: 6px 8px; }
+            .data-table { font-size: 0.8em; }
+            .logo-photo,
+            .sysop-photo {
+                height: auto;
+                max-height: 120px;
+                max-width: 100%;
+                min-width: 0;
+            }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">Gopher Protocol Reference</p>
+            <div class="hdr-version">v1.0.6</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">Gopher</span>
+                <span class="hdr-badge">RFC 1436</span>
+                <span class="hdr-badge">RFC 4266</span>
+                <span class="hdr-badge">Gopher+</span>
+                <span class="hdr-badge">+ASK</span>
+                <span class="hdr-badge">CSO</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#using">Using It</a>
+            <a href="#transaction">Transaction</a>
+            <a href="#menus">Menus</a>
+            <a href="#types">Item Types</a>
+            <a href="#text">Text &amp; Dots</a>
+            <a href="#search">Search &amp; CSO</a>
+            <a href="#redundant">Redundant Servers</a>
+            <a href="#telnet">Telnet Items</a>
+            <a href="#urls">URLs &amp; Bytes</a>
+            <a href="#gopherplus">Gopher+</a>
+            <a href="#ask">+ASK Forms</a>
+            <a href="#safety">Safety &amp; Limits</a>
+            <a href="#compliance">Compliance</a>
+            <a href="#examples">Examples</a>
+            <a href="#glossary">Glossary</a>
+            <a href="#references">References</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">Gopher is the internet's menu system: a 1991 protocol from the University of Minnesota that predates the web's rise and still has hundreds of servers run by hobbyists. This page explains how it works on the wire and exactly how the gateway's browser speaks it.</p>
+
+                <p>
+                    Where the web is pages with links inside the text, Gopher is
+                    <strong>menus</strong>. Every screen is a list of items, and each item is
+                    one thing: another menu, a text file, a search, a file to download, or a
+                    telnet session. There is no layout, no styling, no scripts and no images
+                    on the page. That makes it one of the few corners of the internet that a
+                    40-column Commodore 64 or an 80-column terminal can use completely.
+                </p>
+                <p>
+                    The protocol is deliberately tiny. The client opens a TCP connection
+                    (port 70 by default), sends one line naming what it wants, and reads until
+                    the server closes. There are no headers, no cookies and no state between
+                    requests. <strong>Gopher+</strong> (1993) adds, in an upward-compatible
+                    way, information about each item, alternate formats, and simple forms.
+                </p>
+                <div class="callout callout-info">
+                    <strong>What the gateway implements:</strong> every item type in
+                    RFC&nbsp;1436, the <code>gopher://</code> URL scheme of RFC&nbsp;4266, and
+                    Gopher+ &mdash; item information, views and <code>+ASK</code> forms. The
+                    <a href="#compliance">compliance table</a> lists each requirement and
+                    where it stands.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- USING IT                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="using">
+                <div class="section-title">Using It</div>
+                <p class="intro">Gopher lives in the gateway's text web browser; the keys are the browser's.</p>
+
+                <table class="data-table">
+                    <thead><tr><th>Do this</th><th>Keys</th></tr></thead>
+                    <tbody>
+                        <tr><td>Open the browser</td><td><span class="kbd">B</span> on the main menu</td></tr>
+                        <tr><td>Go to a gopher server</td><td><span class="kbd">G</span>, then an address such as <code>gopher://gopher.floodgap.com</code></td></tr>
+                        <tr><td>Follow an item</td><td><span class="kbd">L</span> and its number</td></tr>
+                        <tr><td>Go back</td><td><span class="kbd">B</span></td></tr>
+                        <tr><td>Gopher+ information on an item</td><td><span class="kbd">I</span> and its number; <span class="kbd">I</span> then Enter for the whole menu</td></tr>
+                        <tr><td>Fill in a Gopher+ form</td><td>opens by itself; <span class="kbd">F</span> to return to it</td></tr>
+                        <tr><td>Bookmark the page</td><td><span class="kbd">K</span></td></tr>
+                    </tbody>
+                </table>
+                <div class="callout callout-tip">
+                    <strong>A good first stop:</strong> <code>gopher://gopher.floodgap.com</code>.
+                    Its menu includes a search of all of Gopher, and it links to most of the
+                    other servers still running.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- TRANSACTION                                   -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="transaction">
+                <div class="section-title">One Transaction</div>
+                <p class="intro">Every request is a new connection, one line out, one reply back.</p>
+
+                <pre><code><span class="prompt-char">C:</span> connects to host, port 70
+<span class="prompt-char">C:</span> <span class="output-text">selector</span> CR LF
+<span class="prompt-char">S:</span> the menu, text file or binary file
+<span class="prompt-char">S:</span> closes the connection</code></pre>
+                <p>
+                    The <strong>selector</strong> is an opaque string the server handed out
+                    in an earlier menu; the empty selector asks for the server's top menu.
+                    The client never interprets a selector: it sends back exactly what it was
+                    given. A menu or text file ends with a line holding a single
+                    <code>.</code> (the <em>Lastline</em>), and a binary file ends when the
+                    server closes.
+                </p>
+                <p>
+                    RFC&nbsp;1436 says either side may close once the reply is complete. The
+                    gateway reads until the server closes, but when a text file or menu has
+                    ended with its <code>.</code> line (a dot, then CR&nbsp;LF, as the RFC
+                    writes it) it waits only two more seconds, so a
+                    server that keeps the connection open costs a moment rather than a
+                    timeout.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- MENUS                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="menus">
+                <div class="section-title">Menus</div>
+                <p class="intro">A menu is one item per line, its fields separated by TABs.</p>
+
+                <pre><code><span class="prompt-char">T</span>Display string<span class="output-text">&lt;TAB&gt;</span>selector<span class="output-text">&lt;TAB&gt;</span>host<span class="output-text">&lt;TAB&gt;</span>port<span class="output-text">[&lt;TAB&gt;+]</span> CR LF</code></pre>
+                <table class="data-table">
+                    <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td>Type</td><td>One character: what the item is (<a href="#types">table below</a>). It is glued to the display string.</td></tr>
+                        <tr><td>Display string</td><td>What the user sees. Should be under 70 characters, in ISO Latin-1 if it uses 8-bit characters.</td></tr>
+                        <tr><td>Selector</td><td>What to send to fetch it. Any bytes except TAB, CR and LF.</td></tr>
+                        <tr><td>Host, port</td><td>Where it lives &mdash; any server, not just this one. An empty host or port means this server.</td></tr>
+                        <tr><td>Fifth field</td><td>Gopher+ only: <code>+</code> marks a Gopher+ item, <code>?</code> one with a form. Old clients ignore it.</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    The gateway numbers each followable item as a link and labels it by what
+                    following it will do. Lines of type <code>i</code> (information, a
+                    widespread extension) are shown as plain text, and type <code>3</code>
+                    (an error) is shown prefixed <code>ERR:</code>.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- ITEM TYPES                                    -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="types">
+                <div class="section-title">Item Types</div>
+                <p class="intro">Every type RFC 1436 defines, the Gopher+ additions, and the common extensions &mdash; and what the gateway does with each.</p>
+
+                <table class="data-table">
+                    <thead><tr><th>Type</th><th>Defined by</th><th>Is</th><th>Shown as</th><th>Following it</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>0</code></td><td>RFC 1436</td><td>Text file</td><td>name</td><td>Shows it; see <a href="#text">dots</a>.</td></tr>
+                        <tr><td><code>1</code></td><td>RFC 1436</td><td>Menu</td><td>name<code>/</code></td><td>Opens it.</td></tr>
+                        <tr><td><code>2</code></td><td>RFC 1436</td><td>CSO phone book</td><td><code>[CSO]</code></td><td>Asks a name, queries, shows each entry.</td></tr>
+                        <tr><td><code>3</code></td><td>RFC 1436</td><td>Error</td><td><code>ERR:</code> text</td><td>Not followable.</td></tr>
+                        <tr><td><code>4</code></td><td>RFC 1436</td><td>BinHex (Macintosh) file</td><td><code>[HQX]</code></td><td>Shown as the text it is.</td></tr>
+                        <tr><td><code>5</code></td><td>RFC 1436</td><td>DOS binary</td><td><code>[BIN]</code></td><td>Saved to the transfer folder.</td></tr>
+                        <tr><td><code>6</code></td><td>RFC 1436</td><td>uuencoded file</td><td><code>[UUE]</code></td><td>Shown as the text it is.</td></tr>
+                        <tr><td><code>7</code></td><td>RFC 1436</td><td>Search</td><td>name<code>?</code></td><td>Asks for words, shows the results menu.</td></tr>
+                        <tr><td><code>8</code></td><td>RFC 1436</td><td>Telnet session</td><td><code>[TEL]</code></td><td>Asks, then connects you; see <a href="#telnet">telnet items</a>.</td></tr>
+                        <tr><td><code>9</code></td><td>RFC 1436</td><td>Binary file</td><td><code>[BIN]</code></td><td>Saved to the transfer folder.</td></tr>
+                        <tr><td><code>+</code></td><td>RFC 1436</td><td>Redundant server</td><td><code>[ALT]</code></td><td>The item above it, on another server; see <a href="#redundant">redundant servers</a>.</td></tr>
+                        <tr><td><code>T</code></td><td>RFC 1436</td><td>tn3270 session</td><td><code>[3270]</code></td><td>See <a href="#telnet">telnet items</a>.</td></tr>
+                        <tr><td><code>g</code></td><td>RFC 1436</td><td>GIF image</td><td><code>[IMG]</code></td><td>Saved to the transfer folder.</td></tr>
+                        <tr><td><code>I</code></td><td>RFC 1436</td><td>Other image</td><td><code>[IMG]</code></td><td>Saved to the transfer folder.</td></tr>
+                        <tr><td><code>:</code> <code>;</code> <code>&lt;</code></td><td>Gopher+</td><td>Bitmap, movie, sound</td><td><code>[IMG]</code> <code>[MOV]</code> <code>[SND]</code></td><td>Saved to the transfer folder.</td></tr>
+                        <tr><td><code>i</code></td><td>extension</td><td>Information line</td><td>plain text</td><td>Not followable.</td></tr>
+                        <tr><td><code>h</code></td><td>extension</td><td>HTML document, or a web link (<code>URL:</code> selector)</td><td>name</td><td>Drawn as a web page, or the web link opened.</td></tr>
+                        <tr><td><code>s</code> <code>d</code> <code>p</code> <code>P</code></td><td>extension</td><td>Sound, document, PNG, PDF</td><td><code>[SND]</code> <code>[DOC]</code> <code>[IMG]</code> <code>[DOC]</code></td><td>Saved to the transfer folder.</td></tr>
+                        <tr><td>anything else</td><td>&mdash;</td><td>Unknown</td><td><code>[???]</code></td><td>Shown, not followed (RFC 1436 allows ignoring or showing it).</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    A saved file asks first, takes the selector's last name made safe, and
+                    is numbered rather than overwriting a file already there. It is at most
+                    8&nbsp;MB, what XMODEM, ZMODEM and Kermit can send on.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- TEXT AND DOTS                                 -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="text">
+                <div class="section-title">Text Files &amp; the Dot Line</div>
+                <p class="intro">Why a server doubles some dots, and why a line can come out one dot short.</p>
+
+                <p>
+                    Gopher never says how long a text file is. The server ends it with a
+                    line holding a single <code>.</code>, the way mail servers end a message
+                    they pass on. That would cut the file short wherever a line of the file
+                    itself starts with a dot, so RFC&nbsp;1436 has the server add an extra
+                    dot to every such line, and the client take it off again:
+                </p>
+                <pre><code><span class="output-text">The file:</span>          <span class="output-text">On the wire:</span>       <span class="output-text">Shown:</span>
+Hello              Hello              Hello
+.hidden            ..hidden           .hidden
+...                ....               ...
+                   .                  <span class="output-text">(end)</span></code></pre>
+                <p>
+                    The gateway does the client's part for text files and the two text
+                    encodings of a file (types <code>0</code>, <code>4</code> and
+                    <code>6</code>): it hides the closing line and takes one dot off any line
+                    that starts with two.
+                </p>
+                <div class="callout callout-warn">
+                    <strong>Servers that skip their part:</strong> many servers in use today
+                    (Bucktooth on Floodgap, gophernicus, pygopherd, all measured) send files
+                    as they are, without doubling. From those, a line that really begins with
+                    two or more dots is shown with one fewer. The gateway follows the
+                    standard, for the servers that follow it too.
+                </div>
+                <p>
+                    Text that is not valid UTF-8 is read as ISO Latin-1, the character set
+                    both specifications name, one line at a time; a Latin-1
+                    <code>&eacute;</code> is drawn as itself. On a C64 or a 7-bit terminal
+                    it is folded the way all internet text is.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SEARCH AND CSO                                -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="search">
+                <div class="section-title">Searches &amp; Phone Books</div>
+                <p class="intro">Two item types ask the user something first.</p>
+
+                <div class="cat">Type 7: full-text search</div>
+                <pre><code><span class="prompt-char">C:</span> selector<span class="output-text">&lt;TAB&gt;</span>words CR LF
+<span class="prompt-char">S:</span> a menu of what matched</code></pre>
+                <p>
+                    The browser asks <em>Search:</em>, sends the words after a TAB, and draws
+                    the reply as a menu. Spaces mean <em>and</em>; some engines also take
+                    <code>and</code>, <code>or</code> and <code>not</code>. The words stay in
+                    the page's URL, so Back, Reload and bookmarks repeat the search.
+                </p>
+
+                <div class="cat">Type 2: CSO phone book</div>
+                <pre><code><span class="prompt-char">C:</span> query <span class="output-text">name</span> CR LF
+<span class="prompt-char">C:</span> quit CR LF
+<span class="prompt-char">S:</span> -200:1:name: Ricky Bryce
+<span class="prompt-char">S:</span> -200:1:email: ...
+<span class="prompt-char">S:</span> 200:Ok.</code></pre>
+                <p>
+                    A CSO item is not Gopher at all: RFC&nbsp;1436 says the client must
+                    &ldquo;resort to a pure CSO nameserver protocol&rdquo;. The browser asks
+                    <em>Look up:</em>, connects to the item's host (port 105 if the menu gives
+                    none), and shows each matching entry's fields. Codes of 500 and up are
+                    errors. Lookups only: logging in and changing entries are left out.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- REDUNDANT SERVERS                             -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="redundant">
+                <div class="section-title">Redundant Servers</div>
+                <p class="intro">A <code>+</code> item is the item above it, held on another server.</p>
+
+                <pre><code>1Documents<span class="output-text">&lt;TAB&gt;</span>/docs<span class="output-text">&lt;TAB&gt;</span>main.example<span class="output-text">&lt;TAB&gt;</span>70
++Documents<span class="output-text">&lt;TAB&gt;</span>/docs<span class="output-text">&lt;TAB&gt;</span>mirror.example<span class="output-text">&lt;TAB&gt;</span>70</code></pre>
+                <p>
+                    The item a <code>+</code> stands in for is the last one above it that
+                    is not a <code>+</code>, and it is fetched as that item's type. Both are
+                    listed, the copy marked <code>[ALT]</code>, so either can be picked.
+                </p>
+                <p>
+                    RFC&nbsp;1436 &sect;3.5 also asks a smart client to move to the copy
+                    when a server &ldquo;seems to be down&rdquo;. The gateway does: following
+                    any of them, it tries the others in menu order, at most three, when the server cannot be
+                    reached &mdash; its name does not resolve, or nothing answers. A server
+                    that answers, even with an error or a missing item, is up, and its answer
+                    stands. This covers menus, text, searches (the copy is asked the same
+                    words), phone books and downloads. No more than three copies are tried,
+                    because each one that is down can take 15 seconds to give up on.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- TELNET ITEMS                                  -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="telnet">
+                <div class="section-title">Telnet &amp; tn3270 Items</div>
+                <p class="intro">Types <code>8</code> and <code>T</code> are sessions, not documents.</p>
+
+                <p>
+                    RFC&nbsp;1436: &ldquo;Connect to given host at given port. The name to
+                    login as at this host is in the selector string.&rdquo; The browser shows
+                    the host and the name to log in as, asks, and hands you to the gateway's
+                    own Telnet Gateway. Pressing <span class="kbd">ESC</span> twice leaves
+                    and returns to the menu. Port 23 is used when the menu gives none.
+                </p>
+                <p>
+                    Every address the host name resolves to is checked against the same
+                    rule as any other fetch (see <a href="#safety">safety</a>), and the
+                    address checked is the one dialled &mdash; the name is not looked up a
+                    second time.
+                </p>
+                <div class="callout callout-warn">
+                    <strong>tn3270:</strong> a <code>T</code> item is a session with an IBM
+                    mainframe, which expects a 3270 block-mode terminal. It is connected over
+                    plain telnet, and the screen says so before connecting; many 3270 hosts
+                    do not work that way.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- URLS                                          -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="urls">
+                <div class="section-title">URLs &amp; Selector Bytes</div>
+                <p class="intro">RFC 4266 is how a gopher item is written as an address.</p>
+
+                <pre><code>gopher://<span class="output-text">host</span>[:<span class="output-text">port</span>]/<span class="output-text">T</span><span class="output-text">selector</span>[%09<span class="output-text">search</span>[%09<span class="output-text">gopher+ string</span>]]</code></pre>
+                <table class="data-table">
+                    <thead><tr><th>Part</th><th>Rule</th></tr></thead>
+                    <tbody>
+                        <tr><td>Port</td><td>70 when omitted.</td></tr>
+                        <tr><td><code>T</code></td><td>The item type. With no path at all, <code>1</code> (a menu) and the empty selector.</td></tr>
+                        <tr><td>Selector</td><td>Percent-encoded. <code>gopher://host/0/my%20file</code> asks for <code>my file</code>.</td></tr>
+                        <tr><td><code>%09</code> search</td><td>A search's words, after an encoded TAB.</td></tr>
+                        <tr><td><code>%09</code> Gopher+ string</td><td>After a second TAB (the search may be empty): <code>+</code>, <code>!</code>, <code>$</code>, a view or <code>?</code>.</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    <strong>A selector is bytes, not text.</strong> Both RFCs allow any byte
+                    but TAB, CR and LF. The gateway keeps a selector as the exact bytes the
+                    menu gave: a Latin-1 <code>&eacute;</code> is written <code>%E9</code> in
+                    the URL and sent as that one byte, so a server whose selectors are not
+                    UTF-8 is asked for what it listed. Bookmarks, Back and Reload keep the
+                    whole URL, search and Gopher+ string included.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- GOPHER+                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="gopherplus">
+                <div class="section-title">Gopher+</div>
+                <p class="intro">Upward-compatible extensions: item information, alternate formats and forms.</p>
+
+                <p>
+                    A Gopher+ server marks its items with the menu's fifth field, and a
+                    Gopher+ request adds a TAB and a command after the selector. The gateway
+                    sends Gopher+ requests <strong>only for items marked</strong>
+                    <code>+</code> or <code>?</code>, because servers that do not speak it
+                    vary: Floodgap and SDF ignore the extra field and send the plain reply,
+                    and the gateway takes a reply with no Gopher+ header as the plain reply
+                    it is.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Request</th><th>Asks for</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>selector&lt;TAB&gt;+</code></td><td>The item, in its default view.</td></tr>
+                        <tr><td><code>selector&lt;TAB&gt;+text/plain En_US</code></td><td>One of its views (formats), by MIME type and language.</td></tr>
+                        <tr><td><code>selector&lt;TAB&gt;!</code></td><td>The item's attributes.</td></tr>
+                        <tr><td><code>selector&lt;TAB&gt;$</code></td><td>The attributes of every item in a menu.</td></tr>
+                        <tr><td><code>selector&lt;TAB&gt;words&lt;TAB&gt;+</code></td><td>A Gopher+ search.</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="cat">Replies</div>
+                <table class="data-table">
+                    <thead><tr><th>First line</th><th>Means</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>+5340</code></td><td>Exactly 5340 bytes follow.</td></tr>
+                        <tr><td><code>+-1</code></td><td>Data ends with a <code>.</code> line (dots doubled, as in text files).</td></tr>
+                        <tr><td><code>+-2</code></td><td>Data ends when the server closes.</td></tr>
+                        <tr><td><code>--1</code> &hellip;</td><td>An error. Its first token is a code: <code>1</code> not available, <code>2</code> try again later, <code>3</code> moved &mdash; followed by the menu line of where it went, which the gateway shows as a link.</td></tr>
+                    </tbody>
+                </table>
+                <p>
+                    A counted reply ends the read as soon as its bytes are in, without
+                    waiting for the server to close. A download that arrives short of what its
+                    header promised is refused rather than saved as if whole.
+                </p>
+
+                <div class="cat">Attributes (the <span class="kbd">I</span> key)</div>
+                <table class="data-table">
+                    <thead><tr><th>Block</th><th>Holds</th><th>Shown as</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>+INFO</code></td><td>The item's menu line (always present).</td><td>The item, as a link.</td></tr>
+                        <tr><td><code>+ADMIN</code></td><td><code>Admin:</code> who keeps it, <code>Mod-Date:</code> when it changed, and optional lines.</td><td>Each line; the date as <code>YYYY-MM-DD hh:mm:ss</code>.</td></tr>
+                        <tr><td><code>+VIEWS</code></td><td>The other formats it can be fetched in, with language and size.</td><td>Each a link that fetches that view; a file view is saved.</td></tr>
+                        <tr><td><code>+ABSTRACT</code></td><td>A short description, or a reference to one.</td><td>The text, and a link to the full one.</td></tr>
+                        <tr><td><code>+ASK</code></td><td>A form.</td><td>&ldquo;Has a form&rdquo;; see below.</td></tr>
+                        <tr><td>others</td><td>Anything a server adds.</td><td>As sent.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- ASK FORMS                                     -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="ask">
+                <div class="section-title">+ASK Forms</div>
+                <p class="intro">An item marked <code>?</code> asks questions before it is fetched.</p>
+
+                <p>
+                    Following one fetches its attributes (<code>!</code>), and the form
+                    screen opens on the questions in its <code>+ASK</code> block, in order.
+                    <span class="kbd">S</span> sends the answers.
+                </p>
+                <table class="data-table">
+                    <thead><tr><th>Line</th><th>Asks</th><th>On the form screen</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>Ask:</code></td><td>One line of text, with an optional default after a TAB.</td><td>A text field.</td></tr>
+                        <tr><td><code>AskP:</code></td><td>A password.</td><td>Shown as stars.</td></tr>
+                        <tr><td><code>AskL:</code></td><td>Several lines.</td><td>Typed line by line, a blank line ending it (up to 50).</td></tr>
+                        <tr><td><code>AskF:</code></td><td>A file name to save the reply under.</td><td>A text field; the reply is saved in the transfer folder.</td></tr>
+                        <tr><td><code>Select:</code></td><td>A yes/no option (<code>label:1</code> starts ticked).</td><td>A checkbox.</td></tr>
+                        <tr><td><code>Choose:</code></td><td>One of several choices, TAB-separated.</td><td>A pick list.</td></tr>
+                        <tr><td><code>ChooseF:</code></td><td>A local file to send.</td><td>A pick list of the transfer folder's files, nothing chosen at first.</td></tr>
+                        <tr><td><code>Note:</code></td><td>Nothing: text for the user.</td><td>Shown above the form.</td></tr>
+                    </tbody>
+                </table>
+                <pre><code><span class="prompt-char">C:</span> selector<span class="output-text">&lt;TAB&gt;</span>+<span class="output-text">&lt;TAB&gt;</span>1 CR LF
+<span class="prompt-char">C:</span> +<span class="output-text">N</span> CR LF                 <span class="output-text">N = bytes that follow</span>
+<span class="prompt-char">C:</span> one answer per line, in order
+<span class="prompt-char">C:</span> <span class="output-text">(an AskL: its line count, then its lines)</span>
+<span class="prompt-char">C:</span> <span class="output-text">(a ChooseF: the file's bytes, last)</span>
+<span class="prompt-char">S:</span> the reply, drawn as a page</code></pre>
+                <div class="callout callout-info">
+                    <strong>Only a Gopher+ form can send a file.</strong> A form counts as
+                    one only when it came from an <code>+ASK</code> block, on a gopher page,
+                    and is sent to a gopher item &mdash; so no web page can make the browser
+                    send a file from the transfer folder. The Gopher+ spec suggests limiting
+                    <code>ChooseF</code> to one directory; the gateway offers only the
+                    transfer folder's own files.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SAFETY AND LIMITS                             -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="safety">
+                <div class="section-title">Safety &amp; Limits</div>
+                <p class="intro">A menu can point anywhere, so what it points at is checked.</p>
+
+                <table class="data-table">
+                    <thead><tr><th>Rule</th><th>Why</th></tr></thead>
+                    <tbody>
+                        <tr><td>Hosts on this machine or the local network are refused, unless <code>disable_ip_safety</code> is on.</td><td>A menu on the internet must not be able to reach your LAN through the gateway. Every address a name resolves to is checked, and the checked address is the one connected to.</td></tr>
+                        <tr><td>Control characters are stripped from everything shown, the C1 range included.</td><td>A hostile server could otherwise move the cursor or rewrite the screen.</td></tr>
+                        <tr><td>Pages: 512&nbsp;KB, 15&nbsp;seconds for the whole exchange with each server.  At most three <code>+</code> copies are tried after a server that is down.</td><td>A server trickling bytes, or a menu listing many dead copies, cannot hold the session.</td></tr>
+                        <tr><td>Files: 8&nbsp;MB, 180&nbsp;seconds.</td><td>What the transfer protocols can send on; time for a slow server.</td></tr>
+                        <tr><td>After a <code>.</code> line: 2&nbsp;seconds more at most.</td><td>Either side may close then.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- COMPLIANCE                                    -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="compliance">
+                <div class="section-title">Compliance</div>
+                <p class="intro">What each specification asks of a client, and where the gateway stands.</p>
+
+                <table class="data-table">
+                    <thead><tr><th>Requirement</th><th>Spec</th><th>Status</th></tr></thead>
+                    <tbody>
+                        <tr><td>Port 70 by default; selector then CR LF</td><td>RFC 1436 &sect;2</td><td>Yes</td></tr>
+                        <tr><td>Menus: type, display, selector, host, port; end at the <code>.</code> line</td><td>RFC 1436 App. (Menu)</td><td>Yes</td></tr>
+                        <tr><td>Ignore fields after the port</td><td>Gopher+ &sect;2.1</td><td>Yes; the fifth is read for Gopher+</td></tr>
+                        <tr><td>Unknown types ignored or shown as unknown</td><td>RFC 1436 &sect;3.5</td><td>Shown as <code>[???]</code></td></tr>
+                        <tr><td>Strip the extra dot from text lines</td><td>RFC 1436 App. (TextFile)</td><td>Yes (types 0, 4, 6)</td></tr>
+                        <tr><td>Be prepared for no <code>.</code> line (server just closes)</td><td>RFC 1436 App. (TextFile)</td><td>Yes</td></tr>
+                        <tr><td>Either side may close after the reply</td><td>RFC 1436 App. (transactions)</td><td>Yes, 2&nbsp;s after a <code>.</code> line</td></tr>
+                        <tr><td>Binary files read until the server closes</td><td>RFC 1436 App. (types 5, 9)</td><td>Yes</td></tr>
+                        <tr><td>Search: selector, TAB, words</td><td>RFC 1436 App. (type 7)</td><td>Yes</td></tr>
+                        <tr><td>CSO items talk the CSO protocol</td><td>RFC 1436 &sect;3.7</td><td>Yes, lookups</td></tr>
+                        <tr><td>Telnet items connect to host and port, login from the selector</td><td>RFC 1436 App. (type 8)</td><td>Yes</td></tr>
+                        <tr><td>tn3270 items</td><td>RFC 1436 App. (type T)</td><td>Connected over plain telnet, with a warning</td></tr>
+                        <tr><td><code>+</code> items use their primary's transaction</td><td>RFC 1436 App. (type +)</td><td>Yes</td></tr>
+                        <tr><td>Move to a redundant server when one seems down</td><td>RFC 1436 &sect;3.5</td><td>Yes</td></tr>
+                        <tr><td>Display strings in ISO Latin-1</td><td>RFC 1436 App.; Gopher+ App.</td><td>Yes; UTF-8 also read</td></tr>
+                        <tr><td>Selectors are any bytes but TAB, CR, LF</td><td>RFC 1436 App.; RFC 4266 &sect;2.1</td><td>Yes, kept byte for byte</td></tr>
+                        <tr><td>URL: default port and type, <code>%09</code> search and Gopher+ string</td><td>RFC 4266 &sect;2</td><td>Yes</td></tr>
+                        <tr><td>Gopher+ replies: count, <code>-1</code>, <code>-2</code>, errors 1&ndash;3</td><td>Gopher+ &sect;2.3</td><td>Yes</td></tr>
+                        <tr><td><code>!</code> and <code>$</code> attributes; <code>+INFO</code>, <code>+ADMIN</code>, <code>+VIEWS</code>, <code>+ABSTRACT</code></td><td>Gopher+ &sect;2.5, &sect;2.7, App. I</td><td>Yes</td></tr>
+                        <tr><td>Alternate views</td><td>Gopher+ &sect;2.6</td><td>Yes</td></tr>
+                        <tr><td><code>+ASK</code>: every question type, AskL line count, one file last</td><td>Gopher+ &sect;2.8</td><td>Yes</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- EXAMPLES                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="examples">
+                <div class="section-title">Example Exchanges</div>
+                <p class="intro">As they appear on the wire (<code>C:</code> = the gateway, <code>S:</code> = the gopher server).</p>
+
+                <div class="cat">A menu</div>
+                <pre><code><span class="prompt-char">C:</span> CR LF                                 <span class="output-text">the empty selector: the top menu</span>
+<span class="prompt-char">S:</span> iWelcome to the example server<span class="output-text">&lt;TAB&gt;</span><span class="output-text">&lt;TAB&gt;</span>error.host<span class="output-text">&lt;TAB&gt;</span>1
+<span class="prompt-char">S:</span> 1Software<span class="output-text">&lt;TAB&gt;</span>/software<span class="output-text">&lt;TAB&gt;</span>example.org<span class="output-text">&lt;TAB&gt;</span>70
+<span class="prompt-char">S:</span> 0About this server<span class="output-text">&lt;TAB&gt;</span>/about.txt<span class="output-text">&lt;TAB&gt;</span>example.org<span class="output-text">&lt;TAB&gt;</span>70
+<span class="prompt-char">S:</span> 7Search the archive<span class="output-text">&lt;TAB&gt;</span>/search<span class="output-text">&lt;TAB&gt;</span>example.org<span class="output-text">&lt;TAB&gt;</span>70
+<span class="prompt-char">S:</span> .
+<span class="output-text">   -> Welcome to the example server
+      Software/                   [1]
+      About this server           [2]
+      Search the archive?         [3]</span></code></pre>
+
+                <div class="cat">A search</div>
+                <pre><code><span class="prompt-char">C:</span> /search<span class="output-text">&lt;TAB&gt;</span>commodore 64 CR LF
+<span class="prompt-char">S:</span> 0C64 memory map<span class="output-text">&lt;TAB&gt;</span>/docs/c64map.txt<span class="output-text">&lt;TAB&gt;</span>example.org<span class="output-text">&lt;TAB&gt;</span>70
+<span class="prompt-char">S:</span> .</code></pre>
+
+                <div class="cat">Gopher+ attributes</div>
+                <pre><code><span class="prompt-char">C:</span> /about.txt<span class="output-text">&lt;TAB&gt;</span>! CR LF
+<span class="prompt-char">S:</span> +-1
+<span class="prompt-char">S:</span> +INFO: 0About this server<span class="output-text">&lt;TAB&gt;</span>/about.txt<span class="output-text">&lt;TAB&gt;</span>example.org<span class="output-text">&lt;TAB&gt;</span>70<span class="output-text">&lt;TAB&gt;</span>+
+<span class="prompt-char">S:</span> +ADMIN:
+<span class="prompt-char">S:</span>  Admin: Example Admin &lt;admin@example.org&gt;
+<span class="prompt-char">S:</span>  Mod-Date: Mon Aug 30 17:02:01 1993 &lt;19930830170201&gt;
+<span class="prompt-char">S:</span> +VIEWS:
+<span class="prompt-char">S:</span>  Text/plain: &lt;2k&gt;
+<span class="prompt-char">S:</span> .</code></pre>
+
+                <div class="cat">A form</div>
+                <pre><code><span class="prompt-char">C:</span> /feedback<span class="output-text">&lt;TAB&gt;</span>! CR LF
+<span class="prompt-char">S:</span> +-1
+<span class="prompt-char">S:</span> +INFO: 0Send feedback<span class="output-text">&lt;TAB&gt;</span>/feedback<span class="output-text">&lt;TAB&gt;</span>example.org<span class="output-text">&lt;TAB&gt;</span>70<span class="output-text">&lt;TAB&gt;</span>?
+<span class="prompt-char">S:</span> +ASK:
+<span class="prompt-char">S:</span>  Ask: Your name?
+<span class="prompt-char">S:</span>  Choose: Rating<span class="output-text">&lt;TAB&gt;</span>Good<span class="output-text">&lt;TAB&gt;</span>Bad
+<span class="prompt-char">S:</span> .
+<span class="output-text">   ...the user answers "Ricky" and picks Good...</span>
+<span class="prompt-char">C:</span> /feedback<span class="output-text">&lt;TAB&gt;</span>+<span class="output-text">&lt;TAB&gt;</span>1 CR LF
+<span class="prompt-char">C:</span> +13 CR LF
+<span class="prompt-char">C:</span> Ricky CR LF
+<span class="prompt-char">C:</span> Good CR LF
+<span class="prompt-char">S:</span> +-2
+<span class="prompt-char">S:</span> Thank you!</code></pre>
+
+                <div class="cat">A server that is down, and its copy</div>
+                <pre><code><span class="output-text">   menu:  1Documents ... main.example 70
+          +Documents ... mirror.example 70</span>
+<span class="prompt-char">C:</span> connect main.example:70        <span class="output-text">refused</span>
+<span class="prompt-char">C:</span> connect mirror.example:70      <span class="output-text">answers</span>
+<span class="prompt-char">C:</span> /docs CR LF</code></pre>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- GLOSSARY                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="glossary">
+                <div class="section-title">Glossary</div>
+                <table class="data-table">
+                    <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td>Selector</td><td>The string a client sends to fetch an item. Opaque to the client; any bytes but TAB, CR and LF.</td></tr>
+                        <tr><td>Display string</td><td>The text a menu shows for an item.</td></tr>
+                        <tr><td>Item type</td><td>The one character at the start of a menu line saying what the item is.</td></tr>
+                        <tr><td>Lastline</td><td>The line holding only <code>.</code> that ends a menu or text file.</td></tr>
+                        <tr><td>Dot doubling</td><td>The server adding a <code>.</code> to a text line that starts with one, so it cannot be mistaken for the Lastline.</td></tr>
+                        <tr><td>Gopherspace</td><td>All the gopher servers, linked by their menus.</td></tr>
+                        <tr><td>Gopher+</td><td>The 1993 upward-compatible extension: attributes, views and forms.</td></tr>
+                        <tr><td>View</td><td>One of the formats a Gopher+ item can be fetched in, named by MIME type and language.</td></tr>
+                        <tr><td>CSO</td><td>The Computing Services Office &ldquo;ph&rdquo; phone-book protocol from the University of Illinois.</td></tr>
+                        <tr><td>Veronica</td><td>The classic search engine of all gopherspace; Veronica-2 runs on Floodgap.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section">
+                <div class="section-title">See Also</div>
+                <div class="callout callout-info">
+                    The User Manual's web browser chapter (&sect;13) covers the browser as a
+                    whole, and &sect;13.5 Gopher in particular. The specifications this page
+                    follows are RFC&nbsp;1436 (<em>The Internet Gopher Protocol</em>, 1993),
+                    RFC&nbsp;4266 (<em>The gopher URI Scheme</em>, 2005) and
+                    <em>Gopher+: Upward compatible enhancements to the Internet Gopher
+                    protocol</em> (University of Minnesota, 1993). Files saved from Gopher
+                    are sent on with the protocols in the
+                    <a href="xmodemreference.html">XMODEM</a>,
+                    <a href="zmodemreference.html">ZMODEM</a> and
+                    <a href="kermitreference.html">Kermit</a> references.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- PROTOCOL REFERENCES                            -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="references">
+                <div class="section-title">References</div>
+                <p class="intro">Deep-dive reference pages for every protocol and interface, plus the character-set tables and ANSI escape-sequence reference.</p>
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3><a href="cpmreference.html">CP/M Emulator</a></h3>
+                        <p>UART profiles, EGT8080, HBIOS calls, BDOS/BIOS coverage.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="xmodemreference.html">XMODEM</a></h3>
+                        <p>128-byte blocks; CRC-16 / checksum negotiation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="ymodemreference.html">YMODEM</a></h3>
+                        <p>Block-0 metadata, batch, exact size truncation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="zmodemreference.html">ZMODEM</a></h3>
+                        <p>Streaming; ZDLE, CRC-32, autostart, resume.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermitreference.html">Kermit</a></h3>
+                        <p>Send-Init negotiation; F / A / D / Z / B transfer.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="punterreference.html">Punter</a></h3>
+                        <p>C1 dual checksum, two-phase, GOO/BAD/ACK.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="atcommandreference.html">AT Commands</a></h3>
+                        <p>Hayes command set, S-registers, +++ escape.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="telnetreference.html">Telnet</a></h3>
+                        <p>IAC negotiation, every option, the NVT data phase.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="sshreference.html">SSH</a></h3>
+                        <p>Server, gateway, host keys, TOFU, auth modes.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3 style="color: var(--yellow);">Gopher <span class="dim-text" style="font-size:0.78em;">(this page)</span></h3>
+                        <p>Menus, every item type, Gopher+ attributes and forms.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html">Character Code Tables</a></h3>
+                        <p>Hex tables for every encoding: ASCII, ANSI, PETSCII, ATASCII, Baudot/ITA2, ZX Spectrum, TRS-80.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html#ansi-table">ANSI Escape Sequences</a></h3>
+                        <p>Cursor, colour/SGR, erase, and screen-mode escape codes, with the raw hex bytes.</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v1.0.6 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>

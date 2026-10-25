@@ -1550,6 +1550,12 @@ pub(crate) struct TelnetSession {
     web_lines: Vec<String>,
     web_scroll: usize,
     web_links: Vec<String>,
+    /// For each link, the servers that hold the same thing (a gopher
+    /// menu's `+` items, `WebPage::alternates`).
+    web_alternates: Vec<Vec<String>>,
+    /// The followed link's alternates, for the fetch that follows it to try
+    /// if its server is down; taken by that fetch.
+    web_next_alternates: Vec<String>,
     web_history: Vec<(String, usize)>,
     web_url: Option<String>,
     /// Whether the configured homepage has been auto-loaded this visit.
@@ -1749,6 +1755,8 @@ impl TelnetSession {
             web_lines: Vec::new(),
             web_scroll: 0,
             web_links: Vec::new(),
+            web_alternates: Vec::new(),
+            web_next_alternates: Vec::new(),
             web_history: Vec::new(),
             web_url: None,
             web_home_tried: false,
@@ -1836,6 +1844,8 @@ impl TelnetSession {
             web_lines: Vec::new(),
             web_scroll: 0,
             web_links: Vec::new(),
+            web_alternates: Vec::new(),
+            web_next_alternates: Vec::new(),
             web_history: Vec::new(),
             web_url: None,
             web_home_tried: false,
@@ -1943,6 +1953,8 @@ impl TelnetSession {
             web_lines: Vec::new(),
             web_scroll: 0,
             web_links: Vec::new(),
+            web_alternates: Vec::new(),
+            web_next_alternates: Vec::new(),
             web_history: Vec::new(),
             web_url: None,
             web_home_tried: false,
@@ -2850,6 +2862,8 @@ pub fn start_server(
                                     web_lines: Vec::new(),
                                     web_scroll: 0,
                                     web_links: Vec::new(),
+                                    web_alternates: Vec::new(),
+                                    web_next_alternates: Vec::new(),
                                     web_history: Vec::new(),
                                     web_url: None,
                                     web_home_tried: false,
