@@ -116,6 +116,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A slave's CP/M endpoint waits a second before it re-announces.**  When
+  its registration with the master ended, it connected again at once.  Two
+  gateways behind one address -- each registration replacing the other's on
+  the master -- then traded the slot many times a second and tripped the
+  master's connection limit for that address, locking out its serial ports
+  too.  It now waits the same second the serial ports wait.  Two gateways
+  behind one address still cannot both hold a CP/M slot on one master.
 - **A letter typed is the letter typed.**  On a terminal that sends
   UTF-8, an accented letter reached the gateway as two Latin-1 characters
   and was saved or sent encoded twice (`cafÃ©` for `café`).  It is read as

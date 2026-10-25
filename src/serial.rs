@@ -2794,6 +2794,8 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>, _exit: AnnouncerExit) {
     let mut backoff = RECONNECT_BACKOFF_MIN; // grows while the master is away
     let mut last_err: Option<String> = None; // so one reason logs once
     loop {
+        // Whether this pass held a registration that has now ended.
+        let mut held = false;
         if stop.load(Ordering::SeqCst) {
             return;
         }
@@ -2844,6 +2846,7 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>, _exit: AnnouncerExit) {
         .await
         {
             Ok(crate::relay::MasterRelay { _session, mut stream }) => {
+                held = true;
                 attempt = 0; // connected: a later outage counts from one again
                 backoff = RECONNECT_BACKOFF_MIN;
                 last_err = None;
@@ -2932,6 +2935,16 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>, _exit: AnnouncerExit) {
         // a stale "announced" would have it reporting an endpoint the master
         // can no longer reach.
         crate::relay::set_cpm_announced(false);
+        // A registration that ended -- the call finished, the master closed
+        // the channel, its settings changed -- re-announces after the same
+        // brisk floor the serial ports keep (`RECONNECT_BACKOFF_MIN`), not at
+        // once.  Without it, two gateways behind one address (each
+        // registration evicts the other's, `relay::register_remote_port`)
+        // traded the CPM slot many times a second, which tripped the master's
+        // per-address connection limit and locked out every port from there.
+        if held {
+            cpm_announce_backoff(&stop, RECONNECT_BACKOFF_MIN).await;
+        }
     }
 }
 
@@ -9022,6 +9035,37 @@ mod tests {
         assert_eq!(tick.matches("get_config()").count(), 1, "a second config reading crept back in");
         let registered = tick.find("SlaveLinkState::Registered").expect("the success path");
         assert!(tick[connect..registered].contains("attempt = 0;"), "the attempt count is not reset on success");
+    }
+
+    /// The CP/M announcer waits the serial ports' brisk floor before it
+    /// re-announces after a registration ends.  It used to go straight back to
+    /// connecting, so two gateways behind one address -- each registration
+    /// evicting the other's -- traded the CPM slot many times a second and
+    /// tripped the master's per-address connection limit (measured live: two
+    /// slaves on one Pi, ~100 master log lines a minute, every port from that
+    /// address refused).  The wait is gated on a registration having been held
+    /// in *this* pass -- the flag is made fresh each pass and set only on the
+    /// success path -- so a failed connect keeps its own ladder and is never
+    /// waited for twice.
+    #[test]
+    fn test_the_cpm_announcer_waits_before_it_re_announces() {
+        let src = include_str!("serial.rs").replace("\r\n", "\n");
+        let body = &src[src.find("pub async fn cpm_slave_announce(").expect("the announcer")..];
+        let body = &body[..body.find("\n}\n").expect("its end")];
+        let top = body.find("    loop {").expect("the loop");
+        let fresh = body.find("let mut held = false;").expect("the flag");
+        let stop = body.find("if stop.load(Ordering::SeqCst)").expect("the stop check");
+        assert!(top < fresh && fresh < stop, "the flag is not made fresh each pass");
+        assert_eq!(body.matches("held = true;").count(), 1, "the flag is set on more than one path");
+        let held = body.find("held = true;").expect("a held registration is recorded");
+        let connected = body.find("CONNECTED to master").expect("the success path");
+        assert!(held < connected, "held is not set on the success path");
+        let cleared = body.rfind("crate::relay::set_cpm_announced(false);").expect("the flag cleared");
+        let wait = body.rfind("cpm_announce_backoff(&stop, RECONNECT_BACKOFF_MIN).await;").expect("the floor");
+        assert!(cleared < wait, "the floor runs before the announced flag is cleared");
+        let gate = body[..wait].rfind("if held {").expect("the wait is gated");
+        assert!(cleared < gate, "the gate is not the one round the floor");
+        assert!(!body[wait..].contains("Err(e)"), "the floor sits inside an arm, not after the match");
     }
 
     /// A console port on a slave is dedicated to the master and must be
