@@ -304,8 +304,10 @@ impl TelnetSession {
         }
         self.flush().await?;
 
+        // The letters typed (`typed_text`): "Zürich" from a UTF-8 terminal
+        // is looked up as Zürich.
         let input = match self.get_line_input().await? {
-            Some(s) => s,
+            Some(s) => self.typed_text(&s),
             None => return Ok(()),
         };
 

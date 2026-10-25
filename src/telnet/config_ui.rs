@@ -607,10 +607,11 @@ impl TelnetSession {
         // An address is taken as the browser's URL prompt takes it: the bytes
         // typed (`typed_url`), so a homepage set here goes to its server as
         // the same address typed at G does.
+        // Anything else, the letters typed (`typed_text`).
         let v = if key == "browser_homepage" {
             crate::webbrowser::typed_url(&crate::telnet::colors::to_latin1_bytes(&v))
         } else {
-            v
+            self.typed_text(&v)
         };
         let k = key.to_string();
         tokio::task::spawn_blocking(move || {
@@ -5801,8 +5802,9 @@ impl TelnetSession {
         self.send("  New directory: ").await?;
         self.flush().await?;
 
+        // The letters typed (`typed_text`): a folder named with an `é`.
         let input = match self.get_line_input().await? {
-            Some(s) if !s.is_empty() => s,
+            Some(s) if !s.is_empty() => self.typed_text(&s),
             _ => return Ok(()),
         };
 

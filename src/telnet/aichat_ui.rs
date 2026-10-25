@@ -41,8 +41,10 @@ impl TelnetSession {
             .await?;
         self.flush().await?;
 
+        // The letters typed (`typed_text`): a UTF-8 terminal's `é` is
+        // asked as `é`, not as two Latin-1 letters.
         let mut question = match self.get_line_input().await? {
-            Some(s) if !s.is_empty() && !s.eq_ignore_ascii_case("q") => s,
+            Some(s) if !s.is_empty() && !s.eq_ignore_ascii_case("q") => self.typed_text(&s),
             _ => return Ok(()),
         };
 
@@ -194,7 +196,7 @@ impl TelnetSession {
             // merely starts with a command letter (e.g. "Quantum...") is
             // no longer swallowed by the menu.  ESC / disconnect → None.
             let input = match self.get_line_input().await? {
-                Some(s) => s,
+                Some(s) => self.typed_text(&s),
                 None => return Ok(None),
             };
             if input.is_empty() {

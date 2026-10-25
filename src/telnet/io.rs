@@ -929,6 +929,21 @@ impl TelnetSession {
         }
     }
 
+    /// A typed line as text.  The line holds one char per byte typed
+    /// (`get_line_input`), so a UTF-8 terminal's `é` arrives as two; read
+    /// back as UTF-8 if it is, else Latin-1 (`decode_text`), it is the
+    /// letter typed, whichever the terminal sends.  A C64's line is
+    /// already ASCII.
+    ///
+    /// Not for a password: login checks the bytes as typed, so one set
+    /// through here would no longer match.
+    pub(in crate::telnet) fn typed_text(&self, line: &str) -> String {
+        if self.terminal_type == TerminalType::Petscii {
+            return line.to_string();
+        }
+        crate::webbrowser::decode_text(&crate::telnet::colors::to_latin1_bytes(line)).into_owned()
+    }
+
     pub(in crate::telnet) async fn get_line_input(&mut self) -> Result<Option<String>, std::io::Error> {
         self.arm_if_a_transfer_asked().await;
         self.read_input_loop(&mut Vec::new(), InputMode::Normal).await

@@ -16953,6 +16953,72 @@ async fn test_a_typed_form_answer_is_the_letter_typed() {
     assert!(matches!(&form.fields[0], crate::webbrowser::FormField::TextArea { value, .. } if value == "caf\u{e9}"), "{shown}");
 }
 
+/// A typed line read back as the letters typed: UTF-8 if it is, else
+/// Latin-1; a C64's line as it came.
+#[test]
+fn test_typed_text_is_the_letters_typed() {
+    let line = |b: &[u8]| -> String { b.iter().map(|&c| char::from(c)).collect() };
+    let (ansi, _peer) = make_test_session_with_peer(TerminalType::Ansi);
+    assert_eq!(ansi.typed_text(&line(b"Z\xc3\xbcrich")), "Z\u{fc}rich");
+    assert_eq!(ansi.typed_text(&line(b"Z\xfcrich")), "Z\u{fc}rich");
+    assert_eq!(ansi.typed_text("plain"), "plain");
+    let (c64, _peer) = make_test_session_with_peer(TerminalType::Petscii);
+    assert_eq!(c64.typed_text(&line(b"a\xc3\xbc")), line(b"a\xc3\xbc"));
+}
+
+/// AI Chat's questions and Weather's location are read as the letters
+/// typed.  Both go to the internet (Groq, Open-Meteo), so the wiring is
+/// pinned here rather than by a fetch.
+#[test]
+fn test_ai_chat_and_weather_read_the_letters_typed() {
+    fn body<'a>(src: &'a str, sig: &str) -> &'a str {
+        let at = src.find(sig).unwrap_or_else(|| panic!("{sig} not found"));
+        let rest = &src[at + sig.len()..];
+        let end = ["\n    pub(", "\n    async fn ", "\n    fn "].iter().filter_map(|m| rest.find(m)).min().unwrap_or(rest.len());
+        &rest[..end]
+    }
+    let ai = include_str!("aichat_ui.rs").replace("\r\n", "\n");
+    let f = body(&ai, "async fn ai_chat(");
+    assert!(f.contains("&& !s.eq_ignore_ascii_case(\"q\") => self.typed_text(&s),"), "first question");
+    // A follow-up is typed on the answer's page.
+    let f = body(&ai, "async fn ai_show_answer(");
+    assert!(f.contains("Some(s) => self.typed_text(&s),"), "follow-up");
+    let weather = include_str!("weather.rs").replace("\r\n", "\n");
+    let f = body(&weather, "async fn weather(");
+    assert!(f.contains("Some(s) => self.typed_text(&s),"), "location");
+}
+
+/// A setting typed on the settings screen is the letters typed: a weather
+/// location and a transfer folder with an accent, from a UTF-8 terminal.
+#[tokio::test]
+async fn test_a_setting_typed_is_the_letters_typed() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let before = crate::config::get_config().weather_location.clone();
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("New value", b"Z\xc3\xbcrich\r"), ("Press any key", b"x")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.other_set_field("Weather location", "weather_location", &before, false))
+        .await
+        .expect("hung")
+        .unwrap();
+    drop(sess);
+    screen.await.unwrap();
+    let saved = crate::config::get_config().weather_location.clone();
+    crate::config::update_config_value("weather_location", &before);
+    assert_eq!(saved, "Z\u{fc}rich");
+
+    let before = crate::config::get_config().transfer_dir.clone();
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("New directory", b"/tmp/caf\xc3\xa9\r"), ("Press any key", b"x")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.xmodem_set_dir(&before)).await.expect("hung").unwrap();
+    drop(sess);
+    screen.await.unwrap();
+    let saved = crate::config::get_config().transfer_dir.clone();
+    crate::config::update_config_value("transfer_dir", &before);
+    assert_eq!(saved, "/tmp/caf\u{e9}");
+}
+
 /// The hand-off dials the address `gopher_dial_addr` checked, and a form
 /// that sends a file is given a file's time: wiring a loopback test cannot
 /// see, since tests may fetch from internal addresses and a slow server

@@ -618,18 +618,6 @@ impl TelnetSession {
         self.web_forms.get(idx).is_some_and(|f| self.web_is_gopher_form(f))
     }
 
-    /// A typed line as text.  The line holds one char per byte typed
-    /// (`get_line_input`), so a UTF-8 terminal's `é` arrives as two; read
-    /// back as UTF-8 if it is, else Latin-1 (`decode_text`), it is the
-    /// letter typed, whichever the terminal sends.  A C64's line is
-    /// already ASCII.
-    fn web_typed_text(&self, line: &str) -> String {
-        if self.terminal_type == TerminalType::Petscii {
-            return line.to_string();
-        }
-        crate::webbrowser::decode_text(&crate::telnet::colors::to_latin1_bytes(line)).into_owned()
-    }
-
     /// `web_gopher_form`'s rule, for a form already in hand.
     fn web_is_gopher_form(&self, f: &crate::webbrowser::WebForm) -> bool {
         self.web_url.as_deref().is_some_and(|u| u.starts_with("gopher://"))
@@ -955,9 +943,9 @@ impl TelnetSession {
         self.flush().await?;
 
         let query = match self.get_line_input().await? {
-            // The letters typed (`web_typed_text`), matched without case,
+            // The letters typed (`typed_text`), matched without case,
             // accented ones too: `É` finds `é`.
-            Some(s) => self.web_typed_text(&s).trim().to_lowercase(),
+            Some(s) => self.typed_text(&s).trim().to_lowercase(),
             None => return Ok(()),
         };
         // Nothing but spaces would be found on every line.
@@ -1270,7 +1258,7 @@ impl TelnetSession {
                 self.send("  > ").await?;
                 self.flush().await?;
                 match self.get_line_input().await? {
-                    Some(line) if !line.is_empty() => rows.push(self.web_typed_text(&line)),
+                    Some(line) if !line.is_empty() => rows.push(self.typed_text(&line)),
                     Some(_) => break,
                     // ESC: the answer is left as it was.
                     None => return Ok(()),
@@ -1291,7 +1279,7 @@ impl TelnetSession {
                 self.get_line_input().await?
             };
             if let Some(new_val) = input {
-                let new_val = self.web_typed_text(&new_val);
+                let new_val = self.typed_text(&new_val);
                 match &mut form.fields[idx] {
                     FormField::Text { value, .. } | FormField::TextArea { value, .. } => {
                         *value = new_val;
