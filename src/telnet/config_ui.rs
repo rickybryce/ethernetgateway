@@ -607,9 +607,14 @@ impl TelnetSession {
         // An address is taken as the browser's URL prompt takes it: the bytes
         // typed (`typed_url`), so a homepage set here goes to its server as
         // the same address typed at G does.
-        // Anything else, the letters typed (`typed_text`).
+        // Anything else, the letters typed (`typed_text`) -- but not the
+        // master's login name: the master compares it with its own, set
+        // and typed the way the login name always has been (see
+        // `typed_text`), and a pair typed alike on both must still match.
         let v = if key == "browser_homepage" {
             crate::webbrowser::typed_url(&crate::telnet::colors::to_latin1_bytes(&v))
+        } else if key == "slave_master_username" {
+            v
         } else {
             self.typed_text(&v)
         };

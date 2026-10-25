@@ -945,7 +945,9 @@ impl TelnetSession {
         let query = match self.get_line_input().await? {
             // The letters typed (`typed_text`), matched without case,
             // accented ones too: `É` finds `é`.
-            Some(s) => self.typed_text(&s).trim().to_lowercase(),
+            // Folded as the page is (`web_text`): on a 7-bit screen "café"
+            // finds the "cafe" shown.
+            Some(s) => self.web_text(&self.typed_text(&s)).trim().to_lowercase(),
             None => return Ok(()),
         };
         // Nothing but spaces would be found on every line.

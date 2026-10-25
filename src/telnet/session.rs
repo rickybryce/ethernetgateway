@@ -61,19 +61,23 @@ pub(crate) fn is_backspace_key(byte: u8, erase_char: u8) -> bool {
 /// C64, whose bytes are PETSCII) pops one.  A Latin-1 terminal's bytes are
 /// one each, and the one pair it could type that reads as UTF-8 (`Ã©`) is
 /// read as `é` everywhere else too (`decode_text`), so it goes as one.
-pub(crate) fn pop_typed_char(buf: &mut Vec<u8>, utf8: bool) {
-    let Some(last) = buf.pop() else { return };
+///
+/// How many bytes went: a password, echoed a `*` per byte, rubs out that
+/// many.
+pub(crate) fn pop_typed_char(buf: &mut Vec<u8>, utf8: bool) -> usize {
+    let Some(last) = buf.pop() else { return 0 };
     if !utf8 || !(0x80..=0xBF).contains(&last) {
-        return;
+        return 1;
     }
     for n in 1..=3 {
-        let Some(at) = buf.len().checked_sub(n) else { return };
+        let Some(at) = buf.len().checked_sub(n) else { return 1 };
         let seq = [&buf[at..], &[last][..]].concat();
         if std::str::from_utf8(&seq).is_ok_and(|s| s.chars().count() == 1) {
             buf.truncate(at);
-            return;
+            return n + 1;
         }
     }
+    1
 }
 
 /// The erase character to use when the detection prompt was answered with

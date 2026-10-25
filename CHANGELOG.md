@@ -100,8 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the browser's Find (which now matches accented letters in either case),
   in AI Chat's questions, Weather's location, and the values typed on the
   settings screens (the weather location, the AI model, the log file, the
-  transfer folder, the relay's master host and user).  The login name and
-  password are left as typed: login checks them byte for byte.  Backspace
+  transfer folder, the relay's master host).  Login names and passwords --
+  the gateway's own and the master's the relay logs in with -- are left as
+  they were: they are compared with ones already stored, and changing how
+  they are read would lock out an accented one.  Backspace
   takes off a whole UTF-8 letter, not one of its bytes, at every prompt.
   A Gopher+ form the server wrote in Latin-1 is answered in Latin-1, a
   choice going back as the very bytes the server listed.  A gopher

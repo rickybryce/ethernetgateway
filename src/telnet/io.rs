@@ -935,8 +935,11 @@ impl TelnetSession {
     /// letter typed, whichever the terminal sends.  A C64's line is
     /// already ASCII.
     ///
-    /// Not for a password: login checks the bytes as typed, so one set
-    /// through here would no longer match.
+    /// Not for a login name or password.  Login compares the line as the
+    /// reader gives it, a char per byte, so a name or password set
+    /// through here would no longer match one typed at login -- or one
+    /// already stored.  Changing that is changing every stored credential,
+    /// a decision of its own.
     pub(in crate::telnet) fn typed_text(&self, line: &str) -> String {
         if self.terminal_type == TerminalType::Petscii {
             return line.to_string();
@@ -1024,8 +1027,12 @@ impl TelnetSession {
 
             if is_backspace_key(byte, self.erase_char) {
                 if !buf.is_empty() {
-                    pop_typed_char(buf, self.terminal_type != TerminalType::Petscii);
-                    self.echo_backspace().await?;
+                    let gone = pop_typed_char(buf, self.terminal_type != TerminalType::Petscii);
+                    // A column per character -- but a password shows a `*`
+                    // per byte.
+                    for _ in 0..if is_password { gone } else { 1 } {
+                        self.echo_backspace().await?;
+                    }
                     self.flush().await?;
                 }
                 continue;
@@ -1036,9 +1043,12 @@ impl TelnetSession {
                 // Erase the current line both in the buffer and on the
                 // user's terminal.
                 while !buf.is_empty() {
-                    // A column per character, not per byte.
-                    pop_typed_char(buf, self.terminal_type != TerminalType::Petscii);
-                    self.echo_backspace().await?;
+                    // A column per character, not per byte (a password's
+                    // `*` per byte).
+                    let gone = pop_typed_char(buf, self.terminal_type != TerminalType::Petscii);
+                    for _ in 0..if is_password { gone } else { 1 } {
+                        self.echo_backspace().await?;
+                    }
                 }
                 self.flush().await?;
                 continue;

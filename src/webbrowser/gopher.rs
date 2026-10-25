@@ -543,7 +543,9 @@ fn latin1_ask(items: &mut [ItemAttrs], raw: &[&[u8]]) {
         && block.latin1
         && block.name == "+ASK"
     {
-        block.lines = raw.iter().map(|l| l.iter().map(|&b| char::from(b)).collect()).collect();
+        // As `decode_text` would read them as Latin-1, its link-number
+        // bytes dropped too.
+        block.lines = raw.iter().map(|l| l.iter().filter(|&&b| b != 0x02 && b != 0x03).map(|&b| char::from(b)).collect()).collect();
     }
 }
 
@@ -1332,6 +1334,13 @@ mod tests {
         assert_eq!(page.lines[0], "See link  99 here");
         assert_eq!(page.lines.concat().matches('\u{2}').count(), page.links.len());
         assert_eq!(text_lines(b"a\x02 7\x03b\r\n"), vec!["a 7b"]);
+        // Nor a form read as Latin-1.
+        let attrs = b"+-2\r\n+INFO: 0Form\t/f\th\t70\t?\r\n+ASK:\r\n Note: See \x02 99\x03 caf\xe9\r\n Ask: Name \x02 7\x03:\r\n".to_vec();
+        let (port, server) = serve(attrs);
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/f%09%09%3F"), 72).unwrap();
+        server.join().unwrap();
+        assert_eq!(page.lines[0], "See  99 caf\u{e9}");
+        assert!(matches!(&page.forms[0].fields[0], FormField::Text { label, .. } if label == "Name  7:"), "{:?}", page.forms[0].fields);
     }
 
     /// A `?` item opens on its form: its attributes asked for with `!`.

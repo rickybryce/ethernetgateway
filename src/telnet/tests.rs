@@ -16662,7 +16662,8 @@ async fn test_a_typed_gopher_url_is_sent_as_typed() {
 fn test_backspace_takes_off_a_whole_typed_letter() {
     let after = |typed: &[u8], utf8: bool| {
         let mut buf = typed.to_vec();
-        pop_typed_char(&mut buf, utf8);
+        let gone = pop_typed_char(&mut buf, utf8);
+        assert_eq!(gone, typed.len() - buf.len(), "{typed:?}");
         buf
     };
     assert_eq!(after(b"caf\xc3\xa9", true), b"caf");
@@ -16674,6 +16675,26 @@ fn test_backspace_takes_off_a_whole_typed_letter() {
     // A C64's bytes are PETSCII: one each, whatever they look like.
     assert_eq!(after(b"caf\xc3\xa9", false), b"caf\xc3");
     assert_eq!(after(b"", true), b"");
+}
+
+/// A password shows a `*` per byte typed, so Backspace over a UTF-8 `é`
+/// rubs out both: no `*` is left over an empty answer.
+#[tokio::test]
+async fn test_a_password_backspace_leaves_no_star() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    // Typed before the prompt: a password prompt draws nothing to wait on.
+    let (mut rd, mut wr) = tokio::io::split(peer);
+    wr.write_all(b"\xc3\xa9\x7f\r").await.unwrap();
+    let got = tokio::time::timeout(std::time::Duration::from_secs(10), sess.get_password_input()).await.expect("hung").unwrap();
+    drop(sess);
+    let mut out = Vec::new();
+    rd.read_to_end(&mut out).await.unwrap();
+    let shown = String::from_utf8_lossy(&out).into_owned();
+    assert_eq!(got.as_deref(), Some(""));
+    assert_eq!(shown.matches('*').count(), shown.matches("\x08 \x08").count(), "{shown:?}");
+    assert_eq!(shown.matches('*').count(), 2, "{shown:?}");
 }
 
 /// Typed with a correction, an answer is still the letters on the screen.
@@ -16722,6 +16743,15 @@ async fn test_find_and_link_numbers_take_what_was_typed() {
     // Typed in capitals, the page in lower case -- and the other way round.
     sess.web_lines = vec!["nothing".into(), "un caf\u{e9} noir".into()];
     let screen = script_peer(peer, vec![("Find", b"CAF\xc3\x89\r")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_search_in_page()).await.expect("hung").unwrap();
+    assert_eq!(sess.web_scroll, 1);
+    drop(sess);
+    screen.await.unwrap();
+    // A 7-bit screen shows "cafe": what is typed is folded the same way.
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ascii);
+    sess.color_enabled = false;
+    sess.web_lines = vec!["nothing".into(), "un caf\u{e9} noir".into()];
+    let screen = script_peer(peer, vec![("Find", b"caf\xc3\xa9\r")]);
     tokio::time::timeout(std::time::Duration::from_secs(10), sess.web_search_in_page()).await.expect("hung").unwrap();
     assert_eq!(sess.web_scroll, 1);
     drop(sess);
@@ -17006,6 +17036,22 @@ async fn test_a_setting_typed_is_the_letters_typed() {
     let saved = crate::config::get_config().weather_location.clone();
     crate::config::update_config_value("weather_location", &before);
     assert_eq!(saved, "Z\u{fc}rich");
+
+    // The master's login name is kept as the login name always is: a char
+    // per byte typed, so it matches one typed alike on the master.
+    let before = crate::config::get_config().slave_master_username.clone();
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("New value", b"Jos\xc3\xa9\r"), ("Press any key", b"x")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.other_set_field("Master user", "slave_master_username", &before, false))
+        .await
+        .expect("hung")
+        .unwrap();
+    drop(sess);
+    screen.await.unwrap();
+    let saved = crate::config::get_config().slave_master_username.clone();
+    crate::config::update_config_value("slave_master_username", &before);
+    assert_eq!(saved, "Jos\u{c3}\u{a9}");
 
     let before = crate::config::get_config().transfer_dir.clone();
     let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
