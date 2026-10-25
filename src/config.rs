@@ -1082,7 +1082,8 @@ pub struct Config {
     /// lives at Groq and changes without us, so the only honest check is the
     /// answer the API gives, which the chat screen shows verbatim.
     pub ai_model: String,
-    /// Browser homepage URL. If empty, browser opens to a blank prompt.
+    /// Browser homepage URL, offered on the browser's home screen: Enter
+    /// opens it.  If empty, nothing is offered.
     pub browser_homepage: String,
     /// Last-used weather location — a city name or postal code, worldwide
     /// (e.g. "62051", "London, GB", "Zürich").  If empty, the user is prompted
@@ -3460,8 +3461,8 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push('\n');
 
     content.push_str("\
-# Browser homepage URL (loaded automatically when entering the browser)
-# Leave empty to start with a blank prompt.
+# Browser homepage URL (offered when entering the browser; Enter opens it)
+# Leave empty to offer none.
 ");
     write_kv_str(&mut content, "browser_homepage", &cfg.browser_homepage);
     content.push('\n');

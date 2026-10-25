@@ -72,23 +72,6 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn render_web_browser(&mut self) -> Result<(), std::io::Error> {
-        // Auto-load homepage on first visit if configured.
-        //
-        // `web_home_tried` is what makes it *once*: a failed fetch leaves
-        // `web_lines` and `web_url` both empty, which is the same state as
-        // "never visited", so an unreachable homepage otherwise started a
-        // fresh blocking fetch on every redraw and made the user wait out the
-        // timeout each time.  Cleared by `web_reset`, so leaving the browser
-        // and coming back does retry.
-        if !self.web_home_tried && self.web_lines.is_empty() && self.web_url.is_none() {
-            let cfg = config::get_config();
-            if !cfg.browser_homepage.is_empty() {
-                self.web_home_tried = true;
-                let url = crate::webbrowser::normalize_url(&cfg.browser_homepage);
-                self.web_fetch_page(&url, false).await?;
-            }
-        }
-
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
@@ -98,6 +81,14 @@ impl TelnetSession {
             self.send_line(&format!("  {}", self.yellow("WEB BROWSER"))).await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
+            // The homepage is offered, not fetched: Enter opens it, and
+            // anything typed instead goes where it says (`web_bare_enter`).
+            if let Some(home) = self.web_home_url() {
+                let room = self.web_content_width().saturating_sub("Home:  (Enter)".len());
+                let shown = crate::webbrowser::truncate_to_width(&self.web_text(&home), room);
+                self.send_line(&format!("  {} {}  {}", self.cyan("Home:"), self.amber(&shown), self.dim("(Enter)"))).await?;
+                self.send_line("").await?;
+            }
             self.send_line(&format!("  {}", self.dim("Try:"))).await?;
             self.send_line(&format!("  {}",
                 self.dim("  http://telnetbible.com")
@@ -202,6 +193,25 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// The configured homepage as the browser would fetch it, if one is set.
+    fn web_home_url(&self) -> Option<String> {
+        let home = config::get_config().browser_homepage;
+        let home = home.trim();
+        (!home.is_empty()).then(|| crate::webbrowser::normalize_url(home))
+    }
+
+    /// A bare Enter at the browser prompt.  On the home screen it opens the
+    /// homepage shown there; on a page it only redraws, so a reader who
+    /// presses Enter part-way down a page keeps their place.
+    pub(in crate::telnet) async fn web_bare_enter(&mut self) -> Result<(), std::io::Error> {
+        if self.web_lines.is_empty() {
+            if let Some(url) = self.web_home_url() {
+                self.web_fetch_page(&url, false).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(in crate::telnet) async fn handle_web_browser_command(&mut self, input: &str) -> Result<bool, std::io::Error> {
         // More than one character is not a command — it is somewhere to go.
         // `normalize_url` decides which: a scheme or a dot makes it a URL,
@@ -216,6 +226,25 @@ impl TelnetSession {
         // a byte typed, and a UTF-8 letter's last byte can be Unicode
         // whitespace as a char.
         let typed = input.trim_matches(|c: char| c.is_ascii_whitespace());
+        // A number on a page is a link, web or Gopher alike: they share
+        // `web_links`.  Checked before the URL rule, which would otherwise
+        // send "12" to a search engine and call a lone "7" unknown.  The home
+        // screen has no links, so there a number is still a search -- and
+        // `Q` leaves the closed page's links behind, so that guard is also
+        // what keeps "3" there from following a page no longer shown.  A
+        // Latin-1 no-break space (A0) round the number is let go, as the
+        // `L` prompt lets it go (`web_prompt_link`).
+        let number = typed.trim_matches('\u{A0}');
+        if !self.web_lines.is_empty() && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+            self.drain_input().await;
+            if self.web_links.is_empty() {
+                self.show_error("No links on this page.").await?;
+            } else {
+                // Too many digits for a usize is out of range like any other.
+                self.web_follow_link(number.parse().unwrap_or(usize::MAX)).await?;
+            }
+            return Ok(true);
+        }
         if typed.chars().count() > 1 {
             // The bytes typed, as the URL prompt takes them (`typed_url`).
             let typed = crate::webbrowser::typed_url(&crate::telnet::colors::to_latin1_bytes(typed));
@@ -246,7 +275,12 @@ impl TelnetSession {
                 }
                 "r" => {} // just redraw
                 _ => {
-                    self.show_error("Press G, K, H, or Q.").await?;
+                    let hint = if self.web_home_url().is_some() {
+                        "Press Enter, G, K, H, or Q."
+                    } else {
+                        "Press G, K, H, or Q."
+                    };
+                    self.show_error(hint).await?;
                 }
             }
         } else {
@@ -1509,8 +1543,5 @@ impl TelnetSession {
         self.web_url = None;
         self.web_title = None;
         self.web_fallback_hosts.clear();
-        // Leaving the browser ends the visit, so the homepage is auto-loaded
-        // again next time -- the once-only guard is per visit, not per session.
-        self.web_home_tried = false;
     }
 }

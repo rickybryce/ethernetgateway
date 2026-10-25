@@ -83,6 +83,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until the retry limit.  Two `CAN` bytes from the other side end it the same
   way.  After a packet that failed, bytes up to the next good packet (or a
   pause) are still data, so a PETSCII `_` in a damaged packet cannot cancel.
+- **Browser: type a link's number to follow it**, on a web page or a Gopher
+  menu, without pressing `L` first (`L` still works).  On a page a number is
+  always a link, so `12` follows link 12 where it used to search for "12";
+  press `G` to search for a number.  Letters are still commands, and longer
+  text is still an address or a search.
+- **Browser: the homepage is offered, not loaded.**  The browser opens on its
+  home screen with the homepage shown and `(Enter)` beside it; Enter opens it,
+  and an address, a search or a command typed instead goes there.  So a
+  homepage that is slow or down no longer stands between you and the site you
+  came for.
 
 ### Security
 

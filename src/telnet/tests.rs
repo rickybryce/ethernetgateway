@@ -1099,7 +1099,6 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         web_next_alternates: Vec::new(),
         web_history: Vec::new(),
         web_url: None,
-        web_home_tried: false,
         web_fallback_hosts: Vec::new(),
         web_title: None,
         web_forms: Vec::new(),
@@ -1168,7 +1167,6 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         web_next_alternates: Vec::new(),
         web_history: Vec::new(),
         web_url: None,
-        web_home_tried: false,
         web_fallback_hosts: Vec::new(),
         web_title: None,
         web_forms: Vec::new(),
@@ -2801,6 +2799,7 @@ fn test_all_error_messages_fit_petscii() {
         "Location too long.",
         "Not found - try 'City, Country'.",
         // Web browser
+        "Press Enter, G, K, H, or Q.",
         "Press G, K, H, or Q.",
         "End of page.",
         "Top of page.",
@@ -16916,12 +16915,163 @@ async fn test_find_and_link_numbers_take_what_was_typed() {
     tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
 }
 
+/// A number typed at the page prompt follows that link, with no `L` first:
+/// "2" is the second link (not "Unknown command"), even with a Latin-1
+/// no-break space after it as `L` takes one; "12" on a two-link page is out
+/// of range (not a search for "12"); a page with no links says so; and on the
+/// home screen -- where `Q` leaves the closed page's links behind -- a number
+/// follows none of them.
+#[tokio::test]
+async fn test_a_number_at_the_page_prompt_follows_that_link() {
+    let (port, server) = serve_gopher_seq(vec![b"second\r\n.\r\n".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_lines = vec!["a menu".into()];
+    sess.web_links = vec![
+        "gopher://127.0.0.1:1/0/never".into(),
+        format!("gopher://127.0.0.1:{port}/0/two"),
+    ];
+    let screen = script_peer(peer, vec![]);
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.handle_web_browser_command(" 2\u{a0}")).await.expect("hung").unwrap();
+    assert_eq!(sess.web_lines, vec!["second"]);
+    drop(sess);
+    screen.await.unwrap();
+    let asked = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(asked, vec![b"/two\r\n".to_vec()]);
+
+    for (links, typed, said) in [
+        (vec!["gopher://127.0.0.1:1/0/a".to_string(), "gopher://127.0.0.1:1/0/b".into()], "12", "Link 12 not found."),
+        (vec!["gopher://127.0.0.1:1/0/a".to_string()], "99999999999999999999999", "not found."),
+        (vec![], "3", "No links on this page."),
+    ] {
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        sess.color_enabled = false;
+        sess.web_url = Some("gopher://127.0.0.1/1/".into());
+        sess.web_lines = vec!["a menu".into()];
+        sess.web_links = links;
+        let screen = script_peer(peer, vec![("Press any key", b"x")]);
+        tokio::time::timeout(std::time::Duration::from_secs(10), sess.handle_web_browser_command(typed)).await.expect("hung").unwrap();
+        assert_eq!(sess.web_lines, vec!["a menu"], "{typed} left the page");
+        drop(sess);
+        let shown = screen.await.unwrap();
+        assert!(shown.contains(said), "{typed}: {shown}");
+    }
+
+    // The home screen after `Q`: the closed page's links are still held.
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_links = vec!["gopher://127.0.0.1:1/0/closed".into()];
+    let screen = script_peer(peer, vec![("Press any key", b"x")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.handle_web_browser_command("1")).await.expect("hung").unwrap();
+    assert!(sess.web_lines.is_empty());
+    drop(sess);
+    let shown = screen.await.unwrap();
+    assert!(shown.contains("G, K, H, or Q."), "a number on the home screen did something: {shown}");
+}
+
+/// Puts `browser_homepage` back however the test ends.
+struct HomepageGuard(String);
+
+impl HomepageGuard {
+    fn new() -> Self {
+        HomepageGuard(crate::config::get_config().browser_homepage.clone())
+    }
+}
+
+impl Drop for HomepageGuard {
+    fn drop(&mut self) {
+        crate::config::update_config_value("browser_homepage", &self.0);
+    }
+}
+
+/// The homepage is offered on the browser's home screen, not fetched: the
+/// screen shows it with "(Enter)", drawing it fetches nothing, a bare Enter
+/// opens it, and on a page a bare Enter only redraws.  With no homepage set
+/// nothing is offered and Enter does nothing.
+#[tokio::test]
+async fn test_the_homepage_is_offered_and_enter_opens_it() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let _home = HomepageGuard::new();
+    let (port, server) = serve_gopher_seq(vec![b"welcome\r\n.\r\n".to_vec()]);
+    crate::config::update_config_value("browser_homepage", &format!("gopher://127.0.0.1:{port}/0/home"));
+
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![]);
+    sess.render_web_browser().await.unwrap();
+    assert!(sess.web_lines.is_empty(), "drawing the home screen fetched the homepage");
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_bare_enter()).await.expect("hung").unwrap();
+    assert_eq!(sess.web_lines, vec!["welcome"]);
+    // On a page, Enter keeps the page: the server has nothing more to give.
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_bare_enter()).await.expect("hung").unwrap();
+    assert_eq!(sess.web_lines, vec!["welcome"]);
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let home = shown.lines().find(|l| l.contains("Home:")).unwrap_or_else(|| panic!("no Home line: {shown}"));
+    assert!(home.contains(&format!("gopher://127.0.0.1:{port}/0/home")) && home.contains("(Enter)"), "{home}");
+    let asked = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(asked, vec![b"/home\r\n".to_vec()]);
+
+    // Through the real prompt loop: Enter at the home screen opens it.
+    let (port, server) = serve_gopher_seq(vec![b"from the loop\r\n.\r\n".to_vec()]);
+    crate::config::update_config_value("browser_homepage", &format!("gopher://127.0.0.1:{port}/0/loop"));
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    sess.current_menu = Menu::Browser;
+    let screen = script_peer(peer, vec![("(Enter)", b"\r")]);
+    let ran = tokio::time::timeout(std::time::Duration::from_secs(5), sess.run_menu_loop()).await;
+    assert!(ran.is_err(), "the loop ended: {ran:?}");
+    assert_eq!(sess.web_lines, vec!["from the loop"]);
+    drop(sess);
+    screen.await.unwrap();
+    let asked = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(asked, vec![b"/loop\r\n".to_vec()]);
+
+    // A long homepage is cut to fit a C64's 40 columns.
+    crate::config::update_config_value("browser_homepage", "http://a-very-long-host-name.example.com/and/a/long/path");
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Petscii);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![]);
+    sess.render_web_browser().await.unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let home = shown.lines().find(|l| l.to_ascii_lowercase().contains("home:")).unwrap_or_else(|| panic!("{shown}"));
+    assert!(home.trim_end_matches('\r').chars().count() < PETSCII_WIDTH, "{home:?}");
+    assert!(home.to_ascii_lowercase().contains("(enter)"), "{home:?}");
+
+    crate::config::update_config_value("browser_homepage", "");
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![]);
+    sess.render_web_browser().await.unwrap();
+    sess.web_bare_enter().await.unwrap();
+    assert!(sess.web_lines.is_empty() && sess.web_url.is_none());
+    drop(sess);
+    let shown = screen.await.unwrap();
+    assert!(!shown.contains("Home:"), "{shown}");
+
+    // The home screen's hint names Enter only when Enter would do something.
+    for (home, said) in [("http://h.example/", "Press Enter, G, K, H, or Q."), ("", "  Press G, K, H, or Q.")] {
+        crate::config::update_config_value("browser_homepage", home);
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        sess.color_enabled = false;
+        let screen = script_peer(peer, vec![("Press any key", b"x")]);
+        tokio::time::timeout(std::time::Duration::from_secs(10), sess.handle_web_browser_command("x")).await.expect("hung").unwrap();
+        drop(sess);
+        let shown = screen.await.unwrap();
+        assert!(shown.contains(said), "{home:?}: {shown}");
+    }
+}
+
 /// A homepage typed on the settings screen is kept as the URL prompt keeps
 /// an address: a gopher one's bytes as typed (`%C3%A9`), not `Ã©`.
 #[tokio::test]
 async fn test_a_homepage_typed_in_settings_keeps_its_bytes() {
     let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
-    let before = crate::config::get_config().browser_homepage.clone();
+    let home = HomepageGuard::new();
+    let before = home.0.clone();
     let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
     sess.color_enabled = false;
     let screen = script_peer(peer, vec![("New value", b"gopher://h.example/0/caf\xc3\xa9\r"), ("Press any key", b"x")]);
@@ -16932,7 +17082,6 @@ async fn test_a_homepage_typed_in_settings_keeps_its_bytes() {
     drop(sess);
     screen.await.unwrap();
     let saved = crate::config::get_config().browser_homepage.clone();
-    crate::config::update_config_value("browser_homepage", &before);
     assert_eq!(saved, "gopher://h.example/0/caf%C3%A9");
 }
 

@@ -1558,14 +1558,6 @@ pub(crate) struct TelnetSession {
     web_next_alternates: Vec<String>,
     web_history: Vec<(String, usize)>,
     web_url: Option<String>,
-    /// Whether the configured homepage has been auto-loaded this visit.
-    ///
-    /// A *failed* fetch leaves `web_lines` and `web_url` both empty, which is
-    /// exactly the "first visit" condition `render_web_browser` tests -- so
-    /// with an unreachable `browser_homepage` every redraw started another
-    /// blocking fetch and made the user wait out the timeout again.  Cleared
-    /// by `web_reset`, so leaving and re-entering the browser does retry.
-    web_home_tried: bool,
     /// The sites (`host:port`) whose HTTPS failed this visit, so a page of
     /// theirs came over plain HTTP (`WebPage::fallback_sites`).  A form
     /// sent over `http://` to one, or from a page of one, asks first.  Kept
@@ -1759,7 +1751,6 @@ impl TelnetSession {
             web_next_alternates: Vec::new(),
             web_history: Vec::new(),
             web_url: None,
-            web_home_tried: false,
             web_fallback_hosts: Vec::new(),
             web_title: None,
             web_forms: Vec::new(),
@@ -1848,7 +1839,6 @@ impl TelnetSession {
             web_next_alternates: Vec::new(),
             web_history: Vec::new(),
             web_url: None,
-            web_home_tried: false,
             web_fallback_hosts: Vec::new(),
             web_title: None,
             web_forms: Vec::new(),
@@ -1957,7 +1947,6 @@ impl TelnetSession {
             web_next_alternates: Vec::new(),
             web_history: Vec::new(),
             web_url: None,
-            web_home_tried: false,
             web_fallback_hosts: Vec::new(),
             web_title: None,
             web_forms: Vec::new(),
@@ -2085,7 +2074,8 @@ impl TelnetSession {
         if petscii {
             &[
                 "  [1] [2] etc. next to text",
-                "  are links to other pages.",
+                "  are links: type the number",
+                "  and ENTER to follow one.",
                 "",
                 "  N/P  Next/Previous page",
                 "  T/E  Jump to Top/End",
@@ -2102,13 +2092,13 @@ impl TelnetSession {
                 "",
                 "  Press ENTER after a command.",
                 "  Type more than one character",
-                "  and it is taken as a URL or",
-                "  a search instead.",
+                "  (not a number) and it is",
+                "  taken as a URL or a search.",
             ]
         } else {
             &[
-                "  [1], [2], etc. next to text are links",
-                "  to other pages.",
+                "  [1], [2], etc. next to text are links:",
+                "  type the number and ENTER to follow one.",
                 "",
                 "  N / P  Next page / Previous page",
                 "  T / E  Jump to Top / End of page",
@@ -2124,9 +2114,10 @@ impl TelnetSession {
                 "  ESC    Exit browser to main menu",
                 "",
                 "  Commands take effect on ENTER.  Anything",
-                "  longer than a single character is treated",
-                "  as a URL or a search, so you can type an",
-                "  address at the prompt without pressing G.",
+                "  longer than a single character, other than",
+                "  a number, is treated as a URL or a search,",
+                "  so you can type an address at the prompt",
+                "  without pressing G.",
             ]
         }
     }
@@ -2134,6 +2125,7 @@ impl TelnetSession {
     /// Browser landing-menu key bindings (shown when no page is loaded).
     fn browser_menu_help_lines() -> &'static [&'static str] {
         &[
+            "  Enter  Open the homepage, if set",
             "  G  Go to a URL or search query",
             "  K  Open saved bookmarks",
             "  Q  Exit browser to main menu",
@@ -2866,7 +2858,6 @@ pub fn start_server(
                                     web_next_alternates: Vec::new(),
                                     web_history: Vec::new(),
                                     web_url: None,
-                                    web_home_tried: false,
                                     web_fallback_hosts: Vec::new(),
                                     web_title: None,
                                     web_forms: Vec::new(),

@@ -1314,8 +1314,14 @@ impl TelnetSession {
                 // threw all of that away, so a reader who pressed Enter
                 // part-way down a long page landed on the main menu with the
                 // page gone -- and Enter after reading is a habit, not an
-                // error.
-                Some(_) => continue,
+                // error.  On the browser's home screen it opens the homepage
+                // offered there (`web_bare_enter`).
+                Some(_) => {
+                    if self.current_menu == Menu::Browser {
+                        self.web_bare_enter().await?;
+                    }
+                    continue;
+                }
                 None => {
                     // A dropped session ends here.  It used to be "go to the
                     // main menu" like ESC, which on the main menu itself is a
