@@ -340,7 +340,10 @@ impl TelnetSession {
         self.send("  Password (ENTER to skip): ").await?;
         self.flush().await?;
 
+        // The letters typed, as every password now is (`typed_text`): trimmed
+        // as text, so a UTF-8 `à` keeps its last byte.
         let typed = self.get_password_input().await?.unwrap_or_default();
+        let typed = self.typed_text(&typed);
         // No blank row before the answer: Enter has already ended the prompt
         // row (the input loop echoes CR LF), so one here was a second blank --
         // and the 23rd row of a screen whose body grows a line when the
@@ -986,10 +989,15 @@ impl TelnetSession {
             // short-circuit): short-circuiting skips the password compare when
             // the username is wrong, so the response time would leak whether
             // the username was valid.  Mirrors `ssh::auth_password`.
-            let user_ok = constant_time_eq(username.as_bytes(), cfg.username.as_bytes());
+            // Checked in every form one may have been stored in
+            // (`credential_forms`).  The line is a char per byte typed, and
+            // those forms include it read as the UTF-8 it may be -- the
+            // letters typed, as the web page, the GUI and SSH give theirs --
+            // so it needs no reading first.
+            let user_ok = crate::credential::username_matches(&username, &cfg.username);
             // Accepts a PBKDF2 hash or legacy cleartext -- see src/credential.rs.
             // Off the runtime worker: the KDF is seconds on a Pi.
-            let pass_ok = crate::credential::verify_off_runtime(&cfg.password, &password).await;
+            let pass_ok = crate::credential::verify_any_off_runtime(&cfg.password, &password).await;
             if user_ok && pass_ok {
                 if let Some(ip) = self.peer_addr {
                     clear_lockout(&self.lockouts, ip);

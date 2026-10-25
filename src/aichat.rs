@@ -84,7 +84,7 @@ mod model_tests {
     ///
     /// This is the "chat is not wrapping" report, and it is the *same* defect as
     /// the mangled dashes rather than a second one. [`super::wrap_line`] counts
-    /// characters, so it wraps correctly -- but a terminal that draws one glyph
+    /// columns, so it wraps correctly -- but a terminal that draws one glyph
     /// per byte renders a multi-byte character as two or three columns, and the
     /// line overruns the screen and wraps itself. Measured on a real Groq reply:
     /// 143 characters, **151 bytes**, so a 78-character line arrived as 82
@@ -400,7 +400,7 @@ pub(crate) fn sanitize_for_terminal(s: &str) -> String {
 /// hyphens back as garbage.
 ///
 /// It also **fixes the wrapping**, which looked like a second bug and is the
-/// same one: [`wrap_line`] counts *characters*, and a line of 78 characters
+/// same one: [`wrap_line`] counts *columns*, and a line of 78 characters
 /// containing four multi-byte ones is 82 bytes -- 82 columns on a terminal that
 /// draws one glyph per byte -- so it overran an 80-column screen and wrapped
 /// itself. Measured on a real reply: 143 characters, 151 bytes before folding
@@ -588,27 +588,61 @@ pub(crate) fn fold_to_ascii(s: &str) -> String {
     out
 }
 
-/// Word-wrap a single line to fit within `width` columns, breaking at spaces.
+/// How many columns an ANSI terminal draws `c` in: two for CJK and emoji,
+/// one for anything else.  For text as the terminal will get it -- folded
+/// first for a C64 or an ASCII one (`display_for_terminal`, `web_text`),
+/// where a `ß` is the two letters `ss` by then.
+pub(crate) fn display_cols(c: char) -> usize {
+    let wide = matches!(c,
+        '\u{1100}'..='\u{115F}' | '\u{2E80}'..='\u{A4CF}' | '\u{AC00}'..='\u{D7A3}'
+        | '\u{F900}'..='\u{FAFF}' | '\u{FE30}'..='\u{FE4F}' | '\u{FF00}'..='\u{FF60}'
+        | '\u{FFE0}'..='\u{FFE6}' | '\u{1F300}'..='\u{1FAFF}' | '\u{20000}'..='\u{3FFFD}');
+    if wide { 2 } else { 1 }
+}
+
+/// The widest any terminal draws `c`: an ANSI one as `display_cols`, an
+/// ASCII-only one as its fold (`ß` as `ss`, `fold_to_ascii`).  For text laid
+/// out once and drawn on any of them (the browser's pages); the sentinels
+/// round a link number are one each, drawn as `[` and `]`.
+pub(crate) fn widest_cols(c: char) -> usize {
+    if c.is_ascii() {
+        return 1;
+    }
+    let folded = fold_to_ascii(c.encode_utf8(&mut [0; 4])).chars().count();
+    folded.max(display_cols(c))
+}
+
+/// `s`'s width in columns (`display_cols`).
+pub(crate) fn text_cols(s: &str) -> usize {
+    s.chars().map(display_cols).sum()
+}
+
+/// Word-wrap a single line to fit within `width` columns
+/// (`display_cols`), breaking at spaces.
 pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if line.is_empty() {
         return vec![String::new()];
     }
-    if line.chars().count() <= width {
+    if text_cols(line) <= width {
         return vec![line.to_string()];
     }
     let mut result = Vec::new();
     let mut remaining = line;
     while !remaining.is_empty() {
-        // `nth`, not `count`: counting the whole remainder on every pass made
-        // one long line quadratic, and a hostile page can be 1 MB of it.
-        if remaining.char_indices().nth(width).is_none() {
+        // Where `width` columns end (`display_cols`: a CJK character is
+        // two), counted only that far: counting the whole remainder on
+        // every pass made one long line quadratic, and a hostile page can
+        // be 1 MB of it.
+        let mut cols = 0;
+        let fit = remaining.char_indices().find(|&(_, c)| {
+            cols += display_cols(c);
+            cols > width
+        });
+        let Some((boundary, _)) = fit else {
             result.push(remaining.to_string());
             break;
-        }
-        let boundary = remaining
-            .char_indices()
-            .nth(width)
-            .map_or(remaining.len(), |(i, _)| i);
+        };
+        // At least one character a row, however wide.
         let boundary = if boundary == 0 {
             remaining
                 .char_indices()
@@ -627,6 +661,38 @@ pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// Width is columns, not characters: a CJK character or an emoji is two
+    /// on an ANSI screen.  A wrapped row and a truncated one fit the screen
+    /// in columns.  The browser, laying a page out once for any terminal,
+    /// also counts a fold's width: a `ß` is two once it is `ss`.
+    #[test]
+    fn test_wide_characters_take_two_columns() {
+        assert_eq!(text_cols("abc"), 3);
+        assert_eq!(text_cols("\u{4f60}\u{597d}"), 4);
+        assert_eq!(text_cols("Stra\u{df}e"), 6);
+        assert_eq!(text_cols("20\u{b0}C"), 4);
+        assert_eq!((widest_cols('\u{df}'), widest_cols('\u{b0}'), widest_cols('\u{4f60}'), widest_cols('a')), (2, 3, 2, 1));
+        assert_eq!(text_cols("\u{1f600}"), 2);
+        assert_eq!(text_cols("caf\u{e9}"), 4);
+        let rows = wrap_line("\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}", 5);
+        assert_eq!(rows, vec!["\u{4f60}\u{597d}", "\u{4e16}\u{754c}", "\u{4f60}\u{597d}"]);
+        assert!(rows.iter().all(|r| text_cols(r) <= 5));
+        // Few enough characters, too many columns: still wrapped.
+        assert_eq!(wrap_line("\u{4f60}\u{597d}\u{4e16}", 5), vec!["\u{4f60}\u{597d}", "\u{4e16}"]);
+        // One character wider than the row still gets a row of its own.
+        assert_eq!(wrap_line("\u{4f60}\u{597d}", 1), vec!["\u{4f60}", "\u{597d}"]);
+        // ASCII as before (it breaks at the last space before the column
+        // that does not fit, so here before "bbb").
+        assert_eq!(wrap_line("aaa bbb ccc", 7), vec!["aaa", "bbb ccc"]);
+        assert_eq!(wrap_line("aaa bbb ccc", 8), vec!["aaa bbb", "ccc"]);
+        use crate::webbrowser::{truncate_path_to_width, truncate_to_width};
+        assert_eq!(truncate_to_width("\u{4f60}\u{597d}\u{4e16}\u{754c}abc", 7), "\u{4f60}\u{597d}...");
+        assert_eq!(truncate_to_width("\u{4f60}\u{597d}", 4), "\u{4f60}\u{597d}");
+        assert_eq!(truncate_to_width("abcdefgh", 6), "abc...");
+        assert_eq!(truncate_path_to_width("/a/\u{4f60}\u{597d}\u{4e16}", 8), "...\u{597d}\u{4e16}");
+        assert_eq!(truncate_path_to_width("/abc/defgh", 8), "...defgh");
+    }
+
     /// The ASCII-only fold: plain letters for Latin ones, words for a few
     /// symbols, nothing for emoji, one `?` for anything else -- and ASCII,
     /// control bytes included, untouched.

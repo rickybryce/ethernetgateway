@@ -1059,22 +1059,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
 /// columns once a C64 has it as `ss` -- and a line that fits is left exactly
 /// as it was, spacing and all.
 fn rewrap_for_screen(line: &str, max: usize) -> Vec<String> {
-    // The widest any terminal draws it: an ASCII-only one draws the fold
-    // (`ss`), an ANSI one draws CJK and emoji two columns wide.
-    let cols = |c: char| -> usize {
-        match c {
-            '\u{2}' | '\u{3}' => 1, // drawn as '[' and ']'
-            c if c.is_ascii() => 1,
-            c => {
-                let folded = crate::aichat::fold_to_ascii(c.encode_utf8(&mut [0; 4])).chars().count();
-                let wide = matches!(c,
-                    '\u{1100}'..='\u{115F}' | '\u{2E80}'..='\u{A4CF}' | '\u{AC00}'..='\u{D7A3}'
-                    | '\u{F900}'..='\u{FAFF}' | '\u{FE30}'..='\u{FE4F}' | '\u{FF00}'..='\u{FF60}'
-                    | '\u{FFE0}'..='\u{FFE6}' | '\u{1F300}'..='\u{1FAFF}' | '\u{20000}'..='\u{3FFFD}');
-                folded.max(if wide { 2 } else { 1 })
-            }
-        }
-    };
+    let cols = crate::aichat::widest_cols;
     if line.chars().map(cols).sum::<usize>() <= max {
         return vec![line.to_string()];
     }
@@ -1994,15 +1979,26 @@ pub(crate) fn normalize_url(input: &str) -> String {
     format!("https://{}", trimmed)
 }
 
-/// Truncate a string to fit within `max_width` visible characters, appending "..." if truncated.
-/// Safe for multi-byte UTF-8: always truncates on a char boundary.
+/// Truncate a string to fit within `max_width` columns, appending "..." if
+/// truncated.  Columns as an ANSI terminal draws them
+/// (`aichat::display_cols`): a CJK character or an emoji is two.  Safe for
+/// multi-byte UTF-8: always truncates on a char boundary.
 pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if s.chars().count() <= max_width {
+    if crate::aichat::text_cols(s) <= max_width {
         s.to_string()
     } else if max_width <= 3 {
         ".".repeat(max_width)
     } else {
-        let truncated: String = s.chars().take(max_width - 3).collect();
+        let mut room = max_width - 3;
+        let truncated: String = s
+            .chars()
+            .take_while(|&c| {
+                let w = crate::aichat::display_cols(c);
+                let fits = w <= room;
+                room = room.saturating_sub(w);
+                fits
+            })
+            .collect();
         format!("{}...", truncated)
     }
 }
@@ -2027,16 +2023,26 @@ pub(crate) fn truncate_to_width(s: &str, max_width: usize) -> String {
 /// is the difference between showing the sub-directory and not. The leading
 /// `...` is what says the front was dropped.
 pub(crate) fn truncate_path_to_width(s: &str, max_width: usize) -> String {
-    if s.chars().count() <= max_width {
+    if crate::aichat::text_cols(s) <= max_width {
         return s.to_string();
     }
     if max_width <= 3 {
         return ".".repeat(max_width);
     }
-    let keep = max_width - 3;
-    let count = s.chars().count();
-    let tail: String = s.chars().skip(count - keep).collect();
-    format!("...{}", tail)
+    // The tail that fits, in columns (`aichat::display_cols`).
+    let mut room = max_width - 3;
+    let mut tail: Vec<char> = s
+        .chars()
+        .rev()
+        .take_while(|&c| {
+            let w = crate::aichat::display_cols(c);
+            let fits = w <= room;
+            room = room.saturating_sub(w);
+            fits
+        })
+        .collect();
+    tail.reverse();
+    format!("...{}", tail.into_iter().collect::<String>())
 }
 
 /// Return `true` if the DOM nests deeper than `limit` element levels.

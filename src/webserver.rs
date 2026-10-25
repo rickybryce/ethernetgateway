@@ -1153,8 +1153,9 @@ async fn is_authorized(req: &HttpRequest) -> bool {
     // Evaluate BOTH comparisons before combining (no `&&` short-circuit) so a
     // wrong username can't be distinguished from a wrong password by response
     // time.  Mirrors the telnet/SSH auth paths.
-    let user_ok = telnet::constant_time_eq(user.as_bytes(), cfg.username.as_bytes());
-    let pass_ok = crate::credential::verify_cached_off_runtime(&cfg.password, pass).await;
+    // In each form one may have been stored in (`credential_forms`).
+    let user_ok = crate::credential::username_matches(user, &cfg.username);
+    let pass_ok = crate::credential::verify_any_cached_off_runtime(&cfg.password, pass).await;
     user_ok && pass_ok
 }
 
@@ -6700,7 +6701,12 @@ mod tests {
     }
 
     /// `is_authorized`, driven to completion for a synchronous test.
+    ///
+    /// Under the config test lock: it reads the live credential, and a test
+    /// that has swapped a hashed one in would make it run a derivation that
+    /// `credential`'s derivation-counting tests then see as their own.
     fn is_authorized_now(req: &HttpRequest) -> bool {
+        let _cfg = crate::config::CONFIG_TEST_LOCK.blocking_lock();
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

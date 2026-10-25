@@ -565,6 +565,11 @@ fn direct_program(program: &str) -> Option<String> {
 /// nothing of it is echoed and sudo's own prompt does not land in the captured
 /// stderr we may show back.  It is passed by reference and never copied into a
 /// log, an error string or a config value.
+///
+/// The password is the line as typed, a char per byte (`get_password_input`),
+/// and sudo is given those bytes: an accented one reaches it as the terminal
+/// sent it, not re-encoded (`é` from a UTF-8 terminal as C3 A9, not
+/// C3 83 C2 A9).
 pub(in crate::telnet) async fn run_elevated(
     elev: Elevate,
     password: Option<&str>,
@@ -665,7 +670,7 @@ pub(in crate::telnet) async fn run_elevated_within(
                 std::io::Error::other("could not open stdin for the power command")
             })?;
             if let Some(pw) = password {
-                stdin.write_all(pw.as_bytes()).await?;
+                stdin.write_all(&crate::telnet::colors::to_latin1_bytes(pw)).await?;
                 stdin.write_all(b"\n").await?;
             }
             stdin.flush().await?;

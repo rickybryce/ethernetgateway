@@ -1255,8 +1255,9 @@ impl TelnetSession {
         self.send(&format!("  {} ", self.cyan("Username:")))
             .await?;
         self.flush().await?;
+        // The letters typed (`typed_text`): the remote takes text.
         let username = match self.get_line_input().await? {
-            Some(s) if !s.is_empty() => s,
+            Some(s) if !s.is_empty() => self.typed_text(&s),
             _ => return Ok(None),
         };
 
@@ -1273,8 +1274,9 @@ impl TelnetSession {
         self.send(&format!("  {} ", self.cyan("Password:")))
             .await?;
         self.flush().await?;
+        // The letters typed (`typed_text`), as the username.
         match self.get_password_input().await? {
-            Some(s) => Ok(Some(s)),
+            Some(s) => Ok(Some(self.typed_text(&s))),
             None => Ok(None),
         }
     }

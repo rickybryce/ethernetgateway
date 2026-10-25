@@ -493,8 +493,8 @@ async fn test_credential_checks_take_turns_per_address() {
     let ssh = include_str!("../ssh.rs").replace("\r\n", "\n");
     let web = include_str!("../webserver.rs").replace("\r\n", "\n");
     for (what, src, start, verify) in [
-        ("telnet", &telnet, "async fn authenticate(", "verify_off_runtime("),
-        ("ssh", &ssh, "async fn auth_password(", "verify_off_runtime("),
+        ("telnet", &telnet, "async fn authenticate(", "verify_any_off_runtime("),
+        ("ssh", &ssh, "async fn auth_password(", "verify_any_off_runtime("),
         ("web", &web, "if live_security {", "is_authorized(&request)"),
     ] {
         let f = &src[src.find(start).expect(start)..];
@@ -12556,6 +12556,12 @@ async fn test_run_elevated_feeds_the_password_and_closes_stdin() {
         .expect("cat should run");
     assert!(out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hunter2\n");
+    // An accented password, as the line reader holds it (a char per byte
+    // typed): sudo gets the bytes typed, not their re-encoding.
+    let out = crate::telnet::power::run_elevated(Elevate::Direct, Some("caf\u{c3}\u{a9}"), &["cat"])
+        .await
+        .expect("cat should run");
+    assert_eq!(out.stdout, b"caf\xc3\xa9\n");
 }
 
 /// The MORE page must fit the screen it is drawn on — counted and measured
@@ -17037,8 +17043,8 @@ async fn test_a_setting_typed_is_the_letters_typed() {
     crate::config::update_config_value("weather_location", &before);
     assert_eq!(saved, "Z\u{fc}rich");
 
-    // The master's login name is kept as the login name always is: a char
-    // per byte typed, so it matches one typed alike on the master.
+    // The master's login name too: the master tries the form an older one
+    // was stored in as well (`credential_forms`).
     let before = crate::config::get_config().slave_master_username.clone();
     let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
     sess.color_enabled = false;
@@ -17051,7 +17057,7 @@ async fn test_a_setting_typed_is_the_letters_typed() {
     screen.await.unwrap();
     let saved = crate::config::get_config().slave_master_username.clone();
     crate::config::update_config_value("slave_master_username", &before);
-    assert_eq!(saved, "Jos\u{c3}\u{a9}");
+    assert_eq!(saved, "Jos\u{e9}");
 
     let before = crate::config::get_config().transfer_dir.clone();
     let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
@@ -17063,6 +17069,119 @@ async fn test_a_setting_typed_is_the_letters_typed() {
     let saved = crate::config::get_config().transfer_dir.clone();
     crate::config::update_config_value("transfer_dir", &before);
     assert_eq!(saved, "/tmp/caf\u{e9}");
+}
+
+/// An accented login typed at telnet is the letters typed, and logs in
+/// against one set on the web page or GUI (text), one telnet stored before
+/// (a char per byte), from a UTF-8 terminal or a Latin-1 one.
+#[tokio::test]
+async fn test_an_accented_login_works_from_any_terminal() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    for (user, pass, typed_user, typed_pass) in [
+        ("Jos\u{e9}", "caf\u{e9}", &b"Jos\xc3\xa9\r"[..], &b"caf\xc3\xa9\r"[..]),
+        ("Jos\u{e9}", "caf\u{e9}", &b"Jos\xe9\r"[..], &b"caf\xe9\r"[..]),
+        ("Jos\u{c3}\u{a9}", "caf\u{c3}\u{a9}", &b"Jos\xc3\xa9\r"[..], &b"caf\xc3\xa9\r"[..]),
+    ] {
+        let cfg = crate::config::Config {
+            username: user.into(),
+            password: crate::credential::hash_for_test(pass),
+            idle_timeout_secs: 0,
+            ..Default::default()
+        };
+        let old = crate::config::swap_config_for_test(Some(cfg));
+        let (mut s, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        let driver = async {
+            let mut buf = [0u8; 256];
+            let mut seen = Vec::new();
+            for (wait, keys) in [("Username:", typed_user), ("Password:", typed_pass)] {
+                while !String::from_utf8_lossy(&seen).contains(wait) {
+                    let n = peer.read(&mut buf).await.unwrap();
+                    assert!(n > 0, "hung up before {wait}");
+                    seen.extend_from_slice(&buf[..n]);
+                }
+                seen.clear();
+                peer.write_all(keys).await.unwrap();
+            }
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while peer.read(&mut buf).await.map(|n| n > 0).unwrap_or(false) {}
+            })
+            .await;
+        };
+        let (ok, ()) = tokio::join!(
+            async {
+                let r = tokio::time::timeout(std::time::Duration::from_secs(20), s.authenticate()).await;
+                drop(s);
+                r
+            },
+            driver
+        );
+        crate::config::swap_config_for_test(old);
+        assert!(ok.expect("hung").unwrap(), "{user:?} typed {typed_user:?}");
+    }
+}
+
+/// A login name or password set on the telnet settings screen is the
+/// letters typed -- an `à`, whose UTF-8 ends in A0, is not taken for a
+/// space -- and so is the master password a slave is given; SSH and the
+/// web page check every stored form as telnet does.
+#[tokio::test]
+async fn test_credentials_set_at_telnet_are_the_letters_typed() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let before = crate::config::get_config().username.clone();
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("New username", b"Jos\xc3\xa0\r"), ("Press any key", b"x")]);
+    tokio::time::timeout(std::time::Duration::from_secs(10), sess.security_set_field("Username", "username", &before, false))
+        .await
+        .expect("hung")
+        .unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let saved = crate::config::get_config().username.clone();
+    crate::config::update_config_value("username", &before);
+    assert_eq!(saved, "Jos\u{e0}", "{shown}");
+
+    fn body<'a>(src: &'a str, sig: &str) -> &'a str {
+        let at = src.find(sig).unwrap_or_else(|| panic!("{sig} not found"));
+        let rest = &src[at + sig.len()..];
+        let end = ["\n    pub(", "\n    async fn ", "\n    fn ", "\nfn ", "\nasync fn ", "\npub"]
+            .iter()
+            .filter_map(|m| rest.find(m))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+    let session = include_str!("session.rs").replace("\r\n", "\n");
+    assert!(body(&session, "async fn offer_master_password(").contains("let typed = self.typed_text(&typed);"));
+    let config = include_str!("config_ui.rs").replace("\r\n", "\n");
+    assert!(config.contains("crate::relay::set_pending_master_password(&self.typed_text(&v));"));
+    let ssh = include_str!("../ssh.rs").replace("\r\n", "\n");
+    let f = body(&ssh, "async fn auth_password(");
+    assert!(f.contains("crate::credential::username_matches(user, &self.username)"), "ssh user");
+    let f = body(&ssh, "async fn auth_publickey(");
+    assert!(f.contains("crate::credential::username_matches(user, &self.username)"), "ssh key user");
+    let web = include_str!("../webserver.rs").replace("\r\n", "\n");
+    let f = body(&web, "async fn is_authorized(");
+    assert!(f.contains("crate::credential::username_matches(user, &cfg.username)"), "web user");
+    assert!(f.contains("crate::credential::verify_any_cached_off_runtime(&cfg.password, pass)"), "web pass");
+}
+
+/// The SSH gateway's login name and password go to the remote as the
+/// letters typed, not as a char per byte (`José`, not `JosÃ©`).
+#[tokio::test]
+async fn test_the_ssh_gateway_sends_the_letters_typed() {
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("Password:", b"caf\xc3\xa9\r")]);
+    let pw = tokio::time::timeout(std::time::Duration::from_secs(10), sess.gateway_password_prompt()).await.expect("hung").unwrap();
+    drop(sess);
+    screen.await.unwrap();
+    assert_eq!(pw.as_deref(), Some("caf\u{e9}"));
+    let src = include_str!("gateway.rs").replace("\r\n", "\n");
+    let at = src.find("async fn gateway_host_prompts(").expect("prompts");
+    let f = &src[at..at + src[at..].find("\n    pub(").unwrap_or(src.len() - at)];
+    assert!(f.contains("Some(s) if !s.is_empty() => self.typed_text(&s),"), "username");
 }
 
 /// The hand-off dials the address `gopher_dial_addr` checked, and a form

@@ -935,11 +935,8 @@ impl TelnetSession {
     /// letter typed, whichever the terminal sends.  A C64's line is
     /// already ASCII.
     ///
-    /// Not for a login name or password.  Login compares the line as the
-    /// reader gives it, a char per byte, so a name or password set
-    /// through here would no longer match one typed at login -- or one
-    /// already stored.  Changing that is changing every stored credential,
-    /// a decision of its own.
+    /// Login names and passwords too, set and checked alike; one stored
+    /// before, a char per byte, is still accepted (`credential_forms`).
     pub(in crate::telnet) fn typed_text(&self, line: &str) -> String {
         if self.terminal_type == TerminalType::Petscii {
             return line.to_string();

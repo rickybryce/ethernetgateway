@@ -455,6 +455,74 @@ pub(crate) async fn verify_cached_off_runtime(stored: &str, supplied: &str) -> b
         .unwrap_or(false)
 }
 
+/// The forms a supplied login name or password may have been stored in.
+///
+/// **One credential, read one way everywhere.**  The web page, the desktop
+/// GUI and SSH hand over text; telnet now does too (`typed_text`).  Before,
+/// telnet kept a line as a char per byte typed, so an accented name or
+/// password it stored is that text's UTF-8 read a char per byte (`José`
+/// stored as `JosÃ©`) -- and the reverse, a slave that saved its master's
+/// name that way and sends it so.  Both are tried, so nothing stored before
+/// is locked out and nothing need be re-entered.
+///
+/// `supplied` itself first; for plain ASCII it is the only form.  Each
+/// form is the same keys typed, read another way, so accepting them widens
+/// nothing an attacker can choose.
+pub(crate) fn credential_forms(supplied: &str) -> Vec<String> {
+    let mut forms = vec![supplied.to_string()];
+    if supplied.is_ascii() {
+        return forms;
+    }
+    // As telnet stored it: the UTF-8 bytes a char each.
+    forms.push(supplied.bytes().map(char::from).collect());
+    // Sent as telnet stored it, the text it was.
+    if let Ok(octets) = supplied.chars().map(|c| u8::try_from(u32::from(c))).collect::<Result<Vec<u8>, _>>()
+        && let Ok(text) = String::from_utf8(octets)
+        && text != supplied
+    {
+        forms.push(text);
+    }
+    forms
+}
+
+/// A supplied login name against the stored one, in any of its forms
+/// (`credential_forms`), constant-time for each and without stopping
+/// early.
+pub(crate) fn username_matches(supplied: &str, stored: &str) -> bool {
+    credential_forms(supplied)
+        .iter()
+        .fold(false, |ok, form| crate::telnet::constant_time_eq(form.as_bytes(), stored.as_bytes()) | ok)
+}
+
+/// [`verify_off_runtime`] for each form of the supplied password
+/// (`credential_forms`); the first that verifies is enough.
+pub(crate) async fn verify_any_off_runtime(stored: &str, supplied: &str) -> bool {
+    for form in credential_forms(supplied) {
+        if verify_off_runtime(stored, &form).await {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`verify_cached_off_runtime`] for each form of the supplied password --
+/// the cache asked about **every** form before any is derived.  Asked form
+/// by form, a password stored in an older form missed on the first one and
+/// paid a derivation bound to fail on every request, before its own form
+/// hit: the cost the cache exists to spare `/vdm/frame`.
+pub(crate) async fn verify_any_cached_off_runtime(stored: &str, supplied: &str) -> bool {
+    let forms = credential_forms(supplied);
+    if is_hashed(stored) && forms.iter().any(|form| cache_hit(&cache_key(stored, form))) {
+        return true;
+    }
+    for form in forms {
+        if verify_cached_off_runtime(stored, &form).await {
+            return true;
+        }
+    }
+    false
+}
+
 /// Set while a test wants cheap hashing; 0 means "use `PBKDF2_ROUNDS`".
 #[cfg(test)]
 static TEST_ROUNDS: AtomicU32 = AtomicU32::new(0);
@@ -510,6 +578,48 @@ mod tests {
     /// `hash_with_rounds`.
     fn cheap(plain: &str) -> String {
         hash_with_rounds(plain, Params::MIN_ROUNDS).expect("hashing failed")
+    }
+
+    /// An accented login name or password is accepted in every form one
+    /// may have been stored in: as text (web, GUI, SSH, telnet now), as
+    /// telnet stored it before (its UTF-8 a char per byte), and sent that
+    /// old way against one stored as text.  ASCII has the one form.
+    #[test]
+    fn test_a_credential_is_checked_in_every_stored_form() {
+        assert_eq!(credential_forms("admin"), vec!["admin"]);
+        assert_eq!(credential_forms("Jos\u{e9}"), vec!["Jos\u{e9}", "Jos\u{c3}\u{a9}"]);
+        assert_eq!(credential_forms("Jos\u{c3}\u{a9}"), vec!["Jos\u{c3}\u{a9}", "Jos\u{c3}\u{83}\u{c2}\u{a9}", "Jos\u{e9}"]);
+        // Beyond Latin-1: no char-per-byte reading back.
+        assert_eq!(credential_forms("\u{263a}").len(), 2);
+        assert!(username_matches("Jos\u{e9}", "Jos\u{e9}"));
+        assert!(username_matches("Jos\u{e9}", "Jos\u{c3}\u{a9}"));
+        assert!(username_matches("Jos\u{c3}\u{a9}", "Jos\u{e9}"));
+        assert!(!username_matches("Jose", "Jos\u{e9}"));
+        assert!(!username_matches("admin", "Admin"));
+        // Inside the cache's lock: the tests that count derivations share
+        // the counter these add to.
+        with_clean_cache(|| {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            for (stored, supplied, ok) in [
+                ("caf\u{e9}", "caf\u{e9}", true),
+                ("caf\u{c3}\u{a9}", "caf\u{e9}", true),
+                ("caf\u{e9}", "caf\u{c3}\u{a9}", true),
+                ("caf\u{e9}", "cafe", false),
+            ] {
+                assert_eq!(rt.block_on(verify_any_off_runtime(&cheap(stored), supplied)), ok, "{stored:?} {supplied:?}");
+                assert_eq!(rt.block_on(verify_any_cached_off_runtime(&cheap(stored), supplied)), ok, "{stored:?} {supplied:?}");
+            }
+            // A password stored in the older form rides the cache like any
+            // other: one derivation, then none -- not one bound to fail on
+            // every request.
+            *AUTH_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            let legacy = cheap("caf\u{c3}\u{a9}");
+            let before = DERIVATIONS.load(Ordering::Relaxed);
+            for _ in 0..5 {
+                assert!(rt.block_on(verify_any_cached_off_runtime(&legacy, "caf\u{e9}")));
+            }
+            assert_eq!(DERIVATIONS.load(Ordering::Relaxed), before + 2, "the first form's miss, then its own; then the cache");
+        });
     }
 
     #[test]

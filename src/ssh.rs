@@ -1438,10 +1438,11 @@ impl russh::server::Handler for SshHandler {
             return Ok(russh::server::Auth::reject());
         }
         // Constant-time comparison to prevent timing attacks.
-        let user_ok =
-            telnet::constant_time_eq(user.as_bytes(), self.username.as_bytes());
+        // In each form one may have been stored in (`credential_forms`):
+        // telnet kept an accented one a char per byte.
+        let user_ok = crate::credential::username_matches(user, &self.username);
         let pass_ok =
-            crate::credential::verify_off_runtime(&self.password, password).await;
+            crate::credential::verify_any_off_runtime(&self.password, password).await;
         if user_ok && pass_ok {
             // Valid credentials reset any failure lockout for this IP.
             if let Some(ip) = self.peer_addr {
@@ -1539,7 +1540,7 @@ impl russh::server::Handler for SshHandler {
             glog!("SSH: key auth rejected — configured SSH username is empty");
             return Ok(russh::server::Auth::reject());
         }
-        if !telnet::constant_time_eq(user.as_bytes(), self.username.as_bytes())
+        if !crate::credential::username_matches(user, &self.username)
             || !key_is_authorized(&self.authorized_keys, public_key)
         {
             return Ok(russh::server::Auth::reject());

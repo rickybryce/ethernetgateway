@@ -100,10 +100,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the browser's Find (which now matches accented letters in either case),
   in AI Chat's questions, Weather's location, and the values typed on the
   settings screens (the weather location, the AI model, the log file, the
-  transfer folder, the relay's master host).  Login names and passwords --
-  the gateway's own and the master's the relay logs in with -- are left as
-  they were: they are compared with ones already stored, and changing how
-  they are read would lock out an accented one.  Backspace
+  transfer folder, the relay's master host).  Login names and passwords
+  too -- the gateway's own and the master's the relay logs in with -- so an
+  accented one set on the web page or the GUI now logs in at telnet, and
+  one set at telnet logs in over SSH and the web page.  One stored before,
+  when telnet kept it a byte per letter, still logs in everywhere: every
+  login tries both forms, so nothing need be re-entered.  An accented
+  telnet login name is no longer refused as containing a space, and a
+  master password typed for the relay keeps its last letter whole.  (A
+  slave whose master login is typed again after upgrading needs its master
+  upgraded too, as the relay already asks.)  The SSH gateway sends the
+  remote login typed as letters too, and the power page gives `sudo` the
+  password's bytes as typed rather than re-encoded.  Chinese, Japanese and
+  Korean text and emoji are counted as the two columns a terminal draws
+  them in when a line is wrapped or shortened (AI Chat, Weather, the
+  settings screens), as the browser already did, so such a line no longer
+  runs past the screen's edge.  Backspace
   takes off a whole UTF-8 letter, not one of its bytes, at every prompt.
   A Gopher+ form the server wrote in Latin-1 is answered in Latin-1, a
   choice going back as the very bytes the server listed.  A gopher

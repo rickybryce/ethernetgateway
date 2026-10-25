@@ -607,14 +607,11 @@ impl TelnetSession {
         // An address is taken as the browser's URL prompt takes it: the bytes
         // typed (`typed_url`), so a homepage set here goes to its server as
         // the same address typed at G does.
-        // Anything else, the letters typed (`typed_text`) -- but not the
-        // master's login name: the master compares it with its own, set
-        // and typed the way the login name always has been (see
-        // `typed_text`), and a pair typed alike on both must still match.
+        // Anything else, the letters typed (`typed_text`) -- the master's
+        // login name too: the master tries the form an older one was
+        // stored in as well (`credential_forms`).
         let v = if key == "browser_homepage" {
             crate::webbrowser::typed_url(&crate::telnet::colors::to_latin1_bytes(&v))
-        } else if key == "slave_master_username" {
-            v
         } else {
             self.typed_text(&v)
         };
@@ -2338,8 +2335,11 @@ impl TelnetSession {
             self.get_line_input().await?
         };
 
+        // The letters typed (`typed_text`), as the web page and the GUI set
+        // them; login tries the form an older one was stored in too
+        // (`credential_forms`).
         let input = match input {
-            Some(s) if !s.is_empty() => s,
+            Some(s) if !s.is_empty() => self.typed_text(&s),
             _ => return Ok(()),
         };
         if key == "username"
@@ -3197,7 +3197,9 @@ impl TelnetSession {
                             .other_prompt_value("Master pass", state.label(), true)
                             .await?
                         {
-                            crate::relay::set_pending_master_password(&v);
+                            // The letters typed, as every password now is
+                            // (`typed_text`).
+                            crate::relay::set_pending_master_password(&self.typed_text(&v));
                             // No restart notice: nothing was written, and
                             // `set_pending_master_password` cuts the retry
                             // backoff short, so the next connection is seconds
