@@ -55,9 +55,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that holds the connection open after the closing `.` line is waited for
   two seconds, not until the page times out.  A new reference page,
   `gopherreference.html`, explains the protocol and lists each requirement
-  and where the gateway stands.  A tn3270 (`T`) item is connected and
-  logged in as the RFC says, over plain telnet with a warning; the gateway
-  is not a 3270 terminal.  Following a
+  and where the gateway stands.  Read end to end against the three
+  specifications, every client obligation is now met, and the Gopher client
+  is compliant with RFC 1436, RFC 4266 and the Gopher+ specification: a
+  search with an empty selector sends the words alone (RFC 1436 3.7); a
+  filled-in form's URL sends its answers (RFC 4266 2.9); nothing in a
+  URL's path is a mark any longer (a selector may end `?search`); named
+  attributes are asked for; a Gopher+ picture, movie or sound is fetched in
+  the first view its information lists and saved with that type's
+  extension (Gopher+ 2.9).  A tn3270 (`T`) item is connected and logged in
+  as the RFC says, over plain telnet with a warning; the gateway is not a
+  3270 terminal.  Following a
   telnet item names each server it tries, so the screen says which copy
   answered.
 

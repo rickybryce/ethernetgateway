@@ -16597,8 +16597,8 @@ async fn test_a_followed_link_falls_back_to_its_alternate() {
     sess.color_enabled = false;
     let screen = script_peer(peer, vec![("Search", b"c64\r")]);
     sess.web_url = Some("gopher://127.0.0.1/1/".into());
-    sess.web_links = vec![format!("gopher://127.0.0.1:{closed}/7/find?search")];
-    sess.web_alternates = vec![vec![format!("gopher://127.0.0.1:{port}/7/find?search")]];
+    sess.web_links = vec![format!("gopher://127.0.0.1:{closed}/7/find")];
+    sess.web_alternates = vec![vec![format!("gopher://127.0.0.1:{port}/7/find")]];
     tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
     drop(sess);
     screen.await.unwrap();
@@ -16695,6 +16695,50 @@ async fn test_a_telnet_item_with_a_copy_says_where_it_connects() {
     tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
     assert!(shown.contains(&format!("Connecting to 127.0.0.1:{port}...")), "{shown}");
     assert!(shown.contains("HELLO FROM THE ITEM") && !shown.contains("trying a copy"), "{shown}");
+}
+
+/// A Gopher+ picture is fetched in the view its attributes list first, and
+/// saved with that type's extension (Gopher+ 2.9: "no default format").
+/// The same server under a longer URL is not "a copy".
+#[tokio::test]
+async fn test_a_picture_is_saved_in_its_view_with_its_extension() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let folder = GopherTransferDir::new("picture-view");
+    let attrs = b"+-1\r\n+INFO: :Cat\t/cat\th\t70\t+\r\n+VIEWS:\r\n image/gif: <1k>\r\n.\r\n".to_vec();
+    let (port, server) = serve_gopher_seq(vec![attrs, b"+4\r\nGIF8".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("(Y/N)", b"y"), ("Press any key", b"x")]);
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_links = vec![format!("gopher://127.0.0.1:{port}/:/cat%09%09+")];
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    let sent = tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(sent, vec![b"/cat\t!\r\n".to_vec(), b"/cat\t+image/gif\r\n".to_vec()]);
+    assert_eq!(std::fs::read(folder.dir.join("cat.gif")).unwrap(), b"GIF8", "{shown}");
+    assert!(!shown.contains("From a copy"), "{shown}");
+}
+
+/// A name that already ends in another view's extension has it swapped:
+/// `p.gif` that came as `image/jpeg` is saved as `p.jpg`.
+#[tokio::test]
+async fn test_a_picture_fetched_in_another_view_swaps_its_extension() {
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let folder = GopherTransferDir::new("picture-swap");
+    let attrs = b"+-1\r\n+INFO: :Cat\t/p.gif\th\t70\t+\r\n+VIEWS:\r\n image/jpeg: <1k>\r\n.\r\n".to_vec();
+    let (port, server) = serve_gopher_seq(vec![attrs, b"+4\r\nJPEG".to_vec()]);
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("(Y/N)", b"y"), ("Press any key", b"x")]);
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_links = vec![format!("gopher://127.0.0.1:{port}/:/p.gif%09%09+")];
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert_eq!(std::fs::read(folder.dir.join("p.jpg")).unwrap(), b"JPEG", "{shown}");
+    assert!(!folder.dir.join("p.gif").exists());
 }
 
 /// A file whose server is down is fetched from its `+` copy.
@@ -16923,7 +16967,7 @@ async fn test_typed_search_words_are_sent_as_typed() {
         sess.color_enabled = false;
         let screen = script_peer(peer, vec![("Search", answer)]);
         sess.web_url = Some("gopher://127.0.0.1/1/".into());
-        sess.web_links = vec![format!("gopher://127.0.0.1:{port}/7/find?search")];
+        sess.web_links = vec![format!("gopher://127.0.0.1:{port}/7/find")];
         tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
         drop(sess);
         screen.await.unwrap();
@@ -16938,7 +16982,7 @@ async fn test_info_on_a_telnet_link_is_refused() {
     let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
     sess.color_enabled = false;
     sess.web_url = Some("gopher://h.example/1/menu".into());
-    sess.web_links = vec!["gopher://bbs.example:23/8guest".into(), "gopher://ns.example:105/2?search".into()];
+    sess.web_links = vec!["gopher://bbs.example:23/8guest".into(), "gopher://ns.example:105/2".into()];
     for n in [b"1\r", b"2\r"] {
         let (mut s2, peer2) = make_test_session_with_peer(TerminalType::Ansi);
         s2.web_url = sess.web_url.clone();

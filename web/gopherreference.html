@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gopher Protocol Reference &mdash; Ethernet Gateway v1.0.6</title>
-    <meta name="description" content="How the Gopher protocol works and how the Ethernet Gateway speaks it -- RFC 1436, RFC 4266 and Gopher+: menus and every RFC 1436 item type, text files and dot doubling, searches and CSO phone books, redundant servers, telnet items, gopher:// URLs (RFC 4266) and selector bytes, Gopher+ attributes, views and +ASK forms, safety limits, and a compliance table.">
+    <meta name="description" content="How the Gopher protocol works and how the Ethernet Gateway speaks it -- compliant with RFC 1436, RFC 4266 and Gopher+: menus and every RFC 1436 item type, text files and dot doubling, searches and CSO phone books, redundant servers, telnet items, gopher:// URLs (RFC 4266) and selector bytes, Gopher+ attributes, views and +ASK forms, safety limits, and a compliance table.">
     <style>
         :root {
             --green: #33ff33;
@@ -607,14 +607,13 @@
                     way, information about each item, alternate formats, and simple forms.
                 </p>
                 <div class="callout callout-info">
-                    <strong>What the gateway implements.</strong> The Gopher client implements
+                    <strong>Compliance.</strong> The Gopher client is compliant with
                     <strong>RFC&nbsp;1436</strong> (The Internet Gopher Protocol),
                     <strong>RFC&nbsp;4266</strong> (The gopher URI Scheme) and the
-                    <strong>Gopher+</strong> specification (1993) &mdash; item information,
-                    views, <code>$</code> and <code>!</code> requests and <code>+ASK</code>
-                    forms &mdash; measured against live servers (Floodgap, SDF, quux.org)
-                    and two server implementations (gophernicus, pygopherd). One type is met
-                    only in part: RFC&nbsp;1436 defines a <code>T</code> item as a tn3270
+                    <strong>Gopher+</strong> specification (1993): every client obligation
+                    in the three, read end to end, is met, and measured against live servers
+                    (Floodgap, SDF, quux.org) and two server implementations (gophernicus,
+                    pygopherd). One type is met only in part: RFC&nbsp;1436 defines a <code>T</code> item as a tn3270
                     session and says only to connect to its host and port and log in as the
                     selector. The gateway does that over plain telnet, without 3270
                     emulation, and warns on the screen first; many 3270 hosts will not work
@@ -1057,37 +1056,66 @@ Hello              Hello              Hello
                 <div class="section-title">Compliance</div>
                 <p class="intro">What each specification asks of a client, and where the gateway stands.</p>
                 <p>
-                    Each row is a client obligation of a specification, or a behaviour it
-                    describes as optional; the Status column says how the gateway meets it.
-                    tn3270 is met only in part: see its row.  What a server does is the
-                    server's own compliance (none of the servers measured doubles a text
-                    line's leading dot, for one).
+                    Every client obligation in RFC&nbsp;1436, RFC&nbsp;4266 and the Gopher+
+                    specification, read end to end, with the behaviours each describes as
+                    optional (marked so). All are met; the one met in part is tn3270, whose
+                    3270 terminal is not emulated. What a server does is the server's own
+                    compliance (none of the servers measured doubles a text line's leading
+                    dot, for one).
                 </p>
 
                 <table class="data-table">
-                    <thead><tr><th>Requirement</th><th>Spec</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Spec</th><th>Requirement</th><th>Section</th><th>Status</th></tr></thead>
                     <tbody>
-                        <tr><td>Port 70 by default; selector then CR LF</td><td>RFC 1436 &sect;2</td><td>Yes</td></tr>
-                        <tr><td>Menus: type, display, selector, host, port; end at the <code>.</code> line</td><td>RFC 1436 App. (Menu)</td><td>Yes</td></tr>
-                        <tr><td>Ignore fields after the port</td><td>Gopher+ &sect;2.1</td><td>Yes; the fifth is read for Gopher+</td></tr>
-                        <tr><td>Unknown types ignored or shown as unknown</td><td>RFC 1436 &sect;3.5</td><td>Shown as <code>[???]</code></td></tr>
-                        <tr><td>Strip the extra dot from text lines</td><td>RFC 1436 App. (TextFile)</td><td>Yes (types 0, 4, 6)</td></tr>
-                        <tr><td>Be prepared for no <code>.</code> line (server just closes)</td><td>RFC 1436 App. (TextFile)</td><td>Yes</td></tr>
-                        <tr><td>Either side may close after the reply</td><td>RFC 1436 App. (transactions)</td><td>Yes, 2&nbsp;s after a <code>.</code> line</td></tr>
-                        <tr><td>Binary files read until the server closes</td><td>RFC 1436 App. (types 5, 9)</td><td>Yes</td></tr>
-                        <tr><td>Search: selector, TAB, words</td><td>RFC 1436 App. (type 7)</td><td>Yes</td></tr>
-                        <tr><td>CSO items talk the CSO protocol</td><td>RFC 1436 &sect;3.7</td><td>Yes, lookups</td></tr>
-                        <tr><td>Telnet items connect to host and port, login from the selector</td><td>RFC 1436 App. (type 8)</td><td>Yes</td></tr>
-                        <tr><td>tn3270 items: connect to the host and port, log in as the selector</td><td>RFC 1436 &sect;3.8, App. (type T)</td><td>In part: connected and logged in as the RFC says, over plain telnet with a warning; a tn3270 session's 3270 terminal is not emulated</td></tr>
-                        <tr><td><code>+</code> items use their primary's transaction</td><td>RFC 1436 App. (type +)</td><td>Yes</td></tr>
-                        <tr><td>Move to a cloned server when one seems down (optional)</td><td>RFC 1436 &sect;3.5</td><td>Failover yes, in menu order (no random load balancing): menus, text, searches, phone books, downloads and telnet items; at most three copies</td></tr>
-                        <tr><td>Display strings in ISO Latin-1</td><td>RFC 1436 App.; Gopher+ App.</td><td>Yes; UTF-8 also read</td></tr>
-                        <tr><td>Selectors are any bytes but TAB, CR, LF (and NUL)</td><td>RFC 4266 &sect;2.1; RFC 1436 App.; Gopher+ App. II</td><td>Yes, kept byte for byte</td></tr>
-                        <tr><td>URL: default port and type, <code>%09</code> search and Gopher+ string</td><td>RFC 4266 &sect;2</td><td>Yes</td></tr>
-                        <tr><td>Gopher+ replies: count, <code>-1</code>, <code>-2</code>, errors 1&ndash;3</td><td>Gopher+ &sect;2.3</td><td>Yes</td></tr>
-                        <tr><td><code>!</code> and <code>$</code> attributes; <code>+INFO</code>, <code>+ADMIN</code>, <code>+VIEWS</code>, <code>+ABSTRACT</code></td><td>Gopher+ &sect;2.5, &sect;2.7, App. I</td><td>Yes</td></tr>
-                        <tr><td>Alternate views</td><td>Gopher+ &sect;2.6</td><td>Yes</td></tr>
-                        <tr><td><code>+ASK</code>: every question type, AskL line count, one file last</td><td>Gopher+ &sect;2.8</td><td>Yes</td></tr>
+                        <tr><td>RFC 1436</td><td>Connect to the host and port the item names; port 70 when none is given</td><td>&sect;2; App. (Port); RFC 4266 &sect;2.1</td><td>Yes</td></tr>
+                        <tr><td>RFC 1436</td><td>Send the selector, then CR LF; never modify the selector</td><td>&sect;2</td><td>Yes, byte for byte</td></tr>
+                        <tr><td>RFC 1436</td><td>Read a menu line: type, display string, selector, host, port; ignore further fields</td><td>&sect;2; App. (DirEntity)</td><td>Yes; the fifth is read for Gopher+</td></tr>
+                        <tr><td>RFC 1436</td><td>A menu ends at the <code>.</code> line</td><td>App. (Menu)</td><td>Yes</td></tr>
+                        <tr><td>RFC 1436</td><td>Show the user what kind of item each is</td><td>&sect;2</td><td>Yes: <code>[CSO]</code>, <code>[TEL]</code>, <code>[IMG]</code> and the like</td></tr>
+                        <tr><td>RFC 1436</td><td>An unknown type may be ignored or shown as unknown</td><td>&sect;3.5 (may)</td><td>Shown as <code>[???]</code></td></tr>
+                        <tr><td>RFC 1436</td><td>Stack visited locations so the user can back out</td><td>&sect;3.5 (may)</td><td>Yes, Back</td></tr>
+                        <tr><td>RFC 1436</td><td>Choose between cloned servers, and move to one when the other seems down</td><td>&sect;3.5 (optional)</td><td>Failover yes, in menu order, for menus, text, searches, phone books, downloads and telnet items; at most three copies; no random load balancing</td></tr>
+                        <tr><td>RFC 1436</td><td>A phone-book (<code>2</code>) item: speak the CSO protocol</td><td>&sect;3.4, &sect;3.7; App. (type 2)</td><td>Yes, lookups</td></tr>
+                        <tr><td>RFC 1436</td><td>A search: the selector, a TAB, the words; with an empty selector, the words alone</td><td>&sect;3.7; App. (type 7)</td><td>Yes</td></tr>
+                        <tr><td>RFC 1436</td><td>Types <code>5</code> and <code>9</code>: read until the server closes; the client decides what to do with the file</td><td>&sect;3.8; App.</td><td>Yes: saved to the transfer folder</td></tr>
+                        <tr><td>RFC 1436</td><td>Type <code>3</code>: an error</td><td>&sect;3.8; App.</td><td>Shown as an <code>ERR:</code> line</td></tr>
+                        <tr><td>RFC 1436</td><td>Types <code>g</code> and <code>I</code>: the client decides how to display</td><td>&sect;3.8; App.</td><td>Saved to the transfer folder</td></tr>
+                        <tr><td>RFC 1436</td><td>Display strings: a client may truncate them</td><td>&sect;3.9 (may)</td><td>Wrapped to the screen instead</td></tr>
+                        <tr><td>RFC 1436</td><td>Do something reasonable with odd characters in text</td><td>&sect;4(c)</td><td>Yes: control characters filtered, text folded for 7-bit and C64 screens</td></tr>
+                        <tr><td>RFC 1436</td><td>Strip the extra dot from a text line</td><td>App. (TextFile)</td><td>Yes, type 0 (and 4 and 6, also text)</td></tr>
+                        <tr><td>RFC 1436</td><td>Be prepared for no <code>.</code> line (the server just closes)</td><td>App. (TextFile)</td><td>Yes</td></tr>
+                        <tr><td>RFC 1436</td><td>Either side may close after the reply</td><td>App. (transactions)</td><td>Yes, 2&nbsp;s after a <code>.</code> line</td></tr>
+                        <tr><td>RFC 1436</td><td>Telnet (<code>8</code>): connect to the host and port; the login is the selector</td><td>App. (type 8)</td><td>Yes</td></tr>
+                        <tr><td>RFC 1436</td><td>tn3270 (<code>T</code>): connect to the host and port; the login is the selector</td><td>&sect;3.8; App. (type T)</td><td>In part: connected and logged in as the RFC says, over plain telnet with a warning; a tn3270 session's 3270 terminal is not emulated</td></tr>
+                        <tr><td>RFC 1436</td><td>A <code>+</code> item: a duplicate of the last non-<code>+</code> item, fetched with its transaction</td><td>App. (type +)</td><td>Yes</td></tr>
+                        <tr><td>RFC 1436</td><td>8-bit display strings are ISO Latin-1</td><td>App. (Notes)</td><td>Read as Latin-1, and UTF-8 too</td></tr>
+                        <tr><td>RFC 1436</td><td>A selector holds no TAB, CR, LF or NUL</td><td>App. (Selector)</td><td>Yes; nothing else is changed</td></tr>
+                        <tr><td>RFC 4266</td><td><code>gopher://host:port/</code>, port 70 by default; an empty path is the root menu (type 1)</td><td>&sect;2.1</td><td>Yes</td></tr>
+                        <tr><td>RFC 4266</td><td>A selector is octets: any but TAB, CR and LF; no character in the path is reserved</td><td>&sect;2.1</td><td>Yes: <code>%XX</code> to the byte, nothing in the path is a mark</td></tr>
+                        <tr><td>RFC 4266</td><td>A search: <code>%09</code> and the words; sent as the selector, a TAB and the words</td><td>&sect;2.2</td><td>Yes (with an empty selector, the words alone, as RFC 1436 &sect;3.7 says)</td></tr>
+                        <tr><td>RFC 4266</td><td>Gopher+: a second <code>%09</code> and the Gopher+ string, the search possibly empty</td><td>&sect;2.3</td><td>Yes</td></tr>
+                        <tr><td>RFC 4266</td><td><code>+</code> is the default view; <code>?</code> an item with a form, its <code>+ASK</code> fetched and filled in</td><td>&sect;2.4, &sect;2.5</td><td>Yes</td></tr>
+                        <tr><td>RFC 4266</td><td><code>!</code> an item's attributes, <code>$</code> a directory's</td><td>&sect;2.6</td><td>Yes</td></tr>
+                        <tr><td>RFC 4266</td><td>Named attributes: <code>!+ABSTRACT</code>, several separated by coded spaces</td><td>&sect;2.7</td><td>Yes</td></tr>
+                        <tr><td>RFC 4266</td><td>A view: <code>+view%20language</code></td><td>&sect;2.8</td><td>Yes</td></tr>
+                        <tr><td>RFC 4266</td><td>A filled-in form: the coded request, answers and all</td><td>&sect;2.9</td><td>Yes: the selector, TAB, <code>+</code>, TAB, <code>1</code>, then the answers as coded</td></tr>
+                        <tr><td>Gopher+</td><td>Ignore fields beyond those expected</td><td>&sect;2.1</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td>A <code>+</code> (or <code>?</code>) after the port marks a Gopher+ item; an old-style request still works</td><td>&sect;2.2</td><td>Yes: Gopher+ requests go only to marked items</td></tr>
+                        <tr><td>Gopher+</td><td>Replies: <code>+N</code> bytes, <code>+-1</code> to a <code>.</code> line, <code>+-2</code> to the close</td><td>&sect;2.3</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td>Errors: <code>-</code>, a code (1 not available, 2 try later, 3 moved, with where to), the administrator, the message</td><td>&sect;2.3</td><td>Yes; moved is a link</td></tr>
+                        <tr><td>Gopher+</td><td>A request: selector, TAB, <code>+</code>, representation, TAB, data flag, then the data block</td><td>&sect;2.4; App. II</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td>A search item's Gopher+ string follows the words</td><td>&sect;2.4</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td><code>!</code>: attribute blocks, <code>+</code> in column 1, lines starting with a space, <code>+INFO</code> first</td><td>&sect;2.5; App. I</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td>An attribute given both by reference and explicitly: the explicit value is preferred</td><td>&sect;2.5</td><td>Yes: shown, the reference offered as a link</td></tr>
+                        <tr><td>Gopher+</td><td>Attribute names are case sensitive</td><td>&sect;2.5</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td><code>+VIEWS</code>: the views, the server's preferred first, each with its size; the user picks one</td><td>&sect;2.5, &sect;2.6; App. I</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td><code>$</code>: every item's attributes at once, named blocks optional; the client inspects what comes back</td><td>&sect;2.7</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td><code>+ASK</code>: every line in order; Ask, AskP, AskL, AskF, Select, Choose, ChooseF; answers as the first lines, an AskL with its line count, one file last</td><td>&sect;2.8</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td>ChooseF: restrict the files offered</td><td>&sect;2.8 (suggestion)</td><td>Yes: the transfer folder only</td></tr>
+                        <tr><td>Gopher+</td><td>Pictures, movies and sounds (<code>:</code> <code>;</code> <code>&lt;</code>): no default format, it comes from <code>+VIEWS</code></td><td>&sect;2.9</td><td>Yes: fetched in the first view listed, saved with its type's extension</td></tr>
+                        <tr><td>Gopher+</td><td>A search item's attributes: selector, TAB, TAB, <code>!</code></td><td>App. II</td><td>Yes</td></tr>
+                        <tr><td>Gopher+</td><td>A selector can be longer than 255 characters</td><td>App. II (Notes)</td><td>Yes, sent whole</td></tr>
+                        <tr><td>Gopher+</td><td>A Gopher+ menu: a data head, then the items</td><td>App. II (Menu)</td><td>Yes</td></tr>
                     </tbody>
                 </table>
             </div>

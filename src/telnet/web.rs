@@ -402,7 +402,7 @@ impl TelnetSession {
         // Gopher search URLs need a query term before fetching
         let url = if crate::webbrowser::is_gopher_search(url) {
             // A CSO phone book (type 2) is asked for a name, not words.
-            let phone_book = crate::webbrowser::GopherUrl::parse(url.trim_end_matches("?search")).is_ok_and(|g| g.ty == '2');
+            let phone_book = crate::webbrowser::GopherUrl::parse(url).is_ok_and(|g| g.ty == '2');
             let label = if phone_book { "Look up" } else { "Search" };
             self.send(&format!("  {}: ", self.cyan(label))).await?;
             self.flush().await?;
@@ -514,8 +514,19 @@ impl TelnetSession {
                 return Ok(());
             }
         };
-        // Its server was down and a `+` copy sent it: say which.
-        if served != url {
+        // Fetched in a Gopher+ view (a picture's, say, `image/gif`): saved
+        // with that type's extension -- in place of another view's (`p.gif`
+        // that came as `image/jpeg` is `p.jpg`), else added.  The name is
+        // ASCII (`safe_upload_name`) and kept within the longest allowed.
+        let name = match crate::webbrowser::view_extension(&served) {
+            Some(ext) => crate::webbrowser::name_for_view(&name, ext, Self::MAX_FILENAME_LEN),
+            None => name,
+        };
+        // Its server was down and a `+` copy sent it: say which.  Told by
+        // the server, not the URL: a picture fetched in its view is the
+        // same server under a longer URL.
+        let server = |u: &str| crate::webbrowser::GopherUrl::parse(u).map(|g| (g.host, g.port)).ok();
+        if server(&served) != server(url) {
             let copy = crate::webbrowser::GopherUrl::parse(&served).map(|g| g.host).unwrap_or_default();
             let copy = crate::aichat::display_for_terminal(&copy);
             let copy = crate::webbrowser::truncate_to_width(&self.web_text(&copy), 22);
@@ -835,7 +846,7 @@ impl TelnetSession {
                 }
             };
             let link = crate::webbrowser::resolve_url(&page, &link);
-            match crate::webbrowser::GopherUrl::parse(link.trim_end_matches("?search")) {
+            match crate::webbrowser::GopherUrl::parse(&link) {
                 // A telnet session or a phone book is not served by a gopher
                 // server, so it has no Gopher+ information to ask for.
                 Ok(g) if matches!(g.ty, '8' | 'T' | '2') => {

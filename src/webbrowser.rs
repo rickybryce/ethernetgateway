@@ -2618,7 +2618,7 @@ const GOPHER_TIMEOUT_SECS: u64 = 15;
 const GOPHER_MAX_BODY: usize = 512 * 1024;
 
 mod gopher;
-pub(crate) use gopher::{decode_text, gopher_action, server_seems_down, GopherAction, GopherUrl, ASK_METHOD, ASK_SAVE_AS, ASK_SEND_FILE};
+pub(crate) use gopher::{decode_text, gopher_action, name_for_view, server_seems_down, view_extension, GopherAction, GopherUrl, ASK_METHOD, ASK_SAVE_AS, ASK_SEND_FILE};
 
 /// Read a response of at most `max` bytes, giving up at `deadline`.
 ///
@@ -2689,8 +2689,7 @@ fn ends_with_gopher_lastline(body: &[u8]) -> bool {
 /// A selector as a URL writes it: percent-encoded (RFC 4266 section 2.1).
 ///
 /// Everything that is not printable ASCII, and the three characters a URL
-/// gives meaning to -- `%`, `?` (the `?search` mark, see
-/// [`is_gopher_search`]) and `#`.  A search's TAB goes in as `%09`, which is
+/// gives meaning to -- `%`, `?` and `#`.  A search's TAB goes in as `%09`, which is
 /// also what keeps it through a bookmark: the bookmark file strips
 /// whitespace, and a raw TAB in the URL was stripped with it, joining the
 /// query to the selector.  A selector is octets (RFC 1436), not text: a
@@ -2820,7 +2819,7 @@ pub(crate) fn fetch_gopher_any(url: &str, alternates: &[String], width: usize) -
 /// A gopher file item, for the transfer folder, moving on to `alternates`
 /// the same way, and the URL that served it.  Blocking.
 pub(crate) fn fetch_gopher_file_any(url: &str, alternates: &[String], max: usize) -> Result<(Vec<u8>, String), String> {
-    first_server_up(url, alternates, |u| gopher::fetch_file(u, max).map(|data| (data, u.to_string())))
+    first_server_up(url, alternates, |u| gopher::fetch_file(u, max))
 }
 
 /// How many alternates a follow tries after its own server: each costs up
@@ -2930,9 +2929,9 @@ fn render_gopher_directory(
                 }
             }
             '0' | '1' | '7' => {
-                // Text file, directory, or search — create a link.  A search
-                // is marked `?search` (`MenuItem::url`) so the browser asks
-                // for the words first.
+                // Text file, directory, or search — create a link.  A
+                // search's has no words yet, so the browser asks for them
+                // first (`is_gopher_search`).
                 let type_marker = match item_type {
                     '1' => "/",
                     '7' => "?",
@@ -3015,22 +3014,31 @@ fn render_gopher_directory(
     })
 }
 
-/// Returns true if the URL is a Gopher search that needs a query term.
+/// Whether a gopher URL is a search or phone book still to be asked its
+/// words: type `7` or `2` with no search part (RFC 4266 2.2 writes one as
+/// `%09` and the words).  Not one asking for the item's attributes (`!`,
+/// `$`), nor a filled-in form (`+` TAB `1`, RFC 4266 2.9), whose URL is
+/// its whole request.  Nothing in the selector is a mark: RFC 4266 reserves no
+/// character there, so a selector ending `?search` is that selector.
 pub(crate) fn is_gopher_search(url: &str) -> bool {
-    url.starts_with("gopher://") && url.ends_with("?search")
+    url.starts_with("gopher://")
+        && GopherUrl::parse(url).is_ok_and(|g| {
+            matches!(g.ty, '7' | '2')
+                && g.search.is_none()
+                && !g.plus.as_deref().is_some_and(|p| p.starts_with('!') || p.starts_with('$') || p.starts_with("+\t"))
+        })
 }
 
-/// Strip the `?search` sentinel and append a tab + query to form the search URL.
+/// A search URL with its words: a tab and the query after the selector.
 ///
 /// `query` is octets, as typed: a search's words go to the server byte for
 /// byte (RFC 4266), so a terminal's Latin-1 or UTF-8 is not re-encoded.
 pub(crate) fn build_gopher_search_url(url: &str, query: &[u8]) -> String {
-    let base = url.strip_suffix("?search").unwrap_or(url);
     // The query follows the selector after a TAB (`%09` in the URL), and a
     // Gopher+ string, if the item has one, after another.
-    match GopherUrl::parse(base) {
+    match GopherUrl::parse(url) {
         Ok(g) => GopherUrl { search: Some(query.to_vec()), ..g }.to_url(),
-        Err(_) => base.to_string(),
+        Err(_) => url.to_string(),
     }
 }
 
@@ -4269,9 +4277,20 @@ mod tests {
 
     #[test]
     fn test_gopher_search_detection() {
-        assert!(is_gopher_search("gopher://example.com/7/search?search"));
+        // A search or phone book with no words yet is asked for them.
+        assert!(is_gopher_search("gopher://example.com/7/search"));
+        assert!(is_gopher_search("gopher://example.com:105/2"));
+        assert!(is_gopher_search("gopher://example.com/7/s%09%09+"));
+        // With its words, or asked for its attributes, it is fetched.
+        assert!(!is_gopher_search("gopher://example.com/7/search%09c64"));
+        assert!(!is_gopher_search("gopher://example.com/7/s%09%09!"));
+        assert!(!is_gopher_search("gopher://example.com/7/s%09%09+%091%0D%0A+-1%0D%0Ax%0D%0A.%0D%0A"));
         assert!(!is_gopher_search("gopher://example.com/1/dir"));
         assert!(!is_gopher_search("https://example.com?search"));
+        // RFC 4266 2.1 reserves nothing in the path: `?search` is part of a
+        // selector, not a mark.
+        assert!(!is_gopher_search("gopher://example.com/0/x?search"));
+        assert_eq!(parse_gopher_url("gopher://example.com/0/x?search").unwrap().3, b"/x?search");
     }
 
     /// A URL typed in Latin-1 or UTF-8: a gopher path keeps the octets as
@@ -4311,7 +4330,7 @@ mod tests {
     #[test]
     fn test_build_gopher_search_url() {
         let url = build_gopher_search_url(
-            "gopher://example.com/7/v2/vs?search",
+            "gopher://example.com/7/v2/vs",
             b"hello world",
         );
         // Percent-encoded in the URL (RFC 4266), the TAB included, and
@@ -4390,15 +4409,10 @@ mod tests {
     fn test_rfc1436_item_type_7_search_marks_query_url() {
         // §3.9: type '7' = "Item is an Index-Search server", the
         // selector is the search target and the client is expected
-        // to prompt the user for a query string.  We tag the URL
-        // with `?search` so the browser layer knows to prompt.
+        // to prompt the user for a query string.  Its URL has no search
+        // part yet, which is what makes the browser layer prompt.
         let page = render_one_item("7Search\t/q\texample.org\t70");
-        assert_eq!(page.links.len(), 1);
-        assert!(
-            page.links[0].ends_with("?search"),
-            "type-7 link should be tagged with ?search marker, got {}",
-            page.links[0]
-        );
+        assert_eq!(page.links, vec!["gopher://example.org/7/q".to_string()]);
         assert!(is_gopher_search(&page.links[0]));
     }
 
@@ -4460,7 +4474,7 @@ mod tests {
         let cases = [
             ("8Login\tguest\tbbs.example.org\t", "[TEL] Login", "gopher://bbs.example.org:23/8guest"),
             ("TMainframe\t\tibm.example.org\t0", "[3270] Mainframe", "gopher://ibm.example.org:23/T"),
-            ("2Phone book\t\tns.example.org\t", "[CSO] Phone book", "gopher://ns.example.org:105/2?search"),
+            ("2Phone book\t\tns.example.org\t", "[CSO] Phone book", "gopher://ns.example.org:105/2"),
             ("4Mac file\t/a.hqx\texample.org\t70", "[HQX] Mac file", "gopher://example.org/4/a.hqx"),
             ("6Unix file\t/a.uue\texample.org\t70", "[UUE] Unix file", "gopher://example.org/6/a.uue"),
         ];
@@ -5223,11 +5237,7 @@ mod tests {
         assert_eq!(page.links.len(), 3, "expected 3 actionable links");
         assert!(page.links[0].contains("/0/readme.txt"));
         assert!(page.links[1].contains("/1/sub"));
-        assert!(
-            page.links[2].ends_with("?search"),
-            "type-7 search link should end with ?search marker, got {}",
-            page.links[2]
-        );
+        assert!(is_gopher_search(&page.links[2]), "type-7 search link should ask for words, got {}", page.links[2]);
         assert!(page.lines.iter().any(|l| l.contains("Welcome")));
     }
 

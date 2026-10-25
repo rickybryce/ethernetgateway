@@ -87,7 +87,12 @@ impl GopherUrl {
     pub(crate) fn request(&self, plus: Option<&str>) -> Vec<u8> {
         let mut line = self.selector.clone();
         if let Some(search) = &self.search {
-            line.push(b'\t');
+            // "If the selector string is empty, the client merely sends the
+            // search string" (RFC 1436 3.7).  A Gopher+ request keeps its
+            // TABs: its fields are found by them (Gopher+ App. II).
+            if !line.is_empty() || plus.is_some() {
+                line.push(b'\t');
+            }
             line.extend_from_slice(search);
         }
         if let Some(plus) = plus {
@@ -110,7 +115,8 @@ impl GopherUrl {
     /// The item type the reply is drawn as: a Gopher+ view names its own
     /// MIME type, and that wins over the menu's letter.
     fn shown_as(&self) -> char {
-        let Some(view) = self.plus.as_deref().and_then(|p| p.strip_prefix('+')).filter(|v| !v.is_empty()) else {
+        // A filled-in form (`+` TAB `1` ...) is the item's own view.
+        let Some(view) = self.plus.as_deref().and_then(|p| p.strip_prefix('+')).filter(|v| !v.is_empty() && !v.starts_with('\t')) else {
             return self.ty;
         };
         let mime = view.split(' ').next().unwrap_or_default().to_ascii_lowercase();
@@ -121,6 +127,26 @@ impl GopherUrl {
             _ => '9',
         }
     }
+}
+
+/// The request a filled-in form URL stands for (RFC 4266 2.9): its Gopher+
+/// string is "a coded version of what the client sends", `+` TAB `1` CR LF
+/// and a data block of the answers.  The line before the block is the
+/// selector, TAB, `+`, TAB, `1` -- built as every Gopher+ request is
+/// (`request`), so a search keeps its empty search and a selector stays
+/// one line -- and the block goes as it is: the octets the URL decodes to,
+/// an answer in Latin-1 as it was written.  `None` for any other URL, and
+/// for a data block without a Gopher+ data head.
+fn form_request(url: &str) -> Option<Vec<u8>> {
+    let g = GopherUrl::parse(url).ok()?;
+    let (_, _, _, path) = parse_gopher_url(url).ok()?;
+    let plus = path.splitn(3, |&b| b == b'\t').nth(2)?;
+    let block = plus.strip_prefix(b"+\t1\r\n")?;
+    plus_header(block).filter(|&(ok, _, _)| ok)?;
+    let mut request = g.request(Some("+"));
+    request.extend_from_slice(b"\t1\r\n");
+    request.extend_from_slice(block);
+    Some(request)
 }
 
 /// What following a gopher link does.
@@ -449,9 +475,10 @@ pub(crate) fn parse_menu_line(line: impl AsRef<[u8]>, current_host: &str, curren
 
 impl MenuItem {
     /// The link a menu item makes, under `ty` (a `+` redundant server's
-    /// is its primary's).  A search or phone book is marked `?search`, so
-    /// the browser asks for the words first; a Gopher+ item carries its
-    /// marker as the URL's Gopher+ string.
+    /// is its primary's).  A search or phone book's URL has no search part,
+    /// which is what makes the browser ask for the words first
+    /// (`is_gopher_search`); a Gopher+ item carries its marker as the URL's
+    /// Gopher+ string.
     pub(crate) fn url(&self, ty: char) -> String {
         if ty == 'h'
             && let Some(web) = self.selector.strip_prefix(b"URL:")
@@ -466,8 +493,7 @@ impl MenuItem {
             search: None,
             plus: self.plus.map(|c| c.to_string()),
         };
-        let url = g.to_url();
-        if matches!(ty, '7' | '2') { format!("{url}?search") } else { url }
+        g.to_url()
     }
 }
 
@@ -1022,10 +1048,12 @@ pub(crate) fn fetch(url: &str, width: usize) -> Result<WebPage, String> {
     // server that keeps the connection open after it is not waited out --
     // nor one that ignored a Gopher+ request and sent the plain reply.
     let lined = matches!(g.shown_as(), '0' | '1' | '4' | '6' | '7' | 'h');
+    // A filled-in form's URL carries its whole request, answers and all.
+    let request = form_request(url).unwrap_or_else(|| [g.request(plus), b"\r\n".to_vec()].concat());
     let body = exchange(
         &g.host,
         g.port,
-        &[g.request(plus), b"\r\n".to_vec()].concat(),
+        &request,
         GOPHER_MAX_BODY,
         GOPHER_TIMEOUT_SECS,
         &|b| plus.is_some() && plus_reply_complete(b),
@@ -1058,7 +1086,97 @@ pub(crate) fn fetch(url: &str, width: usize) -> Result<WebPage, String> {
 
 /// Fetch a file item whole, for the transfer folder, refusing one larger
 /// than `max`.
-pub(crate) fn fetch_file(url: &str, max: usize) -> Result<Vec<u8>, String> {
+///
+/// Also the URL it was fetched as: a picture, movie or sound item has no
+/// default format (Gopher+ 2.9) -- "the specific format ... must be gleaned
+/// from the +VIEWS information" -- so a Gopher+ one is fetched in the first
+/// view its attributes list, the server's preferred; one whose attributes
+/// name none is fetched as asked.
+pub(crate) fn fetch_file(url: &str, max: usize) -> Result<(Vec<u8>, String), String> {
+    let g = GopherUrl::parse(url)?;
+    if matches!(g.ty, ':' | ';' | '<')
+        && g.plus.as_deref() == Some("+")
+        && let Some(view) = media_view(&g)?
+    {
+        let viewed = g.with_plus(&view).to_url();
+        return fetch_file_as(&viewed, max).map(|data| (data, viewed));
+    }
+    fetch_file_as(url, max).map(|data| (data, url.to_string()))
+}
+
+/// The view a Gopher+ item's attributes list first (`+VIEWS`), as the
+/// Gopher+ string that asks for it (`+image/gif`).  `None` if they could
+/// not be had or name none -- but a server that is down is an error, so a
+/// `+` copy is tried at once rather than after a second wait for the file.
+fn media_view(g: &GopherUrl) -> Result<Option<String>, String> {
+    let request = [g.request(Some("!")), b"\r\n".to_vec()].concat();
+    let body = match exchange(&g.host, g.port, &request, GOPHER_MAX_BODY, GOPHER_TIMEOUT_SECS, &plus_reply_complete, &|_| false) {
+        Ok(body) => body,
+        Err(e) if server_seems_down(&e) => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    let PlusReply::Data(data) = split_plus_reply(&body) else { return Ok(None) };
+    let items = parse_attributes(&data);
+    let Some(views) = items.first().and_then(|i| i.block("+VIEWS")) else { return Ok(None) };
+    // `Content-Type[ Language]: [<size>]`
+    let view = views.lines.iter().filter_map(|l| l.split_once(':')).map(|(name, _)| name.trim()).find(|n| !n.is_empty());
+    Ok(view.map(|v| format!("+{v}")))
+}
+
+/// The extension a file fetched in a Gopher+ view is saved with, from the
+/// view's content type: a picture item named `cat` fetched as `image/gif`
+/// is `cat.gif`.  `None` for a URL with no view, or a type not known here.
+pub(crate) fn view_extension(url: &str) -> Option<&'static str> {
+    let g = GopherUrl::parse(url).ok()?;
+    let view = g.plus.as_deref()?.strip_prefix('+')?;
+    let mime = view.split(' ').next()?.to_ascii_lowercase();
+    VIEW_EXTENSIONS.iter().find(|(types, _)| types.contains(&mime.as_str())).map(|&(_, ext)| ext)
+}
+
+/// Whether `ext` is one [`view_extension`] gives: a name ending in one
+/// names a format, and one fetched in another view has it swapped.
+pub(crate) fn is_view_extension(ext: &str) -> bool {
+    VIEW_EXTENSIONS.iter().any(|&(_, e)| e.eq_ignore_ascii_case(ext))
+}
+
+/// `name` saved with `ext`, a view's extension, and at most `max` long:
+/// in place of another view's (`p.gif` that came as `image/jpeg` is
+/// `p.jpg`), else added (`cat` is `cat.gif`).  Cut before the extension,
+/// leaving no dot at the cut to make `..` with it; a name that is nothing
+/// but dots is kept as it is.
+pub(crate) fn name_for_view(name: &str, ext: &str, max: usize) -> String {
+    let stem = match name.rsplit_once('.') {
+        Some((stem, old)) if !stem.is_empty() && is_view_extension(old) => stem,
+        _ => name,
+    };
+    let room = max.saturating_sub(ext.len() + 1);
+    let stem = stem[..stem.floor_char_boundary(room)].trim_end_matches('.');
+    if stem.is_empty() { name.to_string() } else { format!("{stem}.{ext}") }
+}
+
+const VIEW_EXTENSIONS: &[(&[&str], &str)] = &[
+    (&["image/gif"], "gif"),
+    (&["image/jpeg", "image/jpg"], "jpg"),
+    (&["image/png"], "png"),
+    (&["image/tiff"], "tif"),
+    (&["image/bmp", "image/x-bmp"], "bmp"),
+    (&["image/pict", "image/x-pict"], "pct"),
+    (&["video/mpeg"], "mpg"),
+    (&["video/quicktime"], "mov"),
+    (&["video/x-msvideo", "video/avi"], "avi"),
+    (&["video/mp4"], "mp4"),
+    (&["audio/basic"], "au"),
+    (&["audio/wav", "audio/x-wav"], "wav"),
+    (&["audio/mpeg"], "mp3"),
+    (&["audio/aiff", "audio/x-aiff"], "aif"),
+    (&["audio/midi"], "mid"),
+    (&["text/plain"], "txt"),
+    (&["application/postscript"], "ps"),
+    (&["application/pdf"], "pdf"),
+];
+
+/// [`fetch_file`] for the URL as it is.
+fn fetch_file_as(url: &str, max: usize) -> Result<Vec<u8>, String> {
     let g = GopherUrl::parse(url)?;
     let plus = g.plus.as_deref();
     // One byte past the limit, to tell "exactly max" from "more".
@@ -1125,6 +1243,43 @@ mod tests {
         (port, h)
     }
 
+    /// `serve`, for one connection after another: what each sent.
+    fn serve_seq(replies: Vec<Vec<u8>>) -> (u16, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Gives up rather than waiting for ever: a client that makes fewer
+        // connections than expected must fail its test, not hang it.
+        listener.set_nonblocking(true).unwrap();
+        let h = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            for reply in replies {
+                let mut s = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break s,
+                        Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                        Err(_) => return seen,
+                    }
+                };
+                s.set_nonblocking(false).unwrap();
+                s.set_read_timeout(Some(std::time::Duration::from_millis(300))).ok();
+                let mut got = Vec::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = s.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    got.extend_from_slice(&buf[..n]);
+                }
+                s.write_all(&reply).unwrap();
+                seen.push(got);
+            }
+            seen
+        });
+        (port, h)
+    }
+
     #[test]
     fn test_a_gopher_url_round_trips_its_search_and_plus_string() {
         let g = GopherUrl::parse("gopher://h.example:7070/7/find%09c64%09+").unwrap();
@@ -1137,11 +1292,72 @@ mod tests {
         // A plain search, and a plain item, are as they always were.
         assert_eq!(GopherUrl::parse("gopher://h/7/v%09hi").unwrap().to_url(), "gopher://h/7/v%09hi");
         assert_eq!(GopherUrl::parse("gopher://h/1/x").unwrap().to_url(), "gopher://h/1/x");
-        assert_eq!(build_gopher_search_url("gopher://h/7/v%09%09+?search", b"c 64"), "gopher://h/7/v%09c%2064%09+");
+        assert_eq!(build_gopher_search_url("gopher://h/7/v%09%09+", b"c 64"), "gopher://h/7/v%09c%2064%09+");
     }
 
     /// On the wire the Gopher+ spec, not RFC 4266's example: one TAB before
     /// the Gopher+ string for an item, an empty search before it for a search.
+    /// RFC 1436 3.7: "If the selector string is empty, the client merely
+    /// sends the search string."  A Gopher+ request keeps its TABs.
+    #[test]
+    fn test_a_search_with_an_empty_selector_sends_only_the_words() {
+        let g = GopherUrl::parse("gopher://h/7%09c64").unwrap();
+        assert_eq!(g.request(None), b"c64");
+        assert_eq!(GopherUrl::parse("gopher://h/7/s%09c64").unwrap().request(None), b"/s\tc64");
+        assert_eq!(g.request(Some("+")), b"\tc64\t+");
+        // On the wire.
+        let (port, server) = serve(b"0Hit\t/h\th\t70\r\n.\r\n".to_vec());
+        fetch(&format!("gopher://127.0.0.1:{port}/7%09c64"), 72).unwrap();
+        assert_eq!(server.join().unwrap(), b"c64\r\n");
+    }
+
+    /// RFC 4266 2.9: a filled-in form's URL is "a coded version of what the
+    /// client sends" -- sent as it is, answers and CR LFs and all -- and
+    /// its reply is the item, drawn as a page.
+    #[test]
+    fn test_a_filled_in_form_url_sends_its_answers() {
+        let (port, server) = serve(b"+-1\r\nThanks, Ann\r\n.\r\n".to_vec());
+        let url = format!("gopher://127.0.0.1:{port}/0/order%09%09+%091%0D%0A+-1%0D%0AAnn%0D%0Acaf%E9%0D%0A.%0D%0A");
+        assert_eq!(gopher_action(&url), GopherAction::Page);
+        let page = fetch(&url, 72).unwrap();
+        // One TAB before the `+`, as RFC 4266 2.9 sends it.
+        assert_eq!(server.join().unwrap(), b"/order\t+\t1\r\n+-1\r\nAnn\r\ncaf\xe9\r\n.\r\n");
+        assert_eq!(page.lines, vec!["Thanks, Ann"]);
+        // A search keeps its empty search; a selector stays one line; the
+        // block is sent as it is, a NUL in a counted answer too.
+        assert_eq!(form_request("gopher://h/7/s%09%09+%091%0D%0A+-1%0D%0Ax%0D%0A.%0D%0A").unwrap(), b"/s\t\t+\t1\r\n+-1\r\nx\r\n.\r\n");
+        assert_eq!(form_request("gopher://h/0/a%0D%0Ajunk%09%09+%091%0D%0A+-1%0D%0A.%0D%0A").unwrap(), b"/ajunk\t+\t1\r\n+-1\r\n.\r\n");
+        assert_eq!(form_request("gopher://h/0/a%09%09+%091%0D%0A+3%0D%0Ax%00y").unwrap(), b"/a\t+\t1\r\n+3\r\nx\0y");
+        // Not a form: a view, or a block without a data head.
+        assert_eq!(form_request("gopher://h/0/a%09%09+text/plain"), None);
+        assert_eq!(form_request("gopher://h/0/a%09%09+%091%0D%0Ajunk"), None);
+    }
+
+    /// Named attributes (RFC 4266 2.7; Gopher+ 2.7, App. II): the names go
+    /// to the server after the `!` or `$`, and whatever comes back is drawn.
+    /// A search item's attributes are asked for after an empty search.
+    #[test]
+    fn test_named_attributes_are_asked_for() {
+        let attrs = b"+-1\r\n+INFO: 0Doc\t/d\th\t70\t+\r\n+ABSTRACT:\r\n Short.\r\n.\r\n".to_vec();
+        let (port, server) = serve(attrs.clone());
+        let page = fetch(&format!("gopher://127.0.0.1:{port}/0/d%09%09!+ABSTRACT%20+SMELL"), 72).unwrap();
+        assert_eq!(server.join().unwrap(), b"/d\t!+ABSTRACT +SMELL\r\n");
+        assert!(page.lines.iter().any(|l| l.contains("Short.")), "{:?}", page.lines);
+        let (port, server) = serve(attrs);
+        fetch(&format!("gopher://127.0.0.1:{port}/1/dir%09%09$+VIEWS+ABSTRACT"), 72).unwrap();
+        assert_eq!(server.join().unwrap(), b"/dir\t$+VIEWS+ABSTRACT\r\n");
+        assert_eq!(GopherUrl::parse("gopher://h/7/s%09%09!").unwrap().request(Some("!")), b"/s\t\t!");
+    }
+
+    /// Gopher+ App. II: "the Selector string can be longer than 255
+    /// characters" -- sent whole.
+    #[test]
+    fn test_a_long_selector_is_sent_whole() {
+        let long = "x".repeat(600);
+        let g = GopherUrl::parse(&format!("gopher://h/0/{long}")).unwrap();
+        assert_eq!(g.request(None).len(), 601);
+    }
+
     #[test]
     fn test_a_gopher_plus_request_line() {
         let item = GopherUrl::parse("gopher://h/0/a%09%09+").unwrap();
@@ -1200,7 +1416,8 @@ mod tests {
         assert_eq!(parse_menu_line("0Doc\t/d\th\t70\tjunk", "x", 70).unwrap().plus, None);
         // A Gopher+ search keeps its marker through the search prompt.
         let search = parse_menu_line("7Find\t/s\th\t70\t+", "x", 70).unwrap().url('7');
-        assert_eq!(search, "gopher://h/7/s%09%09+?search");
+        assert_eq!(search, "gopher://h/7/s%09%09+");
+        assert!(is_gopher_search(&search));
     }
 
     /// The `+ASK` keywords UMN's published forms use, and the spec's two
@@ -1437,7 +1654,7 @@ mod tests {
         server5.join().unwrap();
         // A binary file is read to the close, `.` line or not.
         let (port, server4) = hold_open(vec![b"x\r\n.\r\n"], std::time::Duration::ZERO);
-        let data = fetch_file(&format!("gopher://127.0.0.1:{port}/9/f"), 100).unwrap();
+        let data = fetch_file(&format!("gopher://127.0.0.1:{port}/9/f"), 100).unwrap().0;
         assert_eq!(data, b"x\r\n.\r\n");
         for s in [server, server2, server3, server4] {
             s.join().unwrap();
@@ -1588,13 +1805,34 @@ mod tests {
     #[test]
     fn test_a_file_item_is_fetched_whole_or_refused() {
         let (port, server) = serve(b"\x00\x01binary\xff".to_vec());
-        let data = fetch_file(&format!("gopher://127.0.0.1:{port}/9/f.bin"), 100).unwrap();
+        let data = fetch_file(&format!("gopher://127.0.0.1:{port}/9/f.bin"), 100).unwrap().0;
         assert_eq!(String::from_utf8_lossy(&server.join().unwrap()), "/f.bin\r\n");
         assert_eq!(data, b"\x00\x01binary\xff");
-        let (port, server) = serve(b"+4\r\nGIF8".to_vec());
-        let data = fetch_file(&format!("gopher://127.0.0.1:{port}/:/p.gif%09%09+"), 100).unwrap();
-        assert_eq!(String::from_utf8_lossy(&server.join().unwrap()), "/p.gif\t+\r\n");
+        // A picture has no default format (Gopher+ 2.9): its attributes
+        // are asked first, and it is fetched in the first view they list.
+        let attrs = b"+-1\r\n+INFO: :Cat\t/p\th\t70\t+\r\n+VIEWS:\r\n image/gif: <1k>\r\n image/jpeg: <2k>\r\n.\r\n".to_vec();
+        let (port, server) = serve_seq(vec![attrs, b"+4\r\nGIF8".to_vec()]);
+        let (data, served) = fetch_file(&format!("gopher://127.0.0.1:{port}/:/p%09%09+"), 100).unwrap();
+        assert_eq!(server.join().unwrap(), vec![b"/p\t!\r\n".to_vec(), b"/p\t+image/gif\r\n".to_vec()]);
         assert_eq!(data, b"GIF8");
+        assert_eq!(served, format!("gopher://127.0.0.1:{port}/:/p%09%09+image/gif"));
+        assert_eq!(view_extension(&served), Some("gif"));
+        // Attributes that name no view: fetched as asked.
+        let (port, server) = serve_seq(vec![b"+-1\r\n+INFO: :Cat\t/p\th\t70\t+\r\n.\r\n".to_vec(), b"+4\r\nGIF8".to_vec()]);
+        let (data, served) = fetch_file(&format!("gopher://127.0.0.1:{port}/:/p%09%09+"), 100).unwrap();
+        assert_eq!(server.join().unwrap()[1], b"/p\t+\r\n");
+        assert_eq!((data.as_slice(), view_extension(&served)), (&b"GIF8"[..], None));
+        // A server that is down is said to be, so its `+` copy is tried
+        // now, not after a second wait for the file itself.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let g = GopherUrl::parse(&format!("gopher://127.0.0.1:{closed}/:/p%09%09+")).unwrap();
+        assert!(media_view(&g).is_err_and(|e| server_seems_down(&e)));
+        assert!(is_view_extension("GIF") && !is_view_extension("v2"));
+        assert_eq!(name_for_view("cat", "gif", 64), "cat.gif");
+        assert_eq!(name_for_view("p.GIF", "jpg", 64), "p.jpg");
+        assert_eq!(name_for_view("notes.v2", "txt", 64), "notes.v2.txt");
+        assert_eq!(name_for_view("abc.defgh", "gif", 8), "abc.gif");
+        assert_eq!(name_for_view("..", "gif", 64), "..");
         // Cut short: a counted reply with fewer bytes, or a `.`-ended one
         // with no `.` line, is not saved as if it were whole.
         for reply in [&b"+10\r\nabc"[..], &b"+-1\r\nabc\r\n"[..]] {

@@ -5504,12 +5504,24 @@ the internet can.  Hobbyists still run hundreds of servers.
 </p>
 
 <p>
-<strong>Standards.</strong>  The browser's Gopher client implements
+<strong>Compliance.</strong>  The browser's Gopher client is compliant with
 RFC&nbsp;1436 (The Internet Gopher Protocol), RFC&nbsp;4266 (The gopher URI
-Scheme) and the Gopher+ specification, measured against live servers.  A
-tn3270 (<code>T</code>) item is connected to its host and port with its
-login, as the RFC says, but over plain telnet: the gateway is not an IBM 3270
-terminal, and many 3270 hosts will not work this way.  The Gopher reference page
+Scheme) and the Gopher+ specification: every client obligation in the three,
+read end to end, is met, and measured against live servers.  One is met only
+in part: a tn3270 (<code>T</code>) item is connected to its host and port
+with its login, as the RFC says, but over plain telnet &mdash; the gateway is
+not an IBM 3270 terminal, and many 3270 hosts will not work this way.  The
+Gopher reference page (<code>gopherreference.html</code>) lists every
+requirement and its section.
+</p>
+
+<p>
+A picture, movie or sound offered by a Gopher+ server has no format of its
+own; the browser asks its information first and fetches it in the first view
+the server lists, saving it with that type's extension (<code>cat.gif</code>).
+A search or phone book asks for its words when followed; an address with the
+words already in it (<code>gopher://host/7/find%09c64</code>) goes straight to
+the results.  The Gopher reference page
 (<code>gopherreference.html</code>) lists each requirement.
 </p>
 
