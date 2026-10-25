@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gopher Protocol Reference &mdash; Ethernet Gateway v1.0.6</title>
-    <meta name="description" content="How the Gopher protocol works and how the Ethernet Gateway speaks it: menus and every RFC 1436 item type, text files and dot doubling, searches and CSO phone books, redundant servers, telnet items, gopher:// URLs (RFC 4266) and selector bytes, Gopher+ attributes, views and +ASK forms, safety limits, and a compliance table.">
+    <meta name="description" content="How the Gopher protocol works and how the Ethernet Gateway speaks it -- RFC 1436, RFC 4266 and Gopher+: menus and every RFC 1436 item type, text files and dot doubling, searches and CSO phone books, redundant servers, telnet items, gopher:// URLs (RFC 4266) and selector bytes, Gopher+ attributes, views and +ASK forms, safety limits, and a compliance table.">
     <style>
         :root {
             --green: #33ff33;
@@ -607,11 +607,19 @@
                     way, information about each item, alternate formats, and simple forms.
                 </p>
                 <div class="callout callout-info">
-                    <strong>What the gateway implements:</strong> every item type in
-                    RFC&nbsp;1436, the <code>gopher://</code> URL scheme of RFC&nbsp;4266, and
-                    Gopher+ &mdash; item information, views and <code>+ASK</code> forms. The
-                    <a href="#compliance">compliance table</a> lists each requirement and
-                    where it stands.
+                    <strong>What the gateway implements.</strong> The Gopher client implements
+                    <strong>RFC&nbsp;1436</strong> (The Internet Gopher Protocol),
+                    <strong>RFC&nbsp;4266</strong> (The gopher URI Scheme) and the
+                    <strong>Gopher+</strong> specification (1993) &mdash; item information,
+                    views, <code>$</code> and <code>!</code> requests and <code>+ASK</code>
+                    forms &mdash; measured against live servers (Floodgap, SDF, quux.org)
+                    and two server implementations (gophernicus, pygopherd). One type is met
+                    only in part: RFC&nbsp;1436 defines a <code>T</code> item as a tn3270
+                    session and says only to connect to its host and port and log in as the
+                    selector. The gateway does that over plain telnet, without 3270
+                    emulation, and warns on the screen first; many 3270 hosts will not work
+                    this way. The <a href="#compliance">compliance table</a> lists each
+                    requirement and where it stands.
                 </div>
             </div>
 
@@ -835,13 +843,15 @@ Hello              Hello              Hello
                     listed, the copy marked <code>[ALT]</code>, so either can be picked.
                 </p>
                 <p>
-                    RFC&nbsp;1436 &sect;3.5 also asks a smart client to move to the copy
-                    when a server &ldquo;seems to be down&rdquo;. The gateway does: following
+                    RFC&nbsp;1436 &sect;3.5 describes smart clients that choose at random
+                    between cloned servers to spread the load, and move to the other when one
+                    &ldquo;seems to be down&rdquo;. The gateway does the second half for
+                    <code>+</code> copies: following
                     any of them, it tries the others in menu order, at most three, when the server cannot be
                     reached &mdash; its name does not resolve, or nothing answers. A server
                     that answers, even with an error or a missing item, is up, and its answer
                     stands. This covers menus, text, searches (the copy is asked the same
-                    words), phone books and downloads. No more than three copies are tried,
+                    words), phone books, downloads and telnet items. No more than three copies are tried,
                     because each one that is down can take 15 seconds to give up on.
                 </p>
             </div>
@@ -897,8 +907,9 @@ Hello              Hello              Hello
                     </tbody>
                 </table>
                 <p>
-                    <strong>A selector is bytes, not text.</strong> Both RFCs allow any byte
-                    but TAB, CR and LF. The gateway keeps a selector as the exact bytes the
+                    <strong>A selector is bytes, not text.</strong> RFC&nbsp;4266 allows any
+                    byte but TAB, CR and LF in one (RFC&nbsp;1436 and Gopher+ also exclude
+                    NUL; RFC&nbsp;1436 says ASCII, Gopher+ any octet). The gateway keeps a selector as the exact bytes the
                     menu gave: a Latin-1 <code>&eacute;</code> is written <code>%E9</code> in
                     the URL and sent as that one byte, so a server whose selectors are not
                     UTF-8 is asked for what it listed. A gopher address typed at
@@ -942,7 +953,7 @@ Hello              Hello              Hello
                     <thead><tr><th>First line</th><th>Means</th></tr></thead>
                     <tbody>
                         <tr><td><code>+5340</code></td><td>Exactly 5340 bytes follow.</td></tr>
-                        <tr><td><code>+-1</code></td><td>Data ends with a <code>.</code> line (dots doubled, as in text files).</td></tr>
+                        <tr><td><code>+-1</code></td><td>Data ends with a <code>.</code> line.</td></tr>
                         <tr><td><code>+-2</code></td><td>Data ends when the server closes.</td></tr>
                         <tr><td><code>--1</code> &hellip;</td><td>An error. Its first token is a code: <code>1</code> not available, <code>2</code> try again later, <code>3</code> moved &mdash; followed by the menu line of where it went, which the gateway shows as a link.</td></tr>
                     </tbody>
@@ -1045,6 +1056,13 @@ Hello              Hello              Hello
             <div class="section" id="compliance">
                 <div class="section-title">Compliance</div>
                 <p class="intro">What each specification asks of a client, and where the gateway stands.</p>
+                <p>
+                    Each row is a client obligation of a specification, or a behaviour it
+                    describes as optional; the Status column says how the gateway meets it.
+                    tn3270 is met only in part: see its row.  What a server does is the
+                    server's own compliance (none of the servers measured doubles a text
+                    line's leading dot, for one).
+                </p>
 
                 <table class="data-table">
                     <thead><tr><th>Requirement</th><th>Spec</th><th>Status</th></tr></thead>
@@ -1060,11 +1078,11 @@ Hello              Hello              Hello
                         <tr><td>Search: selector, TAB, words</td><td>RFC 1436 App. (type 7)</td><td>Yes</td></tr>
                         <tr><td>CSO items talk the CSO protocol</td><td>RFC 1436 &sect;3.7</td><td>Yes, lookups</td></tr>
                         <tr><td>Telnet items connect to host and port, login from the selector</td><td>RFC 1436 App. (type 8)</td><td>Yes</td></tr>
-                        <tr><td>tn3270 items</td><td>RFC 1436 App. (type T)</td><td>Connected over plain telnet, with a warning</td></tr>
+                        <tr><td>tn3270 items: connect to the host and port, log in as the selector</td><td>RFC 1436 &sect;3.8, App. (type T)</td><td>In part: connected and logged in as the RFC says, over plain telnet with a warning; a tn3270 session's 3270 terminal is not emulated</td></tr>
                         <tr><td><code>+</code> items use their primary's transaction</td><td>RFC 1436 App. (type +)</td><td>Yes</td></tr>
-                        <tr><td>Move to a redundant server when one seems down</td><td>RFC 1436 &sect;3.5</td><td>Yes</td></tr>
+                        <tr><td>Move to a cloned server when one seems down (optional)</td><td>RFC 1436 &sect;3.5</td><td>Failover yes, in menu order (no random load balancing): menus, text, searches, phone books, downloads and telnet items; at most three copies</td></tr>
                         <tr><td>Display strings in ISO Latin-1</td><td>RFC 1436 App.; Gopher+ App.</td><td>Yes; UTF-8 also read</td></tr>
-                        <tr><td>Selectors are any bytes but TAB, CR, LF</td><td>RFC 1436 App.; RFC 4266 &sect;2.1</td><td>Yes, kept byte for byte</td></tr>
+                        <tr><td>Selectors are any bytes but TAB, CR, LF (and NUL)</td><td>RFC 4266 &sect;2.1; RFC 1436 App.; Gopher+ App. II</td><td>Yes, kept byte for byte</td></tr>
                         <tr><td>URL: default port and type, <code>%09</code> search and Gopher+ string</td><td>RFC 4266 &sect;2</td><td>Yes</td></tr>
                         <tr><td>Gopher+ replies: count, <code>-1</code>, <code>-2</code>, errors 1&ndash;3</td><td>Gopher+ &sect;2.3</td><td>Yes</td></tr>
                         <tr><td><code>!</code> and <code>$</code> attributes; <code>+INFO</code>, <code>+ADMIN</code>, <code>+VIEWS</code>, <code>+ABSTRACT</code></td><td>Gopher+ &sect;2.5, &sect;2.7, App. I</td><td>Yes</td></tr>

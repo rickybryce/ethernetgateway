@@ -105,6 +105,7 @@ options, and the full AT command set.
   over SSH; files always land on the master.
 - **Web browser** — text-mode HTTP/HTTPS/Gopher browsing with numbered links,
   forms, and bookmarks. Rendered for 40-column PETSCII up to modern terminals.
+  The Gopher client implements RFC 1436, RFC 4266 and Gopher+.
 - **AI chat** — Q&A powered by the Groq API (free key required).
 - **Weather** — current conditions + 3-day forecast for any city/postal code
   worldwide (Open-Meteo, no key required).

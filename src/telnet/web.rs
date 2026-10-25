@@ -430,7 +430,7 @@ impl TelnetSession {
                     return Ok(false);
                 }
                 crate::webbrowser::GopherAction::Telnet { host, port, login, tn3270 } => {
-                    self.web_gopher_telnet(&host, port, &login, tn3270).await?;
+                    self.web_gopher_telnet(&host, port, &login, tn3270, &alternates).await?;
                     return Ok(false);
                 }
             }
@@ -558,7 +558,19 @@ impl TelnetSession {
     /// to log in as.  The address is checked as a gopher fetch's is: a menu
     /// chose it.  A tn3270 host wants an IBM 3270 terminal, which the
     /// gateway cannot be; it is offered over plain telnet, and said so.
-    pub(in crate::telnet) async fn web_gopher_telnet(&mut self, host: &str, port: u16, login: &str, tn3270: bool) -> Result<(), std::io::Error> {
+    ///
+    /// `alternates`: the item's `+` copies (RFC 1436 3.5), tried in turn --
+    /// at most `GOPHER_MAX_ALTERNATES` -- while the server seems down: its
+    /// name does not resolve, or nothing answers.  A server refused by the
+    /// address check is not down, and ends it there.
+    pub(in crate::telnet) async fn web_gopher_telnet(
+        &mut self,
+        host: &str,
+        port: u16,
+        login: &str,
+        tn3270: bool,
+        alternates: &[String],
+    ) -> Result<(), std::io::Error> {
         self.clear_screen().await?;
         let sep = self.separator();
         self.send_line(&sep).await?;
@@ -587,27 +599,70 @@ impl TelnetSession {
         if !self.cpm_confirm().await? {
             return Ok(());
         }
-        // Every address the name has is checked, and the one dialled is the
-        // first of them: a connect by name would try the others too, and
-        // resolve again -- a LAN address behind a public one, or rebound.
-        let (h, p) = (host.to_string(), port);
-        let checked = tokio::task::spawn_blocking(move || {
-            use std::net::ToSocketAddrs;
-            let addrs: Vec<std::net::SocketAddr> =
-                (h.as_str(), p).to_socket_addrs().map_err(|e| format!("DNS error: {e}"))?.collect();
-            crate::webbrowser::gopher_dial_addr(&addrs, &h)
-        })
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let addr = match checked {
-            Ok(a) => a,
-            Err(e) => {
-                let safe = self.web_text(&crate::aichat::sanitize_for_terminal(&e));
-                self.show_error(&safe).await?;
-                return Ok(());
+        // The item, then its copies that are telnet items too.
+        let mut servers = vec![(host.to_string(), port, login.to_string())];
+        for alt in alternates.iter().take(crate::webbrowser::GOPHER_MAX_ALTERNATES) {
+            if let crate::webbrowser::GopherAction::Telnet { host, port, login, .. } = crate::webbrowser::gopher_action(alt) {
+                servers.push((host, port, login));
             }
-        };
-        self.gateway_telnet_dial(host, port, Some(addr)).await
+        }
+        let last = servers.len() - 1;
+        // With no copy the gateway's own dial draws this screen, blank row
+        // and all, as before there were copies to try.
+        if last > 0 {
+            self.send_line("").await?;
+        }
+        for (i, (host, port, copy_login)) in servers.into_iter().enumerate() {
+            // Moving to a copy: said so, and its own login if it differs.
+            if i > 0 {
+                self.send_line("  It did not answer; trying a copy.").await?;
+                if copy_login != login && !copy_login.trim().is_empty() {
+                    let name = crate::aichat::display_for_terminal(&copy_login);
+                    let name = crate::webbrowser::truncate_to_width(&self.web_text(&name), 26);
+                    self.send_line(&format!("  Log in as: {}", self.amber(&name))).await?;
+                }
+            }
+            // Every address the name has is checked, and the one dialled is
+            // the first of them: a connect by name would try the others too,
+            // and resolve again -- a LAN address behind a public one, or
+            // rebound.
+            let h = host.clone();
+            let checked = tokio::task::spawn_blocking(move || {
+                use std::net::ToSocketAddrs;
+                let addrs: Vec<std::net::SocketAddr> =
+                    (h.as_str(), port).to_socket_addrs().map_err(|e| format!("DNS error: {e}"))?.collect();
+                crate::webbrowser::gopher_dial_addr(&addrs, &h)
+            })
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let addr = match checked {
+                Ok(a) => a,
+                Err(e) if i < last && crate::webbrowser::server_seems_down(&e) => {
+                    glog!("Gopher: telnet item {}:{} could not be reached; trying its copy", host, port);
+                    continue;
+                }
+                Err(e) => {
+                    let safe = self.web_text(&crate::aichat::sanitize_for_terminal(&e));
+                    self.show_error(&safe).await?;
+                    return Ok(());
+                }
+            };
+            if i == last {
+                // The last one tried: dialled as the gateway dials, its
+                // "Connecting to" line and its failure shown as the
+                // gateway shows them.
+                return self.gateway_telnet_dial(&host, port, Some(addr)).await;
+            }
+            // One with a copy after it: connected here, so one that does not
+            // answer can be left for the next -- named first, so the screen
+            // says which server it waits on and which one answered.
+            self.gateway_connecting_line(&host, port).await?;
+            match tokio::time::timeout(Self::GATEWAY_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr)).await {
+                Ok(Ok(remote)) => return self.gateway_telnet_bridge(remote).await,
+                _ => glog!("Gopher: telnet item {}:{} did not answer; trying its copy", host, port),
+            }
+        }
+        Ok(())
     }
 
     /// Whether form `idx` is a Gopher+ `+ASK` form: made from one (its

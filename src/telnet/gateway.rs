@@ -1149,7 +1149,7 @@ impl TelnetSession {
     // ─── SSH GATEWAY ────────────────────────────────────────
 
     /// Gateway timeout for SSH connection attempts.
-    const GATEWAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    pub(in crate::telnet) const GATEWAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
     /// Which filter this session's terminal and the operator's setting choose.
     ///
@@ -2095,21 +2095,8 @@ impl TelnetSession {
         port: u16,
         pinned: Option<std::net::SocketAddr>,
     ) -> Result<(), std::io::Error> {
-        let cfg = config::get_config();
-        let esc_label = match self.terminal_type {
-            TerminalType::Petscii => "<-",
-            _ => "ESC",
-        };
-        // A gopher menu can name the host: shown as internet text is, and
-        // cut to a C64's 40 columns.
-        let mut shown = crate::aichat::display_for_terminal(host);
-        if self.terminal_type == TerminalType::Petscii {
-            shown = crate::webbrowser::truncate_to_width(&shown, 39 - 20 - port.to_string().len());
-        }
         self.send_line("").await?;
-        self.send_line(&format!("  Connecting to {}:{}...", self.amber(&shown), port))
-        .await?;
-        self.flush().await?;
+        self.gateway_connecting_line(host, port).await?;
 
         // Connect to remote telnet server
         let addr = format!("{}:{}", host, port);
@@ -2135,6 +2122,35 @@ impl TelnetSession {
                 self.show_error("Connection timed out.").await?;
                 return Ok(());
             }
+        };
+        self.gateway_telnet_bridge(remote).await
+    }
+
+    /// "Connecting to host:port...", for the telnet gateway and for each
+    /// server a gopher telnet item tries.  A gopher menu can name the host:
+    /// shown as internet text is, and cut to a C64's 40 columns.
+    pub(in crate::telnet) async fn gateway_connecting_line(&mut self, host: &str, port: u16) -> Result<(), std::io::Error> {
+        let mut shown = crate::aichat::display_for_terminal(host);
+        if self.terminal_type == TerminalType::Petscii {
+            shown = crate::webbrowser::truncate_to_width(&shown, 39 - 20 - port.to_string().len());
+        }
+        self.send_line(&format!("  Connecting to {}:{}...", self.amber(&shown), port))
+        .await?;
+        self.flush().await
+    }
+
+    /// The telnet gateway's bridge, from a connection already made: the
+    /// user's terminal and the remote, until either ends or the user
+    /// leaves.  `gateway_telnet_dial` makes the connection; a gopher telnet
+    /// item may make it to one of its `+` copies instead.
+    pub(in crate::telnet) async fn gateway_telnet_bridge(
+        &mut self,
+        remote: tokio::net::TcpStream,
+    ) -> Result<(), std::io::Error> {
+        let cfg = config::get_config();
+        let esc_label = match self.terminal_type {
+            TerminalType::Petscii => "<-",
+            _ => "ESC",
         };
         let _ = remote.set_nodelay(true);
 

@@ -46,7 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `.` that starts a line, and the browser takes one off.  Measured against
   the three specifications, line by line, and brought into them: a server
   that cannot be reached is left for its `+` copies, at most three
-  (RFC 1436 3.5), and a download says which copy sent it; a selector, a
+  (RFC 1436 3.5) -- telnet items too -- and a download says which copy
+  sent it; a selector, a
   search's words and a gopher address typed at `G` are kept byte for byte,
   so a server whose selectors are Latin-1 is asked for what it listed;
   text that is not UTF-8 is read as Latin-1, the standard's character set,
@@ -54,7 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that holds the connection open after the closing `.` line is waited for
   two seconds, not until the page times out.  A new reference page,
   `gopherreference.html`, explains the protocol and lists each requirement
-  and where the gateway stands.
+  and where the gateway stands.  A tn3270 (`T`) item is connected and
+  logged in as the RFC says, over plain telnet with a warning; the gateway
+  is not a 3270 terminal.  Following a
+  telnet item names each server it tries, so the screen says which copy
+  answered.
 
 ### Changed
 

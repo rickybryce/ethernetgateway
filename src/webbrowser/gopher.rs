@@ -227,7 +227,7 @@ pub(crate) fn checked_addr(
     for a in addrs {
         check(a.ip(), host)?;
     }
-    addrs.first().copied().ok_or_else(|| "Could not resolve host".to_string())
+    addrs.first().copied().ok_or_else(|| DOWN_NO_HOST.to_string())
 }
 
 /// Send one request (and any data after it) and read the reply whole,

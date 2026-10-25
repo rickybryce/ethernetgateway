@@ -2618,7 +2618,7 @@ const GOPHER_TIMEOUT_SECS: u64 = 15;
 const GOPHER_MAX_BODY: usize = 512 * 1024;
 
 mod gopher;
-pub(crate) use gopher::{decode_text, gopher_action, GopherAction, GopherUrl, ASK_METHOD, ASK_SAVE_AS, ASK_SEND_FILE};
+pub(crate) use gopher::{decode_text, gopher_action, server_seems_down, GopherAction, GopherUrl, ASK_METHOD, ASK_SAVE_AS, ASK_SEND_FILE};
 
 /// Read a response of at most `max` bytes, giving up at `deadline`.
 ///

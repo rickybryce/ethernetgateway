@@ -5504,6 +5504,16 @@ the internet can.  Hobbyists still run hundreds of servers.
 </p>
 
 <p>
+<strong>Standards.</strong>  The browser's Gopher client implements
+RFC&nbsp;1436 (The Internet Gopher Protocol), RFC&nbsp;4266 (The gopher URI
+Scheme) and the Gopher+ specification, measured against live servers.  A
+tn3270 (<code>T</code>) item is connected to its host and port with its
+login, as the RFC says, but over plain telnet: the gateway is not an IBM 3270
+terminal, and many 3270 hosts will not work this way.  The Gopher reference page
+(<code>gopherreference.html</code>) lists each requirement.
+</p>
+
+<p>
 <strong>Getting started.</strong>  Open the browser (<span class="kbd">B</span>
 on the main menu), press <span class="kbd">G</span> and type a
 <code>gopher://</code> address &mdash; <code>gopher://gopher.floodgap.com</code>
@@ -5530,7 +5540,7 @@ extras are used.  A menu labels each item by what it does:
         <tr><td><code>[BIN]</code> <code>[IMG]</code> <code>[SND]</code> <code>[MOV]</code> <code>[DOC]</code></td><td><code>5</code> <code>9</code> <code>g</code> <code>I</code> <code>s</code> <code>:</code> <code>;</code> <code>&lt;</code> <code>d</code> <code>p</code> <code>P</code></td><td>A file: asks, then saves it in the transfer folder under its own name (made safe, and numbered rather than overwriting one already there), to send on with XMODEM, ZMODEM or Kermit.  At most 8 MB, what those can send.</td></tr>
         <tr><td><code>[TEL]</code></td><td><code>8</code></td><td>A telnet session: shows the host and the name to log in as, asks, then connects you through the Telnet Gateway.  ESC twice leaves it and returns to the menu.</td></tr>
         <tr><td><code>[3270]</code></td><td><code>T</code></td><td>The same for a tn3270 session.  Such a host expects an IBM 3270 terminal, which the gateway is not, so it may not work over plain telnet; the screen says so.</td></tr>
-        <tr><td><code>[ALT]</code></td><td><code>+</code></td><td>The item above it on another server: followed the same way.  When a server cannot be reached, following it or its copy tries the others in menu order, at most three.</td></tr>
+        <tr><td><code>[ALT]</code></td><td><code>+</code></td><td>The last item above it that is not a <code>+</code>, on another server: followed the same way.  When a server cannot be reached, following it or its copy tries the others in menu order, at most three &mdash; telnet items included.</td></tr>
         <tr><td><code>[FORM]</code></td><td>Gopher+ <code>?</code></td><td>Opens on the form's questions (below).</td></tr>
         <tr><td><code>[???]</code></td><td>other</td><td>A type no standard defines: shown, not followed.</td></tr>
     </tbody>

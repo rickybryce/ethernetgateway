@@ -16396,6 +16396,11 @@ async fn test_a_gopher_telnet_item_hands_over_to_the_gateway() {
     assert_eq!(sent.len(), 1, "the gateway did not connect");
     assert!(shown.contains("TELNET SESSION") && shown.contains("Log in as: guest"), "{shown}");
     assert!(shown.contains("Welcome to the BBS"), "{shown}");
+    // With no copy, the screen is the gateway's own: one blank row between
+    // the answer and the "Connecting to" line.
+    let asked = shown.find("(Y/N)").unwrap();
+    let dialling = asked + shown[asked..].find("Connecting to").unwrap();
+    assert_eq!(&shown[asked..dialling], "(Y/N) \r\n\r\n  ", "{shown:?}");
 }
 
 /// A Gopher+ form, end to end: its questions fetched with `!`, the form
@@ -16499,7 +16504,7 @@ async fn test_a_gopher_menus_names_are_shown_safely() {
         let (mut sess, peer) = make_test_session_with_peer(term);
         sess.color_enabled = false;
         let screen = script_peer(peer, vec![("(Y/N)", b"n")]);
-        sess.web_gopher_telnet("bbs\x1b]0;owned\x07.example", 23, "\x1b[2Jguest", false).await.unwrap();
+        sess.web_gopher_telnet("bbs\x1b]0;owned\x07.example", 23, "\x1b[2Jguest", false, &[]).await.unwrap();
         drop(sess);
         // The screen's own clear is the only escape it may hold.
         let shown = screen.await.unwrap().replace("\x1b[2J\x1b[H", "");
@@ -16617,6 +16622,79 @@ async fn test_a_shown_menu_keeps_its_alternates() {
     drop(sess);
     screen.await.unwrap();
     tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+}
+
+/// A telnet item whose server does not answer is connected to its `+`
+/// copy instead (RFC 1436 3.5), as a page or a download is.
+#[tokio::test]
+async fn test_a_telnet_item_falls_back_to_its_alternate() {
+    use std::io::Write;
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Gives up rather than waiting for ever: a hand-off that never tries
+    // the copy must fail this test, not hang it.
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if let Ok((mut s, _)) = listener.accept() {
+                s.set_nonblocking(false).unwrap();
+                s.write_all(b"HELLO FROM THE COPY\r\n").unwrap();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("(Y/N)", b"y"), ("Press any key", b"x")]);
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_links = vec![format!("gopher://127.0.0.1:{closed}/8/")];
+    sess.web_alternates = vec![vec![format!("gopher://127.0.0.1:{port}/8/")]];
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert!(shown.contains("HELLO FROM THE COPY"), "{shown}");
+    // The screen names each server as it is tried, the item's first.
+    let tried = shown.find(&format!("Connecting to 127.0.0.1:{closed}...")).expect("the item itself was not named");
+    let moved = shown.find("It did not answer; trying a copy.").expect("the move was not said");
+    let copy = shown.find(&format!("Connecting to 127.0.0.1:{port}...")).expect("the copy was not named");
+    assert!(tried < moved && moved < copy, "{shown}");
+}
+
+/// An item whose server answers is connected to it, and the screen still
+/// says where -- with a copy behind it as without.
+#[tokio::test]
+async fn test_a_telnet_item_with_a_copy_says_where_it_connects() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if let Ok((mut s, _)) = listener.accept() {
+                s.set_nonblocking(false).unwrap();
+                s.write_all(b"HELLO FROM THE ITEM\r\n").unwrap();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    sess.color_enabled = false;
+    let screen = script_peer(peer, vec![("(Y/N)", b"y"), ("Press any key", b"x")]);
+    sess.web_url = Some("gopher://127.0.0.1/1/".into());
+    sess.web_links = vec![format!("gopher://127.0.0.1:{port}/8/")];
+    sess.web_alternates = vec![vec!["gopher://127.0.0.1:9/8/".into()]];
+    tokio::time::timeout(std::time::Duration::from_secs(20), sess.web_follow_link(1)).await.expect("hung").unwrap();
+    drop(sess);
+    let shown = screen.await.unwrap();
+    tokio::task::spawn_blocking(move || server.join().unwrap()).await.unwrap();
+    assert!(shown.contains(&format!("Connecting to 127.0.0.1:{port}...")), "{shown}");
+    assert!(shown.contains("HELLO FROM THE ITEM") && !shown.contains("trying a copy"), "{shown}");
 }
 
 /// A file whose server is down is fetched from its `+` copy.
@@ -17203,7 +17281,12 @@ fn test_the_hand_off_and_form_timeout_are_wired() {
     let web = include_str!("web.rs").replace("\r\n", "\n");
     let f = body(&web, "async fn web_gopher_telnet(");
     assert!(f.contains("crate::webbrowser::gopher_dial_addr(&addrs, &h)"), "{f}");
-    assert!(f.contains("self.gateway_telnet_dial(host, port, Some(addr))"), "{f}");
+    // The checked address is the one dialled, by the gateway or here for
+    // a server with a copy after it.
+    assert!(f.contains("self.gateway_telnet_dial(&host, port, Some(addr))"), "{f}");
+    // ...within the gateway's connect timeout: a copy that drops the SYN
+    // must not hold the user for the system's two minutes.
+    assert!(f.contains("tokio::time::timeout(Self::GATEWAY_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr))"), "{f}");
     let gopher = include_str!("../webbrowser/gopher.rs").replace("\r\n", "\n");
     let f = body(&gopher, "pub(crate) fn submit_ask(");
     assert!(f.contains("ask_secs(file)"), "{f}");
