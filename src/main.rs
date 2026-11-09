@@ -867,8 +867,16 @@ mod console_close {
     /// signal-hook already stops us, so the handler declines it and the next
     /// handler in the chain runs as before. Ctrl-Break raises `SIGBREAK`,
     /// which nothing here catches and whose default is termination, so it is
-    /// taken. Logoff and shutdown are delivered only to processes without a
-    /// window, which this is when run headless, and mean what a close means.
+    /// taken.
+    ///
+    /// **Logoff and shutdown are listed but never arrive.**  Windows withholds
+    /// `CTRL_LOGOFF_EVENT` and `CTRL_SHUTDOWN_EVENT` from the console handler of
+    /// any process that has loaded `user32.dll` or `gdi32.dll`, and this binary
+    /// links both (the desktop GUI), headless or not. At logoff or shutdown the
+    /// process is simply ended, with no goodbye to connected callers. Catching
+    /// those would need a hidden window answering `WM_QUERYENDSESSION` /
+    /// `WM_ENDSESSION`; until then the two arms are harmless, and kept so they
+    /// mean what a close means if that ever changes.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn is_a_stop(event: u32) -> bool {
         matches!(event, CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT)
