@@ -1919,16 +1919,16 @@ async fn connect_master_relay_inner(
         offer_key_for_enrolment_once(&session).await;
     }
 
-    let channel = session
+    let mut channel = session
         .channel_open_session()
         .await
         .map_err(|e| RelayConnectError::Network(format!("channel open failed: {}", e)))?;
     // **A refusal does not surface here.**  `exec()` only queues the request
     // and resolves `Ok` even when the master answers `channel_failure` (see
-    // [`RELAY_HELLO`]); a refusal is detected below, by the hello never
-    // arriving.  So an `Err` from this call is the request failing to *send*
-    // -- the transport died between the channel opening and now -- which is
-    // a network fault, and retrying briskly is right.  See `exec_send_failed`.
+    // [`RELAY_HELLO`]); a refusal is read below, from the reply.  So an `Err`
+    // from this call is the request failing to *send* -- the transport died
+    // between the channel opening and now -- which is a network fault, and
+    // retrying briskly is right.  See `exec_send_failed`.
     channel
         .exec(true, exec_command.as_bytes())
         .await
@@ -1944,17 +1944,74 @@ async fn connect_master_relay_inner(
     }
     .id());
 
+    // One deadline for the reply and the hello together, so the wait is no
+    // longer than it was when the hello alone answered both questions.
+    let deadline = tokio::time::Instant::now() + hello_wait;
+    await_exec_reply(&mut channel, deadline).await?;
     let mut stream = channel.into_stream();
     // §9 handshake: read the master's relay hello before handing the
-    // channel to the caller.  This is what distinguishes an ACCEPTED relay
-    // from a refused-but-open channel (russh `exec()` returns Ok even on
-    // the master's `channel_failure`) and catches a protocol-version skew.
+    // channel to the caller.  The reply above says the master took the
+    // request; the hello says the relay is up -- for a dial or a peer, that
+    // the far end answered -- and catches a protocol-version skew.
     awaiting_answer.store(true, Ordering::SeqCst);
-    read_relay_hello(&mut stream, hello_wait).await?;
+    read_relay_hello(&mut stream, deadline.saturating_duration_since(tokio::time::Instant::now())).await?;
     Ok(MasterRelay {
         _session: session,
         stream,
     })
+}
+
+/// Wait for the master's answer to the relay `exec`: `channel_success` or
+/// `channel_failure`.
+///
+/// **A refusal is known at once, and was waited out.**  Every refusal the
+/// master gives -- not a master, `master_accept_relays` off, at
+/// `max_sessions`, `allow_peer_dial` off -- is a `channel_failure` with no
+/// close, and the slave used to learn of it only when the hello never came:
+/// 5 s for a registration, and 40 s for a Dial or Peer, where a device dialling
+/// through the slave sat silent and the log said "no answer after 40s", which
+/// reads as an unreachable BBS.  The master always answers before it writes
+/// anything on the channel, so no relay byte can be consumed here; one that
+/// arrives first anyway is not our master, and is refused as incompatible
+/// rather than dropped.
+async fn await_exec_reply(
+    channel: &mut russh::Channel<russh::client::Msg>,
+    deadline: tokio::time::Instant,
+) -> Result<(), RelayConnectError> {
+    let reply = tokio::time::timeout_at(deadline, async {
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                russh::ChannelMsg::Success => return Some(Ok(())),
+                russh::ChannelMsg::Failure => {
+                    return Some(Err(RelayConnectError::Refused(
+                        "the master refused the relay request -- it is not a master, \
+                         master_accept_relays is off, it is at capacity, or the \
+                         target is not allowed (allow_peer_dial / allow_relay_kermit)"
+                            .to_string(),
+                    )));
+                }
+                russh::ChannelMsg::Data { .. } | russh::ChannelMsg::ExtendedData { .. } => {
+                    return Some(Err(RelayConnectError::Refused(
+                        "the far end sent data before answering the relay request -- \
+                         not a relay master, or an incompatible build"
+                            .to_string(),
+                    )));
+                }
+                _ => continue,
+            }
+        }
+        None
+    })
+    .await;
+    match reply {
+        Ok(Some(answer)) => answer,
+        Ok(None) => Err(RelayConnectError::Refused(
+            "the master closed the relay channel without answering".to_string(),
+        )),
+        Err(_) => Err(RelayConnectError::Refused(
+            "the master did not answer the relay request in time".to_string(),
+        )),
+    }
 }
 
 /// Read and validate the master's [`RELAY_HELLO`] from a freshly-accepted

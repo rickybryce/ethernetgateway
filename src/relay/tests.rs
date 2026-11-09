@@ -2501,8 +2501,14 @@ fn test_the_answer_marker_is_raised_between_the_call_and_the_answer() {
     let body = &body[..body.find("\n}\n").expect("its end")];
     let exec = body.find(".exec(true, exec_command.as_bytes())").expect("the call");
     let mark = body.find("awaiting_answer.store(true, Ordering::SeqCst);").expect("the marker");
-    let hello = body.find("read_relay_hello(&mut stream, hello_wait)").expect("the answer");
+    let hello = body.find("read_relay_hello(&mut stream, deadline.saturating_duration_since(").expect("the answer");
     assert!(exec < mark && mark < hello, "marker out of place: exec {exec}, mark {mark}, hello {hello}");
+    // The master's reply is read before the channel becomes a stream (after
+    // which `wait()` is gone) and before the marker: a refusal is the master's
+    // answer, not a far end's.
+    let reply = body.find("await_exec_reply(&mut channel, deadline).await?;").expect("the reply is awaited");
+    let stream = body.find("channel.into_stream()").expect("the stream");
+    assert!(exec < reply && reply < stream && stream < mark, "reply wait out of place");
     assert_eq!(body.matches("awaiting_answer.store(true").count(), 1, "raised in more than one place");
     assert!(!body[mark..hello].contains(".await"), "something is awaited between the marker and the answer");
     // And only a dial or peer, the targets with a far end, may turn the
@@ -2787,4 +2793,96 @@ fn test_a_refused_password_is_not_retried_by_the_next_loop() {
     let guess = f.find("authenticate_password(").expect("the guess");
     assert!(turn < check && check < guess, "the turn and the check must come before the guess");
     assert!(f.contains("note_refused_password(host, port, username, password);"), "a refusal is not recorded");
+}
+
+/// **A master's refusal is known at once.**  Every refusal is a
+/// `channel_failure` with no close, and the slave used to notice only when the
+/// hello never came -- 40 s for a Dial, with "no answer" in the log.  Driven
+/// over a real loopback SSH connection, because `Channel` cannot be built any
+/// other way: a server that refuses the exec, and one that accepts it.
+#[tokio::test]
+async fn test_a_refused_relay_request_is_known_at_once() {
+    struct Server {
+        accept: bool,
+    }
+    impl russh::server::Handler for Server {
+        type Error = russh::Error;
+        async fn auth_password(&mut self, _: &str, _: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+        async fn channel_open_session(
+            &mut self,
+            _: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            _: &[u8],
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            if self.accept {
+                session.channel_success(channel)?;
+                session.data(channel, bytes::Bytes::copy_from_slice(&super::RELAY_HELLO))?;
+            } else {
+                session.channel_failure(channel)?;
+            }
+            Ok(())
+        }
+    }
+    struct Client;
+    impl russh::client::Handler for Client {
+        type Error = russh::Error;
+        async fn check_server_key(&mut self, _: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+    async fn exec_once(accept: bool) -> (Result<(), RelayConnectError>, Duration, Vec<u8>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).unwrap();
+            let cfg = Arc::new(russh::server::Config { keys: vec![key], ..Default::default() });
+            if let Ok(s) = russh::server::run_stream(cfg, tcp, Server { accept }).await {
+                let _ = s.await;
+            }
+        });
+        let mut session = russh::client::connect(Arc::new(russh::client::Config::default()), addr, Client)
+            .await
+            .unwrap();
+        assert!(session.authenticate_password("u", "p").await.unwrap().success());
+        let mut channel = session.channel_open_session().await.unwrap();
+        channel.exec(true, &b"serial-relay A dial bbs.example:23"[..]).await.unwrap();
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+        let r = super::await_exec_reply(&mut channel, deadline).await;
+        let took = started.elapsed();
+        let mut rest = Vec::new();
+        if r.is_ok() {
+            let mut stream = channel.into_stream();
+            let mut hello = [0u8; super::RELAY_HELLO.len()];
+            tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut hello)).await.unwrap().unwrap();
+            rest = hello.to_vec();
+        }
+        server.abort();
+        (r, took, rest)
+    }
+
+    let (r, took, _) = exec_once(false).await;
+    match r {
+        Err(RelayConnectError::Refused(m)) => assert!(m.contains("refused the relay request"), "{m}"),
+        other => panic!("a refusal must be Refused, got {other:?}"),
+    }
+    assert!(took < Duration::from_secs(2), "the refusal took {took:?} to be noticed");
+
+    // The positive control: an accept passes, and the hello behind it is
+    // still there for `read_relay_hello` -- the reply wait consumed nothing.
+    let (r, _, hello) = exec_once(true).await;
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(hello, super::RELAY_HELLO.to_vec(), "the hello was consumed by the reply wait");
 }
