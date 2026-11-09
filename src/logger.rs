@@ -189,7 +189,7 @@ pub fn file_logging_enabled(cfg: &crate::config::Config) -> bool {
 /// `Warning: could not open log file ... Permission denied` and then `Logging
 /// to ...` (measured 2026-08-20). The warning is the true one.
 pub fn file_logging_is_paused() -> bool {
-    matches!(&*file_sink().lock().unwrap_or_else(|e| e.into_inner()), Sink::Paused { .. })
+    matches!(&*lock_marked(file_sink()), Sink::Paused { .. })
 }
 
 /// One-line description of what the current log settings will do on disk.
@@ -353,7 +353,7 @@ fn open_log(path: &Path, truncate: bool) -> std::io::Result<std::fs::File> {
 /// (reopening on every restart would be pointless churn); a changed path or
 /// limit reopens.
 pub fn configure_file_logging(policy: Option<FilePolicy>) {
-    let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+    let mut slot = lock_marked(file_sink());
     match policy {
         None => {
             *slot = Sink::Off;
@@ -409,7 +409,7 @@ pub fn configure_file_logging(policy: Option<FilePolicy>) {
 /// [`log()`] never holds both at once — it finishes with the sink before touching
 /// the backlog — so there is no cycle and no deadlock.
 fn retire_prearm_backlog(slot: &mut Sink) {
-    let mut held = prearm_backlog().lock().unwrap_or_else(|e| e.into_inner());
+    let mut held = lock_marked(prearm_backlog());
     // `None` means the window already closed; a second configure call is a no-op.
     let Some(lines) = held.take() else { return };
     // A paused sink has no open file, so the backlog is dropped rather than
@@ -494,7 +494,7 @@ fn write_line_to(sink: &mut FileSink, line: &str) -> std::io::Result<()> {
 /// which is what keeps `log()` from ever holding the sink and backlog locks at
 /// the same time (see [`retire_prearm_backlog`]).
 fn write_to_file(line: &str) -> FileWrite {
-    let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+    let mut slot = lock_marked(file_sink());
     write_to_file_at(&mut slot, line, Instant::now())
 }
 
@@ -613,7 +613,7 @@ fn resume(policy: &FilePolicy, dropped: u64, line: &str) -> Option<FileSink> {
 /// didn't reach a file is one the operator chose not to keep (or one that failed
 /// to write and reported itself), not one waiting for a file to exist.
 fn buffer_prearm_line(line: &str) {
-    let mut held = prearm_backlog().lock().unwrap_or_else(|e| e.into_inner());
+    let mut held = lock_marked(prearm_backlog());
     let Some(lines) = held.as_mut() else { return };
     push_bounded(lines, line, MAX_PREARM_LINES);
 }
@@ -681,6 +681,12 @@ fn escape_controls(msg: String) -> String {
 ///
 /// Control characters are written as `\xNN` (see [`escape_controls`]).
 pub fn log(msg: String) {
+    log_to(msg, true);
+}
+
+/// [`log`], with stderr optional: the panic hook's line goes everywhere else,
+/// because the default hook has already put the panic on stderr.
+fn log_to(msg: String, echo_to_stderr: bool) {
     // Marks this thread as inside the logger until the end of the call, unwind
     // included, so a panic raised in here is not logged by `install_panic_hook`
     // back into the locks this call may be holding.
@@ -695,7 +701,9 @@ pub fn log(msg: String) {
     // `drain_backlog_into`) therefore still take an unadorned line, which is
     // what their own tests assert on.
     let msg = format!("{}{}", stamp(), escape_controls(msg));
-    to_stderr(format_args!("{}", msg));
+    if echo_to_stderr {
+        to_stderr(format_args!("{}", msg));
+    }
     // Before the rings, so a line is on disk even if a ring lock is contended.
     // A line that predates the config (the version banner, the config-load
     // diagnostics) has no file to go to yet, so it waits in the backlog and is
@@ -724,8 +732,42 @@ thread_local! {
     static IN_LOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Set while a thread is inside [`log`]; cleared on drop, so on unwind too.
+/// Set while a thread is inside [`log`] or holds one of the logger's locks;
+/// cleared on drop, so on unwind too.
 struct InsideLog(bool);
+
+/// A logger lock, held with the thread marked as inside the logger.
+///
+/// **Every logger lock is taken through this, not only those inside [`log`].**
+/// A panic while one is held -- in `configure_file_logging`, in `drain`, or in
+/// a test asserting with the sink locked -- would otherwise reach the panic
+/// hook, whose `log` locks the same mutex again on the same thread: a deadlock
+/// where there should have been a panic message.  Fields drop in order, so the
+/// lock is released before the mark is.
+struct Marked<'a, T> {
+    guard: std::sync::MutexGuard<'a, T>,
+    _inside: InsideLog,
+}
+
+impl<T> std::ops::Deref for Marked<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> std::ops::DerefMut for Marked<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+/// Lock one of the logger's mutexes, recovering from poison (a thread that
+/// panicked holding it is exactly when logging must keep working).
+fn lock_marked<T>(m: &std::sync::Mutex<T>) -> Marked<'_, T> {
+    let inside = InsideLog::enter();
+    Marked { guard: m.lock().unwrap_or_else(|e| e.into_inner()), _inside: inside }
+}
 
 impl InsideLog {
     fn enter() -> Self {
@@ -747,10 +789,11 @@ impl Drop for InsideLog {
 /// headless gateway's stderr usually goes nowhere at all.  The default hook
 /// still runs first, so a terminal sees exactly what it saw before.
 ///
-/// A panic raised *inside* [`log`] is not logged again: that call may be
-/// holding the sink or a ring lock, and a std `Mutex` locked twice on one
-/// thread deadlocks.  It still reaches stderr through the default hook.
-/// Installed once; later calls do nothing.
+/// A panic raised *inside* [`log`], or anywhere a logger lock is held (see
+/// [`lock_marked`]), is not logged again: the sink or a ring may be locked, and
+/// a std `Mutex` locked twice on one thread deadlocks.  It still reaches stderr
+/// through the default hook -- which is also why the logged copy skips stderr:
+/// a terminal saw every panic twice.  Installed once; later calls do nothing.
 pub fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -764,7 +807,7 @@ pub fn install_panic_hook() {
             // `info` reads "panicked at file:line:col:\nmessage"; one line, so
             // the log does not show the break as an escaped `\x0A`.
             let what = info.to_string().replace('\n', " ");
-            log(format!("PANIC in thread '{}': {}", thread.name().unwrap_or("unnamed"), what));
+            log_to(format!("PANIC in thread '{}': {}", thread.name().unwrap_or("unnamed"), what), false);
         }));
     });
 }
@@ -776,14 +819,14 @@ pub fn install_panic_hook() {
 /// to keep working.  Matches config.rs / gui.rs.
 fn push_to_rings(line: String) {
     if let Some(buf) = LOG_BUFFER.get() {
-        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = lock_marked(buf);
         buf.push_back(line.clone());
         while buf.len() > MAX_LINES {
             buf.pop_front();
         }
     }
     if let Some(buf) = HISTORY_BUFFER.get() {
-        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = lock_marked(buf);
         buf.push_back(line);
         while buf.len() > MAX_LINES {
             buf.pop_front();
@@ -794,7 +837,7 @@ fn push_to_rings(line: String) {
 /// Drain all buffered log lines (used by the GUI console each frame).
 pub fn drain() -> Vec<String> {
     if let Some(buf) = LOG_BUFFER.get() {
-        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = lock_marked(buf);
         return buf.drain(..).collect();
     }
     Vec::new()
@@ -805,7 +848,7 @@ pub fn drain() -> Vec<String> {
 /// poller (the GUI's accumulator continues to drain its own buffer).
 pub fn snapshot(max: usize) -> Vec<String> {
     if let Some(buf) = HISTORY_BUFFER.get() {
-        let buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+        let buf = lock_marked(buf);
         let len = buf.len();
         let skip = len.saturating_sub(max);
         return buf.iter().skip(skip).cloned().collect();
@@ -860,6 +903,48 @@ mod tests {
         // And the flag is put back after a call on this thread.
         log("panic-probe: after".to_string());
         assert!(!IN_LOG.with(|f| f.get()), "a thread stays marked as inside log()");
+
+        // A panic while a logger lock is held OUTSIDE log() -- here the sink,
+        // as a test asserting on it would -- ends the thread rather than
+        // deadlocking it in the hook's own log().
+        let t = tag.clone();
+        let held = std::thread::spawn(move || {
+            let _sink = lock_marked(file_sink());
+            panic!("{t}-held")
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !held.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !held.is_finished() {
+            // The deadlocked thread holds the sink, and a read lock on the
+            // panic hook, for good: a panic here would hang in the hook's own
+            // log(), and the harness's exit hangs on the hook lock.  Measured:
+            // the run never ends.  So this failure ends the process itself.
+            eprintln!("FAILED: a panic holding the sink deadlocked in the panic hook");
+            std::process::exit(101);
+        }
+        assert!(held.join().is_err());
+        assert!(!snapshot(MAX_LINES).iter().any(|l| l.contains(&format!("{tag}-held"))));
+        drop(lock_marked(file_sink()));
+        assert!(!IN_LOG.with(|f| f.get()), "a lock leaves the thread marked once released");
+    }
+
+    /// **The hook's copy of a panic skips stderr**, which the default hook has
+    /// already written -- a terminal saw every panic twice.  Bounded to the
+    /// hook; the line still goes to the file and the consoles (tested above).
+    #[test]
+    fn test_a_panic_reaches_stderr_once() {
+        let src = include_str!("logger.rs").replace("\r\n", "\n");
+        let start = src.find("pub fn install_panic_hook()").expect("the hook");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("its end")];
+        assert!(body.contains("default(info);"), "the default hook no longer runs");
+        assert!(body.contains("\"PANIC in thread '{}': {}\""), "the hook no longer logs");
+        assert!(body.contains(", false);"), "the hook's line is echoed to stderr a second time");
+        assert!(!body.contains(" log(format!"), "the hook logs through log(), which echoes to stderr");
+        let log_to = &src[src.find("fn log_to(").expect("log_to")..];
+        let log_to = &log_to[..log_to.find("\n}\n").expect("its end")];
+        assert!(log_to.contains("if echo_to_stderr {\n        to_stderr("), "stderr is written unconditionally");
     }
 
     /// Serialises the tests that arm the process-global [`FILE_SINK`], and
@@ -1420,7 +1505,7 @@ mod tests {
         };
         let far_off = Instant::now() + RETRY_BACKOFF_MAX;
         {
-            let mut slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+            let mut slot = lock_marked(file_sink());
             *slot = Sink::Paused {
                 policy: policy.clone(),
                 retry_at: far_off,
@@ -1431,7 +1516,7 @@ mod tests {
 
         configure_file_logging(Some(policy.clone()));
         {
-            let slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+            let slot = lock_marked(file_sink());
             match &*slot {
                 Sink::Paused { backoff, dropped, retry_at, .. } => {
                     assert_eq!(*backoff, RETRY_BACKOFF_MAX, "an unchanged policy must not reset the backoff");
@@ -1450,7 +1535,7 @@ mod tests {
         let changed = FilePolicy { max_files: 3, ..policy };
         configure_file_logging(Some(changed));
         {
-            let slot = file_sink().lock().unwrap_or_else(|e| e.into_inner());
+            let slot = lock_marked(file_sink());
             assert!(matches!(&*slot, Sink::Armed(_)), "a changed policy must be applied");
         }
         let _ = std::fs::remove_file(
@@ -1593,7 +1678,7 @@ mod tests {
         // The guard's own configure(None) closed the window, so re-open it and
         // seed a line the way a pre-config log() call would have.
         {
-            let mut held = prearm_backlog().lock().unwrap_or_else(|e| e.into_inner());
+            let mut held = lock_marked(prearm_backlog());
             let mut q = VecDeque::new();
             q.push_back("PREARM_SENTINEL banner line".to_string());
             *held = Some(q);
