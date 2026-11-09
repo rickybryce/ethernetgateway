@@ -165,8 +165,15 @@ pub fn mount(drive0: u8, mount: Mount) -> Result<(), String> {
 /// and the boot claims last, so neither side can see the other half-done: a
 /// claim made before this publishes is refused here, and one made after finds
 /// the mount in the table when the boot plans its drives. `restoring` skips
-/// only the boot test, because a booted session giving back its own drive
-/// still holds its claim.
+/// the boot test, because a booted session giving back its own drive still
+/// holds its claim -- and the loan test below, because that drive is the one
+/// it lent.
+///
+/// **A drive lent to a boot is refused here too, not only up front.**
+/// [`check_can_change`] refuses it before any work is done, and a boot could
+/// borrow the drive in the gap after: the new mount was then published over the
+/// loan, and the boot's restore -- which comes back with `restoring` set --
+/// replaced it with the old image when the session ended, silently.
 pub fn mount_exclusive(drive0: u8, mount: Mount, restoring: bool) -> Result<(), String> {
     if drive0 >= NUM_DRIVES {
         return Err(format!("no such drive ({drive0})"));
@@ -189,6 +196,12 @@ pub fn mount_exclusive(drive0: u8, mount: Mount, restoring: bool) -> Result<(), 
             "{} is already mounted on drive {}: - unmount it there first",
             mount.filename,
             (b'A' + other) as char
+        ));
+    }
+    if !restoring && lent.contains_key(&drive0) {
+        return Err(format!(
+            "drive {}: is held by a booted disk - it comes back when that session ends",
+            (b'A' + drive0) as char
         ));
     }
     if !restoring && booted.contains(&key) {
@@ -733,6 +746,25 @@ mod tests {
     /// The loan table has to behave at its edges: a drive that is not mounted
     /// cannot be lent, a drive already lent cannot be lent twice, and a drive
     /// number past the end is refused rather than panicking.
+    /// **A mount cannot be published onto a drive lent in the meantime.**
+    /// The up-front check passed, a boot borrowed the drive while the image was
+    /// being opened, and the publish went ahead over the loan -- to be replaced
+    /// by the boot's own restore when its session ended.  The session's restore
+    /// itself still goes through.
+    #[test]
+    fn test_a_mount_is_not_published_onto_a_lent_drive() {
+        let _g = registry_lock();
+        reset();
+        note_loan_for_tests(2, "booted_one.dsk");
+        let err = mount_exclusive(2, test_mount("operators_new.dsk"), false)
+            .expect_err("published over a loan");
+        assert!(err.contains("held by a booted disk"), "{err}");
+        assert!(get(2).is_none(), "the drive was written all the same");
+        mount_exclusive(2, test_mount("booted_one.dsk"), true).expect("the session's restore is refused");
+        let _ = end_boot_loan(2);
+        reset();
+    }
+
     #[test]
     fn test_loan_edges() {
         let _g = registry_lock();
