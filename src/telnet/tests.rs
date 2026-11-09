@@ -15792,6 +15792,56 @@ async fn test_a_failed_first_file_does_not_lose_the_rest_of_the_batch() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **The overwrite answer belongs to the name it was asked about.**
+///
+/// Punter saves `GAME` as `GAME.prg`, and the "overwrite?" question is asked
+/// about `GAME` before the transfer, when the type is not yet known.  The
+/// answer used to carry to `GAME.prg`: with both present, Y replaced the
+/// `.prg` nobody was asked about; with only `GAME.prg` present there was no
+/// question, and the finished upload was then discarded as "already exists".
+#[tokio::test]
+async fn test_a_refined_upload_name_never_replaces_a_file_unasked() {
+    let dir = std::env::temp_dir().join(format!("egw_refined_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let none = std::collections::HashSet::new();
+    let typed = dir.join("GAME");
+    let refined = || vec![(Some("GAME.prg".to_string()), b"upload".to_vec(), None)];
+
+    // Both present, Y given for GAME: GAME.prg is untouched, GAME replaced.
+    std::fs::write(&typed, b"old game").unwrap();
+    std::fs::write(dir.join("GAME.prg"), b"their prg").unwrap();
+    let out = TelnetSession::save_uploads(
+        &dir, &refined(), Some(("GAME", typed.as_path(), true)), false, &none, Vec::new(),
+    )
+    .await;
+    assert_eq!(std::fs::read(dir.join("GAME.prg")).unwrap(), b"their prg", "replaced a file nobody was asked about");
+    assert_eq!(std::fs::read(&typed).unwrap(), b"upload", "the answered name takes the upload");
+    assert_eq!(out.saved, vec![("GAME".to_string(), 6)]);
+
+    // Only GAME.prg present, so no question was asked: the upload is kept.
+    std::fs::remove_file(&typed).unwrap();
+    let out = TelnetSession::save_uploads(
+        &dir, &refined(), Some(("GAME", typed.as_path(), false)), false, &none, Vec::new(),
+    )
+    .await;
+    assert_eq!(out.lone_failure, None, "the finished upload was thrown away");
+    assert_eq!(out.saved, vec![("GAME".to_string(), 6)]);
+    assert_eq!(std::fs::read(&typed).unwrap(), b"upload");
+    assert_eq!(std::fs::read(dir.join("GAME.prg")).unwrap(), b"their prg");
+
+    // Nothing in the way: the refined name is used, as before.
+    std::fs::remove_file(&typed).unwrap();
+    std::fs::remove_file(dir.join("GAME.prg")).unwrap();
+    let out = TelnetSession::save_uploads(
+        &dir, &refined(), Some(("GAME", typed.as_path(), false)), false, &none, Vec::new(),
+    )
+    .await;
+    assert_eq!(out.saved, vec![("GAME.prg".to_string(), 6)]);
+    assert!(!typed.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **The ZMODEM autostart leaves the outcome for the menu, as the Upload menu
 /// does.**  A terminal that starts an upload by itself still restores its
 /// screen afterwards, so the summary printed then is lost and the menu is

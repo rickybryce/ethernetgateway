@@ -937,18 +937,31 @@ impl TelnetSession {
                 // .prg/.seq extension matching the declared CBM type when
                 // the user's filename had none (the same suffix
                 // `PunterFileType::autodetect` reads on the way back out).
-                // The user's overwrite choice for the base name carries to
-                // the suffixed name; a late collision still surfaces via
-                // create_new below.
-                let (save_name, save_path) = match sender_name {
-                    Some(n) if Self::validate_filename(n).is_ok() => (n.clone(), dir.join(n)),
-                    _ => (filename.to_string(), filepath.to_path_buf()),
-                };
+                //
+                // **The overwrite answer belongs to the name it was asked
+                // about.**  It used to carry to the refined name: `GAME` and
+                // `GAME.prg` both present, Y to "overwrite GAME?", and the
+                // upload replaced `GAME.prg`, which nobody was asked about.
+                // With only `GAME.prg` present there was no question at all,
+                // and the finished upload was then thrown away as "already
+                // exists".  So a refined name is only ever created new, and
+                // if it is taken the file goes under the typed name, on the
+                // answer the operator actually gave for that name.
+                let mut candidates: Vec<(String, std::path::PathBuf, bool)> = Vec::new();
+                if let Some(n) = sender_name
+                    && n != filename
+                    && Self::validate_filename(n).is_ok()
+                {
+                    candidates.push((n.clone(), dir.join(n), false));
+                }
+                candidates.push((filename.to_string(), filepath.to_path_buf(), overwrite));
+                let mut save_name = String::new();
                 // (message for a lone file, reason for a batch's list)
-                let failure: Option<(String, &'static str)> =
-                    // Checked again here: the codec may have refined the
-                    // name, and the overwrite answer carries to the new one.
-                    if overwrite && Self::is_symlink(&save_path).await {
+                let mut failure: Option<(String, &'static str)> = None;
+                let last = candidates.len() - 1;
+                for (ci, (name, save_path, overwrite)) in candidates.into_iter().enumerate() {
+                    save_name = name;
+                    failure = if overwrite && Self::is_symlink(&save_path).await {
                         Some(("That name is a link; not replaced.".into(), "a link; not replaced"))
                     } else {
                         let mut opts = tokio::fs::OpenOptions::new();
@@ -976,11 +989,16 @@ impl TelnetSession {
                                 }
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                                if ci < last {
+                                    continue;
+                                }
                                 Some(("File already exists.".into(), "already exists"))
                             }
                             Err(e) => Some((format!("Failed to save: {}", e), "write failed")),
                         }
                     };
+                    break;
+                }
                 match failure {
                     None => saved.push((save_name, data.len())),
                     Some((msg, _)) if uploads.len() == 1 => lone_failure = Some(msg),
@@ -1499,8 +1517,11 @@ impl TelnetSession {
                 elapsed.as_secs_f64()
             ))
             .await?;
-            // Nobody typed this name, so say what it was.
-            if named_by_sender && let Some((name, _)) = saved.first() {
+            // Say what the file was saved as whenever that is not what was
+            // typed: nobody typed it, or Punter added its type's extension.
+            if let Some((name, _)) = saved.first()
+                && (named_by_sender || *name != filename)
+            {
                 let room = if self.terminal_type == TerminalType::Petscii { 27 } else { 66 };
                 self.send_line(&format!("  Saved as {}", self.amber(&truncate_to_width(name, room))))
                     .await?;
