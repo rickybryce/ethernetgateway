@@ -367,12 +367,25 @@ fn mount_image_unchecked(
     // Three separate things can force read-only, and the operator is told
     // which: a guessed format, a file the host will not let us write, or a
     // directory that arrived damaged (decided inside `ImageFs::mount`).
-    let host_ro = std::fs::metadata(&path)
+    let mut host_ro = std::fs::metadata(&path)
         .map(|m| m.permissions().readonly())
         .unwrap_or(false);
-    let want_ro = ident.force_read_only() || host_ro;
+    let mut want_ro = ident.force_read_only() || host_ro;
 
-    let medium = media::FileMedia::open(&path, want_ro).map_err(|e| format!("{filename}: {e}"))?;
+    // **`readonly()` is not "can this account write it".**  On Unix it is true
+    // only with no write bit for anybody, so an image owned by root with mode
+    // 0644 read as writable, the read-write open failed with EACCES, and the
+    // operator was refused a disk they could have read.  The open is the real
+    // answer: denied for writing means read-only on the host.
+    let medium = match media::FileMedia::open(&path, want_ro) {
+        Err(e) if !want_ro && e.kind() == std::io::ErrorKind::PermissionDenied => {
+            host_ro = true;
+            want_ro = true;
+            media::FileMedia::open(&path, true)
+        }
+        r => r,
+    }
+    .map_err(|e| format!("{filename}: {e}"))?;
     let image = fs::ImageFs::mount(Box::new(medium), ident.format, want_ro)
         .map_err(|e| format!("{filename}: {e}"))?;
     let read_only = image.is_read_only();
@@ -1381,6 +1394,44 @@ mod tests {
         mount_image(&base, 1, "altair8_running.dsk").expect("mounts once the boot ends");
         registry::tests_reset();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **An image this account cannot write mounts read-only, not refused.**
+    ///
+    /// `Permissions::readonly()` is true on Unix only with no write bit for
+    /// anybody, so a file someone else may write but we may not -- root's
+    /// 0644 under a service account, here our own 0464 -- read as writable,
+    /// the read-write open failed, and the mount was refused "Permission
+    /// denied".  The boot path reads `host_read_only` from the same mount.
+    #[cfg(unix)]
+    #[test]
+    fn test_an_image_we_cannot_write_mounts_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = registry::tests_lock();
+        registry::tests_reset();
+        let base = std::env::temp_dir().join(format!("egw_mount_noperm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let images = images_dir(&base);
+        std::fs::create_dir_all(&images).unwrap();
+        let name = "ibm3740_theirs.dsk";
+        let path = images.join(name);
+        let fmt = format::by_token("ibm3740").unwrap();
+        std::fs::write(&path, vec![0xE5u8; fmt.min_bytes() as usize]).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o464)).unwrap();
+        assert!(!std::fs::metadata(&path).unwrap().permissions().readonly(), "a write bit is set");
+        // Root writes through any mode, and then there is nothing to test.
+        let writable = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
+        if !writable {
+            let msg = mount_image(&base, 1, name).expect("mounted, not refused");
+            assert!(msg.contains("read-only on the host"), "{msg}");
+            let m = registry::get(1).expect("published");
+            assert!(m.read_only && m.host_read_only, "the boot path must see it too");
+            unmount_drive(1).unwrap();
+        }
+        registry::tests_reset();
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!writable, "running as root: this test proves nothing");
     }
 
     /// The publish re-decides what `mount_image`'s early checks decided.
