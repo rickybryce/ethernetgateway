@@ -879,6 +879,16 @@ async fn read_block(
                     // here — they occur freely as data.
                     buf.push(b);
                 }
+                // **A hang-up is not a slow byte.**  The read failed -- EOF,
+                // a reset -- rather than timing out, so there is no line left
+                // to resend S/B on.  It was taken as a timeout, the S/B
+                // re-sent into a closed connection max_retries times, and the
+                // transfer reported "block read failed", which sent the
+                // operator looking for line noise.  A mid-IAC stall from tnio
+                // is still a timeout, as in the code reader above.
+                Ok(Err(e)) if e != crate::tnio::IAC_TIMEOUT_ERR => {
+                    return Err(format!("Punter receive: the sender hung up ({e})"));
+                }
                 _ => break, // timeout — short/blank read
             }
         }
@@ -1965,6 +1975,31 @@ mod tests {
         let (out, ft) = round_trip_opts(&[], PunterFileType::Unknown, true).await;
         assert_eq!(out, Vec::<u8>::new());
         assert_eq!(ft, PunterFileType::Unknown);
+    }
+
+    /// **A sender that hangs up is reported as having hung up**, at once --
+    /// not as a block that would not read, after max_retries S/B re-sends
+    /// into a closed connection.
+    #[tokio::test]
+    async fn read_block_reports_a_hang_up_as_one() {
+        let t = Tunables {
+            negotiation_timeout: 5,
+            block_timeout: 5,
+            max_retries: 3,
+            max_bad_rounds: 30,
+            retry_interval: 1,
+            block_payload: MAX_PAYLOAD,
+        };
+        let (gone, mut rd) = duplex(64);
+        drop(gone); // the far end has closed: every read is EOF
+        let (mut wr, _drain) = duplex(256);
+        let mut state = ReadState::default();
+        let start = std::time::Instant::now();
+        let err = read_block(&mut rd, &mut wr, false, &mut state, 7, &t, false)
+            .await
+            .expect_err("a closed line read as a block");
+        assert!(err.contains("hung up"), "{err}");
+        assert!(start.elapsed() < std::time::Duration::from_millis(500), "it waited out the retries");
     }
 
     #[tokio::test]
