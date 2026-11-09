@@ -1054,6 +1054,17 @@ impl TelnetSession {
             if byte < 0x20 {
                 continue;
             }
+            // **PETSCII's second control range, 0x80-0x9F, is not text
+            // either.**  It is the C64's cursor keys, CLR/HOME, INST, shifted
+            // RETURN, the colour keys and F1-F8.  Taken into the line and
+            // echoed, CRSR-LEFT moved the C64's cursor so editing looked as if
+            // it worked, while the saved value carried the 0x9D.  Measured
+            // 2026-11-09 under VICE: `ab`, CRSR-LEFT, `c`, CRSR-UP, `d` at the
+            // Telnet Gateway's Host prompt showed "Connecting to abcd" and
+            // failed the lookup.  Dropped like the C0 controls above.
+            if self.terminal_type == TerminalType::Petscii && (0x80..=0x9F).contains(&byte) {
+                continue;
+            }
 
             if buf.len() >= MAX_INPUT_LENGTH {
                 self.send_raw(b"\r\n").await?;

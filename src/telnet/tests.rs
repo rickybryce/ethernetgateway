@@ -2277,6 +2277,27 @@ fn log_lines_after(mark: &str) -> Vec<String> {
 
 /// **A keystroke diagnostic must not write down passwords.**
 ///
+/// **A C64's cursor and colour keys are not text.**  Measured under VICE:
+/// `ab`, CRSR-LEFT (0x9D), `c`, CRSR-UP (0x91), `d` at the Telnet Gateway's
+/// Host prompt was taken whole and echoed, so the C64's cursor moved as if
+/// editing worked, and the host saved was `ab\x9Dc\x91d` -- shown as
+/// "Connecting to abcd", failing the lookup.  The PETSCII control range is
+/// dropped; a shifted letter (0xC1) in the range above it is still a letter.
+#[tokio::test]
+async fn test_petscii_cursor_keys_never_reach_a_typed_line() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Petscii);
+    peer.write_all(b"AB\x9dC\x91D\x93\x90\x85\xc1\r").await.unwrap();
+    assert_eq!(session.get_line_input().await.unwrap().as_deref(), Some("abcdA"));
+    drop(session);
+    let mut echoed = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), peer.read_to_end(&mut echoed)).await;
+    for b in [0x9Du8, 0x91, 0x93, 0x90, 0x85] {
+        assert!(!echoed.contains(&b), "{b:#04x} was echoed back: {echoed:02x?}");
+    }
+    assert!(echoed.contains(&0xC1), "the shifted letter was not echoed: {echoed:02x?}");
+}
+
 /// The byte trace sits in `session_read_byte`, under *every* prompt in the
 /// gateway -- so with `gateway_debug` on, the telnet login, the SSH gateway's
 /// remote password and the Groq API key were each emitted one byte per line.
