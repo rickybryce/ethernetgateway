@@ -17873,3 +17873,128 @@ fn test_a_print_job_is_written_off_the_async_worker() {
     let boot = include_str!("cpm_boot_ui.rs").replace("\r\n", "\n");
     assert!(!boot.contains("job.write("), "the boot path writes a job itself");
 }
+
+/// **The device picker pages a long port list instead of running off a C64.**
+/// Its fixed rows take 11 of the 22, so a twelfth port overflowed.  Past 11 it
+/// shows ten at a time with an `M` row; every port is on exactly one page,
+/// under its own number, and every page fits with the prompt.
+#[test]
+fn test_the_port_picker_pages_a_long_list() {
+    use crate::serial::DetectedPort;
+    let ports = |n: usize| -> Vec<DetectedPort> {
+        (0..n)
+            .map(|i| DetectedPort {
+                name: format!("/dev/ttyUSB{i}"),
+                summary: "FTDI".into(),
+                detail: String::new(),
+            })
+            .collect()
+    };
+    let mut sess = make_test_session(TerminalType::Petscii);
+    sess.color_enabled = false;
+    for (n, want_pages) in [(0usize, 1usize), (11, 1), (12, 2), (25, 3)] {
+        let list = ports(n);
+        let pages = crate::telnet::serial_ui::port_list_pages(n);
+        assert_eq!(pages, want_pages, "{n} ports");
+        let mut seen = Vec::new();
+        for page in 0..pages {
+            let rows = sess.port_list_rows("PORT A - DEVICE", &list, page);
+            assert!(rows.len() < 22, "{n} ports, page {page}: {} rows and the prompt", rows.len());
+            for r in &rows {
+                assert!(r.chars().count() <= 39, "{r:?} is too wide");
+            }
+            let paged = rows.iter().any(|r| r.contains("More ports"));
+            assert_eq!(paged, pages > 1, "{n} ports: the M row");
+            for r in &rows {
+                if let Some((num, _)) = r.trim_start().split_once(". ") {
+                    seen.push(num.parse::<usize>().unwrap());
+                }
+            }
+        }
+        assert_eq!(seen, (1..=n).collect::<Vec<_>>(), "{n} ports: not each on one page, in order");
+    }
+}
+
+/// **The serial overview keeps a long device path's tail**, where the device
+/// is named.  It cut the end off, so every `/dev/serial/by-id/...` path read as
+/// the same folder.  Drawn on a C64.
+#[tokio::test]
+async fn test_the_serial_overview_keeps_a_device_paths_tail() {
+    use crate::config::{serial_key, SerialPortId};
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let id = SerialPortId::A;
+    let before = crate::config::get_config().port(id).port.clone();
+    let path = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A10KXYZ-if00-port0";
+    crate::config::update_config_value(&serial_key(id, "port"), path);
+    let frames = petscii_frames(b"q", |mut sess| async move {
+        sess.serial_configuration_menu().await.unwrap();
+        sess
+    })
+    .await;
+    crate::config::update_config_value(&serial_key(id, "port"), &before);
+    let frame = &frames[0];
+    let row = frame
+        .iter()
+        .find(|l| l.to_ascii_lowercase().contains("/dev/") || l.contains("..."))
+        .unwrap_or_else(|| panic!("no path row:\n{}", frame.join("\n")));
+    assert!(row.to_ascii_lowercase().contains("if00-port0"), "the device was cut off: {row:?}");
+    for l in frame {
+        assert!(l.chars().count() <= 39, "{l:?} is too wide");
+    }
+}
+
+/// **The dialup screen pages past nine, and a long host stays on its row.**
+/// It stopped at nine with "... and N more" and nothing showed the rest; the
+/// `M` row takes that line's place, every entry is on one page under its own
+/// number, and every page fits a C64 with the prompt.
+#[test]
+fn test_the_dialup_screen_pages_and_fits() {
+    let entries = |n: usize| -> Vec<crate::config::DialupEntry> {
+        (0..n)
+            .map(|i| crate::config::DialupEntry {
+                number: format!("555{i:04}"),
+                host: format!("a-very-long-bbs-host-name-number-{i}.example.com"),
+                port: 6400,
+            })
+            .collect()
+    };
+    let mut sess = make_test_session(TerminalType::Petscii);
+    sess.color_enabled = false;
+    for (n, want_pages) in [(0usize, 1usize), (9, 1), (10, 2), (25, 3)] {
+        let list = entries(n);
+        let pages = crate::telnet::serial_ui::dialup_pages(n);
+        assert_eq!(pages, want_pages, "{n} entries");
+        let mut seen = Vec::new();
+        for page in 0..pages {
+            let rows = sess.dialup_rows(&list, page);
+            assert!(rows.len() < 22, "{n} entries, page {page}: {} rows and the prompt", rows.len());
+            for r in &rows {
+                assert!(r.chars().count() <= 39, "{r:?} wraps on a C64");
+            }
+            assert_eq!(rows.iter().any(|r| r.contains("More mappings")), pages > 1, "{n}: the M row");
+            for r in &rows {
+                if let Some((num, _)) = r.trim_start().split_once(". ") {
+                    seen.push(num.parse::<usize>().unwrap());
+                }
+            }
+        }
+        assert_eq!(seen, (1..=n).collect::<Vec<_>>(), "{n} entries: not each on one page, in order");
+    }
+}
+
+/// **Deleting a mapping removes that mapping from the file as it is now.**  It
+/// removed by index from the list read when the screen was drawn and saved
+/// that list back, erasing anything added meanwhile from another screen.  The
+/// file is a fixed path no test may write, so this reads the function.
+#[test]
+fn test_a_dialup_delete_rereads_and_removes_only_what_was_shown() {
+    let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
+    let start = src.find("async fn dialup_delete_entry(").expect("the fn");
+    let body = &src[start..start + src[start..].find("\n    }\n").expect("its end")];
+    let load = body.find("config::try_load_dialup_mappings()").expect("the delete does not read the file again");
+    let find = body.find("current.iter().position(|e| *e == shown)").expect("the delete does not match the shown entry");
+    let save = body.find("config::save_dialup_mappings(&current);").expect("the delete does not save the fresh list");
+    assert!(load < find && find < save, "read, match, then save");
+    assert!(!body.contains("entries.remove("), "the delete still removes from the stale list");
+}
+

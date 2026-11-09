@@ -27,6 +27,24 @@ use super::*;
 /// costing two rows of the twenty-two.
 pub(in crate::telnet) const SERIAL_MENU_SECOND_COL: usize = 26;
 
+/// Dialup mappings per page; see `dialup_rows`.
+pub(in crate::telnet) const DIALUP_PAGE: usize = 9;
+
+/// Pages of the dialup mapping screen for `n` user entries.
+pub(in crate::telnet) fn dialup_pages(n: usize) -> usize {
+    n.div_ceil(DIALUP_PAGE).max(1)
+}
+
+/// Ports per page of the device picker, once it pages; see `port_list_rows`.
+pub(in crate::telnet) const PORT_LIST_PAGE: usize = 10;
+
+/// How many pages the device picker needs for `n` ports: one while they all
+/// fit beside the fixed rows (11 on a C64), else pages of [`PORT_LIST_PAGE`],
+/// whose `M` row costs the one port's room.
+pub(in crate::telnet) fn port_list_pages(n: usize) -> usize {
+    if n <= PORT_LIST_PAGE + 1 { 1 } else { n.div_ceil(PORT_LIST_PAGE) }
+}
+
 /// The keys the port settings screen answers, for one port mode, as lowercase
 /// letters in alphabetical order.
 ///
@@ -141,72 +159,15 @@ impl TelnetSession {
     // ─── Dialup Mapping ────────────────────────────────────
 
     pub(in crate::telnet) async fn dialup_mapping(&mut self) -> Result<(), std::io::Error> {
+        let mut page = 0usize;
         loop {
             let entries = config::load_dialup_mappings();
-
+            let pages = dialup_pages(entries.len());
+            page = page.min(pages - 1);
             self.clear_screen().await?;
-            let sep = self.separator();
-            self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("DIALUP MAPPING")))
-                .await?;
-            self.send_line(&sep).await?;
-            self.send_line("").await?;
-
-            // Built-in gateway entry (not deletable)
-            self.send_line(&format!(
-                "     {} = {}",
-                self.cyan("1001000"),
-                self.amber("ethernetgateway")
-            ))
-            .await?;
-
-            if entries.is_empty() {
-                self.send_line("").await?;
-                self.send_line("  No other mappings defined.").await?;
-            } else {
-                // Show up to 9 user entries to fit the screen
-                let max_show = 9;
-                for (i, entry) in entries.iter().take(max_show).enumerate() {
-                    let num_col = self.cyan(&entry.number);
-                    let target = format!("{}:{}", entry.host, entry.port);
-                    let line = format!(
-                        "  {}. {} = {}",
-                        i + 1,
-                        num_col,
-                        self.amber(&target)
-                    );
-                    self.send_line(&line).await?;
-                }
-                if entries.len() > max_show {
-                    self.send_line(&format!(
-                        "  ... and {} more",
-                        entries.len() - max_show
-                    ))
-                    .await?;
-                }
+            for row in self.dialup_rows(&entries, page) {
+                self.send_line(&row).await?;
             }
-            self.send_line("").await?;
-
-            self.send_line(&format!(
-                "  {}  Add mapping",
-                self.cyan("A")
-            ))
-            .await?;
-            if !entries.is_empty() {
-                self.send_line(&format!(
-                    "  {}  Delete mapping",
-                    self.cyan("D")
-                ))
-                .await?;
-            }
-            self.send_line("").await?;
-            self.send_line(&format!(
-                "  {}  {}",
-                self.action_prompt("Q", "Back"),
-                self.action_prompt("H", "Help")
-            ))
-            .await?;
-
             let prompt = format!("{}> ", self.cyan("gateway/dialup"));
             self.send(&prompt).await?;
             self.flush().await?;
@@ -223,6 +184,7 @@ impl TelnetSession {
                 "d" if !entries.is_empty() => {
                     self.dialup_delete_entry(&entries).await?;
                 }
+                "m" if pages > 1 => page = (page + 1) % pages,
                 "h" => {
                     self.show_help_page("DIALUP MAPPING HELP", Self::dialup_help_lines())
                         .await?;
@@ -231,12 +193,58 @@ impl TelnetSession {
                 _ => {
                     if entries.is_empty() {
                         self.show_error("Press A, H, or Q.").await?;
+                    } else if pages > 1 {
+                        self.show_error("Press A, D, H, M, or Q.").await?;
                     } else {
                         self.show_error("Press A, D, H, or Q.").await?;
                     }
                 }
             }
         }
+    }
+
+    /// The dialup mapping screen, every row but the prompt.
+    ///
+    /// **Paged past nine**, where it used to stop with "... and N more" and
+    /// nothing anywhere showed the rest -- though `D` would delete them, by
+    /// numbers the operator could not see.  The `M` row takes the place of that
+    /// line, so the screen is the same size; the numbers are the list's own.
+    /// A long host is cut to fit, not wrapped onto a second C64 row.
+    pub(in crate::telnet) fn dialup_rows(
+        &self,
+        entries: &[config::DialupEntry],
+        page: usize,
+    ) -> Vec<String> {
+        let sep = self.separator();
+        let mut rows = vec![sep.clone(), format!("  {}", self.yellow("DIALUP MAPPING")), sep, String::new()];
+        // Built-in gateway entry (not deletable)
+        rows.push(format!("     {} = {}", self.cyan("1001000"), self.amber("ethernetgateway")));
+        let pages = dialup_pages(entries.len());
+        let page = page.min(pages - 1);
+        if entries.is_empty() {
+            rows.push(String::new());
+            rows.push("  No other mappings defined.".into());
+        } else {
+            let width: usize = if self.terminal_type == TerminalType::Petscii { 39 } else { 79 };
+            for (i, entry) in entries.iter().enumerate().skip(page * DIALUP_PAGE).take(DIALUP_PAGE) {
+                let number = truncate_to_width(&entry.number, 12);
+                let prefix = format!("  {}. {} = ", i + 1, number);
+                let room = width.saturating_sub(prefix.chars().count()).max(8);
+                let target = truncate_to_width(&format!("{}:{}", entry.host, entry.port), room);
+                rows.push(format!("  {}. {} = {}", i + 1, self.cyan(&number), self.amber(&target)));
+            }
+            if pages > 1 {
+                rows.push(format!("  {}  More mappings ({}/{})", self.cyan("M"), page + 1, pages));
+            }
+        }
+        rows.push(String::new());
+        rows.push(format!("  {}  Add mapping", self.cyan("A")));
+        if !entries.is_empty() {
+            rows.push(format!("  {}  Delete mapping", self.cyan("D")));
+        }
+        rows.push(String::new());
+        rows.push(format!("  {}  {}", self.action_prompt("Q", "Back"), self.action_prompt("H", "Help")));
+        rows
     }
 
     pub(in crate::telnet) async fn dialup_add_entry(&mut self) -> Result<(), std::io::Error> {
@@ -346,9 +354,35 @@ impl TelnetSession {
             }
         };
 
-        let mut entries = entries.to_vec();
-        let removed = entries.remove(idx);
-        config::save_dialup_mappings(&entries);
+        // **The entry shown, from the file as it is now.**  This removed by
+        // index from the list read when the screen was drawn and saved that
+        // whole list back, so a mapping added or changed meanwhile -- from the
+        // web page, the desktop editor or another session -- was erased by a
+        // delete of something else.  Read again, checked so a failed read
+        // cannot save an empty list, and only the entry the operator saw goes.
+        let shown = entries[idx].clone();
+        let mut current = match config::try_load_dialup_mappings() {
+            Ok(e) => e,
+            Err(e) => {
+                glog!("Dialup: refusing to delete — could not read mappings: {}", e);
+                self.show_error_lines(&[
+                    "Could not read the dialup mapping",
+                    "file, so nothing was deleted.",
+                ])
+                .await?;
+                return Ok(());
+            }
+        };
+        let Some(at) = current.iter().position(|e| *e == shown) else {
+            self.show_error_lines(&[
+                "That mapping changed while this",
+                "screen was open; nothing deleted.",
+            ])
+            .await?;
+            return Ok(());
+        };
+        let removed = current.remove(at);
+        config::save_dialup_mappings(&current);
         self.send_line(&format!(
             "  Removed: {} = {}:{}",
             removed.number, removed.host, removed.port
@@ -401,9 +435,15 @@ impl TelnetSession {
                 ))
                 .await?;
                 if !port.port.is_empty() {
+                    // **The tail, not the front.**  A device path names its
+                    // device at the end (`/dev/serial/by-id/usb-FTDI_..._A10K-
+                    // if00-port0`), and cutting the end off showed every long
+                    // path as the same folder.  The port's own screen elides
+                    // the front for the same reason.
+                    let w = if self.terminal_type == TerminalType::Petscii { 23 } else { 60 };
                     self.send_line(&format!(
                         "      {} {}",
-                        self.amber(&truncate_to_width(&port.port, 23)),
+                        self.amber(&crate::webbrowser::truncate_path_to_width(&port.port, w)),
                         port.baud
                     ))
                     .await?;
@@ -1377,7 +1417,11 @@ impl TelnetSession {
         id: crate::config::SerialPortId,
     ) -> Result<(), std::io::Error> {
         let title = format!("PORT {} - DEVICE", id.label());
+        // Which page of a long port list is shown; kept across a redraw, reset
+        // by a refresh.
+        let mut next_page = 0usize;
         loop {
+            let page = std::mem::take(&mut next_page);
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
@@ -1455,41 +1499,12 @@ impl TelnetSession {
             }
 
             // Redraw with port list
+            let pages = port_list_pages(ports.len());
+            let page = page.min(pages - 1);
             self.clear_screen().await?;
-            self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow(&title))).await?;
-            self.send_line(&sep).await?;
-            self.send_line("").await?;
-            let max_w = if self.terminal_type == TerminalType::Petscii {
-                30
-            } else {
-                50
-            };
-            for (i, port) in ports.iter().enumerate() {
-                self.send_line(&format!(
-                    "  {:>2}. {}",
-                    i + 1,
-                    crate::serial::port_row(&port.name, &port.summary, max_w)
-                ))
-                .await?;
+            for row in self.port_list_rows(&title, &ports, page) {
+                self.send_line(&row).await?;
             }
-            self.send_line("").await?;
-            self.send_line(&format!(
-                "  {}  Refresh port list",
-                self.cyan("R")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  None (clear port)",
-                self.cyan("N")
-            ))
-            .await?;
-            self.send_line("").await?;
-            self.send_line(&format!(
-                "  {}",
-                self.dim("Enter #, R, N, or type a path.")
-            )).await?;
-            self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
             self.send(&format!("  {} ", self.cyan("Port:"))).await?;
             self.flush().await?;
 
@@ -1502,6 +1517,10 @@ impl TelnetSession {
             // Either case, as above.
             match input.to_ascii_lowercase().as_str() {
                 "r" => continue,
+                "m" if pages > 1 => {
+                    next_page = (page + 1) % pages;
+                    continue;
+                }
                 "n" => {
                     let k = port_key.clone();
                     tokio::task::spawn_blocking(move || {
@@ -1542,6 +1561,51 @@ impl TelnetSession {
             }
             return Ok(());
         }
+    }
+
+    /// The device picker's screen, every row but the prompt.
+    ///
+    /// **Paged once the ports outnumber the room.**  The fixed rows take 11 of
+    /// a C64's 22, so a twelfth port pushed the list past the screen -- a
+    /// machine with a few USB adapters and the board's own UARTs gets there.
+    /// Past 11 the list shows [`PORT_LIST_PAGE`] at a time with an `M` row to
+    /// page; the numbers stay the list's own, so a number typed from any page
+    /// picks the port it names.
+    pub(in crate::telnet) fn port_list_rows(
+        &self,
+        title: &str,
+        ports: &[crate::serial::DetectedPort],
+        page: usize,
+    ) -> Vec<String> {
+        let sep = self.separator();
+        let mut rows = vec![sep.clone(), format!("  {}", self.yellow(title)), sep, String::new()];
+        let max_w = if self.terminal_type == TerminalType::Petscii { 30 } else { 50 };
+        let pages = port_list_pages(ports.len());
+        let per = if pages > 1 { PORT_LIST_PAGE } else { ports.len() };
+        let first = page.min(pages - 1) * per;
+        for (i, port) in ports.iter().enumerate().skip(first).take(per) {
+            rows.push(format!(
+                "  {:>2}. {}",
+                i + 1,
+                crate::serial::port_row(&port.name, &port.summary, max_w)
+            ));
+        }
+        rows.push(String::new());
+        rows.push(format!("  {}  Refresh port list", self.cyan("R")));
+        rows.push(format!("  {}  None (clear port)", self.cyan("N")));
+        if pages > 1 {
+            rows.push(format!(
+                "  {}  More ports ({}/{})",
+                self.cyan("M"),
+                page.min(pages - 1) + 1,
+                pages
+            ));
+        }
+        rows.push(String::new());
+        let hint = if pages > 1 { "Enter #, R, N, M, or a path." } else { "Enter #, R, N, or type a path." };
+        rows.push(format!("  {}", self.dim(hint)));
+        rows.push(format!("  {}", self.action_prompt("Q", "Back")));
+        rows
     }
 
     pub(in crate::telnet) async fn modem_set_baud(
