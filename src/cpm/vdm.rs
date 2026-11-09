@@ -21,16 +21,18 @@
 //!   this card it is simply a cell with bit 7 set (inverse video).
 //!
 //! The only piece of state the card holds outside memory is the **scroll
-//! register** on port `C8h`, which says which of the sixteen lines is shown at
-//! the top.  Without it a guest that has scrolled is displayed rotated — the
+//! register** on port `C8h`, which says which of the sixteen lines is shown
+//! first and on which screen row (see [`frame`]).  Without it a guest that has scrolled is displayed rotated — the
 //! text is all present and all in the wrong order, which is the failure most
 //! likely to be mistaken for a wrong memory address.
 //!
 //! **CLEAN-ROOM.**  The VDM-1 has a published manual, so by the discriminator
 //! settled for Punter, HBIOS and EGT8080 — does an independent authority exist? —
-//! this is written from the documented behaviour of the card.  z80pack's
-//! `iodevices/proctec-vdm.c` is a cross-check afterwards, not a source, unlike
-//! `z80pack.rs` which is correctly labelled derived.
+//! this is written from the documented behaviour of the card: the Processor
+//! Technology *VDM-1 Video Display Module* manual, April 1976 (copy kept in
+//! `.claude/specs/vdm1/`).  z80pack's `iodevices/proctec-vdm.c` is not a source,
+//! unlike `z80pack.rs` which is correctly labelled derived.  (The scroll rule
+//! below was once taken from it, and the manual showed it wrong.)
 
 /// Where the screen window lives in the guest's address space.
 pub const BASE: u16 = 0xCC00;
@@ -40,7 +42,7 @@ pub const COLS: usize = 64;
 pub const ROWS: usize = 16;
 /// The whole window, in bytes.
 pub const WINDOW: usize = COLS * ROWS;
-/// The scroll register: which line is displayed first.
+/// The scroll register: which line is displayed first, and on which row.
 ///
 /// Write-only, exactly as on the card — a real VDM-1 answers nothing on an
 /// `IN`, so we claim this port for `OUT` alone and leave reads to fall through
@@ -84,21 +86,29 @@ fn glyph(b: u8) -> char {
 ///
 /// This is the entire correctness surface of the VDM-1 and it is deliberately
 /// pure: no machine, no session, no display.  `scroll` is the value the guest
-/// last wrote to port `C8h`; its low four bits name the line shown at the top,
-/// and the sixteen lines are a ring from there.
+/// last wrote to port `C8h`.  The manual's Figure 2-11 names its two halves:
 ///
-/// Its upper four bits are the first screen *row* shown: rows above it are
-/// blanked, which is how a driver hides the line it is about to scroll in.
-/// Read from z80pack's `proctec-vdm.c` (`first = (data & 0xf0) >> 4`, and a
-/// row `y < first` drawn as spaces); this used to mask them off as "not ours",
-/// and showed stale text in those rows.
+/// * bits 3-0, **"Beginning Display Line Absolute Address"**: the line of
+///   memory shown first, with the sixteen lines a ring from there;
+/// * bits 7-4, **"First Displayed Screen Position"**: the screen row that
+///   first line is shown on.  The rows above it are black.
+///
+/// **The text moves down; it is not cut off.**  Section 2.7.4's test sets bits
+/// 4-7 and expects "only the bottom line on the screen" to show, the display
+/// moving "up and down the screen with a black area above it", while "the first
+/// line on display, regardless of its vertical position on the screen, should
+/// remain the same".  Section 3.1.7 is the circuit: the line counter is loaded
+/// with the low nibble when the black band (the "window shade") ends, and
+/// counts on from there.  This once followed z80pack instead, which blanks the
+/// rows above and moves nothing -- every line shown was the wrong one.
 pub fn frame(window: &[u8; WINDOW], scroll: u8) -> Frame {
     let top = (scroll & 0x0F) as usize;
     let first = (scroll >> 4) as usize;
     let mut out = [[Cell::BLANK; COLS]; ROWS];
     for (r, row) in out.iter_mut().enumerate().skip(first) {
-        // The ring: the line at the top is `top`, and the rest follow it round.
-        let src = (top + r) % ROWS;
+        // Screen row `first` shows line `top`, and the rest follow it round;
+        // what would fall below the last row is simply not shown.
+        let src = (top + r - first) % ROWS;
         for (c, cell) in row.iter_mut().enumerate() {
             let b = window[src * COLS + c];
             *cell = Cell { ch: glyph(b & 0x7F), inverse: b & 0x80 != 0 };
@@ -170,10 +180,13 @@ mod tests {
         assert!(text[ROWS - 1].starts_with("LINE2"));
     }
 
-    /// The upper nibble blanks the rows above it and moves nothing: the low
-    /// nibble alone picks the line at the top.  z80pack's `proctec-vdm.c`.
+    /// **The upper nibble moves the display down under a black band.**  The
+    /// manual's own scroll test (section 2.7.4, Figure 2-11): the screen row
+    /// the first line appears on comes from bits 7-4, the rows above it are
+    /// black, and "the first line on display ... should remain the same".  With
+    /// all four set, "only the bottom line on the screen should be displayed".
     #[test]
-    fn test_the_upper_nibble_blanks_the_rows_above_it() {
+    fn test_the_upper_nibble_moves_the_display_down_under_a_black_band() {
         let mut lines = Vec::new();
         for r in 0..ROWS {
             lines.push(format!("LINE{r}"));
@@ -181,11 +194,16 @@ mod tests {
         let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
         let w = window_of(&refs);
         let plain = frame_text(&frame(&w, 0x02));
-        let blanked = frame_text(&frame(&w, 0x32));
-        for (r, row) in blanked.iter().enumerate().take(3) {
+        let moved = frame_text(&frame(&w, 0x32));
+        for (r, row) in moved.iter().enumerate().take(3) {
             assert!(row.trim().is_empty(), "row {r} still shows {row:?}");
         }
-        assert_eq!(&blanked[3..], &plain[3..], "the rest did not move");
+        assert!(moved[3].starts_with("LINE2"), "the first line moved down with the band: {:?}", moved[3]);
+        assert_eq!(&moved[3..], &plain[..ROWS - 3], "the display moved down as a whole");
+
+        let bottom = frame_text(&frame(&w, 0xF0));
+        assert!(bottom[..ROWS - 1].iter().all(|r| r.trim().is_empty()), "only the bottom row shows");
+        assert!(bottom[ROWS - 1].starts_with("LINE0"), "and it is the first line: {:?}", bottom[ROWS - 1]);
     }
 
     #[test]
