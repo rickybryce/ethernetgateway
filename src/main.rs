@@ -564,7 +564,11 @@ fn main() {
         let restart_rt = restart.clone();
         let notify_rt = shutdown_notify.clone();
         let gui_cfg = cfg.clone();
+        let server_died = Arc::new(AtomicBool::new(false));
+        let died_rt = server_died.clone();
         let server_handle = std::thread::spawn(move || {
+            // First, so a panic anywhere below closes the window too.
+            let _death = ServerDeathGuard { died: died_rt, shutdown: shutdown_rt.clone() };
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -760,7 +764,7 @@ fn main() {
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        let server_died = !shutdown.load(Ordering::SeqCst);
+        let server_died = server_died.load(Ordering::SeqCst) || !shutdown.load(Ordering::SeqCst);
 
         // Wait for the server thread to finish.
         shutdown.store(true, Ordering::SeqCst);
@@ -948,6 +952,28 @@ pub(crate) fn reload_arms_restart(sighup_seen: bool, stop_requested: bool) -> bo
 /// and this is the one place where living another cycle is actually decided.
 pub(crate) fn should_run_another_cycle(restart: bool, stop_requested: bool) -> bool {
     restart && !stop_requested
+}
+
+/// Marks the server as dead, and asks everything else to stop, when the
+/// server thread unwinds from a panic.
+///
+/// **The headless wait notices a dead thread by itself; the GUI does not.**  It
+/// blocks the main thread until its window closes, and closes only on
+/// `shutdown`, so a panicked server left a window up over a gateway serving
+/// nothing.  Setting `shutdown` closes it; `died` is what tells the exit path
+/// this was a death and not a quit, since `shutdown` alone can no longer say.
+struct ServerDeathGuard {
+    died: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Drop for ServerDeathGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.died.store(true, Ordering::SeqCst);
+            self.shutdown.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 /// Clear `restart` and `shutdown` for a fresh server cycle, then re-read
@@ -1202,11 +1228,43 @@ mod tests {
             wait.contains("if shutdown.load(Ordering::SeqCst) || server_handle.is_finished() {\n                break;"),
             "the wait no longer wakes when the server thread ends"
         );
-        let died = wait.find("let server_died = !shutdown.load(Ordering::SeqCst);").expect("read before the store");
+        let died = wait
+            .find("let server_died = server_died.load(Ordering::SeqCst) || !shutdown.load(Ordering::SeqCst);")
+            .expect("read before the store");
         let store = wait.find("shutdown.store(true, Ordering::SeqCst);").expect("store");
         assert!(died < store, "server_died must be read before shutdown is set");
         let exit = wait.find("if server_died {").expect("acted on");
         assert!(wait[exit..].contains("std::process::exit(1);"), "a dead server must end the process");
+        // And the guard that tells a GUI is the server thread's first statement.
+        let body = &main_fn[spawn..];
+        let body = &body[body.find("{\n").expect("closure body") + 2..];
+        assert!(
+            body.trim_start().starts_with("// First, so a panic anywhere below closes the window too.\n            let _death = ServerDeathGuard {"),
+            "the death guard is not the server thread's first statement"
+        );
+    }
+
+    /// **A panicking server closes the window**: the guard sets `shutdown`,
+    /// which the GUI closes on, and `died`, which the exit path reads.  A thread
+    /// that ends normally sets neither.
+    #[test]
+    fn test_a_panicking_server_sets_died_and_shutdown() {
+        let run = |panics: bool| {
+            let died = Arc::new(AtomicBool::new(false));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let (d, sd) = (died.clone(), shutdown.clone());
+            let r = std::thread::spawn(move || {
+                let _death = ServerDeathGuard { died: d, shutdown: sd };
+                if panics {
+                    panic!("server-death-guard probe");
+                }
+            })
+            .join();
+            assert_eq!(r.is_err(), panics);
+            (died.load(Ordering::SeqCst), shutdown.load(Ordering::SeqCst))
+        };
+        assert_eq!(run(true), (true, true), "a panic must close the window and mark the death");
+        assert_eq!(run(false), (false, false), "a normal end is not a death");
     }
 
     /// A transfer directory that cannot be created is fatal **only at launch**.
