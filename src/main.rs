@@ -79,6 +79,7 @@ type GuiCtxSlot = Arc<Mutex<Option<eframe::egui::Context>>>;
 
 fn main() {
     logger::init();
+    logger::install_panic_hook();
 
     glog!("Ethernet Gateway v{}", env!("CARGO_PKG_VERSION"));
     glog!("Author: Ricky Bryce");
@@ -748,17 +749,28 @@ fn main() {
         }
 
         // Headless mode — park the main thread until shutdown signal.
+        //
+        // **Or until the server thread ends by itself**, which only a panic
+        // makes it do (the panic hook has logged why).  This loop used to wait
+        // on `shutdown` alone, so a dead server left a process that looked
+        // alive to whatever supervises it and served nothing, for ever.
         loop {
-            if shutdown.load(Ordering::SeqCst) {
+            if shutdown.load(Ordering::SeqCst) || server_handle.is_finished() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
+        let server_died = !shutdown.load(Ordering::SeqCst);
 
         // Wait for the server thread to finish.
         shutdown.store(true, Ordering::SeqCst);
         shutdown_notify.notify_waiters();
         let _ = server_handle.join();
+        if server_died {
+            glog!("FATAL: the server stopped unexpectedly (see the PANIC line above); exiting.");
+            console_close::PROCESS_DONE.store(true, Ordering::SeqCst);
+            std::process::exit(1);
+        }
 
         // **`stop` is checked here as well as in the watcher, and that is not
         // belt and braces -- it closes a race.**  SIGTERM can land after the
@@ -1168,6 +1180,33 @@ mod tests {
         let src = include_str!("main.rs").replace("\r\n", "\n");
         let end = src.find("#[cfg(test)]\nmod tests").expect("test module marker");
         src[..end].to_string()
+    }
+
+    /// **A server thread that dies is noticed.**  The headless wait used to
+    /// watch `shutdown` alone, so a panicked server left a process that looked
+    /// alive and served nothing.  It must also wake on the thread finishing,
+    /// and exit when that happened without a shutdown -- and the panic hook
+    /// that says why must be installed before anything can panic.
+    #[test]
+    fn test_a_dead_server_thread_ends_the_process() {
+        let src = main_source();
+        let main_fn = &src[src.find("fn main() {").expect("main")..];
+        let init = main_fn.find("logger::init();").expect("init");
+        let hook = main_fn.find("logger::install_panic_hook();").expect("the hook is installed");
+        let spawn = main_fn.find("let server_handle = std::thread::spawn(").expect("server spawn");
+        assert!(init < hook && hook < spawn, "the hook goes in before anything runs");
+
+        let start = main_fn.find("// Headless mode").expect("the headless wait");
+        let wait = &main_fn[start..start + main_fn[start..].find("if should_run_another_cycle(").expect("cycle end")];
+        assert!(
+            wait.contains("if shutdown.load(Ordering::SeqCst) || server_handle.is_finished() {\n                break;"),
+            "the wait no longer wakes when the server thread ends"
+        );
+        let died = wait.find("let server_died = !shutdown.load(Ordering::SeqCst);").expect("read before the store");
+        let store = wait.find("shutdown.store(true, Ordering::SeqCst);").expect("store");
+        assert!(died < store, "server_died must be read before shutdown is set");
+        let exit = wait.find("if server_died {").expect("acted on");
+        assert!(wait[exit..].contains("std::process::exit(1);"), "a dead server must end the process");
     }
 
     /// A transfer directory that cannot be created is fatal **only at launch**.

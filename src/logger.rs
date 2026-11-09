@@ -681,6 +681,10 @@ fn escape_controls(msg: String) -> String {
 ///
 /// Control characters are written as `\xNN` (see [`escape_controls`]).
 pub fn log(msg: String) {
+    // Marks this thread as inside the logger until the end of the call, unwind
+    // included, so a panic raised in here is not logged by `install_panic_hook`
+    // back into the locks this call may be holding.
+    let _inside = InsideLog::enter();
     // Stamped HERE, above the sink and the rings, so that every consumer --
     // stderr, the file, the GUI console and the web `/logs` view -- shows the
     // same time for the same line, and so a line held in the pre-arm backlog
@@ -714,6 +718,55 @@ pub fn log(msg: String) {
         to_stderr(format_args!("{}", notice));
         push_to_rings(notice);
     }
+}
+
+thread_local! {
+    static IN_LOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set while a thread is inside [`log`]; cleared on drop, so on unwind too.
+struct InsideLog(bool);
+
+impl InsideLog {
+    fn enter() -> Self {
+        InsideLog(IN_LOG.with(|f| f.replace(true)))
+    }
+}
+
+impl Drop for InsideLog {
+    fn drop(&mut self) {
+        let was = self.0;
+        IN_LOG.with(|f| f.set(was));
+    }
+}
+
+/// Route every panic into the log, as well as to stderr.
+///
+/// **Without this a panic reached stderr only** -- never the log file, the GUI
+/// console or the web `/logs` view, which are where an operator looks, and a
+/// headless gateway's stderr usually goes nowhere at all.  The default hook
+/// still runs first, so a terminal sees exactly what it saw before.
+///
+/// A panic raised *inside* [`log`] is not logged again: that call may be
+/// holding the sink or a ring lock, and a std `Mutex` locked twice on one
+/// thread deadlocks.  It still reaches stderr through the default hook.
+/// Installed once; later calls do nothing.
+pub fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            default(info);
+            if IN_LOG.with(|f| f.get()) {
+                return;
+            }
+            let thread = std::thread::current();
+            // `info` reads "panicked at file:line:col:\nmessage"; one line, so
+            // the log does not show the break as an escaped `\x0A`.
+            let what = info.to_string().replace('\n', " ");
+            log(format!("PANIC in thread '{}': {}", thread.name().unwrap_or("unnamed"), what));
+        }));
+    });
 }
 
 /// Append `line` to both in-memory console buffers.
@@ -770,6 +823,44 @@ pub(crate) use glog;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A panic reaches the log**, named by its thread -- and one raised
+    /// inside `log` itself does not, because logging it there would lock the
+    /// sink or a ring a second time on the same thread and deadlock.
+    #[test]
+    fn test_a_panic_is_logged_but_not_from_inside_the_logger() {
+        init();
+        install_panic_hook();
+        let tag = format!("egw-panic-{}", std::process::id());
+        let t = tag.clone();
+        let r = std::thread::Builder::new()
+            .name("panic-probe".into())
+            .spawn(move || panic!("{t}-outside"))
+            .unwrap()
+            .join();
+        assert!(r.is_err());
+        let lines = snapshot(MAX_LINES);
+        let line = lines
+            .iter()
+            .find(|l| l.contains("PANIC in thread 'panic-probe'") && l.contains(&format!("{tag}-outside")))
+            .expect("the panic never reached the log");
+        assert!(!line.contains("\\x0A"), "the message is split by an escaped newline: {line}");
+
+        let t = tag.clone();
+        let r = std::thread::spawn(move || {
+            let _inside = InsideLog::enter();
+            panic!("{t}-inside")
+        })
+        .join();
+        assert!(r.is_err());
+        assert!(
+            !snapshot(MAX_LINES).iter().any(|l| l.contains(&format!("{tag}-inside"))),
+            "a panic inside log() was logged back into the logger"
+        );
+        // And the flag is put back after a call on this thread.
+        log("panic-probe: after".to_string());
+        assert!(!IN_LOG.with(|f| f.get()), "a thread stays marked as inside log()");
+    }
 
     /// Serialises the tests that arm the process-global [`FILE_SINK`], and
     /// disarms it from `Drop`.
