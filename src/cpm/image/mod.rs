@@ -239,16 +239,10 @@ pub fn create_blank_image(
         // the 0-byte `.dsk` the staging exists to prevent, by another road.
         f.sync_all()?;
         drop(f);
-        // Re-check under the staging lock: `exists` above was before the long
-        // write, and renaming over a disk somebody made meanwhile would destroy
-        // it with no undo.
-        if path.exists() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "a disk with that name appeared while this one was being made",
-            ));
-        }
-        std::fs::rename(&tmp, &path)
+        // Published without replacing: `exists` above was before the long
+        // write, and a disk somebody made meanwhile would be destroyed with no
+        // undo.  See `publish_without_replacing`.
+        publish_without_replacing(&tmp, &path, |a, b| std::fs::hard_link(a, b))
     })();
     if let Err(e) = write {
         let _ = std::fs::remove_file(&tmp);
@@ -264,6 +258,47 @@ pub fn create_blank_image(
         "created {filename} - {}, empty and ready to mount",
         fmt.label
     ))
+}
+
+/// Give the finished `tmp` its real name `path`, refusing if `path` exists.
+///
+/// **A rename cannot refuse.**  On Unix and on Windows it replaces whatever has
+/// the name, so a check that the name is free followed by a rename was a race:
+/// a disk created under the same name between the two -- by another session, a
+/// copy into the folder, a web upload -- was replaced with a blank one.  A hard
+/// link is the no-replace publish both systems have: it fails with
+/// `AlreadyExists` if the name is taken, deciding and publishing in one step,
+/// and the staging name is then removed.
+///
+/// A filesystem without hard links (FAT and exFAT, as on SD cards and USB
+/// sticks) gets the check and the rename, as before: the window is back there,
+/// and only there.  `link` is the hard-link call, a parameter so that fallback
+/// can be tested on a filesystem that has links.
+fn publish_without_replacing(
+    tmp: &Path,
+    path: &Path,
+    link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let taken = || {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "a disk with that name appeared while this one was being made",
+        )
+    };
+    match link(tmp, path) {
+        Ok(()) => {
+            // Published; the staging name is only a second name for it now.
+            let _ = std::fs::remove_file(tmp);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(taken()),
+        Err(_) => {
+            if path.exists() {
+                return Err(taken());
+            }
+            std::fs::rename(tmp, path)
+        }
+    }
 }
 
 /// What a drive is doing that stops it being changed, for the mount screens.
@@ -1210,6 +1245,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// **A disk that appears under the name while a blank is being made
+    /// survives.**  The publish was a check that the name was free and then a
+    /// rename, which replaces: a disk created in between was overwritten with a
+    /// blank one.  The publish itself now refuses a taken name, through a hard
+    /// link, and so does its fallback for a filesystem without hard links.  A
+    /// free name is published and the staging name goes.
+    #[test]
+    fn test_a_blank_never_replaces_a_disk_that_appeared_meanwhile() {
+        let dir = std::env::temp_dir().join(format!("egw_publish_norepl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tmp, path) = (dir.join("d.dsk.creating"), dir.join("d.dsk"));
+        let no_links = |_: &Path, _: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        };
+        for (how, linkless) in [("hard link", false), ("fallback", true)] {
+            std::fs::write(&tmp, b"blank").unwrap();
+            std::fs::write(&path, b"precious").unwrap();
+            let r = if linkless {
+                publish_without_replacing(&tmp, &path, no_links)
+            } else {
+                publish_without_replacing(&tmp, &path, |a, b| std::fs::hard_link(a, b))
+            };
+            assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::AlreadyExists, "{how}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"precious", "{how}: the disk was replaced");
+
+            std::fs::remove_file(&path).unwrap();
+            let r = if linkless {
+                publish_without_replacing(&tmp, &path, no_links)
+            } else {
+                publish_without_replacing(&tmp, &path, |a, b| std::fs::hard_link(a, b))
+            };
+            r.unwrap_or_else(|e| panic!("{how}: a free name was refused: {e}"));
+            assert_eq!(std::fs::read(&path).unwrap(), b"blank", "{how}");
+            assert!(!tmp.exists(), "{how}: the staging name was left behind");
+            std::fs::remove_file(&path).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The operator names a disk, not a file.  Anything that would make the
     /// assembled filename unsafe is folded away rather than rejected, but the
     /// result still has to be a safe bare name and still has to start with the
@@ -1580,7 +1655,11 @@ mod tests {
             ("save_image_atomically", body(&boot, "async fn save_image_atomically(")),
         ] {
             let sync = f.find("sync_all()").unwrap_or_else(|| panic!("{what}: no sync_all"));
-            let rename = f.find("rename(&tmp").unwrap_or_else(|| panic!("{what}: no rename"));
+            // The publish: a rename, or the no-replace publish that wraps one.
+            let rename = f
+                .find("rename(&tmp")
+                .or_else(|| f.find("publish_without_replacing(&tmp"))
+                .unwrap_or_else(|| panic!("{what}: no rename"));
             assert!(sync < rename, "{what}: the staged file is synced before it is renamed");
             assert!(f[rename..].contains("sync_dir_of("), "{what}: and the folder after");
         }
