@@ -1062,7 +1062,7 @@ impl TelnetSession {
             // 2026-11-09 under VICE: `ab`, CRSR-LEFT, `c`, CRSR-UP, `d` at the
             // Telnet Gateway's Host prompt showed "Connecting to abcd" and
             // failed the lookup.  Dropped like the C0 controls above.
-            if self.terminal_type == TerminalType::Petscii && (0x80..=0x9F).contains(&byte) {
+            if self.is_petscii_control(byte) {
                 continue;
             }
 
@@ -1138,7 +1138,9 @@ impl TelnetSession {
             if is_backspace_key(byte, self.erase_char) {
                 continue;
             }
-            if byte < 0x20 {
+            // A C64's cursor and colour keys are not menu choices either: taken
+            // as one, CRSR-RIGHT was echoed and answered as an unknown key.
+            if byte < 0x20 || self.is_petscii_control(byte) {
                 continue;
             }
 
@@ -1254,6 +1256,14 @@ impl TelnetSession {
             self.drain_trailing_eol(2).await;
             return Ok(Some(ch.to_string()));
         }
+    }
+
+    /// **PETSCII's second control range, 0x80-0x9F**: the C64's cursor keys,
+    /// CLR/HOME, INST, shifted RETURN, the colour keys and F1-F8.  Never text
+    /// and never a menu choice.  Always false off a PETSCII terminal, where
+    /// those bytes can be Latin-1 or UTF-8 continuation bytes.
+    pub(in crate::telnet) fn is_petscii_control(&self, byte: u8) -> bool {
+        self.terminal_type == TerminalType::Petscii && (0x80..=0x9F).contains(&byte)
     }
 
     pub(in crate::telnet) async fn wait_for_key(&mut self) -> Result<(), std::io::Error> {
