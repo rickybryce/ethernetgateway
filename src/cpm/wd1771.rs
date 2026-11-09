@@ -203,9 +203,17 @@ pub struct Wd1771 {
     intrq: bool,
     /// Set by whatever went wrong, in the bit position for the running command.
     error: u8,
-    /// Head loaded, from the `h` flag of Type I commands. Reported in Type I
-    /// status bit 5, and some drivers will not read until they see it.
+    /// The HLD output: the head held against the disk.  Reported in Type I
+    /// status bit 5 ("a logical 'and' of HLD and HLT", data sheet p. 12; HLT,
+    /// the drive's own settle signal, is taken as always met), and some drivers
+    /// will not read until they see it.  Loaded and unloaded by the rules in
+    /// [`Wd1771::command`] and [`Wd1771::read`], all from the FD1771 data sheet
+    /// of March 1978 (copy kept in `.claude/specs/fd1771/`).
     head_loaded: bool,
+    /// Index pulses seen since the last command, for the idle unload: HLD
+    /// "remains activated until the third index pulse following the last
+    /// operation which uses the read/write head" (p. 4).
+    idle_index_pulses: u8,
     /// Alternates on every Type I status read, so a driver that waits for the
     /// index pulse to pass sees it pass.  Nothing here spins a disk.
     index: bool,
@@ -257,6 +265,7 @@ impl Wd1771 {
             intrq: false,
             error: 0,
             head_loaded: false,
+            idle_index_pulses: 0,
             index: false,
             buffer: [0; MAX_SECTOR_LEN],
             pos: 0,
@@ -383,6 +392,7 @@ impl Wd1771 {
         self.track = track;
         self.sector = sector;
         self.head_loaded = true;
+        self.idle_index_pulses = 0;
         self.error = 0;
         self.busy = false;
         self.drq = false;
@@ -451,6 +461,22 @@ impl Wd1771 {
                 // status is Type I (`status` reports the bit for both).
                 if matches!(Kind::of(self.cmd), Kind::One | Kind::Four) {
                     self.index = !self.index;
+                    // **The idle unload.**  "If the FD1771 does not receive any
+                    // commands after two revolutions of the disk, the head will
+                    // be automatically disengaged" (p. 5) -- by the third index
+                    // pulse after the last operation (p. 4).  This model's only
+                    // revolution is the pulse above, so it is what is counted:
+                    // the head reads loaded on the status that follows the
+                    // command, and unloaded once three pulses have gone by with
+                    // no new command.  Nothing here reads less well for it --
+                    // the transfer path does not consult the head -- so the only
+                    // thing that sees it is a driver reading bit 5, as it would.
+                    if self.index && !self.busy && self.head_loaded {
+                        self.idle_index_pulses = self.idle_index_pulses.saturating_add(1);
+                        if self.idle_index_pulses >= 3 {
+                            self.head_loaded = false;
+                        }
+                    }
                 }
                 s
             }
@@ -527,6 +553,12 @@ impl Wd1771 {
         // Record Not Found or Write Protect the interrupted command had already
         // raised, so a driver checking why its transfer stopped was told it had
         // not.
+        // Every command restarts the idle count: the unload comes only after
+        // revolutions with *no* command (p. 5).  Force Interrupt included,
+        // though p. 4 counts from "the last operation which uses the
+        // read/write head" and it uses none; the two pages differ, p. 5 is the
+        // command-level rule, and no driver here can tell them apart.
+        self.idle_index_pulses = 0;
         if kind == Kind::Four {
             if !self.busy {
                 self.cmd = cmd;
@@ -577,10 +609,14 @@ impl Wd1771 {
         match kind {
             Kind::One => {
                 // The head-load flag, bit 3, which the disks' own driver calls
-                // HLAB. It stays loaded until something unloads it.
-                if cmd & 0x08 != 0 {
-                    self.head_loaded = true;
-                }
+                // HLAB.  "If h = 1, the head is loaded at the beginning of the
+                // command (HLD output is made active).  If h = 0, HLD is
+                // deactivated" (p. 5) -- except that "in a verify command the
+                // head is loaded after stepping to the destination track on the
+                // disk whenever the h bit is a logic zero" (p. 4).  So h = 0
+                // with no verify unloads it; this used to leave it loaded for
+                // good once any command had loaded it.
+                self.head_loaded = cmd & 0x08 != 0 || cmd & 0x04 != 0;
                 let rate_and_verify_ok = self.ready;
                 match cmd >> 4 {
                     0x0 => {
@@ -635,6 +671,12 @@ impl Wd1771 {
                     self.intrq = true;
                     return Need::None;
                 }
+                // "If the E flag = 1 (this is the normal case) HLD is made
+                // active" (p. 7); with E = 0 "the head is assumed to be engaged"
+                // and HLD is left as it is.
+                if cmd & 0x04 != 0 {
+                    self.head_loaded = true;
+                }
                 let writing = cmd & 0x20 != 0;
                 if writing && self.read_only {
                     // "any Write command is immediately terminated, an interrupt
@@ -674,6 +716,10 @@ impl Wd1771 {
                     self.intrq = true;
                     return Need::None;
                 }
+                // "Upon receipt of the Read Address command, the head is
+                // loaded" (p. 10), and the same for Read Track and Write Track;
+                // their E position (bit 2) is wired to 1 in Table 2.
+                self.head_loaded = true;
                 if cmd >> 4 == 0xC {
                     // Read Address: six bytes of the ID field. Synthesised,
                     // because an unframed image has no ID fields to read — but
@@ -942,6 +988,86 @@ mod tests {
         let s = c.read(reg::COMMAND).0;
         assert_ne!(s & type2::LOST_DATA, 0, "and the same bit is Lost Data here");
         assert_eq!(s & type1::HEAD_LOADED, 0, "with no head-engaged bit in this family");
+    }
+
+    /// **The head loads and unloads as the data sheet says** (FD1771, March
+    /// 1978, pp. 4-5 and 7): h = 1 loads it; h = 0 unloads it, unless the
+    /// command verifies, which loads it after stepping; a read or write with
+    /// E = 1 loads it, and with E = 0 leaves it alone.  It used to stay loaded
+    /// for good once anything had loaded it.
+    #[test]
+    fn test_the_head_loads_and_unloads_by_the_h_v_and_e_flags() {
+        let loaded = |c: &mut Wd1771| c.read(reg::COMMAND).0 & type1::HEAD_LOADED != 0;
+        let mut c = chip();
+        c.write(reg::COMMAND, 0x08); // restore, h = 1
+        assert!(loaded(&mut c), "h = 1 loads the head");
+        c.write(reg::COMMAND, 0x00); // restore, h = 0, no verify
+        assert!(!loaded(&mut c), "h = 0 with no verify unloads it");
+        c.write(reg::COMMAND, 0x04); // restore, h = 0, verify
+        assert!(loaded(&mut c), "a verify loads it after stepping");
+        c.write(reg::COMMAND, 0x00);
+        assert!(!loaded(&mut c));
+
+        // Read Sector with E = 0 leaves it unloaded; with E = 1 it loads it.
+        // Each is stopped by a Force Interrupt, and a second one on the idle
+        // chip retypes the status as Type I so bit 5 can be read.
+        let stop = |c: &mut Wd1771| {
+            c.write(reg::COMMAND, 0xD0);
+            c.write(reg::COMMAND, 0xD0);
+        };
+        c.write(reg::SECTOR, 1);
+        c.write(reg::COMMAND, 0x88);
+        stop(&mut c);
+        assert!(!loaded(&mut c), "E = 0 assumes the head, it does not load it");
+        c.write(reg::COMMAND, 0x8C);
+        stop(&mut c);
+        assert!(loaded(&mut c), "E = 1 loads the head");
+
+        // Read Address loads it too (p. 10), from an unloaded head.
+        c.write(reg::COMMAND, 0x00);
+        assert!(!loaded(&mut c));
+        c.write(reg::COMMAND, 0xC4);
+        stop(&mut c);
+        assert!(loaded(&mut c), "a Type III command loads the head");
+    }
+
+    /// **And unloads itself when left alone**: "the third index pulse following
+    /// the last operation which uses the read/write head" (p. 4).  Loaded on the
+    /// status after the command, unloaded once three pulses pass with no new
+    /// command -- and any command starts the count again.
+    #[test]
+    fn test_an_idle_head_unloads_after_three_index_pulses() {
+        let mut c = chip();
+        let poll = |c: &mut Wd1771| {
+            let s = c.read(reg::COMMAND).0;
+            (s & type1::HEAD_LOADED != 0, s & type1::INDEX != 0)
+        };
+        c.write(reg::COMMAND, 0x18); // seek, h = 1
+        let (first, _) = poll(&mut c);
+        assert!(first, "loaded straight after the command");
+        let mut pulses = 0;
+        let mut unloaded_after = None;
+        for _ in 0..12 {
+            let (loaded, index) = poll(&mut c);
+            if index {
+                pulses += 1;
+            }
+            if !loaded {
+                unloaded_after = Some(pulses);
+                break;
+            }
+        }
+        assert_eq!(unloaded_after, Some(3), "unloaded on the third index pulse, not before");
+
+        // A command in between restarts the count.
+        c.write(reg::COMMAND, 0x18);
+        for _ in 0..4 {
+            poll(&mut c);
+        }
+        c.write(reg::COMMAND, 0x58); // step in, h = 1
+        for _ in 0..4 {
+            assert!(poll(&mut c).0, "a new command restarts the idle count");
+        }
     }
 
     /// A seek written while a Write Sector is collecting its bytes ends the
