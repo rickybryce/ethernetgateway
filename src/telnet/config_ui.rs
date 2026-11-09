@@ -1100,8 +1100,8 @@ impl TelnetSession {
     /// thing an operator needs to *repair* from outside — a guest that stored
     /// `ATQ1` answers nothing on its next boot, and the only way back was to
     /// know that and undo it from inside the emulator, or hand-edit the config
-    /// file. Same reasoning as the serial ports' own advanced panel, which all
-    /// three surfaces have had for far longer.
+    /// file. Same reasoning as the serial ports' own AT profile screen
+    /// (`modem_at_profile`, key `A` on a modem port's screen).
     ///
     /// The state lives in the action rows rather than a status block above
     /// them: this is a screen of toggles, and printing each value twice would

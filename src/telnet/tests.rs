@@ -14186,7 +14186,10 @@ fn test_the_port_settings_rows_align_their_second_key() {
         session.color_enabled = false; // measure what a terminal draws
         for &(label, key2, label2) in &pairs {
             let row = session.serial_menu_row("F", label, Some((key2, label2)));
-            let col = row.find(key2).unwrap_or_else(|| {
+            // Searched for after the left label, which can contain the second
+            // key's letter ("AT profile" beside `A`).
+            let after = format!("  F  {label}").len();
+            let col = row[after..].find(key2).map(|i| i + after).unwrap_or_else(|| {
                 panic!("row {:?} lost its second key {:?}", row, key2)
             });
             assert_eq!(
@@ -14236,7 +14239,8 @@ fn test_the_port_settings_rows_align_their_second_key() {
                 .replace(ANSI_CYAN, "")
                 .replace(ANSI_RESET, "")
                 .replace([char::from(PETSCII_CYAN), char::from(PETSCII_DEFAULT)], "");
-            let col = drawn.find(key2).unwrap_or_else(|| {
+            let after = format!("  F  {label}").len();
+            let col = drawn[after..].find(key2).map(|i| i + after).unwrap_or_else(|| {
                 panic!("coloured row {:?} lost its second key {:?}", row, key2)
             });
             assert_eq!(
@@ -15451,8 +15455,8 @@ fn test_each_serial_help_page_explains_exactly_its_screens_keys() {
 #[test]
 fn test_the_port_settings_hint_names_exactly_the_keys_each_mode_answers() {
     let expected: &[(&str, bool, &str)] = &[
-        ("modem", false, "bcdefghipqstx"),
-        ("modem", true, "bcdefghpqsx"),
+        ("modem", false, "abcdefghipqstx"),
+        ("modem", true, "abcdefghpqsx"),
         ("console", false, "befhkpqst"),
         ("console", true, "befhkpqs"),
         ("kermit", false, "befhpqst"),
@@ -15485,7 +15489,7 @@ fn test_the_port_settings_hint_names_exactly_the_keys_each_mode_answers() {
     }
     assert_eq!(
         serial_menu_key_hint(&serial_menu_keys("modem", false)),
-        "Press B-I, P, Q, S, T, or X.",
+        "Press A-I, P, Q, S, T, or X.",
     );
 }
 
@@ -15684,6 +15688,161 @@ async fn test_the_erase_key_restart_is_applied_once() {
     assert!(restarted, "K restarts a running port");
     assert!(!again, "leaving the screen applied the baud a second time");
     assert_eq!(baseline.port(id).baud, 19200, "the baseline moved forward");
+}
+
+/// Drive a screen on a C64 terminal with `keys` and return each frame it drew
+/// (split at PETSCII CLR) as the visible lines: colour and other PETSCII
+/// control bytes removed, CR/LF as line breaks.  The last line of a frame is
+/// its prompt (with whatever was typed at it).
+async fn petscii_frames<F, Fut>(keys: &'static [u8], run: F) -> Vec<Vec<String>>
+where
+    F: FnOnce(TelnetSession) -> Fut,
+    Fut: std::future::Future<Output = TelnetSession>,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (sess, peer) = make_test_session_with_peer(TerminalType::Petscii);
+    let (mut rd, mut wr) = tokio::io::split(peer);
+    let drain = tokio::spawn(async move {
+        let mut out = Vec::new();
+        let _ = rd.read_to_end(&mut out).await;
+        out
+    });
+    wr.write_all(keys).await.unwrap();
+    let sess = tokio::time::timeout(std::time::Duration::from_secs(10), run(sess))
+        .await
+        .expect("the screen never left");
+    drop(sess);
+    drop(wr);
+    let out = drain.await.unwrap();
+    out.split(|&b| b == PETSCII_CLEAR)
+        .skip(1)
+        .map(|frame| {
+            let visible: Vec<u8> = frame
+                .iter()
+                .copied()
+                .filter(|&b| b == b'\r' || (0x20..0x80).contains(&b) || b >= 0xA0)
+                .collect();
+            let mut lines: Vec<String> =
+                String::from_utf8_lossy(&visible).split('\r').map(str::to_string).collect();
+            // The key answered at the prompt is echoed with a CR, which leaves
+            // an empty piece after it -- not a row the screen drew.
+            if lines.len() > 1 && lines.last().is_some_and(|l| l.is_empty()) {
+                lines.pop();
+            }
+            lines
+        })
+        .collect()
+}
+
+/// **A modem port's screen still fits a C64 with `A` on it**, on another port
+/// and on the caller's own.  Measured by drawing it, not by adding up rows:
+/// `A` shares the Ring row, and takes its own where Ring is hidden.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test serializer, held for the whole test
+async fn test_the_modem_port_screen_fits_a_c64_with_the_at_profile_key() {
+    use crate::config::{serial_key, SerialPortId};
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let _g = crate::serial::lock_global_state();
+    let id = SerialPortId::A;
+    let before = {
+        let c = crate::config::get_config();
+        let p = c.port(id);
+        [("enabled", p.enabled.to_string()), ("mode", p.mode.clone())]
+    };
+    crate::config::update_config_value(&serial_key(id, "enabled"), "true");
+    crate::config::update_config_value(&serial_key(id, "mode"), "modem");
+    for own in [false, true] {
+        let frames = petscii_frames(b"q", |mut sess| async move {
+            if own {
+                sess.is_serial = true;
+                sess.serial_port_id = Some(id);
+            }
+            let mut baseline = crate::config::get_config();
+            sess.modem_settings_screen(id, &mut baseline).await.unwrap();
+            sess
+        })
+        .await;
+        let frame = &frames[0];
+        assert!(frame.len() <= 22, "own={own}: {} rows:\n{}", frame.len(), frame.join("\n"));
+        for line in frame {
+            assert!(line.chars().count() <= 39, "own={own}: {line:?} is too wide");
+        }
+        assert!(
+            // Case-folded: a C64 shows `A  AT profile` as `a  at PROFILE`.
+            frame.iter().any(|l| l.to_ascii_lowercase().contains("a  at profile")),
+            "own={own}: no A row:\n{}",
+            frame.join("\n"),
+        );
+        // Beside Ring on another port; Ring is not offered on the caller's own.
+        let shared = frame.iter().any(|l| {
+            let l = l.to_ascii_lowercase();
+            l.contains("ring emulator") && l.contains("at profile")
+        });
+        let ring = frame.iter().any(|l| l.to_ascii_lowercase().contains("ring emulator"));
+        assert_eq!((shared, ring), (!own, !own), "own={own}:\n{}", frame.join("\n"));
+    }
+    for (k, v) in before {
+        crate::config::update_config_value(&serial_key(id, k), &v);
+    }
+}
+
+/// **The port's saved AT profile can be edited from telnet**, every field of it,
+/// as the web page and the desktop editor always could.  Driven key by key on a
+/// C64: each toggle and cycle writes its own config key, a slot and the
+/// S-registers take a typed value, `-` empties one, and the port is never
+/// restarted for it -- the modem reads the profile at ATZ.  Every frame fits.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test serializer, held for the whole test
+async fn test_the_at_profile_screen_edits_every_saved_field() {
+    use crate::config::{serial_key, SerialPortId};
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let _g = crate::serial::lock_global_state();
+    let id = SerialPortId::A;
+    let fields = [
+        "echo", "verbose", "quiet", "x_code", "dtr_mode", "flow_mode", "dcd_mode", "s_regs",
+        "stored_0", "stored_1", "stored_2", "stored_3",
+    ];
+    let snapshot = || {
+        let c = crate::config::get_config();
+        let p = c.port(id).clone();
+        vec![
+            p.echo.to_string(), p.verbose.to_string(), p.quiet.to_string(),
+            p.x_code.to_string(), p.dtr_mode.to_string(), p.flow_mode.to_string(),
+            p.dcd_mode.to_string(), p.s_regs.clone(), p.stored_numbers[0].clone(),
+            p.stored_numbers[1].clone(), p.stored_numbers[2].clone(), p.stored_numbers[3].clone(),
+        ]
+    };
+    let before = snapshot();
+    let start = ["true", "true", "false", "4", "0", "0", "1", "", "", "OLD", "", ""];
+    for (k, v) in fields.iter().zip(start) {
+        crate::config::update_config_value(&serial_key(id, k), v);
+    }
+    crate::serial::take_restart_request(id);
+
+    // E V T X D K C, S "1,2,3", slot 0 "5551212", slot 1 "-" (clear), Q.
+    let frames = petscii_frames(b"evtxdkcs1,2,3\r05551212\r1-\rq", |mut sess| async move {
+        sess.modem_at_profile(id).await.unwrap();
+        sess
+    })
+    .await;
+    let after = snapshot();
+    let restarted = crate::serial::take_restart_request(id);
+    for (k, v) in fields.iter().zip(&before) {
+        crate::config::update_config_value(&serial_key(id, k), v);
+    }
+
+    let want = ["false", "false", "true", "0", "1", "1", "0", "1,2,3", "5551212", "", "", ""];
+    for ((k, got), want) in fields.iter().zip(&after).zip(want) {
+        assert_eq!(got, want, "{k}");
+    }
+    assert!(!restarted, "editing the saved profile restarted the port");
+    assert!(frames.len() >= 10, "drew only {} frames", frames.len());
+    for frame in &frames {
+        assert!(frame.len() <= 22, "{} rows:\n{}", frame.len(), frame.join("\n"));
+        for line in frame {
+            assert!(line.chars().count() <= 39, "{line:?} is too wide for a C64");
+        }
+    }
 }
 
 /// **T applies the mode once.**  The toggle applies on the spot and moves the

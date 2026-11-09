@@ -52,7 +52,7 @@ pub(in crate::telnet) fn serial_menu_keys(mode: &str, on_own_port: bool) -> Vec<
         keys.push('k');
     }
     if modem {
-        keys.extend(['c', 'd', 'g', 'x']);
+        keys.extend(['a', 'c', 'd', 'g', 'x']);
         if !on_own_port {
             keys.push('i');
         }
@@ -739,12 +739,17 @@ impl TelnetSession {
             // (ringing yourself isn't useful) but allow it on the
             // OTHER port — a Port-A serial session can ring Port B's
             // wire if there's separate hardware listening over there.
-            if keys.contains(&'i') {
-                self.send_line(&format!(
-                    "  {}  Ring emulator",
-                    self.cyan("I")
-                ))
-                .await?;
+            //
+            // `A`, the saved AT profile, rides the Ring row -- this screen is at
+            // the 22-row budget -- and takes a row of its own on the caller's
+            // own port, where Ring (and T) are hidden and the row is free.
+            if keys.contains(&'a') {
+                let row = if keys.contains(&'i') {
+                    self.serial_menu_row("I", "Ring emulator", Some(("A", "AT profile")))
+                } else {
+                    self.serial_menu_row("A", "AT profile", None)
+                };
+                self.send_line(&row).await?;
             }
             self.send_line("").await?;
             self.send_line(&format!(
@@ -892,6 +897,9 @@ impl TelnetSession {
                 "i" => {
                     self.modem_ring_emulator(id).await?;
                 }
+                "a" => {
+                    self.modem_at_profile(id).await?;
+                }
                 "h" => {
                     self.modem_show_help(id).await?;
                 }
@@ -903,6 +911,158 @@ impl TelnetSession {
                 }
             }
         }
+    }
+
+    /// The port's saved Hayes profile -- the `AT&W` state.
+    ///
+    /// **Parity with the web page and the desktop editor**, which have always
+    /// shown and edited these; telnet only wrote them when a modem user typed
+    /// `AT&W`.  A profile is what an operator needs to repair from outside: a
+    /// terminal that stored `ATQ1` sees no result codes after its next `ATZ`,
+    /// and the way back was to know that and undo it from the terminal, or to
+    /// hand-edit the config file.
+    ///
+    /// Saved at once and **never restarts the port**: the modem reads the saved
+    /// profile at `ATZ` and when the port starts, exactly as it reads one the
+    /// other two surfaces save, so a caller on the line is not dropped for it.
+    /// The ranges are the AT parser's own (`apply_config_key` enforces them
+    /// too), so nothing set here is a value a modem user could not have set.
+    pub(in crate::telnet) async fn modem_at_profile(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
+        let set = |key: String, value: String| async move {
+            tokio::task::spawn_blocking(move || {
+                config::update_config_value(&key, &value);
+            })
+            .await
+            .ok();
+        };
+        loop {
+            let cfg = config::get_config();
+            let p = cfg.port(id).clone();
+
+            self.clear_screen().await?;
+            let sep = self.separator();
+            self.send_line(&sep).await?;
+            self.send_line(&format!(
+                "  {}",
+                self.yellow(&format!("PORT {} - AT PROFILE", id.label()))
+            ))
+            .await?;
+            self.send_line(&sep).await?;
+            self.send_line("").await?;
+
+            // The CP/M modem profile's layout: a 14-column label puts every
+            // value in one column on a 40-column screen.
+            let on = |b: bool| if b { "ON" } else { "off" };
+            let row = |s: &Self, key: &str, label: &str, value: String| {
+                format!("  {}  {:<14}{}", s.cyan(key), label, value)
+            };
+            self.send_line(&row(self, "E", "Echo (E1)", self.amber(on(p.echo)))).await?;
+            self.send_line(&row(self, "V", "Verbose (V1)", self.amber(on(p.verbose)))).await?;
+            // `T` for quiet, because `Q` is Back -- as on the CP/M profile.
+            self.send_line(&row(self, "T", "Quiet (Q1)", self.amber(on(p.quiet)))).await?;
+            self.send_line(&row(self, "X", "Result (X)", self.amber(&p.x_code.to_string())))
+                .await?;
+            self.send_line(&row(self, "D", "DTR (&D)", self.amber(&p.dtr_mode.to_string())))
+                .await?;
+            self.send_line(&row(self, "K", "Flow (&K)", self.amber(&p.flow_mode.to_string())))
+                .await?;
+            self.send_line(&row(self, "C", "DCD (&C)", self.amber(&p.dcd_mode.to_string())))
+                .await?;
+            // 20 on a C64 for the same reason as the CP/M profile's row: the
+            // prefix and label are 19, and a row that fills column 40 wraps.
+            let w = if self.terminal_type == TerminalType::Petscii { 20 } else { 55 };
+            let sregs = if p.s_regs.trim().is_empty() {
+                self.dim("(power-on)")
+            } else {
+                self.amber(&truncate_to_width(&p.s_regs, w))
+            };
+            self.send_line(&row(self, "S", "S-registers", sregs)).await?;
+            for (i, slot) in p.stored_numbers.iter().enumerate() {
+                let shown = if slot.is_empty() {
+                    self.dim("(empty)")
+                } else {
+                    self.amber(&truncate_to_width(slot, w))
+                };
+                self.send_line(&row(self, &i.to_string(), &format!("Stored &Z{i}"), shown))
+                    .await?;
+            }
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.dim("Saved now; the modem uses it")))
+                .await?;
+            self.send_line(&format!("  {}", self.dim("at ATZ or when the port starts.")))
+                .await?;
+            self.send_line("").await?;
+            self.send_line(&format!("  {}", self.action_prompt("Q", "Back"))).await?;
+
+            let prompt = format!(
+                "{}> ",
+                self.cyan(&format!("gateway/modem-{}/at", id.label().to_ascii_lowercase()))
+            );
+            self.send(&prompt).await?;
+            self.flush().await?;
+
+            let input = match self.get_menu_input(true).await? {
+                Some(s) if !s.is_empty() => s,
+                _ => return Ok(()),
+            };
+            let key = |suffix: &str| config::serial_key(id, suffix);
+            match input.as_str() {
+                "e" => set(key("echo"), (!p.echo).to_string()).await,
+                "v" => set(key("verbose"), (!p.verbose).to_string()).await,
+                "t" => set(key("quiet"), (!p.quiet).to_string()).await,
+                "x" => set(key("x_code"), ((p.x_code + 1) % 5).to_string()).await,
+                "d" => set(key("dtr_mode"), ((p.dtr_mode + 1) % 4).to_string()).await,
+                "k" => set(key("flow_mode"), ((p.flow_mode + 1) % 5).to_string()).await,
+                "c" => set(key("dcd_mode"), ((p.dcd_mode + 1) % 2).to_string()).await,
+                "s" => {
+                    self.modem_at_text_field(
+                        "S-registers (- = power-on)",
+                        key("s_regs"),
+                        &p.s_regs,
+                    )
+                    .await?;
+                }
+                "0" | "1" | "2" | "3" => {
+                    let i: usize = input.parse().unwrap_or(0);
+                    self.modem_at_text_field(
+                        &format!("Stored &Z{i} (- clears)"),
+                        key(&format!("stored_{i}")),
+                        &p.stored_numbers[i],
+                    )
+                    .await?;
+                }
+                "q" => return Ok(()),
+                _ => {
+                    self.show_error("Press C-E, K, S, T, V, X, 0-3, or Q.").await?;
+                }
+            }
+        }
+    }
+
+    /// One free-text value of the AT profile.  An empty answer keeps the old
+    /// value, as on every prompt here, so `-` is how a slot or the S-registers
+    /// are emptied -- there is no other way to type "nothing" at a prompt.
+    async fn modem_at_text_field(
+        &mut self,
+        label: &str,
+        key: String,
+        current: &str,
+    ) -> Result<(), std::io::Error> {
+        let shown = if current.is_empty() { "(empty)" } else { current };
+        let Some(v) = self.other_prompt_value(label, shown, false).await? else {
+            return Ok(());
+        };
+        let v = self.typed_text(&v);
+        let v = if v.trim() == "-" { String::new() } else { v.trim().to_string() };
+        tokio::task::spawn_blocking(move || {
+            config::update_config_value(&key, &v);
+        })
+        .await
+        .ok();
+        Ok(())
     }
 
     /// Ask before a restart that will drop a live connection on port `id`.
@@ -1846,6 +2006,10 @@ impl TelnetSession {
                 "     on the port you are",
                 "     connected through)",
                 "",
+                "  A  The saved AT profile (AT&W):",
+                "     E/V/Q, X, &D, &K, &C, S-regs",
+                "     and stored numbers",
+                "",
                 "  Dialing:",
                 "  ATDT ethernetgateway",
                 "    Connect to this gateway",
@@ -1926,6 +2090,8 @@ impl TelnetSession {
                 "  I  Ring this port, as if a call were coming",
                 "     in (not offered on the port you are",
                 "     connected through)",
+                "  A  The saved AT profile (AT&W): E/V/Q, X,",
+                "     &D, &K, &C, S-registers, stored numbers",
                 "",
                 "  Dialing:",
                 "  ATDT ethernetgateway",
