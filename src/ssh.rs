@@ -1161,6 +1161,89 @@ fn label_refusal_is_news(ip: std::net::IpAddr, now: std::time::Instant) -> bool 
 }
 
 impl SshHandler {
+    /// Whether this key *would* be accepted, asked before the client signs.
+    ///
+    /// **The trait default is `Accept`**, which tells every client its key
+    /// would work and then refuses the signature -- an answer that is wrong
+    /// twice over.  Answered honestly here so an unenrolled slave learns at
+    /// once and falls back to its password instead of signing for nothing.
+    async fn key_offered(
+        &mut self,
+        _user: &str,
+        public_key: &russh::keys::PublicKey,
+    ) -> Result<russh::server::Auth, russh::Error> {
+        if key_is_authorized(&self.authorized_keys, public_key) {
+            Ok(russh::server::Auth::Accept)
+        } else {
+            Ok(russh::server::Auth::reject())
+        }
+    }
+
+    /// Public-key authentication, for a slave that has been enrolled.
+    ///
+    /// This is what lets a slave stop storing the master's password in
+    /// cleartext -- see [`RELAY_AUTHORIZED_KEYS_FILE`] for why that value
+    /// could never simply be hashed.  With no authorized-keys file the method
+    /// refuses everything, so an installation that has never heard of it is
+    /// unchanged.
+    ///
+    /// **A rejected key does NOT count toward the lockout.**  Password
+    /// guessing is what the lockout exists for; a public key is not
+    /// guessable, and counting a refusal here would let the ordinary
+    /// sequence -- a slave offers its key, is refused, then authenticates
+    /// with its password -- ban the very slave that went on to log in
+    /// correctly.  A *successful* key clears the lockout, exactly as a
+    /// successful password does.
+    async fn key_auth(
+        &mut self,
+        user: &str,
+        public_key: &russh::keys::PublicKey,
+    ) -> Result<russh::server::Auth, russh::Error> {
+        if self.rate_limited {
+            return Ok(russh::server::Auth::reject());
+        }
+        if let Some(ip) = self.peer_addr
+            && telnet::is_locked_out(&self.lockouts, ip)
+        {
+            glog!("SSH: key auth from {} rejected (locked out)", ip);
+            return Ok(russh::server::Auth::reject());
+        }
+        // The same rule as the password path: a blanked username must not
+        // become an accept-anything server.  The password being empty is fine
+        // here -- removing it is the entire point of key auth.
+        if self.username.is_empty() {
+            glog!("SSH: key auth rejected — configured SSH username is empty");
+            return Ok(russh::server::Auth::reject());
+        }
+        if !crate::credential::username_matches(user, &self.username)
+            || !key_is_authorized(&self.authorized_keys, public_key)
+        {
+            return Ok(russh::server::Auth::reject());
+        }
+        self.key_authed = true;
+        if let Some(ip) = self.peer_addr {
+            telnet::clear_lockout(&self.lockouts, ip);
+            glog!("SSH: {} authenticated by public key ({})", ip, public_key.fingerprint(Default::default()));
+        }
+        // Claim a session slot on exactly the same terms as the password path.
+        // Missing this is how a cap silently stops capping: the count is what
+        // `max_sessions` is enforced against, and `Drop` subtracts once.
+        if self.counted {
+            return Ok(russh::server::Auth::Accept);
+        }
+        if !try_claim_slot(&self.session_count, self.max_sessions) {
+            if let Some(ip) = self.peer_addr {
+                glog!(
+                    "SSH: {} authenticated by key but server at capacity ({}); rejecting",
+                    ip, self.max_sessions,
+                );
+            }
+            return Ok(russh::server::Auth::reject());
+        }
+        self.mark_logged_in();
+        Ok(russh::server::Auth::Accept)
+    }
+
     /// Register a remote slave port (`serial-register <port>`, §9 #12).
     /// Gated like the relay path (master + accept_relays + a known peer IP)
     /// and counted against the session cap (a registered idle port holds a
@@ -1486,87 +1569,27 @@ impl russh::server::Handler for SshHandler {
         }
     }
 
-    /// Whether this key *would* be accepted, asked before the client signs.
-    ///
-    /// **The trait default is `Accept`**, which tells every client its key
-    /// would work and then refuses the signature -- an answer that is wrong
-    /// twice over.  Answered honestly here so an unenrolled slave learns at
-    /// once and falls back to its password instead of signing for nothing.
+    /// russh 0.65 hands the key over wrapped (with the algorithm named in
+    /// the request); the decision is made on the bare key in
+    /// [`SshHandler::key_offered`], which the tests can call directly --
+    /// they cannot build a `PublicKeyOffer`, which is `#[non_exhaustive]`.
     async fn auth_publickey_offered(
         &mut self,
-        _user: &str,
-        public_key: &russh::keys::PublicKey,
+        user: &str,
+        offer: russh::server::PublicKeyOffer<'_>,
     ) -> Result<russh::server::Auth, Self::Error> {
-        if key_is_authorized(&self.authorized_keys, public_key) {
-            Ok(russh::server::Auth::Accept)
-        } else {
-            Ok(russh::server::Auth::reject())
-        }
+        self.key_offered(user, offer.public_key).await
     }
 
-    /// Public-key authentication, for a slave that has been enrolled.
-    ///
-    /// This is what lets a slave stop storing the master's password in
-    /// cleartext -- see [`RELAY_AUTHORIZED_KEYS_FILE`] for why that value
-    /// could never simply be hashed.  With no authorized-keys file the method
-    /// refuses everything, so an installation that has never heard of it is
-    /// unchanged.
-    ///
-    /// **A rejected key does NOT count toward the lockout.**  Password
-    /// guessing is what the lockout exists for; a public key is not
-    /// guessable, and counting a refusal here would let the ordinary
-    /// sequence -- a slave offers its key, is refused, then authenticates
-    /// with its password -- ban the very slave that went on to log in
-    /// correctly.  A *successful* key clears the lockout, exactly as a
-    /// successful password does.
+    /// The signature has been verified by russh; the decision is made in
+    /// [`SshHandler::key_auth`].  A `VerifiedPublicKey` can only be made by
+    /// russh, so the tests call `key_auth` directly.
     async fn auth_publickey(
         &mut self,
         user: &str,
-        public_key: &russh::keys::PublicKey,
+        key: russh::server::VerifiedPublicKey<'_>,
     ) -> Result<russh::server::Auth, Self::Error> {
-        if self.rate_limited {
-            return Ok(russh::server::Auth::reject());
-        }
-        if let Some(ip) = self.peer_addr
-            && telnet::is_locked_out(&self.lockouts, ip)
-        {
-            glog!("SSH: key auth from {} rejected (locked out)", ip);
-            return Ok(russh::server::Auth::reject());
-        }
-        // The same rule as the password path: a blanked username must not
-        // become an accept-anything server.  The password being empty is fine
-        // here -- removing it is the entire point of key auth.
-        if self.username.is_empty() {
-            glog!("SSH: key auth rejected — configured SSH username is empty");
-            return Ok(russh::server::Auth::reject());
-        }
-        if !crate::credential::username_matches(user, &self.username)
-            || !key_is_authorized(&self.authorized_keys, public_key)
-        {
-            return Ok(russh::server::Auth::reject());
-        }
-        self.key_authed = true;
-        if let Some(ip) = self.peer_addr {
-            telnet::clear_lockout(&self.lockouts, ip);
-            glog!("SSH: {} authenticated by public key ({})", ip, public_key.fingerprint(Default::default()));
-        }
-        // Claim a session slot on exactly the same terms as the password path.
-        // Missing this is how a cap silently stops capping: the count is what
-        // `max_sessions` is enforced against, and `Drop` subtracts once.
-        if self.counted {
-            return Ok(russh::server::Auth::Accept);
-        }
-        if !try_claim_slot(&self.session_count, self.max_sessions) {
-            if let Some(ip) = self.peer_addr {
-                glog!(
-                    "SSH: {} authenticated by key but server at capacity ({}); rejecting",
-                    ip, self.max_sessions,
-                );
-            }
-            return Ok(russh::server::Auth::reject());
-        }
-        self.mark_logged_in();
-        Ok(russh::server::Auth::Accept)
+        self.key_auth(user, key.public_key).await
     }
 
     /// Accept the session channel.
@@ -3045,7 +3068,7 @@ mod tests {
     /// and above all no session slot, or the cap silently stops capping.
     #[tokio::test]
     async fn test_a_key_is_refused_when_none_is_enrolled() {
-        use russh::server::{Auth, Handler};
+        use russh::server::Auth;
         let session_count = Arc::new(AtomicUsize::new(0));
         let key = russh::keys::PrivateKey::random(
             &mut rand::rng(),
@@ -3054,7 +3077,7 @@ mod tests {
         .unwrap();
         let mut h = test_handler(session_count.clone(), Vec::new());
 
-        let r = h.auth_publickey("admin", key.public_key()).await.unwrap();
+        let r = h.key_auth("admin", key.public_key()).await.unwrap();
         assert!(matches!(r, Auth::Reject { .. }), "an unenrolled key must be refused");
         assert!(!h.counted);
         assert_eq!(session_count.load(Ordering::SeqCst), 0, "a refusal must claim no slot");
@@ -3062,14 +3085,14 @@ mod tests {
         // And the OFFER must say so too.  The trait default answers Accept,
         // which tells every client its key would work and then refuses the
         // signature -- wrong twice over.
-        let offered = h.auth_publickey_offered("admin", key.public_key()).await.unwrap();
+        let offered = h.key_offered("admin", key.public_key()).await.unwrap();
         assert!(matches!(offered, Auth::Reject { .. }), "the offer must be answered honestly");
     }
 
     /// An enrolled key authenticates and claims exactly one slot.
     #[tokio::test]
     async fn test_an_enrolled_key_authenticates_and_claims_one_slot() {
-        use russh::server::{Auth, Handler};
+        use russh::server::Auth;
         let session_count = Arc::new(AtomicUsize::new(0));
         let key = russh::keys::PrivateKey::random(
             &mut rand::rng(),
@@ -3082,11 +3105,11 @@ mod tests {
             h.password = String::new();
 
             assert!(matches!(
-                h.auth_publickey_offered("admin", key.public_key()).await.unwrap(),
+                h.key_offered("admin", key.public_key()).await.unwrap(),
                 Auth::Accept
             ));
             assert!(matches!(
-                h.auth_publickey("admin", key.public_key()).await.unwrap(),
+                h.key_auth("admin", key.public_key()).await.unwrap(),
                 Auth::Accept
             ));
             assert!(h.counted);
@@ -3095,7 +3118,7 @@ mod tests {
             // A second call on the same connection must not count twice, or
             // Drop (which subtracts once) could never release it.
             assert!(matches!(
-                h.auth_publickey("admin", key.public_key()).await.unwrap(),
+                h.key_auth("admin", key.public_key()).await.unwrap(),
                 Auth::Accept
             ));
             assert_eq!(session_count.load(Ordering::SeqCst), 1);
@@ -3103,7 +3126,7 @@ mod tests {
             // The wrong user with the right key is still the wrong user.
             let mut other = test_handler(session_count.clone(), vec![key.public_key().clone()]);
             assert!(matches!(
-                other.auth_publickey("someone-else", key.public_key()).await.unwrap(),
+                other.key_auth("someone-else", key.public_key()).await.unwrap(),
                 Auth::Reject { .. }
             ));
         }
@@ -3120,7 +3143,7 @@ mod tests {
     /// guessing must not get a second door.
     #[tokio::test]
     async fn test_key_refusals_and_the_lockout() {
-        use russh::server::{Auth, Handler};
+        use russh::server::Auth;
         let session_count = Arc::new(AtomicUsize::new(0));
         let key = russh::keys::PrivateKey::random(
             &mut rand::rng(),
@@ -3130,7 +3153,7 @@ mod tests {
         let mut h = test_handler(session_count.clone(), Vec::new());
 
         for _ in 0..(telnet::MAX_AUTH_ATTEMPTS + 2) {
-            let _ = h.auth_publickey("admin", key.public_key()).await.unwrap();
+            let _ = h.key_auth("admin", key.public_key()).await.unwrap();
         }
         let ip = h.peer_addr.unwrap();
         assert!(
@@ -3145,7 +3168,7 @@ mod tests {
         let mut h2 = test_handler(session_count.clone(), vec![key.public_key().clone()]);
         h2.lockouts = h.lockouts.clone();
         assert!(matches!(
-            h2.auth_publickey("admin", key.public_key()).await.unwrap(),
+            h2.key_auth("admin", key.public_key()).await.unwrap(),
             Auth::Reject { .. }
         ), "a locked-out IP must not get in with a key either");
     }
