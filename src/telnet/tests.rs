@@ -15624,12 +15624,29 @@ async fn test_the_erase_key_restart_is_applied_once() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
     let _g = crate::serial::lock_global_state();
+    // A relay test marking port B as bridging would make K ask first, and the
+    // queued Q would answer that question instead of leaving the screen.
+    let _relay = crate::relay::key_auth_test_lock();
     let id = SerialPortId::B;
-    let keys = ["enabled", "mode", "port", "baud", "backspace"];
-    let before: Vec<String> = {
+    /// Puts port B back however the test ends, a timeout included.
+    struct Restore(Vec<(String, String)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            for (k, v) in &self.0 {
+                crate::config::update_config_value(k, v);
+            }
+        }
+    }
+    let _restore = {
         let c = crate::config::get_config();
         let p = c.port(id);
-        vec![p.enabled.to_string(), p.mode.clone(), p.port.clone(), p.baud.to_string(), p.backspace.clone()]
+        Restore(vec![
+            (serial_key(id, "enabled"), p.enabled.to_string()),
+            (serial_key(id, "mode"), p.mode.clone()),
+            (serial_key(id, "port"), p.port.clone()),
+            (serial_key(id, "baud"), p.baud.to_string()),
+            (serial_key(id, "backspace"), p.backspace.clone()),
+        ])
     };
     crate::config::update_config_value(&serial_key(id, "enabled"), "true");
     crate::config::update_config_value(&serial_key(id, "mode"), "console");
@@ -15661,9 +15678,6 @@ async fn test_the_erase_key_restart_is_applied_once() {
     drop(sess);
     drop(wr);
     let _ = drain.await;
-    for (k, v) in keys.iter().zip(&before) {
-        crate::config::update_config_value(&serial_key(id, k), v);
-    }
 
     shown.unwrap();
     applied.unwrap();

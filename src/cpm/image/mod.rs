@@ -1466,7 +1466,6 @@ mod tests {
         std::fs::write(&path, vec![0xE5u8; fmt.min_bytes() as usize]).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o464)).unwrap();
         assert!(!std::fs::metadata(&path).unwrap().permissions().readonly(), "a write bit is set");
-        // Root writes through any mode, and then there is nothing to test.
         // Root writes through any mode, so there the real file cannot refuse;
         // `test_a_refused_write_reopens_read_only` carries the claim there.
         let writable = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
