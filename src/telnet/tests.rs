@@ -17853,3 +17853,23 @@ fn test_the_hand_off_and_form_timeout_are_wired() {
     let f = body(&gopher, "pub(crate) fn submit_ask(");
     assert!(f.contains("ask_secs(file)"), "{f}");
 }
+
+/// **A print job is written off the async worker.**  Closing one renders it
+/// (an ODT is a zip built in memory), writes and syncs the file, and sweeps the
+/// spool folder -- blocking file I/O that held a tokio worker, and every
+/// session sharing it, for as long as an SD card took.  Both CP/M machines
+/// close their spool through this one function.  Bounded to it; the write
+/// must be the closure handed to `spawn_blocking`, not a call beside it.
+#[test]
+fn test_a_print_job_is_written_off_the_async_worker() {
+    let src = include_str!("cpm_emu.rs").replace("\r\n", "\n");
+    let start = src.find("async fn cpmemu_spool_close(").expect("cpmemu_spool_close");
+    let body = &src[start..start + src[start..].find("\n    }\n").expect("its end")];
+    assert!(
+        body.contains("tokio::task::spawn_blocking(move || job.write(&dir, format))"),
+        "the print job is not written inside spawn_blocking"
+    );
+    assert_eq!(body.matches(".write(").count(), 1, "a second write path runs on the worker");
+    let boot = include_str!("cpm_boot_ui.rs").replace("\r\n", "\n");
+    assert!(!boot.contains("job.write("), "the boot path writes a job itself");
+}

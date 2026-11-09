@@ -1781,6 +1781,7 @@ impl russh::server::Handler for SshHandler {
             if !self.counted {
                 glog!("SSH: enroll-key from {:?} refused (not authenticated)", self.peer_addr);
                 session.channel_failure(channel)?;
+                session.close(channel)?;
                 return Ok(());
             }
             // **Only a master that accepts relays enrols anybody** -- the same
@@ -1800,6 +1801,7 @@ impl russh::server::Handler for SshHandler {
                     );
                     drop(cfg);
                     session.channel_failure(channel)?;
+                    session.close(channel)?;
                     return Ok(());
                 }
             }
@@ -1825,6 +1827,11 @@ impl russh::server::Handler for SshHandler {
                     session.channel_failure(channel)?;
                 }
             }
+            // **Closed once answered.**  An `enroll-key` is one request and one
+            // reply, and the channel was left open until the connection ended
+            // -- for a slave, the life of its relay link.  The reply goes first,
+            // so the slave reads Success or Failure before the close.
+            session.close(channel)?;
             return Ok(());
         }
 
@@ -2811,6 +2818,79 @@ mod tests {
 
         drop(session);
         server.abort();
+    }
+
+    /// **An `enroll-key` channel is closed once it is answered.**  It is one
+    /// request and one reply, and the master left the channel open until the
+    /// connection ended -- for a slave, the life of its relay link.  Driven
+    /// over a real connection through the refusal a non-master gives, which
+    /// writes no key file: the reply comes first, then the close.
+    #[tokio::test]
+    async fn test_an_enroll_key_channel_is_closed_once_answered() {
+        struct Client;
+        impl russh::client::Handler for Client {
+            type Error = russh::Error;
+            async fn check_server_key(
+                &mut self,
+                _key: &russh::keys::PublicKeyOrCertificate,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+        let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+        let role = crate::config::get_config().gateway_role.clone();
+        crate::config::update_config_value("gateway_role", "standalone");
+        let key = russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let keys = vec![key.public_key().clone()];
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut handler = loopback_handler(addr, None);
+            handler.authorized_keys = keys;
+            if let Ok(s) = russh::server::run_stream(loopback_config(), tcp, handler).await {
+                let _ = s.await;
+            }
+        });
+        let mut session =
+            russh::client::connect(Arc::new(russh::client::Config::default()), addr, Client)
+                .await
+                .unwrap();
+        let ok = session
+            .authenticate_publickey(
+                "admin",
+                russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key.clone()), None),
+            )
+            .await
+            .unwrap()
+            .success();
+        assert!(ok, "the key did not log in");
+        let mut channel = session.channel_open_session().await.unwrap();
+        channel.exec(true, &b"enroll-key ssh-ed25519 AAAA test"[..]).await.unwrap();
+        let mut seen = Vec::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(msg) = channel.wait().await {
+                let done = matches!(msg, russh::ChannelMsg::Close);
+                seen.push(format!("{msg:?}").split(['(', ' ', '{']).next().unwrap_or("").to_string());
+                if done {
+                    break;
+                }
+            }
+        })
+        .await;
+        crate::config::update_config_value("gateway_role", &role);
+        drop(session);
+        server.abort();
+        let failure = seen.iter().position(|m| m == "Failure").unwrap_or_else(|| panic!("no answer: {seen:?}"));
+        let close = seen.iter().position(|m| m == "Close").unwrap_or_else(|| panic!("never closed: {seen:?}"));
+        assert!(failure < close, "closed before it answered: {seen:?}");
+        // The other two answers -- not authenticated, and enrolled -- close it
+        // too.  Neither is reachable here without writing a real key file, so
+        // the three are counted in the `enroll-key` arm itself.
+        let src = include_str!("ssh.rs").replace("\r\n", "\n");
+        let from = src.find("if let Some(rest) = command.strip_prefix(\"enroll-key \") {").expect("the arm");
+        let arm = &src[from..from + src[from..].find("let parsed = match crate::relay::parse_relay_command(command)").expect("its end")];
+        assert_eq!(arm.matches("session.close(channel)?;").count(), 3, "an enroll-key answer leaves its channel open");
     }
 
     /// A session slot is claimed only on a successful login, released only

@@ -942,10 +942,11 @@ const ENROL_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Hand the master this slave's public key, so the next connection can use it.
 ///
-/// Deliberately fire-and-forget.  Whether it worked is answered by the *next*
-/// connection authenticating with the key -- which is also the only evidence
-/// good enough to act on (see `forget_master_password`) -- so nothing here
-/// waits on, or trusts, a reply.  A master too old to know the command answers
+/// The master's Success or Failure is waited for, briefly, and decides only
+/// whether to ask again and what to log.  Whether the key *works* is answered
+/// by the next connection authenticating with it -- the only evidence good
+/// enough to act on (see `forget_master_password`), so nothing is erased on
+/// this reply.  A master too old to know the command answers
 /// `channel_failure`, which is exactly the "not supported" signal we want and
 /// needs no protocol version bump.
 async fn offer_key_for_enrolment_once(session: &russh::client::Handle<SlaveRelayHandler>) {
@@ -999,6 +1000,10 @@ async fn offer_key_for_enrolment_once(session: &russh::client::Handle<SlaveRelay
         None
     })
     .await;
+    // One request, one reply: the channel is done either way.  A master since
+    // this change closes it too; an older one left it open for the life of the
+    // relay link.
+    let _ = channel.close().await;
     match answer {
         Ok(Some(true)) => {
             enrol_latch().accepted();
