@@ -566,13 +566,20 @@ fn main() {
         let gui_cfg = cfg.clone();
         let server_died = Arc::new(AtomicBool::new(false));
         let died_rt = server_died.clone();
+        let died_late = server_died.clone();
         let server_handle = std::thread::spawn(move || {
-            // First, so a panic anywhere below closes the window too.
+            // First, so a panic building the runtime closes the window too.
             let _death = ServerDeathGuard { died: died_rt, shutdown: shutdown_rt.clone() };
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("Failed to create tokio runtime");
+            // **And again here, which is the one that counts.**  Locals drop
+            // in reverse, so on a panic the runtime is dropped before the guard
+            // above -- and a runtime's Drop waits, with no limit, for every
+            // blocking task, some of which wait on `shutdown`.  Declared after
+            // the runtime, this one sets `shutdown` before that wait starts.
+            let _death_before_runtime_drop = ServerDeathGuard { died: died_late, shutdown: shutdown_rt.clone() };
 
             let serial_handles = runtime.block_on(async move {
                 let session_writers: telnet::SessionWriters =
@@ -1239,9 +1246,16 @@ mod tests {
         let body = &main_fn[spawn..];
         let body = &body[body.find("{\n").expect("closure body") + 2..];
         assert!(
-            body.trim_start().starts_with("// First, so a panic anywhere below closes the window too.\n            let _death = ServerDeathGuard {"),
+            body.trim_start().starts_with("// First, so a panic building the runtime closes the window too.\n            let _death = ServerDeathGuard {"),
             "the death guard is not the server thread's first statement"
         );
+        // The bound that matters: a guard declared AFTER the runtime, so it
+        // drops (and sets `shutdown`) before the runtime's unbounded Drop, and
+        // before the first thing that can panic inside it.
+        let rt = body.find("let runtime = tokio::runtime::Builder::new_multi_thread()").expect("the runtime");
+        let late = body.find("let _death_before_runtime_drop = ServerDeathGuard {").expect("no guard after the runtime");
+        let run = body.find("let serial_handles = runtime.block_on(").expect("block_on");
+        assert!(rt < late && late < run, "the late guard must sit between the runtime and block_on");
     }
 
     /// **A panicking server closes the window**: the guard sets `shutdown`,
