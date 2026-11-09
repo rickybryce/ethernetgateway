@@ -854,11 +854,20 @@ impl CpmModem {
             self.result(out, "NO CARRIER");
             return;
         };
-        let _ = call.progress.send(1).await;
-        self.conn = Some(Box::new(call.bridge));
-        self.mode = Mode::Online;
         self.ring_at = None;
         self.rings = 0;
+        // **A caller who has gone gets no CONNECT.**  Its wait (the relay's, or
+        // its S7) can run out between two RINGs, and the guest's ATA lands in
+        // that gap.  The send failing is how that shows; ignoring it gave the
+        // guest CONNECT and then, on the next poll, NO CARRIER -- the shape the
+        // physical modem refuses at the same point (`serial.rs`, "abort before
+        // emitting a spurious CONNECT toward a dead bridge").
+        if call.progress.send(1).await.is_err() {
+            self.result(out, "NO CARRIER");
+            return;
+        }
+        self.conn = Some(Box::new(call.bridge));
+        self.mode = Mode::Online;
         self.result(out, "CONNECT");
     }
 
@@ -1327,6 +1336,29 @@ mod tests {
         near.write_all(b"yo").await.unwrap();
         let out = m.service(vec![], 65536, false).await;
         assert!(out.windows(2).any(|w| w == b"yo"));
+    }
+
+    /// **A caller that gave up is not answered.**  Its wait can end between
+    /// two RINGs; an ATA in that gap gave the guest CONNECT and then NO
+    /// CARRIER on the next poll.  It is answered NO CARRIER, and the modem is
+    /// free for the next call.
+    #[tokio::test]
+    async fn test_answering_a_caller_who_gave_up_is_no_carrier() {
+        let (_near, far) = tokio::io::duplex(1024);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
+        let mut m = CpmModem::new(true);
+        m.accept_incoming(CpmIncomingCall { bridge: far, progress: tx });
+        let out = m.service(vec![], 65536, false).await;
+        assert!(String::from_utf8_lossy(&out).contains("RING"));
+        assert_eq!(rx.recv().await, Some(0));
+        drop(rx); // the caller's wait ran out
+
+        let out = m.service(b"ATA\r".to_vec(), 65536, false).await;
+        let text = String::from_utf8_lossy(&out);
+        assert!(!text.contains("CONNECT"), "answered a caller who had gone: {text:?}");
+        assert!(text.contains("NO CARRIER"), "{text:?}");
+        assert!(m.conn.is_none() && m.mode != Mode::Online);
+        assert!(m.can_answer(), "the modem is free for the next call");
     }
 
     /// A far end that stops reading drops the call instead of freezing the
