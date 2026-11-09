@@ -1138,9 +1138,22 @@ pub fn restart_serial(id: SerialPortId) {
 }
 
 /// Test hook: whether a restart was requested for `id`, clearing the request.
+/// Hold [`lock_global_state`] around it: other tests set and clear the flag.
 #[cfg(test)]
 pub(crate) fn take_restart_request(id: SerialPortId) -> bool {
     SERIAL_RESTART[id.index()].swap(false, Ordering::SeqCst)
+}
+
+/// Serialize tests that touch the global `CONSOLE_REQUEST`, `BRIDGE_ACTIVE`,
+/// or `SERIAL_RESTART` state.  cargo test runs tests in parallel by default;
+/// without this mutex two tests could interleave their reads/writes of the
+/// shared statics and observe each other's setup/teardown.  Acquire it at the
+/// top of every such test, in this module or outside it, as a `let _g = ...;`
+/// binding.
+#[cfg(test)]
+pub(crate) fn lock_global_state() -> std::sync::MutexGuard<'static, ()> {
+    static GLOBAL_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GLOBAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// One detected serial port: the device path plus whatever the OS could tell
@@ -7639,18 +7652,6 @@ mod tests {
         assert!(wire_trace_worth_logging(16), "the boundary itself");
         assert!(!wire_trace_worth_logging(17), "past the boundary");
         assert!(!wire_trace_worth_logging(256), "a full XMODEM-ish read");
-    }
-
-    /// Serialize tests that touch the global `CONSOLE_REQUEST`,
-    /// `BRIDGE_ACTIVE`, or `SERIAL_RESTART` state.  cargo test runs
-    /// tests in parallel by default; without this mutex two tests
-    /// could interleave their reads/writes of the shared statics
-    /// and observe each other's setup/teardown.  Acquire the lock
-    /// at the top of every such test as a `let _g = ...;` binding.
-    static GLOBAL_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn lock_global_state() -> std::sync::MutexGuard<'static, ()> {
-        GLOBAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     // ─── AT command parsing ──────────────────────────────

@@ -15612,6 +15612,66 @@ fn test_the_port_screen_applies_on_every_exit_and_k_asks_before_dropping_a_sessi
     assert_eq!(k.matches("restart_serial").count(), 1, "K restarts by another route too");
 }
 
+/// **K's restart applies what was pending, once.**  The erase key restarts the
+/// port, which applies everything saved -- a baud changed earlier on the same
+/// screen included -- but left the screen's baseline where it was, so Q then
+/// saw that baud as still pending and restarted the port a second time (the
+/// same fault T had).  Driven through the screen itself: K, then Q.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test serializer, held for the whole test
+async fn test_the_erase_key_restart_is_applied_once() {
+    use crate::config::{serial_key, SerialPortId};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let _g = crate::serial::lock_global_state();
+    let id = SerialPortId::B;
+    let keys = ["enabled", "mode", "port", "baud", "backspace"];
+    let before: Vec<String> = {
+        let c = crate::config::get_config();
+        let p = c.port(id);
+        vec![p.enabled.to_string(), p.mode.clone(), p.port.clone(), p.baud.to_string(), p.backspace.clone()]
+    };
+    crate::config::update_config_value(&serial_key(id, "enabled"), "true");
+    crate::config::update_config_value(&serial_key(id, "mode"), "console");
+    crate::config::update_config_value(&serial_key(id, "port"), "/dev/egw-test-no-such-port");
+    crate::config::update_config_value(&serial_key(id, "baud"), "9600");
+    // The screen opened at 9600; the baud is then changed to 19200 on it.
+    let mut baseline = crate::config::get_config();
+    crate::config::update_config_value(&serial_key(id, "baud"), "19200");
+    crate::serial::take_restart_request(id);
+
+    let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let (mut rd, mut wr) = tokio::io::split(peer);
+    let drain = tokio::spawn(async move {
+        let mut sink = Vec::new();
+        let _ = rd.read_to_end(&mut sink).await;
+    });
+    wr.write_all(b"k").await.unwrap();
+    wr.write_all(b"q").await.unwrap();
+    let shown = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sess.modem_settings_screen(id, &mut baseline),
+    )
+    .await
+    .expect("the screen never left on Q");
+    let restarted = crate::serial::take_restart_request(id);
+    // What the screen's caller does next.
+    let applied = sess.modem_apply_settings(id, &baseline).await;
+    let again = crate::serial::take_restart_request(id);
+    drop(sess);
+    drop(wr);
+    let _ = drain.await;
+    for (k, v) in keys.iter().zip(&before) {
+        crate::config::update_config_value(&serial_key(id, k), v);
+    }
+
+    shown.unwrap();
+    applied.unwrap();
+    assert!(restarted, "K restarts a running port");
+    assert!(!again, "leaving the screen applied the baud a second time");
+    assert_eq!(baseline.port(id).baud, 19200, "the baseline moved forward");
+}
+
 /// **T applies the mode once.**  The toggle applies on the spot and moves the
 /// screen's baseline forward, so the apply on the way out finds nothing left to
 /// do.  It used to apply against its own snapshot and leave the screen's alone,
@@ -15619,9 +15679,13 @@ fn test_the_port_screen_applies_on_every_exit_and_k_asks_before_dropping_a_sessi
 /// asked about a change already made and reverted the file on a "no" while the
 /// port kept running the new mode.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test serializer, held for the whole test
 async fn test_the_mode_toggle_is_applied_once() {
     use crate::config::SerialPortId;
     let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    // The restart flag is shared with the serial module's tests, which set and
+    // clear it; without their lock a clear lands between T and the read.
+    let _g = crate::serial::lock_global_state();
     let id = SerialPortId::B;
     let key = crate::config::serial_key(id, "mode");
     let before = crate::config::get_config().port(id).mode.clone();

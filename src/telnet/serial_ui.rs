@@ -532,7 +532,7 @@ impl TelnetSession {
     /// applies the result when it returns, by whatever route.
     ///
     /// [`modem_settings`]: Self::modem_settings
-    async fn modem_settings_screen(
+    pub(in crate::telnet) async fn modem_settings_screen(
         &mut self,
         id: crate::config::SerialPortId,
         baseline: &mut config::Config,
@@ -817,6 +817,11 @@ impl TelnetSession {
                     .ok();
                     if running {
                         crate::serial::restart_serial(id);
+                        // The restart applies everything saved, so the screen's
+                        // baseline moves forward with it, as after T -- or Q
+                        // applies a change made earlier on this screen a
+                        // second time.
+                        *baseline = config::get_config();
                     }
                 }
                 "g" => {
