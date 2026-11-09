@@ -823,7 +823,9 @@ fn main() {
         break;
     }
 
-    glog!("Server stopped.");
+    // No second "Server stopped." here: the server thread has just said it,
+    // and every quit printed the line twice.
+    //
     // Releases a console-close handler that is holding the process open for
     // this shutdown to finish (Windows only; nothing waits on it elsewhere).
     console_close::PROCESS_DONE.store(true, Ordering::SeqCst);
@@ -1280,6 +1282,18 @@ mod tests {
         let late = body.find("let _death_before_runtime_drop = ServerDeathGuard {").expect("no guard after the runtime");
         let run = body.find("let serial_handles = runtime.block_on(").expect("block_on");
         assert!(rt < late && late < run, "the late guard must sit between the runtime and block_on");
+    }
+
+    /// **"Server stopped." is said once.**  The server thread says it as each
+    /// cycle ends, and `main` used to say it again on the way out, so every
+    /// quit printed it twice.
+    #[test]
+    fn test_server_stopped_is_logged_once() {
+        let src = main_source();
+        let code: String = src.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        let main_fn = &code[code.find("fn main() {").expect("main")..];
+        let main_fn = &main_fn[..main_fn.find("\n}\n").expect("main's end")];
+        assert_eq!(main_fn.matches("glog!(\"Server stopped.\");").count(), 1, "said more than once");
     }
 
     /// **A panicking server closes the window**: the guard sets `shutdown`,
