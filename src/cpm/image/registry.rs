@@ -683,8 +683,9 @@ mod tests {
     /// Hammer every entry point that touches the mount table and the loan
     /// table from several threads at once, and require the lot to finish.
     ///
-    /// `lend_for_boot` is the only place that holds one of those locks while
-    /// taking the other, so a lock-order inversion added later is the defect
+    /// `lend_for_boot` holds one of those locks while taking the other, and
+    /// `mount_exclusive` takes all four in the same order, so a lock-order
+    /// inversion added later is the defect
     /// this shape of code invites — and a deadlock is not something reading the
     /// diff reliably catches.  The deadline is the assertion: if the ordering
     /// is ever inverted this stops finishing rather than failing an assert, so

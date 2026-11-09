@@ -650,10 +650,11 @@ pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'stat
 /// Identify the format of an image.
 ///
 /// `filename` is the bare name in the images folder and `size` its length in
-/// bytes.  `first_record` reads logical record 0 of the data area — the first
-/// directory record — for a candidate format; the caller supplies it because
-/// only the caller has the file open, and because where that record *is*
-/// depends on which format is being considered.
+/// bytes.  `directory` reads the whole directory -- every directory record of
+/// the data area, as a candidate format addresses them -- for that format, or
+/// `None` where it cannot; the caller supplies it because only the caller has
+/// the file open, and because where those records *are* depends on which
+/// format is being considered.
 pub fn identify<F>(
     filename: &str,
     size: u64,

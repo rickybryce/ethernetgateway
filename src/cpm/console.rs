@@ -244,13 +244,14 @@ pub const MACHINE_CHOICES: &[MachineChoice] = &[
         key: "cromemco",
         description: "Cromemco TU-ART console - 0x00 / 0x01",
         console: board(0x00, 0x01, UartFamily::Tuart),
-        // Its own board only. Not because of a port collision — the 16FDC's
-        // `30h`–`34h` and `04h` clash with nothing the Altair machines carry —
-        // but because 256,256 bytes is a Cromemco single-density floppy *and* a
-        // Tarbell disk *and* a z80pack disk, and `Controller::accepts` hands an
-        // image to the first board that recognises the length. A machine that
-        // carried both would give every Cromemco disk of that size to the
-        // Tarbell, which is exactly the failure the z80pack device had.
+        // Its own board only, for two reasons.  A port collision: the 16FDC's
+        // auxiliary latch is `04h`, which is `console_04`'s data port.  And
+        // the one that holds whatever the console: 256,256 bytes is a Cromemco
+        // single-density floppy *and* a Tarbell disk *and* a z80pack disk, and
+        // `Controller::accepts` hands an image to the first board that
+        // recognises the length. A machine that carried both would give every
+        // Cromemco disk of that size to the Tarbell, which is exactly the
+        // failure the z80pack device had.
         boards: &[Board::Cromemco],
     },
 ];

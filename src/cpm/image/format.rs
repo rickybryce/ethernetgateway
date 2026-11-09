@@ -189,10 +189,8 @@ impl Framing {
 pub enum Skew {
     /// No translation — logical sector *n* is physical sector *n*.
     ///
-    /// Unused so far: every format measured to date interleaves.  Kept because
-    /// "this disk has no skew" is a real answer that a hard-disk image is
-    /// likely to give, not a placeholder.
-    #[allow(dead_code)]
+    /// The z80pack hard disk's answer (`z80packhd`): a hard-disk image has no
+    /// reason to interleave, and that one measurably does not.
     None,
     /// An explicit permutation, one entry per sector in a track.  Recovered
     /// from the BIOS on the disk itself; see the module comment.
@@ -339,8 +337,9 @@ pub const IBM3740_SKEW: &[u16] = &[
 /// length was found by requiring the entries to be a permutation, which adjacent
 /// bytes do not form by accident.
 ///
-/// Identical on both MICAH disks measured. The double-sided Cromemco format does
-/// **not** translate at all — see [`Skew::None`] and the format below it.
+/// Identical on both MICAH disks measured. The double-sided Cromemco format
+/// translates too, by a different table its BIOS applies in `SETSEC` -- see
+/// [`CROMEMCO_DSDD_SKEW`].
 pub const CROMEMCO_DD_SKEW: &[u16] =
     &[0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4, 15, 10, 5];
 

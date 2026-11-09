@@ -1,7 +1,7 @@
 //! Shared raw-I/O layer for the file-transfer protocol modules.
 //!
 //! Centralizes the byte-stream details that are identical across
-//! XMODEM/YMODEM, ZMODEM, and Kermit:
+//! XMODEM/YMODEM, ZMODEM, Kermit and Punter:
 //!
 //! - **Telnet IAC unescaping.**  On TCP connections the peer doubles
 //!   any 0xFF data byte as `IAC IAC`; we collapse it back.  Telnet
@@ -50,7 +50,7 @@ pub(crate) const DONT: u8 = 254;
 pub(crate) const CAN: u8 = 0x18;
 
 /// Hard cap on any single file we'll send or receive across XMODEM /
-/// YMODEM / ZMODEM / Kermit.  8 MiB matches the historical cap from
+/// YMODEM / ZMODEM / Kermit / Punter.  8 MiB matches the historical cap from
 /// when each protocol module owned its own copy of the constant; lifted
 /// here so the protocols agree on a single value rather than each
 /// importing their own slightly-typed copy.  Protocol modules can cast

@@ -616,13 +616,14 @@ pub(crate) async fn punter_receive(
 /// Receive one phase (a sequence of blocks ending at the 0xFF-flagged block),
 /// returning the concatenated payloads.  `initial_size` is the fixed length of
 /// the first block (8 for the type phase, 7 for the data phase).
-#[allow(clippy::too_many_arguments)]
+///
 /// `last_phase` marks the DATA phase, the one after which the transfer is
 /// over.  It exists for a single reason: the extra end-off drains must not run
 /// at the phase-A boundary, where the bytes that follow are the sender opening
 /// phase B.  Draining them there swallowed the next phase's start and the
 /// captured-CCGMS replay failed with "early eof" -- the mirror image of the
 /// hazard `end_off_sender` documents on its own side.
+#[allow(clippy::too_many_arguments)]
 async fn receive_phase(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),

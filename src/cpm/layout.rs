@@ -315,7 +315,7 @@ READ-WRITE just the same.  No two formats here are the same size, so the
 size names the format outright; what inspection actually decides is whether
 the file really holds that filesystem.  The whole directory is read and
 checked -- every allocation block inside the disk, no block claimed by two
-files, every record count matching the blocks it claims.  Random bytes under
+files, every record count backed by the blocks it needs.  Random bytes under
 the wrong geometry fail that immediately.
 
 An image that does NOT check out still mounts, but READ-ONLY, and says what
@@ -395,8 +395,11 @@ is optional, as above: a sound filesystem is writable either way.
 
 ",
     );
+    // As wide as the longest token, so every label lines up -- a fixed 10 put
+    // `cromemcodsdd` (12) out of the column.
+    let token_w = FORMATS.iter().map(|f| f.token.len()).max().unwrap_or(0);
     for f in FORMATS {
-        s.push_str(&format!("    {:<10} {}\n", f.token, f.label));
+        s.push_str(&format!("    {:<token_w$} {}\n", f.token, f.label));
         if let Some(size) = f.exact_size {
             // "or a little more", not "exactly": several images in circulation
             // carry a few bytes past their last record, and refusing those was
@@ -1889,6 +1892,24 @@ mod tests {
 
     /// Every format in the table must appear in the readme, because that file
     /// is the only place an operator learns what to call their image.
+    /// **The format list's labels share one column.**  The token column was a
+    /// fixed 10 wide, and `cromemcodsdd` is 12, so its label sat out of line.
+    #[test]
+    fn test_the_readme_format_labels_line_up() {
+        let readme = images_readme();
+        let cols: Vec<usize> = FORMATS
+            .iter()
+            .map(|f| {
+                let row = readme
+                    .lines()
+                    .find(|l| l.starts_with(&format!("    {} ", f.token)) && l.contains(f.label))
+                    .unwrap_or_else(|| panic!("no row for {}", f.token));
+                row.find(f.label).unwrap()
+            })
+            .collect();
+        assert!(cols.windows(2).all(|w| w[0] == w[1]), "labels at columns {cols:?}");
+    }
+
     #[test]
     fn test_readme_documents_every_format() {
         let text = images_readme();
