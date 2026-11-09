@@ -637,7 +637,22 @@ async fn save_image_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io:
                 "the image file is read-only on the host",
             ));
         }
-        Ok(m) => Some(m.permissions()),
+        Ok(m) => {
+            // **Nor one this account may not write.**  `readonly()` is "no write
+            // bit for anybody" on Unix, so root's 0644 image under a service
+            // account passed the check above, and the rename replaced it with a
+            // file the service account owns.  Asking for write access is the
+            // real answer; nothing is truncated or written by asking.
+            if let Err(e) = tokio::fs::OpenOptions::new().write(true).open(path).await
+                && crate::cpm::image::host_refuses_writes(&e)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the image file is read-only on the host",
+                ));
+            }
+            Some(m.permissions())
+        }
         Err(_) => None,
     };
     let tmp = saving_path(path);
@@ -2518,6 +2533,37 @@ mod tests {
         assert_eq!(std::fs::read(&ok).unwrap(), b"new");
         // No temporary left behind for the mount pickers to find.
         assert!(!dir.join("altair8_scratch.dsk.saving").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Nor one this account may not write, whatever its write bits say.**
+    /// `readonly()` is "no write bit for anybody" on Unix, so root's 0644 image
+    /// under a service account (here our own 0464) passed, and the rename --
+    /// which needs only the folder -- replaced it with a file we own.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_an_image_we_may_not_write_is_never_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("egw_save_noperm_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("altair8_theirs.dsk");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o464)).unwrap();
+        assert!(!std::fs::metadata(&path).unwrap().permissions().readonly(), "a write bit is set");
+        // Root writes through any mode, so there the file cannot refuse.
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            eprintln!("running as root: this test is skipped");
+        } else {
+            let err = save_image_atomically(&path, b"replacement").await.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"original", "the disk was replaced");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o464,
+                "the file was swapped for another",
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

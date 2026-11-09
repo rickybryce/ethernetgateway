@@ -71,6 +71,27 @@ pub fn images_dir(cpm_base: &Path) -> PathBuf {
     cpm_base.join(IMAGES_DIR)
 }
 
+/// Whether an open failed because the host will not let this account write
+/// the file: no permission (`EACCES`, `EPERM`), or a read-only filesystem
+/// (`EROFS` -- an SD card mounted `ro`, a CD).  Either way the file can still
+/// be read.
+pub(crate) fn host_refuses_writes(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem)
+}
+
+/// Open read-write, or read-only if the host refuses writing; the flag says
+/// the host refused.  `open(read_only)` is the real open, passed in so the
+/// decision can be tested where no file can be made to refuse (as root).
+fn open_with_host_fallback<M>(
+    want_ro: bool,
+    open: impl Fn(bool) -> std::io::Result<M>,
+) -> std::io::Result<(M, bool)> {
+    match open(want_ro) {
+        Err(e) if !want_ro && host_refuses_writes(&e) => open(true).map(|m| (m, true)),
+        r => r.map(|m| (m, false)),
+    }
+}
+
 /// Make a rename into `path`'s directory durable: sync the directory itself.
 ///
 /// The second half of a staged write. Syncing the staged file before the
@@ -377,15 +398,12 @@ fn mount_image_unchecked(
     // 0644 read as writable, the read-write open failed with EACCES, and the
     // operator was refused a disk they could have read.  The open is the real
     // answer: denied for writing means read-only on the host.
-    let medium = match media::FileMedia::open(&path, want_ro) {
-        Err(e) if !want_ro && e.kind() == std::io::ErrorKind::PermissionDenied => {
-            host_ro = true;
-            want_ro = true;
-            media::FileMedia::open(&path, true)
-        }
-        r => r,
+    let (medium, refused) = open_with_host_fallback(want_ro, |ro| media::FileMedia::open(&path, ro))
+        .map_err(|e| format!("{filename}: {e}"))?;
+    if refused {
+        host_ro = true;
+        want_ro = true;
     }
-    .map_err(|e| format!("{filename}: {e}"))?;
     let image = fs::ImageFs::mount(Box::new(medium), ident.format, want_ro)
         .map_err(|e| format!("{filename}: {e}"))?;
     let read_only = image.is_read_only();
@@ -1396,6 +1414,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// **The fallback decision, on every kind of refusal.**  A denied write
+    /// (`EACCES`) and a read-only filesystem (`EROFS`) both reopen read-only and
+    /// say the host refused; anything else -- a missing file -- is still an
+    /// error, and a read-only open is never retried.  Driven by a fake open so
+    /// it runs as root too, where no real file can be made to refuse.
+    #[test]
+    fn test_a_refused_write_reopens_read_only() {
+        use std::cell::RefCell;
+        use std::io::{Error, ErrorKind};
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::ReadOnlyFilesystem] {
+            let calls = RefCell::new(Vec::new());
+            let r = open_with_host_fallback(false, |ro| {
+                calls.borrow_mut().push(ro);
+                if ro { Ok("medium") } else { Err(Error::from(kind)) }
+            });
+            assert_eq!(r.unwrap(), ("medium", true), "{kind:?}");
+            assert_eq!(*calls.borrow(), [false, true], "{kind:?}");
+        }
+        let r = open_with_host_fallback(false, |_| Err::<(), _>(Error::from(ErrorKind::NotFound)));
+        assert_eq!(r.unwrap_err().kind(), ErrorKind::NotFound, "a missing file is not read-only");
+        let calls = RefCell::new(0);
+        let r = open_with_host_fallback(true, |_| {
+            *calls.borrow_mut() += 1;
+            Err::<(), _>(Error::from(ErrorKind::PermissionDenied))
+        });
+        assert!(r.is_err() && *calls.borrow() == 1, "a read-only open was retried");
+        assert_eq!(open_with_host_fallback(false, Ok::<_, Error>).unwrap(), (false, false));
+    }
+
     /// **An image this account cannot write mounts read-only, not refused.**
     ///
     /// `Permissions::readonly()` is true on Unix only with no write bit for
@@ -1420,8 +1467,12 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o464)).unwrap();
         assert!(!std::fs::metadata(&path).unwrap().permissions().readonly(), "a write bit is set");
         // Root writes through any mode, and then there is nothing to test.
+        // Root writes through any mode, so there the real file cannot refuse;
+        // `test_a_refused_write_reopens_read_only` carries the claim there.
         let writable = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
-        if !writable {
+        if writable {
+            eprintln!("running as root: the real-file half of this test is skipped");
+        } else {
             let msg = mount_image(&base, 1, name).expect("mounted, not refused");
             assert!(msg.contains("read-only on the host"), "{msg}");
             let m = registry::get(1).expect("published");
@@ -1431,7 +1482,6 @@ mod tests {
         registry::tests_reset();
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
         let _ = std::fs::remove_dir_all(&base);
-        assert!(!writable, "running as root: this test proves nothing");
     }
 
     /// The publish re-decides what `mount_image`'s early checks decided.
