@@ -7619,14 +7619,7 @@ pub(crate) mod tests {
         let size = std::fs::metadata(p).expect("the measured image").len();
         let filename = p.file_name().unwrap().to_string_lossy().to_string();
         let ident = crate::cpm::image::identify::identify(&filename, size, |fmt| {
-            let mut dir = Vec::with_capacity(fmt.maxdir as usize * 32);
-            for rec in 0..fmt.dir_records() {
-                let off = fmt.data_record_offset(rec)?;
-                let mut buf = [0u8; 128];
-                crate::cpm::image::media::Media::read_at(&mut probe, off, &mut buf).ok()?;
-                dir.extend_from_slice(&buf);
-            }
-            (!dir.is_empty()).then_some(dir)
+            crate::cpm::image::read_directory(&mut probe, fmt)
         })
         .expect("the image identifies");
         drop(probe);

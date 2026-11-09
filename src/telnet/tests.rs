@@ -1598,73 +1598,30 @@ fn test_filter_petscii_translates_backspace_to_cursor_left() {
 /// No PETSCII output translator may map a host's backspace to the destructive
 /// PETSCII DEL again.
 ///
-/// There are three of them — `filter_gateway_output` here,
-/// `translate_ascii_to_petscii_byte` in `serial.rs` (the modem emulator's
-/// `AT+PETSCII=1` path) and `ascii_to_petscii_byte` in `colors.rs` (a booted
-/// disk image's console stream) — and the first two carried the identical
-/// defect, so fixing one would have left a C64 dialling out through the modem
-/// still corrupted; the third was written later and started out with the byte
+/// There were three -- `filter_gateway_output` here, the modem's
+/// `AT+PETSCII=1` path, and a booted disk's console stream -- and the first two
+/// carried the identical defect, so fixing one would have left a C64 dialling
+/// out through the modem still corrupted; the third started out with the byte
 /// simply falling through, which on a booted disk is the same corruption again.
-/// They live in different modules with different signatures, so they cannot
-/// share a unit test; this scans all three sources instead, the same technique
-/// `config::test_every_written_key_can_be_applied` uses on its `match`.
-///
-/// Scoped to each translator's own body so an unrelated, legitimate `0x14`
-/// elsewhere in either file — notably serial.rs's AT-echo, which *originates* a
-/// destructive erase on purpose and is correct — cannot trip it.
+/// The gateways and the modem now share `petscii::translate_ascii_to_petscii_byte`,
+/// and the console stream's `colors::ascii_to_petscii_byte` calls it, so this
+/// is one test of behaviour over every byte rather than a scan of sources: both
+/// names give the same answer for all 256, and a backspace is CRSR LEFT.
 #[test]
 fn test_no_petscii_translator_maps_backspace_to_destructive_del() {
-    // (file label, source, marker that opens the translator, bytes to scan)
-    // The gateways and the modem now share one text translator (`petscii.rs`),
-    // so there are two byte translators to scan, not three.
-    let sites: [(&str, &str, &str, usize); 2] = [
-        (
-            "petscii.rs translate_ascii_to_petscii_byte",
-            include_str!("../petscii.rs"),
-            "fn translate_ascii_to_petscii_byte",
-            300,
-        ),
-        (
-            "telnet/colors.rs ascii_to_petscii_byte",
-            include_str!("colors.rs"),
-            "fn ascii_to_petscii_byte",
-            200,
-        ),
-    ];
-    for (label, src, marker, span) in sites {
-        // Strip `//` comments from the WHOLE source before locating anything.
-        // Both translators now carry a comment explaining why 0x14 is wrong, so
-        // a scan that reads comments fires on the explanation instead of the
-        // code — and stripping only inside the window doesn't help either,
-        // because a byte span measured against commented source barely reaches
-        // the code. Both mistakes were made here before this worked.
-        // Comment-only lines are dropped entirely rather than blanked: leaving
-        // their indentation behind spends the byte window on whitespace, which
-        // is how an earlier version of this scan failed to reach the code.
-        let stripped: String = src
-            .lines()
-            .map(|l| match l.find("//") {
-                Some(i) => l[..i].trim_end(),
-                None => l.trim_end(),
-            })
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<&str>>()
-            .join("\n");
-        let at = stripped
-            .find(marker)
-            .unwrap_or_else(|| panic!("{label}: marker {marker:?} not found — renamed?"));
-        let body = &stripped[at..(at + span).min(stripped.len())];
-        // The mapping must be present and must be the cursor-left one.
-        assert!(
-            body.contains("0x9D"),
-            "{label}: no 0x9D (PETSCII CRSR LEFT) in the translator — a host's \
-             backspace has to map to the non-destructive move"
+    for b in 0..=255u8 {
+        assert_eq!(
+            crate::telnet::colors::ascii_to_petscii_byte(b),
+            crate::petscii::translate_ascii_to_petscii_byte(b),
+            "the two PETSCII byte maps disagree at {b:#04x}"
         );
-        assert!(
-            !body.contains("0x14"),
-            "{label}: maps a byte to PETSCII DEL 0x14, which DELETES a character \
-             the host only meant to move over. This corrupted every long line on \
-             a C64 gateway session; use 0x9D (CRSR LEFT). Body scanned:\n{body}"
+    }
+    for bs in [0x08u8, 0x7F] {
+        assert_eq!(
+            crate::petscii::translate_ascii_to_petscii_byte(bs),
+            0x9D,
+            "{bs:#04x} must be PETSCII CRSR LEFT (0x9D), never DEL (0x14), which \
+             DELETES a character the host only meant to move over"
         );
     }
 }

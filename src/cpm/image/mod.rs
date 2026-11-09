@@ -301,6 +301,28 @@ fn publish_without_replacing(
     }
 }
 
+/// The whole directory of `media` as `fmt` addresses it -- every directory
+/// record of the data area, in order -- or `None` where that format cannot
+/// reach them, for [`identify::identify`].
+///
+/// **One reader for every caller.**  The mount and [`files_on`] -- the
+/// catalogue and the boot sweep's oracle -- each carried their own copy, and
+/// the rule they serve is that the mount and the catalogue must never disagree
+/// about what is on a disk.
+pub(crate) fn read_directory<M: media::Media + ?Sized>(
+    media: &mut M,
+    fmt: &format::Format,
+) -> Option<Vec<u8>> {
+    let mut dir = Vec::with_capacity(fmt.maxdir as usize * 32);
+    for rec in 0..fmt.dir_records() {
+        let off = fmt.data_record_offset(rec)?;
+        let mut buf = [0u8; 128];
+        media.read_at(off, &mut buf).ok()?;
+        dir.extend_from_slice(&buf);
+    }
+    (!dir.is_empty()).then_some(dir)
+}
+
 /// What a drive is doing that stops it being changed, for the mount screens.
 ///
 /// A lent drive reads as *empty* in the mount table, so without this the
@@ -407,17 +429,8 @@ fn mount_image_unchecked(
     // is a directory here", and the whole of it says "and it is consistent
     // enough to write to", which is what lets an unlabelled disk be mounted
     // read-write instead of sending its owner off to rename the file.
-    let ident = identify::identify(filename, size, |fmt| {
-        let mut dir = Vec::with_capacity(fmt.maxdir as usize * 32);
-        for rec in 0..fmt.dir_records() {
-            let off = fmt.data_record_offset(rec)?;
-            let mut buf = [0u8; 128];
-            media::Media::read_at(&mut probe, off, &mut buf).ok()?;
-            dir.extend_from_slice(&buf);
-        }
-        (!dir.is_empty()).then_some(dir)
-    })
-    .map_err(|e| format!("{filename}: {e}"))?;
+    let ident = identify::identify(filename, size, |fmt| read_directory(&mut probe, fmt))
+        .map_err(|e| format!("{filename}: {e}"))?;
     drop(probe);
 
     // Three separate things can force read-only, and the operator is told
@@ -781,21 +794,11 @@ pub fn available_images(cpm_base: &Path) -> Vec<String> {
 /// list a booted guest's own `DIR` is checked against.  Those two must never
 /// be able to disagree about what is on a disk.
 pub(crate) fn files_on(path: &std::path::Path) -> Option<Vec<String>> {
-    use crate::cpm::image::{fs::ImageFs, identify, media::FileMedia, media::Media};
+    use crate::cpm::image::{fs::ImageFs, identify, media::FileMedia};
     let size = std::fs::metadata(path).ok()?.len();
     let filename = path.file_name()?.to_string_lossy().to_string();
     let mut probe = FileMedia::open(path, true).ok()?;
-    let ident = identify::identify(&filename, size, |fmt| {
-        let mut dir = Vec::with_capacity(fmt.maxdir as usize * 32);
-        for rec in 0..fmt.dir_records() {
-            let off = fmt.data_record_offset(rec)?;
-            let mut buf = [0u8; 128];
-            Media::read_at(&mut probe, off, &mut buf).ok()?;
-            dir.extend_from_slice(&buf);
-        }
-        (!dir.is_empty()).then_some(dir)
-    })
-    .ok()?;
+    let ident = identify::identify(&filename, size, |fmt| read_directory(&mut probe, fmt)).ok()?;
     drop(probe);
     let media = FileMedia::open(path, true).ok()?;
     let fs = ImageFs::mount(Box::new(media), ident.format, true).ok()?;
@@ -1243,6 +1246,19 @@ mod tests {
         assert!(err.contains("already exists"), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), b"precious", "the old disk survived");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The directory is read by one function.**  The mount and `files_on`
+    /// (the catalogue and the boot sweep's oracle) each carried a copy of the
+    /// loop, and those two must never disagree about what is on a disk.
+    #[test]
+    fn test_the_directory_is_read_in_one_place() {
+        let src = include_str!("mod.rs").replace("\r\n", "\n");
+        let product = &src[..src.find("#[cfg(test)]\nmod tests {").expect("the tests")];
+        assert_eq!(product.matches("for rec in 0..fmt.dir_records()").count(), 1, "a second copy of the reader");
+        let reader = product.find("pub(crate) fn read_directory<").expect("read_directory");
+        assert!(product[reader..].contains("for rec in 0..fmt.dir_records()"), "the loop is not read_directory's");
+        assert_eq!(product.matches("|fmt| read_directory(&mut probe, fmt)").count(), 2, "a caller reads its own");
     }
 
     /// **A disk that appears under the name while a blank is being made

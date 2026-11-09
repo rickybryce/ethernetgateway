@@ -41,13 +41,12 @@ pub(crate) fn petscii_to_ascii_byte(byte: u8) -> u8 {
 /// erases with the universal `BS SPACE BS`: mapped to 0x14 that reads as
 /// *delete, space, delete* on a C64 and pulls the line about, where 0x9D gives
 /// left, space, left — the character overwritten and the cursor before it.
+///
+/// **One map, not two.**  This was a byte-for-byte copy of
+/// [`crate::petscii::translate_ascii_to_petscii_byte`], the one the gateways and
+/// the modem use; it is that function now, so a fix to the map is made once.
 pub(crate) fn ascii_to_petscii_byte(byte: u8) -> u8 {
-    match byte {
-        b'A'..=b'Z' => byte + 32,
-        b'a'..=b'z' => byte - 32,
-        0x08 | 0x7F => 0x9D,
-        _ => byte,
-    }
+    crate::petscii::translate_ascii_to_petscii_byte(byte)
 }
 
 pub(crate) fn to_latin1_bytes(text: &str) -> Vec<u8> {
