@@ -247,8 +247,8 @@ fn main() {
                 return;
             }
             glog!("Asking the running copy to stand down...");
-            match instance::request_handover() {
-                Ok(Some(lock)) => {
+            match instance::request_handover(&stop) {
+                Ok(instance::Handover::Took(lock)) => {
                     // The window was closed to end the ask; clear the flag it
                     // was closed with, or the server we are about to start
                     // would shut down the moment it came up.  Through
@@ -262,10 +262,25 @@ fn main() {
                     glog!("Took over — this copy now holds the ports.");
                     lock
                 }
-                Ok(None) => {
-                    glog!("FATAL: the running copy did not stand down in time.");
+                Ok(instance::Handover::NotAnswered) => {
+                    glog!("FATAL: the running copy did not answer the request to stand down.");
                     glog!("       It may be wedged. Stop it and start this one again.");
                     std::process::exit(1);
+                }
+                Ok(instance::Handover::AgreedButStuck) => {
+                    glog!("FATAL: the running copy agreed to stand down but has not let go.");
+                    glog!("       It may be wedged. Stop it and start this one again.");
+                    std::process::exit(1);
+                }
+                Ok(instance::Handover::Stopped { holder_agreed }) => {
+                    glog!("Asked to stop during the handover — not starting.");
+                    if holder_agreed {
+                        // Said plainly, because it is the one outcome where
+                        // nothing serves afterwards.
+                        glog!("       The running copy had already agreed and is stopping too;");
+                        glog!("       start the gateway again to have one running.");
+                    }
+                    return;
                 }
                 Err(e) => {
                     glog!("FATAL: could not ask the running copy to stand down: {}", e);

@@ -224,11 +224,43 @@ fn read_pid(path: &std::path::Path) -> Option<u32> {
     s.trim().parse().ok()
 }
 
+/// How a handover ended, for [`request_handover`]'s caller.
+pub enum Handover {
+    /// The running copy stood down and the lock is ours.
+    Took(InstanceLock),
+    /// It never answered, and the request was taken back unseen.
+    NotAnswered,
+    /// It agreed, and did not let go within [`HANDOVER_AGREED_WAIT`].
+    AgreedButStuck,
+    /// We were asked to stop (Ctrl-C, SIGTERM) while waiting.  `holder_agreed`
+    /// says the running copy had already taken the request -- it is standing
+    /// down, and nothing will replace it.
+    Stopped { holder_agreed: bool },
+}
+
+/// Take the request file, as either side, and say whether **this** call took
+/// it.  Deleting a file is the one step here that only one of two racing
+/// processes can win, so it is what decides: the holder stands down only if it
+/// took the request, and the newcomer gives up only if *it* did.  Each used to
+/// look and then delete regardless, and at the deadline both could act -- the
+/// newcomer saw the request unanswered and left, while the holder took it and
+/// stood down, leaving no copy serving.
+fn claim_request(path: &std::path::Path) -> bool {
+    std::fs::remove_file(path).is_ok()
+}
+
 /// Ask the running copy to stand down, then wait for its lock.
 ///
-/// Returns the lock on success. On timeout the request file is removed again —
-/// leaving it behind would tell the *next* launch's holder to stand down for a
-/// handover nobody is waiting for.
+/// On a timeout the request is taken back -- left behind it would tell the
+/// *next* launch's holder to stand down for a handover nobody is waiting for --
+/// but only if it is still there to take: gone, the holder took it at the
+/// last moment and is standing down, and is waited for like any other that
+/// agreed.
+///
+/// **`stop` is honoured while waiting.**  The signal handlers are registered
+/// before this runs, so a Ctrl-C or SIGTERM sets `stop` rather than ending the
+/// process, and this loop used to ignore it for up to two and a quarter
+/// minutes.
 ///
 /// **A holder that agreed is waited for.**  Its watcher consumes the request
 /// file the moment it agrees, and from then it *will* stop -- so giving up at
@@ -236,8 +268,9 @@ fn read_pid(path: &std::path::Path) -> Option<u32> {
 /// nobody serving: this copy exited, and a moment later so did the old one.
 /// The deadline is for a holder that never answered; one that answered gets
 /// [`HANDOVER_AGREED_WAIT`] more.
-pub fn request_handover() -> std::io::Result<Option<InstanceLock>> {
-    std::fs::write(handover_path(), b"stand down\n")?;
+pub fn request_handover(stop: &AtomicBool) -> std::io::Result<Handover> {
+    let path = handover_path();
+    std::fs::write(&path, b"stand down\n")?;
     let start = std::time::Instant::now();
     let mut said_still_stopping = false;
     loop {
@@ -247,22 +280,50 @@ pub fn request_handover() -> std::io::Result<Option<InstanceLock>> {
         if let Instance::Acquired(lock) = acquire()? {
             // Ours now.  Clear the request so our own watcher does not read it
             // as an instruction to stand down the moment it starts.
-            let _ = std::fs::remove_file(handover_path());
-            return Ok(Some(lock));
+            let _ = std::fs::remove_file(&path);
+            return Ok(Handover::Took(lock));
         }
-        let waited = start.elapsed();
-        let agreed = !handover_path().exists();
-        if waited < HANDOVER_TIMEOUT {
-            continue;
-        }
-        if agreed && waited < HANDOVER_TIMEOUT + HANDOVER_AGREED_WAIT {
-            if !std::mem::replace(&mut said_still_stopping, true) {
-                glog!("The running copy agreed and is still stopping; waiting for it...");
+        match next_step(start.elapsed(), !path.exists(), stop.load(Ordering::SeqCst)) {
+            Step::Wait => {}
+            Step::WaitForAgreed => {
+                if !std::mem::replace(&mut said_still_stopping, true) {
+                    glog!("The running copy agreed and is still stopping; waiting for it...");
+                }
             }
-            continue;
+            Step::Stop => return Ok(Handover::Stopped { holder_agreed: !claim_request(&path) }),
+            Step::GiveUp { agreed: true } => return Ok(Handover::AgreedButStuck),
+            // Taken back only if it is still ours to take; otherwise the
+            // holder took it just now, and is waited for as one that agreed.
+            Step::GiveUp { agreed: false } => {
+                if claim_request(&path) {
+                    return Ok(Handover::NotAnswered);
+                }
+            }
         }
-        let _ = std::fs::remove_file(handover_path());
-        return Ok(None);
+    }
+}
+
+/// What [`request_handover`] does after a poll that did not get the lock.
+#[derive(Debug, PartialEq)]
+enum Step {
+    Wait,
+    WaitForAgreed,
+    Stop,
+    GiveUp { agreed: bool },
+}
+
+/// The newcomer's decision, pulled out so its order is testable: a stop is
+/// honoured before any deadline, an unanswered request is waited for until
+/// [`HANDOVER_TIMEOUT`], and an agreed one [`HANDOVER_AGREED_WAIT`] longer.
+fn next_step(waited: std::time::Duration, agreed: bool, stop: bool) -> Step {
+    if stop {
+        Step::Stop
+    } else if waited < HANDOVER_TIMEOUT {
+        Step::Wait
+    } else if agreed && waited < HANDOVER_TIMEOUT + HANDOVER_AGREED_WAIT {
+        Step::WaitForAgreed
+    } else {
+        Step::GiveUp { agreed }
     }
 }
 
@@ -329,12 +390,13 @@ pub fn spawn_handover_watcher(shutdown: Arc<AtomicBool>, stop: Arc<AtomicBool>) 
         // against a gateway that had agreed to stand down.
         let mut standing_down = false;
         loop {
-            let asked = handover_path().exists();
+            // Taken, not merely seen: the newcomer may be taking it back at
+            // its deadline, and only one of us can (see `claim_request`).
+            // Removed *before* the flag: the newcomer watches for our lock, not
+            // for this file, and a request left on disk would be read as an
+            // instruction by whoever holds the directory next.
+            let asked = claim_request(&handover_path());
             if asked {
-                // Removed *before* the flag: the newcomer watches for our
-                // lock, not for this file, and a request left on disk would be
-                // read as an instruction by whoever holds the directory next.
-                let _ = std::fs::remove_file(handover_path());
                 glog!("Another copy of the gateway asked to take over — standing down.");
             }
             let assert_shutdown;
@@ -446,6 +508,67 @@ mod tests {
         assert_eq!(watcher_pass(false, true), (true, true));
         // Asked twice is not different from asked once.
         assert_eq!(watcher_pass(true, true), (true, true));
+    }
+
+    /// **At the deadline, exactly one side acts on the request.**  The newcomer
+    /// giving up and the holder agreeing both delete the file, and only one
+    /// delete succeeds -- so the holder stands down only if it took it, and the
+    /// newcomer leaves only if it did.  Before, each looked and deleted
+    /// regardless, and both could act: the newcomer left as the holder stood
+    /// down.  Also, a stop wins over every deadline, and the deadlines keep
+    /// their order.
+    #[test]
+    fn test_only_one_side_takes_the_request_and_a_stop_wins() {
+        let dir = std::env::temp_dir().join(format!("egw_handover_claim_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(HANDOVER_FILE);
+        for _ in 0..50 {
+            std::fs::write(&path, b"stand down\n").unwrap();
+            let p1 = path.clone();
+            let p2 = path.clone();
+            let holder = std::thread::spawn(move || claim_request(&p1));
+            let newcomer = std::thread::spawn(move || claim_request(&p2));
+            let (h, n) = (holder.join().unwrap(), newcomer.join().unwrap());
+            assert!(h ^ n, "both or neither took the request (holder {h}, newcomer {n})");
+        }
+        assert!(!claim_request(&path), "nothing to take");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        use std::time::Duration;
+        let t = HANDOVER_TIMEOUT;
+        assert_eq!(next_step(Duration::ZERO, false, false), Step::Wait);
+        assert_eq!(next_step(Duration::ZERO, false, true), Step::Stop, "a stop waits for no deadline");
+        assert_eq!(next_step(t + HANDOVER_AGREED_WAIT, true, true), Step::Stop);
+        assert_eq!(next_step(t, true, false), Step::WaitForAgreed);
+        assert_eq!(next_step(t, false, false), Step::GiveUp { agreed: false });
+        assert_eq!(next_step(t + HANDOVER_AGREED_WAIT, true, false), Step::GiveUp { agreed: true });
+
+        // And both loops act on the claim's answer, not on a look: two real
+        // processes cannot race in a unit test, so this part reads the two
+        // functions, each bounded to its own body.
+        let src = include_str!("instance.rs").replace("\r\n", "\n");
+        let body = |name: &str| {
+            let from = src.find(name).unwrap_or_else(|| panic!("{name}"));
+            let rest = &src[from..];
+            rest[..rest.find("\n}\n").expect("end")].to_string()
+        };
+        let watcher = body("pub fn spawn_handover_watcher(");
+        assert!(watcher.contains("let asked = claim_request(&handover_path());"), "the holder acts on a look");
+        assert!(!watcher.contains(".exists()"), "the holder looks before it takes");
+        let newcomer = body("pub fn request_handover(");
+        assert!(
+            newcomer.contains("Step::GiveUp { agreed: false } => {\n                if claim_request(&path) {\n                    return Ok(Handover::NotAnswered);"),
+            "the newcomer gives up without taking the request back"
+        );
+        assert!(
+            newcomer.contains("Step::Stop => return Ok(Handover::Stopped { holder_agreed: !claim_request(&path) }),"),
+            "a stop does not take the request back, or misreports who has it"
+        );
+        assert!(
+            newcomer.contains("match next_step(start.elapsed(), !path.exists(), stop.load(Ordering::SeqCst)) {"),
+            "the wait no longer reads the stop flag"
+        );
     }
 
     /// **The wait has to outlast a healthy shutdown, or a working handover
