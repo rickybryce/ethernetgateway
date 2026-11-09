@@ -2725,6 +2725,94 @@ mod tests {
         server.abort();
     }
 
+    /// **A slave's key logs in over a real connection.**
+    ///
+    /// The key-auth unit tests call `key_offered` / `key_auth` directly,
+    /// because russh 0.65's `PublicKeyOffer` and `VerifiedPublicKey` cannot be
+    /// built outside russh.  That leaves the trait methods that unwrap them --
+    /// the only door a real slave comes through -- reachable only over the
+    /// wire.  russh asks `auth_publickey_offered` first and calls
+    /// `auth_publickey` only on an Accept, so this drives both: a wrapper that
+    /// refused everything would lock every enrolled slave out (the enrolled
+    /// login fails), and one that accepted everything would let any key in
+    /// (the stranger gets in).
+    #[tokio::test]
+    async fn test_a_key_logs_in_over_a_real_connection() {
+        struct Client;
+        impl russh::client::Handler for Client {
+            type Error = russh::Error;
+            async fn check_server_key(
+                &mut self,
+                _key: &russh::keys::PublicKeyOrCertificate,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+        async fn login(
+            addr: SocketAddr,
+            user: &str,
+            key: &russh::keys::PrivateKey,
+        ) -> (russh::client::Handle<Client>, bool) {
+            let mut session = russh::client::connect(
+                Arc::new(russh::client::Config::default()),
+                addr,
+                Client,
+            )
+            .await
+            .expect("client could not connect");
+            let r = session
+                .authenticate_publickey(
+                    user,
+                    russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key.clone()), None),
+                )
+                .await
+                .unwrap();
+            (session, r.success())
+        }
+        let random = || {
+            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+                .unwrap()
+        };
+        let enrolled = random();
+        let stranger = random();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let session_count = Arc::new(AtomicUsize::new(0));
+        let keys = vec![enrolled.public_key().clone()];
+        let count = session_count.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut handler = loopback_handler(addr, None);
+                handler.authorized_keys = keys.clone();
+                handler.session_count = count.clone();
+                tokio::spawn(async move {
+                    if let Ok(s) = russh::server::run_stream(loopback_config(), tcp, handler).await {
+                        let _ = s.await;
+                    }
+                });
+            }
+        });
+
+        let (_s, ok) = login(addr, "admin", &stranger).await;
+        assert!(!ok, "a key nobody enrolled logged in");
+        let (_s, ok) = login(addr, "someone-else", &enrolled).await;
+        assert!(!ok, "the right key logged in as the wrong user");
+        assert_eq!(session_count.load(Ordering::SeqCst), 0, "a refusal claimed a slot");
+
+        let (session, ok) = login(addr, "admin", &enrolled).await;
+        assert!(ok, "an enrolled key was refused over a real connection");
+        assert_eq!(session_count.load(Ordering::SeqCst), 1, "a key login claims one slot");
+        session
+            .channel_open_session()
+            .await
+            .expect("a key-authenticated client could not open a session");
+
+        drop(session);
+        server.abort();
+    }
+
     /// A session slot is claimed only on a successful login, released only
     /// if it was claimed, and the cap is enforced at exactly `max_sessions`
     /// — so an unauthenticated/stalled connection can't exhaust the cap.

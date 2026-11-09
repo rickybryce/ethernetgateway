@@ -17436,6 +17436,10 @@ async fn test_credentials_set_at_telnet_are_the_letters_typed() {
     // decision (and the check above) must be the one it hands it to.
     let f = body(&ssh, "async fn auth_publickey(");
     assert!(f.contains("self.key_auth(user, key.public_key).await"), "ssh key delegate");
+    // Not visible over the wire with a signing client (russh still calls
+    // key_auth, which refuses), so pinned here.
+    let f = body(&ssh, "async fn auth_publickey_offered(");
+    assert!(f.contains("self.key_offered(user, offer.public_key).await"), "ssh offer delegate");
     let web = include_str!("../webserver.rs").replace("\r\n", "\n");
     let f = body(&web, "async fn is_authorized(");
     assert!(f.contains("crate::credential::username_matches(user, &cfg.username)"), "web user");
