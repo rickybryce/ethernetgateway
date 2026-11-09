@@ -65,6 +65,19 @@ fn cache() -> &'static Mutex<Cache> {
     })
 }
 
+/// Clears a cache's `in_flight` when dropped -- on the probe's way out however
+/// it leaves, a panic included.  The flag was cleared by a line at the end of
+/// the probe, so a probe that panicked before it (a thread that could not be
+/// made in [`run_within`], say) left it set, and no later probe could start:
+/// the `.1` fallback for the life of the process, with nothing to say why.
+struct InFlight(&'static Mutex<Cache>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).in_flight = false;
+    }
+}
+
 /// The router addresses last detected, or empty if we don't know (yet, or at
 /// all on this host).  Never blocks and never runs a command: this is what the
 /// connection path calls.
@@ -105,12 +118,13 @@ pub(crate) fn probe_in_background() {
     // on the connection-accept path, and with `in_flight` left set so that no
     // later probe could ever start.  A failure here is the fallback instead.
     let spawned = std::thread::Builder::new().name("router-probe".into()).spawn(|| {
+        // First, so it is dropped last -- after the cache lock below.
+        let _in_flight = InFlight(cache());
         let found = detect();
         let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
         let changed = guard.addrs != found;
         guard.addrs = found;
         guard.probed_at = Some(Instant::now());
-        guard.in_flight = false;
         let addrs = guard.addrs.clone();
         drop(guard);
         if changed {
@@ -290,11 +304,19 @@ fn run_within(program: &str, args: &[&str], budget: Duration) -> Option<String> 
         .ok()?;
     let mut stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    // Built, not `thread::spawn`, which panics when a thread cannot be made --
+    // here inside the probe, after the child is running.  On failure the
+    // child is stopped and reaped, and the probe gets no answer.
+    let reader = std::thread::Builder::new().name("router-route-read".into()).spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout.read_to_end(&mut buf);
         let _ = tx.send(buf);
     });
+    if reader.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
     let deadline = Instant::now() + budget;
     let status = loop {
         match child.try_wait() {
@@ -768,6 +790,35 @@ Active Routes:
         );
         // And a failing one is still refused, so a parser never sees an error.
         assert_eq!(run_within("false", &[], Duration::from_secs(10)), None);
+    }
+
+    /// **A probe that panics still lets the next one start.**  `in_flight` is
+    /// cleared by a drop guard, so a panic anywhere in the probe -- a thread
+    /// that could not be made, say -- clears it on the way out.  A private cache,
+    /// so a real probe started by another test cannot race this one.
+    #[test]
+    fn test_a_probe_that_panics_clears_in_flight() {
+        let mine: &'static Mutex<Cache> = Box::leak(Box::new(Mutex::new(Cache {
+            addrs: Vec::new(),
+            probed_at: None,
+            in_flight: true,
+        })));
+        let r = std::thread::spawn(move || {
+            let _in_flight = InFlight(mine);
+            panic!("the probe died");
+        })
+        .join();
+        assert!(r.is_err());
+        assert!(!mine.lock().unwrap_or_else(|e| e.into_inner()).in_flight, "in_flight left set");
+        // And the real probe holds one from its first line.
+        let src = include_str!("router.rs").replace("\r\n", "\n");
+        let probe = &src[src.find("pub(crate) fn probe_in_background()").expect("probe")..];
+        let closure = &probe[probe.find(".spawn(|| {").expect("the probe thread")..];
+        assert!(
+            closure[".spawn(|| {".len()..].trim_start().starts_with("// First, so it is dropped last -- after the cache lock below.\n        let _in_flight = InFlight(cache());"),
+            "the probe does not take the guard first"
+        );
+        assert!(!closure[..closure.find("\n    });").unwrap()].contains("in_flight = false"), "a second clear in the probe");
     }
 
     /// The real probe must be safe to call anywhere: it may find nothing (a
