@@ -1504,19 +1504,14 @@ impl TelnetSession {
         // complete!  0 bytes" said neither -- the list below says why.
         if saved.len() == 1 && skipped.is_empty() && batch_error.is_none() {
             let bytes = saved.first().map(|(_, n)| *n).unwrap_or(0);
-            let blocks = bytes.div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE);
             self.send_line(&format!(
                 "  {}",
                 self.green("Upload complete!")
             ))
             .await?;
-            self.send_line(&format!(
-                "  {} bytes, {} blocks, {:.1}s",
-                bytes,
-                blocks,
-                elapsed.as_secs_f64()
-            ))
-            .await?;
+            // No block count: the sender chose the block size, 128 or 1K, and
+            // for ZMODEM, Kermit and Punter there are no XMODEM blocks at all.
+            self.send_line(&transfer_size_line(bytes, None, Some(elapsed))).await?;
             // Say what the file was saved as whenever that is not what was
             // typed: nobody typed it, or Punter added its type's extension.
             if let Some((name, _)) = saved.first()
@@ -1816,19 +1811,14 @@ impl TelnetSession {
         filename: &str,
         file_size: u64,
     ) -> Result<(), std::io::Error> {
-        let blocks = file_size.div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE as u64);
-
         self.send_line("").await?;
         self.send_line(&format!(
             "  Sending: {}",
             self.amber(filename)
         ))
         .await?;
-        self.send_line(&format!(
-            "  {} bytes, {} blocks",
-            file_size, blocks
-        ))
-        .await?;
+        // No block count: the protocol, and so the block size, is chosen next.
+        self.send_line(&transfer_size_line(file_size as usize, None, None)).await?;
 
         // Compared as `u64`: `as usize` on the 32-bit Pi build wrapped a file
         // of 4 GiB + n bytes to n, which passed, and the read below then tried
@@ -2033,11 +2023,10 @@ impl TelnetSession {
                     self.green("Download complete!")
                 ))
                 .await?;
-                self.send_line(&format!(
-                    "  {} bytes, {} blocks, {:.1}s",
+                self.send_line(&transfer_size_line(
                     data.len(),
-                    data.len().div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE),
-                    elapsed.as_secs_f64()
+                    download_block_size(protocol),
+                    Some(elapsed),
                 ))
                 .await?;
                 self.last_transfer_note = Some(TransferNote {
@@ -2789,3 +2778,61 @@ impl TelnetSession {
         Ok(())
     }
 }
+
+/// The block size a download's count can honestly be given in: classic
+/// XMODEM's 128 and nothing else.  XMODEM-1K and YMODEM send their tail in 128s
+/// and can fall back to 128 mid-file; ZMODEM, Kermit and Punter have no XMODEM
+/// blocks.  Every summary used to count 128-byte blocks whatever had run.
+fn download_block_size(protocol: DownloadProtocol) -> Option<usize> {
+    matches!(protocol, DownloadProtocol::Xmodem).then_some(crate::xmodem::XMODEM_BLOCK_SIZE)
+}
+
+/// `  N bytes[, M blocks][, T.Ts]`, the size line every transfer summary prints.
+fn transfer_size_line(
+    bytes: usize,
+    block: Option<usize>,
+    elapsed: Option<std::time::Duration>,
+) -> String {
+    let mut line = format!("  {bytes} bytes");
+    if let Some(b) = block {
+        line += &format!(", {} blocks", bytes.div_ceil(b));
+    }
+    if let Some(t) = elapsed {
+        line += &format!(", {:.1}s", t.as_secs_f64());
+    }
+    line
+}
+
+#[cfg(test)]
+mod size_line_tests {
+    use super::*;
+
+    /// **A block count only where it is true**: after a classic XMODEM
+    /// download.  Every summary counted 128-byte blocks whatever had run --
+    /// eight times too many for a 1K transfer, and invented for ZMODEM,
+    /// Kermit and Punter -- and before a download the protocol is not yet
+    /// chosen.
+    #[test]
+    fn test_blocks_are_counted_only_for_classic_xmodem() {
+        assert_eq!(download_block_size(DownloadProtocol::Xmodem), Some(128));
+        for p in [
+            DownloadProtocol::Xmodem1k,
+            DownloadProtocol::Ymodem,
+            DownloadProtocol::Zmodem,
+            DownloadProtocol::Kermit,
+            DownloadProtocol::Punter,
+        ] {
+            assert_eq!(download_block_size(p), None, "{p:?}");
+        }
+        let t = Some(std::time::Duration::from_millis(1500));
+        assert_eq!(transfer_size_line(300, Some(128), t), "  300 bytes, 3 blocks, 1.5s");
+        assert_eq!(transfer_size_line(300, None, t), "  300 bytes, 1.5s");
+        assert_eq!(transfer_size_line(300, None, None), "  300 bytes");
+        // And no summary computes its own count any more.
+        let src = include_str!("transfer.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("fn download_block_size(").unwrap()];
+        assert!(!code.contains("XMODEM_BLOCK_SIZE)"), "a summary counts its own blocks again");
+        assert!(!code.contains("blocks, {:.1}s"), "a summary formats its own block count again");
+    }
+}
+
