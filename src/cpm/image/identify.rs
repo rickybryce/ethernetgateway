@@ -597,6 +597,16 @@ pub fn directory_is_consistent(dir: &[u8], format: &Format) -> Result<(), &'stat
         if e[15] > 128 {
             return Err("a record count too large for one extent");
         }
+        // Bytes of the map past the slots this format's EXM uses must be
+        // empty -- `ImageFs::inconsistency`'s rule, read the same way.  Without
+        // it this said "consistent" about a file written under a wider EXM (as
+        // `cpmtools` writes some of these disks), the mount then forced it
+        // read-only, and the operator was told only that the directory was
+        // "damaged" -- the generic reason `Identified::why` exists to replace.
+        let used_bytes = params.map_slots * if params.wide_blocks { 2 } else { 1 };
+        if e[16 + used_bytes.min(16)..32].iter().any(|&b| b != 0) {
+            return Err("allocation slots this disk format does not use (written with a different EXM)");
+        }
         // Sixteen 8-bit block numbers, or eight 16-bit ones. Which it is
         // follows from the disk's size, exactly as CP/M itself decides — and
         // from the same `wide_blocks` the mount will use, not a second reading
@@ -1226,6 +1236,42 @@ mod tests {
         let mut d = [0xE5u8; 2048];
         d[0] = 0;
         assert!(!is_erased_directory(&d));
+    }
+
+    /// **A block in a slot the format's EXM never uses is named, here as at
+    /// the mount.**  `ImageFs::inconsistency` refuses it ("written with a
+    /// different EXM"); this check used to read all sixteen map bytes and pass
+    /// it, so the image identified as sound and then mounted read-only as
+    /// merely "damaged".  Every format with unused slots, end to end.
+    #[test]
+    fn test_a_block_past_the_formats_map_slots_is_refused_by_name() {
+        let mut tested = 0;
+        for fmt in FORMATS {
+            let p = Params::derive(fmt);
+            let width = if p.wide_blocks { 2 } else { 1 };
+            let used = p.map_slots * width;
+            if used >= 16 {
+                continue;
+            }
+            let mut dir = consistent_dir(fmt);
+            if directory_is_consistent(&dir, fmt).is_err() {
+                continue; // the helper's block 2 does not suit this layout
+            }
+            // A legal, unclaimed block -- only its slot is wrong.
+            let b = p.max_block.to_le_bytes();
+            dir[16 + used..16 + used + width].copy_from_slice(&b[..width]);
+            assert_eq!(
+                directory_is_consistent(&dir, fmt),
+                Err("allocation slots this disk format does not use (written with a different EXM)"),
+                "{}",
+                fmt.token
+            );
+            let id = identify("unnamed.dsk", fmt.min_bytes(), |f| (f.token == fmt.token).then(|| dir.clone()))
+                .expect("identified");
+            assert!(id.force_read_only() && id.why.is_some_and(|w| w.contains("EXM")), "{}", fmt.token);
+            tested += 1;
+        }
+        assert!(tested > 0, "no format with unused map slots was exercised");
     }
 
     /// **A zero-filled free slot is free here exactly as it is to the mount.**
