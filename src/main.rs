@@ -872,7 +872,8 @@ mod console_close {
     /// **Logoff and shutdown are listed but never arrive.**  Windows withholds
     /// `CTRL_LOGOFF_EVENT` and `CTRL_SHUTDOWN_EVENT` from the console handler of
     /// any process that has loaded `user32.dll` or `gdi32.dll`, and this binary
-    /// links both (the desktop GUI), headless or not. At logoff or shutdown the
+    /// links both (the desktop GUI), headless or not -- and Microsoft documents
+    /// logoff as reaching services only in any case. At logoff or shutdown the
     /// process is simply ended, with no goodbye to connected callers. Catching
     /// those would need a hidden window answering `WM_QUERYENDSESSION` /
     /// `WM_ENDSESSION`; until then the two arms are harmless, and kept so they
