@@ -5616,7 +5616,7 @@ fn slave_resolve_relay_target(
 /// reading is kept, so nothing that dialled before dials elsewhere now.  A
 /// string that cannot split that way (`fe80::1`, `2001:db8::5`) is an address
 /// on port 23.  Brackets always mean the whole address: `[fe80::1:23]`.
-fn dial_host_port(resolved: &str) -> Option<(String, u16)> {
+pub(crate) fn dial_host_port(resolved: &str) -> Option<(String, u16)> {
     use std::net::Ipv6Addr;
     let r = resolved.trim();
     if let Some(inner) = r.strip_prefix('[').and_then(|x| x.strip_suffix(']'))

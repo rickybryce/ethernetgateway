@@ -11,13 +11,16 @@
 //!
 //! Both directions work: **outbound** (`ATD A`/`B` for the gateway's own
 //! ports, `ATD A@<remote-ip>` for a port on another gateway via the crossbar
-//! master, `ATDT host[:port]` for TCP — port 23 by default — and
+//! master, `ATD CPM@<remote-ip>` for another gateway's CP/M endpoint,
+//! `ATDT host[:port]` for TCP — port 23 by default, IPv6 as the serial modem
+//! reads it — and
 //! `ATDT ethernetgateway` for this gateway's own menu, the same dial targets
 //! the physical serial modem answers) and **inbound** — the emulator is dialable
 //! as `CPM@<ip>`, ringing the guest (`RING`) which answers with `ATA` or
 //! `ATS0=`*n* auto-answer.
 
 use crate::config::SerialPortId;
+use crate::logger::glog;
 use crate::serial::{request_peer_call, CpmIncomingCall, PeerCallOutcome};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -508,89 +511,42 @@ impl CpmModem {
             return;
         }
 
-        // Serial port: "A"/"B", optionally "A@<host>".  A bare label or a
-        // local host rings the gateway's own port; a remote host targets a
-        // port a slave registered with this gateway's crossbar (master).
-        let label = t.split('@').next().unwrap_or("").trim();
-        if let Some(id) = local_port(label) {
-            // Peer-dialing a serial port is gated like the physical modem's
-            // ATD <Port>@<host>: when the operator hasn't enabled it, behave
-            // like a failed dial (no hint).  (ATDT to a TCP host below is not
-            // peer-dial and stays ungated, matching the physical modem.)
-            let cfg = crate::config::get_config();
-            if !cfg.allow_peer_dial {
+        // A peer: a serial port ("A"/"B", optionally "A@<host>") or, with a
+        // host, a CP/M endpoint ("CPM@<host>").  A bare label or a local host
+        // rings the gateway's own port; a remote host targets an endpoint a
+        // slave registered with this gateway's crossbar (master).
+        let (label, host) = match t.split_once('@') {
+            Some((l, h)) => (l.trim(), Some(h.trim()).filter(|h| !h.is_empty())),
+            None => (t.trim(), None),
+        };
+        let peer = match (peer_label(label), host) {
+            (Some(Peer::Cpm), None) => None, // `CPM` alone is a host name
+            (p, _) => p,
+        };
+        if let Some(peer) = peer {
+            // Peer-dialing is gated like the physical modem's ATD <Port>@<host>:
+            // when the operator hasn't enabled it, behave like a failed dial
+            // (no hint).  (ATDT to a TCP host below is not peer-dial and stays
+            // ungated, matching the physical modem.)
+            if !crate::config::get_config().allow_peer_dial {
                 self.result(out, "NO CARRIER");
                 return;
             }
-            let host = t.split_once('@').map(|x| x.1.trim()).filter(|h| !h.is_empty());
-            match host {
-                // Remote serial port.  On a slave, relay the address to the
-                // master (which resolves/crossbars it); on a master/standalone,
-                // claim it directly from the crossbar registry.
-                Some(h) if !crate::serial::host_is_local_addr(h) => {
-                    if cfg.gateway_role == "slave" {
-                        let target = crate::relay::RelayTarget::Peer {
-                            addr: format!("{label}@{h}"),
-                        };
-                        match crate::relay::connect_master_relay(
-                            &cfg.slave_master_host,
-                            cfg.slave_master_port,
-                            &cfg.slave_master_username,
-                            &cfg.slave_master_password,
-                            &target,
-                            "CPM",
-                        )
-                        .await
-                        {
-                            Ok(crate::relay::MasterRelay { _session, stream }) => {
-                                self.relay_keepalive = Some(Box::new(_session));
-                                self.conn = Some(Box::new(stream));
-                                self.mode = Mode::Online;
-                                self.result(out, "CONNECT");
-                            }
-                            Err(_) => self.result(out, "NO CARRIER"),
-                        }
-                    } else {
-                        match h.parse::<std::net::IpAddr>() {
-                            // `CONNECT` is only written for `Answered`: the
-                            // guest's software treats it as carrier, so it must
-                            // not stand for a channel that was merely claimed.
-                            Ok(ip) => match crate::relay::claim_remote_peer(ip, label).await {
-                                crate::relay::PeerClaim::Answered(dup) => {
-                                    self.conn = Some(Box::new(dup));
-                                    self.mode = Mode::Online;
-                                    self.result(out, "CONNECT");
-                                }
-                                // Narrowed exactly as the local arm below
-                                // does.  This said the guest's AT layer
-                                // "speaks only CONNECT and NO CARRIER here,
-                                // unlike the serial modem, which has BUSY and
-                                // NO ANSWER to offer" -- contradicted fifteen
-                                // lines down in this same `match`, where the
-                                // local peer-dial emits both.  Believing it
-                                // made `ATD A@<ip>` answer differently from
-                                // `ATD A` for the same busy device, which is
-                                // the difference the outcome byte exists to
-                                // remove.  `result` folds both to NO CARRIER
-                                // at X0, exactly as it does for the local arm,
-                                // so a guest that has not asked for the
-                                // extended codes still hears something true.
-                                crate::relay::PeerClaim::Failed(PeerCallOutcome::Busy) => {
-                                    self.result(out, "BUSY")
-                                }
-                                crate::relay::PeerClaim::Failed(PeerCallOutcome::NoAnswer) => {
-                                    self.result(out, "NO ANSWER")
-                                }
-                                crate::relay::PeerClaim::Failed(_)
-                                | crate::relay::PeerClaim::NotRegistered => {
-                                    self.result(out, "NO CARRIER")
-                                }
-                            },
-                            Err(_) => self.result(out, "NO CARRIER"),
-                        }
-                    }
+            match (peer, host) {
+                // A remote endpoint, named by the label the far side registered
+                // -- `A`, `B` or `CPM` -- never by the spelling dialled:
+                // `PORTA@<ip>` used to go out as `PORTA`, which no gateway
+                // registers, so it failed where `A@<ip>` connected.
+                (_, Some(h)) if !crate::serial::host_is_local_addr(h) => {
+                    self.dial_remote_peer(peer.wire_label(), h, out).await;
                 }
-                _ => match request_peer_call(id, self.carrier_wait()).await {
+                // This emulator's own endpoint: the guest calling itself, which
+                // the serial modem refuses for a port dialling itself too.
+                (Peer::Cpm, _) => {
+                    glog!("CP/M modem: CPM@{} is this emulator; a call to itself refused", host.unwrap_or(""));
+                    self.result(out, "NO CARRIER");
+                }
+                (Peer::Port(id), _) => match request_peer_call(id, self.carrier_wait()).await {
                     Ok(duplex) => {
                         self.conn = Some(Box::new(duplex));
                         self.mode = Mode::Online;
@@ -628,6 +584,77 @@ impl CpmModem {
         }
 
         self.result(out, "NO CARRIER");
+    }
+
+    /// Dial an endpoint on another gateway: `label` (`A`, `B` or `CPM`) at
+    /// `host`.  On a slave the address goes to the master, which resolves or
+    /// crossbars it; on a master or a standalone gateway it is claimed from the
+    /// crossbar registry directly.
+    ///
+    /// **Every failure is logged**, as the serial modem logs its own: the
+    /// guest hears only a result code, and a slave whose master refused the
+    /// relay -- wrong password, relays switched off -- used to say NO CARRIER
+    /// and leave nothing anywhere to say why.
+    async fn dial_remote_peer(&mut self, label: &str, host: &str, out: &mut Vec<u8>) {
+        let cfg = crate::config::get_config();
+        let addr = format!("{label}@{host}");
+        if cfg.gateway_role == "slave" {
+            let target = crate::relay::RelayTarget::Peer { addr: addr.clone() };
+            match crate::relay::connect_master_relay(
+                &cfg.slave_master_host,
+                cfg.slave_master_port,
+                &cfg.slave_master_username,
+                &cfg.slave_master_password,
+                &target,
+                "CPM",
+            )
+            .await
+            {
+                Ok(crate::relay::MasterRelay { _session, stream }) => {
+                    self.relay_keepalive = Some(Box::new(_session));
+                    self.conn = Some(Box::new(stream));
+                    self.mode = Mode::Online;
+                    self.result(out, "CONNECT");
+                }
+                Err(e) => {
+                    glog!(
+                        "CP/M modem: dial to {addr} through master {}:{} failed: {e}",
+                        cfg.slave_master_host,
+                        cfg.slave_master_port
+                    );
+                    self.result(out, "NO CARRIER");
+                }
+            }
+            return;
+        }
+        let Ok(ip) = host.parse::<std::net::IpAddr>() else {
+            glog!("CP/M modem: dial to {addr}: a remote endpoint is named by its IP address");
+            self.result(out, "NO CARRIER");
+            return;
+        };
+        // `CONNECT` is only written for `Answered`: the guest's software treats
+        // it as carrier, so it must not stand for a channel that was merely
+        // claimed.  Busy and no-answer are told apart exactly as the local
+        // peer-dial tells them, and `result` folds both to NO CARRIER at X0.
+        match crate::relay::claim_remote_peer(ip, label).await {
+            crate::relay::PeerClaim::Answered(dup) => {
+                self.conn = Some(Box::new(dup));
+                self.mode = Mode::Online;
+                self.result(out, "CONNECT");
+            }
+            crate::relay::PeerClaim::Failed(why) => {
+                glog!("CP/M modem: dial to {addr}: {why:?}");
+                match why {
+                    PeerCallOutcome::Busy => self.result(out, "BUSY"),
+                    PeerCallOutcome::NoAnswer => self.result(out, "NO ANSWER"),
+                    _ => self.result(out, "NO CARRIER"),
+                }
+            }
+            crate::relay::PeerClaim::NotRegistered => {
+                glog!("CP/M modem: dial to {addr}: no such endpoint is registered here");
+                self.result(out, "NO CARRIER");
+            }
+        }
     }
 
     /// Dial this gateway's own menu over an in-memory duplex, the way the
@@ -1022,11 +1049,32 @@ fn read_number(b: &[u8], i: &mut usize) -> u16 {
     n
 }
 
-/// Map a dial-string label to a local serial port, if it names one.
-fn local_port(label: &str) -> Option<SerialPortId> {
+/// A peer endpoint a dial string can name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Peer {
+    Port(SerialPortId),
+    Cpm,
+}
+
+impl Peer {
+    /// The label the endpoint is registered under, which is what goes on the
+    /// wire -- whatever spelling was dialled.
+    fn wire_label(self) -> &'static str {
+        match self {
+            Peer::Port(SerialPortId::A) => "A",
+            Peer::Port(SerialPortId::B) => "B",
+            Peer::Cpm => "CPM",
+        }
+    }
+}
+
+/// Map a dial-string label to a peer endpoint, if it names one.  The line is
+/// already upper-cased by `dispatch`.
+fn peer_label(label: &str) -> Option<Peer> {
     match label {
-        "A" | "PORTA" => Some(SerialPortId::A),
-        "B" | "PORTB" => Some(SerialPortId::B),
+        "A" | "PORTA" => Some(Peer::Port(SerialPortId::A)),
+        "B" | "PORTB" => Some(Peer::Port(SerialPortId::B)),
+        "CPM" => Some(Peer::Cpm),
         _ => None,
     }
 }
@@ -1062,24 +1110,19 @@ fn resolve_host_port(t: &str) -> Option<(String, u16)> {
     } else {
         t.to_string()
     };
-    if resolved.contains(':') {
-        return parse_host_port(&resolved); // an explicit port must be valid
-    }
-    if resolved.is_empty() {
+    if resolved.trim().is_empty() {
         return None;
     }
-    Some((resolved, 23))
-}
-
-/// Parse a `host:port` dial target.  Requires an explicit port.
-fn parse_host_port(t: &str) -> Option<(String, u16)> {
-    let (host, port) = t.rsplit_once(':')?;
-    let host = host.trim();
-    let port: u16 = port.trim().parse().ok()?;
-    if host.is_empty() {
+    // **The serial modem's own rule**, not a third copy: this used to split at
+    // the last `:`, so `ATDT fe80::1` called host `fe80:` on port 1 -- the bug
+    // `dial_host_port` was written to end for the serial modem and its relay.
+    // A bare host or IPv6 address takes port 23; `[v6]:port` and `host:port`
+    // name one.
+    let (host, port) = crate::serial::dial_host_port(&resolved)?;
+    if host.trim().is_empty() {
         return None;
     }
-    Some((host.to_string(), port))
+    Some((host, port))
 }
 
 #[cfg(test)]
@@ -1293,6 +1336,117 @@ mod tests {
                 "target {after_the_d:?} resolved from {t:?}"
             );
         }
+    }
+
+/// **An IPv6 host dials as one.**  This modem had a third `host:port` parser
+    /// that split at the last `:`, so `ATDT fe80::1` called host `fe80:` on
+    /// port 1.  It now uses the serial modem's rule: a bare IPv6 address takes
+    /// port 23, brackets name a port, and the unbracketed `addr:port` reading
+    /// the serial modem keeps is kept here too.
+    #[test]
+    fn test_an_ipv6_host_dials_as_the_serial_modem_dials_it() {
+        let r = |t: &str| resolve_host_port(t);
+        assert_eq!(r("FE80::1"), Some(("FE80::1".into(), 23)));
+        assert_eq!(r("2001:DB8::5"), Some(("2001:DB8::5".into(), 23)));
+        assert_eq!(r("[::1]:6400"), Some(("::1".into(), 6400)));
+        assert_eq!(r("[FE80::1]"), Some(("FE80::1".into(), 23)));
+        assert_eq!(r("::1:6400"), Some(("::1".into(), 6400)));
+        for t in ["FE80::1", "[::1]:6400", "::1:6400", "BBS.EXAMPLE.COM", "10.0.0.1:2323"] {
+            assert_eq!(r(t), crate::serial::dial_host_port(t), "{t} differs from the serial modem");
+        }
+    }
+
+    /// Point the config at a master/standalone gateway with peer-dial on, for a
+    /// test, and put both back afterwards.
+    struct PeerDialConfig(bool, String);
+    impl PeerDialConfig {
+        fn on() -> Self {
+            let c = crate::config::get_config();
+            let was = PeerDialConfig(c.allow_peer_dial, c.gateway_role.clone());
+            crate::config::update_config_value("allow_peer_dial", "true");
+            crate::config::update_config_value("gateway_role", "standalone");
+            was
+        }
+    }
+    impl Drop for PeerDialConfig {
+        fn drop(&mut self) {
+            crate::config::update_config_value("allow_peer_dial", &self.0.to_string());
+            crate::config::update_config_value("gateway_role", &self.1);
+        }
+    }
+
+    /// Register `label` at `ip` as a slave would, answering the call when it
+    /// comes; returns the task standing in for the slave.
+    fn fake_remote_endpoint(ip: &str, label: &str) -> tokio::task::JoinHandle<()> {
+        use tokio::io::AsyncReadExt;
+        let (mut device_end, master_end) = tokio::io::duplex(64);
+        let facts = crate::relay::RemotePortFacts { mode: Some("modem".into()), erase: None };
+        let _gen = crate::relay::register_remote_port(ip.parse().unwrap(), label.into(), facts, master_end);
+        tokio::spawn(async move {
+            let mut b = [0u8; 1];
+            if device_end.read_exact(&mut b).await.is_ok() {
+                crate::relay::send_peer_answer(&mut device_end, Ok(())).await;
+                // Hold the call open until the test is done with it.
+                let _ = tokio::time::timeout(Duration::from_secs(5), device_end.read(&mut b)).await;
+            }
+        })
+    }
+
+    /// **`PORTA@<ip>` reaches the port registered as `A`.**  The label went on
+    /// the wire as dialled, and no gateway registers `PORTA`, so the long
+    /// spelling the local dial accepts failed for a remote one while `A@<ip>`
+    /// connected.  And **`CPM@<ip>` reaches a remote CP/M endpoint**, which this
+    /// modem did not recognise at all: it looked up `CPM@<ip>` as a host name.
+    #[tokio::test]
+    async fn test_a_remote_peer_is_dialled_by_its_registered_label() {
+        let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+        let _peer = PeerDialConfig::on();
+        // TEST-NET-2 addresses no other test registers.
+        for (dial, ip, label) in [
+            ("ATD PORTA@198.51.100.61\r", "198.51.100.61", "A"),
+            ("ATD CPM@198.51.100.62\r", "198.51.100.62", "CPM"),
+        ] {
+            let slave = fake_remote_endpoint(ip, label);
+            let mut m = CpmModem::new(true);
+            let out = m.service(dial.as_bytes().to_vec(), 65536, false).await;
+            let out = String::from_utf8_lossy(&out).to_string();
+            assert!(out.contains("CONNECT"), "{dial:?} answered {out:?}");
+            drop(m);
+            let _ = slave.await;
+        }
+    }
+
+    /// **A failed remote dial says why in the log**, and the emulator does not
+    /// call itself.  The guest only ever hears a result code; a slave whose
+    /// master refused the relay said NO CARRIER and logged nothing.
+    #[tokio::test]
+    async fn test_a_failed_remote_dial_is_logged() {
+        crate::logger::init();
+        let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+        let _peer = PeerDialConfig::on();
+        let ask = |dial: &'static str| async move {
+            let mut m = CpmModem::new(true);
+            String::from_utf8_lossy(&m.service(dial.as_bytes().to_vec(), 65536, false).await).to_string()
+        };
+        let logged = |what: &str| crate::logger::snapshot(2000).iter().any(|l| l.contains(what));
+
+        assert!(ask("ATD B@198.51.100.63\r").await.contains("NO CARRIER"));
+        assert!(logged("dial to B@198.51.100.63: no such endpoint is registered here"));
+
+        assert!(ask("ATD CPM@127.0.0.1\r").await.contains("NO CARRIER"));
+        assert!(logged("CPM@127.0.0.1 is this emulator"));
+
+        // A slave whose master is not there: the relay fails, and says so.
+        crate::config::update_config_value("gateway_role", "slave");
+        let c = crate::config::get_config();
+        let (host, port) = (c.slave_master_host.clone(), c.slave_master_port);
+        crate::config::update_config_value("slave_master_host", "127.0.0.1");
+        crate::config::update_config_value("slave_master_port", "1");
+        let out = ask("ATD A@198.51.100.64\r").await;
+        crate::config::update_config_value("slave_master_host", &host);
+        crate::config::update_config_value("slave_master_port", &port.to_string());
+        assert!(out.contains("NO CARRIER"), "{out:?}");
+        assert!(logged("dial to A@198.51.100.64 through master 127.0.0.1:1 failed"));
     }
 
     #[tokio::test]
@@ -1786,10 +1940,13 @@ mod tests {
 
     #[test]
     fn test_dial_target_parsing() {
-        assert_eq!(local_port("A"), Some(SerialPortId::A));
-        assert_eq!(local_port("B"), Some(SerialPortId::B));
-        assert_eq!(local_port("Z"), None);
-        assert_eq!(parse_host_port("bbs.example.com:23"), Some(("bbs.example.com".into(), 23)));
-        assert_eq!(parse_host_port("noport"), None);
+        assert_eq!(peer_label("A"), Some(Peer::Port(SerialPortId::A)));
+        assert_eq!(peer_label("PORTB"), Some(Peer::Port(SerialPortId::B)));
+        assert_eq!(peer_label("CPM"), Some(Peer::Cpm));
+        assert_eq!(peer_label("Z"), None);
+        // The registered label, whatever was dialled.
+        assert_eq!(peer_label("PORTA").map(Peer::wire_label), Some("A"));
+        assert_eq!(resolve_host_port("bbs.example.com:23"), Some(("bbs.example.com".into(), 23)));
+        assert_eq!(resolve_host_port("noport"), Some(("noport".into(), 23)));
     }
 }
