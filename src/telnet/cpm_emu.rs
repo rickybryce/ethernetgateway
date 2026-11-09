@@ -865,7 +865,15 @@ impl TelnetSession {
             return Ok(());
         }
         let bytes = job.len();
-        let notice = match job.write(transfer_dir, format) {
+        // **Off the async worker.**  Closing a job renders it -- an ODT is a
+        // zip built in memory -- writes and syncs the file, and measures and
+        // sweeps the spool folder: file I/O that on an SD card can take a
+        // tokio worker for long enough to stall every other session on it.
+        let dir = transfer_dir.to_string();
+        let written = tokio::task::spawn_blocking(move || job.write(&dir, format))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(format!("the print job failed: {e}"))));
+        let notice = match written {
             Ok(name) => {
                 glog!("CP/M printer: printed {bytes} bytes to {name}");
                 self.green(&format!("[printed {bytes} bytes to {name}]"))
