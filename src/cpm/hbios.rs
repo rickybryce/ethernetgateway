@@ -145,8 +145,20 @@ pub enum HbiosOutcome {
 /// "answered" keeps its single meaning at every existing call site — this asks
 /// a different question (was there anything to report?) from the one the
 /// outcome answers (did the guest get resumed?).
-pub fn is_idle_status_poll(cpm: &Cpm, func: u8) -> bool {
-    func == FN_IST && cpm.modem_rx_len() == 0
+///
+/// **Asked of the answer [`service`] just gave, in `A`**, which is what makes
+/// the doc above true: zero is "nothing waiting" on our unit, and a negative
+/// result is a refusal.  It used to ask whether *our* ring was empty, so a
+/// guest polling a unit that is not ours -- a unit-1 build on an `hbios_2`
+/// profile -- while peer bytes sat unread in our ring was refused on every call
+/// and never paced, and the ring never drained because nothing read our unit.
+/// Call it after `service`, on the same stop.
+pub fn is_idle_status_poll(cpm: &mut Cpm, func: u8) -> bool {
+    if func != FN_IST {
+        return false;
+    }
+    let a = cpm.reg8(iz80::Reg8::A);
+    a == 0 || a & 0x80 != 0
 }
 
 /// Service one [`super::Stop::Hbios`] call against the virtual modem.
@@ -521,6 +533,32 @@ mod tests {
         m.port_out(0x83, b'Z');
         assert!(m.modem_drain_tx().is_empty(), "a port write reaches nothing");
         assert_eq!(m.modem_rx_len(), 2, "ring untouched");
+    }
+
+    /// **A status poll with nothing to report is idle, refused or not.**
+    /// Our unit with bytes waiting is the one busy answer.  A poll of a unit
+    /// that is not ours was paced only while our own ring was empty, so with
+    /// peer bytes unread in it the refused poll spun the host unpaced.
+    #[test]
+    fn test_a_refused_status_poll_is_idle_even_with_bytes_waiting() {
+        let (mut cpm, abort) = machine_with_call(FN_IST, 1, "hbios_1");
+        cpm.modem_queue_rx(b"abc");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_IST));
+        service(&mut cpm, FN_IST);
+        assert!(!is_idle_status_poll(&mut cpm, FN_IST), "our unit with bytes waiting is busy");
+
+        let (mut cpm, abort) = machine_with_call(FN_IST, 1, "hbios_1");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_IST));
+        service(&mut cpm, FN_IST);
+        assert!(is_idle_status_poll(&mut cpm, FN_IST), "our unit, nothing waiting");
+
+        let (mut cpm, abort) = machine_with_call(FN_IST, 1, "hbios_2");
+        cpm.modem_queue_rx(b"abc");
+        assert_eq!(cpm.run(100, &abort), Stop::Hbios(FN_IST));
+        service(&mut cpm, FN_IST);
+        assert_eq!(cpm.reg8(iz80::Reg8::A), ERR);
+        assert!(is_idle_status_poll(&mut cpm, FN_IST), "a refused poll spins unpaced");
+        assert!(!is_idle_status_poll(&mut cpm, FN_OST), "only input status is a wait loop");
     }
 
     #[test]
