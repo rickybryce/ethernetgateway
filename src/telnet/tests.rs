@@ -15546,7 +15546,7 @@ fn test_the_port_screen_applies_on_every_exit_and_k_asks_before_dropping_a_sessi
     };
     let outer = body_of("async fn modem_settings(");
     let screen = body_of("async fn modem_settings_screen(");
-    let shown = outer.find("let shown = self.modem_settings_screen(id).await;").expect("the screen runs");
+    let shown = outer.find("let shown = self.modem_settings_screen(id, &mut original_cfg).await;").expect("the screen runs");
     let applied = outer
         .find("let applied = self.modem_apply_settings(id, &original_cfg).await;")
         .expect("the apply runs unconditionally");
@@ -15568,6 +15568,38 @@ fn test_the_port_screen_applies_on_every_exit_and_k_asks_before_dropping_a_sessi
     assert!(write < restart, "the port restarts before the new key is written");
     assert!(k.contains("if running {\n                        crate::serial::restart_serial(id);"));
     assert_eq!(k.matches("restart_serial").count(), 1, "K restarts by another route too");
+}
+
+/// **T applies the mode once.**  The toggle applies on the spot and moves the
+/// screen's baseline forward, so the apply on the way out finds nothing left to
+/// do.  It used to apply against its own snapshot and leave the screen's alone,
+/// so Q restarted the port a second time -- or, with someone connected by then,
+/// asked about a change already made and reverted the file on a "no" while the
+/// port kept running the new mode.
+#[tokio::test]
+async fn test_the_mode_toggle_is_applied_once() {
+    use crate::config::SerialPortId;
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let id = SerialPortId::B;
+    let key = crate::config::serial_key(id, "mode");
+    let before = crate::config::get_config().port(id).mode.clone();
+    crate::config::update_config_value(&key, "modem");
+    let mut sess = make_test_session(TerminalType::Ansi);
+    let mut baseline = crate::config::get_config();
+    crate::serial::take_restart_request(id);
+
+    sess.toggle_serial_mode(id, &mut baseline).await.unwrap();
+    let toggled = crate::config::get_config().port(id).mode.clone();
+    let restarted = crate::serial::take_restart_request(id);
+    // What the screen's exit does next.
+    sess.modem_apply_settings(id, &baseline).await.unwrap();
+    let again = crate::serial::take_restart_request(id);
+    crate::config::update_config_value(&key, &before);
+
+    assert_eq!(toggled, "console", "T cycles modem -> console");
+    assert!(restarted, "T applies the new mode at once");
+    assert!(!again, "leaving the screen applied the same change a second time");
+    assert_eq!(baseline.port(id).mode, "console", "the baseline moved forward");
 }
 
 /// **Leaving the port screen never drops someone else unasked.**  Settings for

@@ -515,8 +515,10 @@ impl TelnetSession {
         id: crate::config::SerialPortId,
     ) -> Result<(), std::io::Error> {
         // Snapshot current config so we can detect changes and revert if needed.
-        let original_cfg = config::get_config();
-        let shown = self.modem_settings_screen(id).await;
+        // The screen moves it forward when T applies a change on the spot, so
+        // this apply sees only what is still pending.
+        let mut original_cfg = config::get_config();
+        let shown = self.modem_settings_screen(id, &mut original_cfg).await;
         // Applied however the screen ended, not only on Q: a connection that
         // drops inside a sub-screen (parity, flow, ...) has already saved what
         // it changed there, and leaving that unapplied would hide it -- the
@@ -533,6 +535,7 @@ impl TelnetSession {
     async fn modem_settings_screen(
         &mut self,
         id: crate::config::SerialPortId,
+        baseline: &mut config::Config,
     ) -> Result<(), std::io::Error> {
         loop {
             self.clear_screen().await?;
@@ -836,7 +839,7 @@ impl TelnetSession {
                     .ok();
                 }
                 "t" => {
-                    self.toggle_serial_mode(id).await?;
+                    self.toggle_serial_mode(id, baseline).await?;
                 }
                 "s" => {
                     self.modem_select_port(id).await?;
@@ -1115,9 +1118,19 @@ impl TelnetSession {
     /// the OTHER port's mode is fine — that restart doesn't affect
     /// their connection.  Console-mode sessions are raw passthroughs
     /// that don't run TelnetSession, so they never reach this code.
+    ///
+    /// **Applied against the screen's `baseline`, which it then moves
+    /// forward.**  It used to apply against a snapshot of its own and leave
+    /// the screen's untouched, so leaving with Q saw the mode as still changed
+    /// and applied it a second time: a second restart, or -- with someone
+    /// connected by then -- "Restart Port B now?" about a change already made,
+    /// where N reverted the file while the port kept running the new mode.
+    /// Against the baseline, anything else changed on this screen goes with
+    /// the same restart, and an N puts back the state the screen opened with.
     pub(in crate::telnet) async fn toggle_serial_mode(
         &mut self,
         id: crate::config::SerialPortId,
+        baseline: &mut config::Config,
     ) -> Result<(), std::io::Error> {
         if self.is_serial && self.serial_port_id == Some(id) {
             self.show_error_lines(&[
@@ -1135,9 +1148,8 @@ impl TelnetSession {
             return Ok(());
         }
 
-        let original_cfg = config::get_config();
         // Cycle Modem -> Console -> Kermit -> Modem.
-        let new_mode = match original_cfg.port(id).mode.as_str() {
+        let new_mode = match config::get_config().port(id).mode.as_str() {
             "modem" => "console",
             "console" => "kermit",
             _ => "modem",
@@ -1149,7 +1161,10 @@ impl TelnetSession {
         })
         .await
         .ok();
-        self.modem_apply_settings(id, &original_cfg).await
+        let applied = self.modem_apply_settings(id, baseline).await;
+        // Applied or reverted, the file now matches the running port.
+        *baseline = config::get_config();
+        applied
     }
 
     /// Revert one port's config to a previous snapshot using a single

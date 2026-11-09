@@ -1137,6 +1137,12 @@ pub fn restart_serial(id: SerialPortId) {
     SERIAL_RESTART[id.index()].store(true, Ordering::SeqCst);
 }
 
+/// Test hook: whether a restart was requested for `id`, clearing the request.
+#[cfg(test)]
+pub(crate) fn take_restart_request(id: SerialPortId) -> bool {
+    SERIAL_RESTART[id.index()].swap(false, Ordering::SeqCst)
+}
+
 /// One detected serial port: the device path plus whatever the OS could tell
 /// us about the hardware behind it.
 ///
