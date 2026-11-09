@@ -330,7 +330,10 @@ fn main() {
     // Now that we own the directory, stand down for a later copy that asks.
     instance::spawn_handover_watcher(shutdown.clone(), stop.clone());
 
+    let mut cycle: u64 = 0;
     loop {
+        cycle += 1;
+        let first_cycle = cycle == 1;
         // Load or create config (re-read from disk on each restart)
         let cfg = config::load_or_create_config();
         // File logging can only be armed once the config exists, so the three
@@ -458,7 +461,8 @@ fn main() {
         // cause named and nothing on screen from a desktop launch.
         if let Err(e) = std::fs::create_dir_all(&cfg.transfer_dir) {
             let headline = format!(
-                "FATAL: could not create the transfer directory '{}': {}",
+                "{}: could not create the transfer directory '{}': {}",
+                if first_cycle { "FATAL" } else { "ERROR" },
                 cfg.transfer_dir, e
             );
             let (uid, name) = config::current_owner_identity();
@@ -487,8 +491,17 @@ fn main() {
             for line in &lines {
                 glog!("{}", line);
             }
-            gui::show_startup_failure(&headline, &lines, shutdown.clone(), gui_ctx.clone());
-            std::process::exit(1);
+            // **Fatal only at launch.**  On a later cycle the path came from a
+            // settings change -- typed on a C64, say, then Save and Restart --
+            // and exiting here took the gateway down with the bad value saved,
+            // so the next launch failed too and the operator had no screen left
+            // to fix it from.  Serve everything else, as the CP/M folders below
+            // do; transfers report their own failure until the path is fixed.
+            if first_cycle {
+                gui::show_startup_failure(&headline, &lines, shutdown.clone(), gui_ctx.clone());
+                std::process::exit(1);
+            }
+            glog!("       Still serving; transfers will fail until transfer_dir is fixed.");
         }
 
         // With the emulator enabled, lay out its container now rather than on
@@ -1155,6 +1168,31 @@ mod tests {
         let src = include_str!("main.rs").replace("\r\n", "\n");
         let end = src.find("#[cfg(test)]\nmod tests").expect("test module marker");
         src[..end].to_string()
+    }
+
+    /// A transfer directory that cannot be created is fatal **only at launch**.
+    ///
+    /// The path can be changed from every settings screen and applied with Save
+    /// and Restart, which goes round this loop again.  Exiting there took the
+    /// gateway down with the bad path already saved, so it never came back.
+    /// Bounded to the `create_dir_all(&cfg.transfer_dir)` failure arm.
+    #[test]
+    fn test_a_bad_transfer_dir_is_fatal_only_on_the_first_cycle() {
+        let src = main_source();
+        let start = src
+            .find("if let Err(e) = std::fs::create_dir_all(&cfg.transfer_dir) {")
+            .expect("the transfer-dir check");
+        let arm = &src[start..start + src[start..].find("\n        }\n").expect("arm end")];
+        assert!(
+            arm.contains(
+                "if first_cycle {\n                \
+                 gui::show_startup_failure(&headline, &lines, shutdown.clone(), gui_ctx.clone());\n                \
+                 std::process::exit(1);\n            }"
+            ),
+            "the exit must sit inside `if first_cycle`"
+        );
+        assert_eq!(arm.matches("std::process::exit").count(), 1, "one exit, the guarded one");
+        assert!(src.contains("let first_cycle = cycle == 1;"), "first_cycle means the first pass");
     }
 
     /// `reset_for_next_cycle` can only close its window if every SIGINT/SIGTERM
