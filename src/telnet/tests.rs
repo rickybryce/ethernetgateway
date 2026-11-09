@@ -17430,8 +17430,12 @@ async fn test_credentials_set_at_telnet_are_the_letters_typed() {
     let ssh = include_str!("../ssh.rs").replace("\r\n", "\n");
     let f = body(&ssh, "async fn auth_password(");
     assert!(f.contains("crate::credential::username_matches(user, &self.username)"), "ssh user");
-    let f = body(&ssh, "async fn auth_publickey(");
+    let f = body(&ssh, "async fn key_auth(");
     assert!(f.contains("crate::credential::username_matches(user, &self.username)"), "ssh key user");
+    // russh 0.65: the trait method only unwraps the verified key; the
+    // decision (and the check above) must be the one it hands it to.
+    let f = body(&ssh, "async fn auth_publickey(");
+    assert!(f.contains("self.key_auth(user, key.public_key).await"), "ssh key delegate");
     let web = include_str!("../webserver.rs").replace("\r\n", "\n");
     let f = body(&web, "async fn is_authorized(");
     assert!(f.contains("crate::credential::username_matches(user, &cfg.username)"), "web user");
