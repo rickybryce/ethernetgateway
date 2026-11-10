@@ -306,7 +306,8 @@ pub fn request_handover(stop: &AtomicBool) -> std::io::Result<Handover> {
             clear_request_files();
             return Ok(Handover::Took(lock));
         }
-        match next_step(start.elapsed(), !path.exists(), stop.load(Ordering::SeqCst)) {
+        let agreed = holder_agreed(path.exists(), claim.exists());
+        match next_step(start.elapsed(), agreed, stop.load(Ordering::SeqCst)) {
             Step::Wait => {}
             Step::WaitForAgreed => {
                 if !std::mem::replace(&mut said_still_stopping, true) {
@@ -332,6 +333,19 @@ pub fn request_handover(stop: &AtomicBool) -> std::io::Result<Handover> {
             }
         }
     }
+}
+
+/// Has the running copy agreed to stand down?
+///
+/// **Either sign will do: the request gone, or a claim made.**  The holder
+/// claims and then deletes the request, and the delete can fail -- a Windows
+/// virus scanner holding the file open is enough.  Read from the request alone,
+/// that holder had not agreed, so at the deadline the newcomer tried to take
+/// the request back, lost the claim to it, and tried again on every pass with
+/// no deadline left at all.  The newcomer clears a leftover claim before it
+/// asks, so a claim present now was made by the holder, for this request.
+fn holder_agreed(request_present: bool, claim_present: bool) -> bool {
+    !request_present || claim_present
 }
 
 /// What [`request_handover`] does after a poll that did not get the lock.
@@ -610,9 +624,17 @@ mod tests {
             "a stop does not take the request back, or misreports who has it"
         );
         assert!(
-            newcomer.contains("match next_step(start.elapsed(), !path.exists(), stop.load(Ordering::SeqCst)) {"),
-            "the wait no longer reads the stop flag"
+            newcomer.contains(
+                "let agreed = holder_agreed(path.exists(), claim.exists());\n        \
+                 match next_step(start.elapsed(), agreed, stop.load(Ordering::SeqCst)) {"
+            ),
+            "the wait no longer reads the stop flag, or reads agreement from the request alone"
         );
+        // A holder that claimed but could not delete the request has agreed:
+        // read otherwise, the newcomer's give-up loses the claim on every pass.
+        assert!(holder_agreed(true, true), "a claim made with the request still there is agreement");
+        assert!(holder_agreed(false, false), "the request taken is agreement");
+        assert!(!holder_agreed(true, false), "an untouched request is not agreement");
     }
 
     /// **The wait has to outlast a healthy shutdown, or a working handover
