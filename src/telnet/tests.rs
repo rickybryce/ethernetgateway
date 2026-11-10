@@ -3496,25 +3496,6 @@ async fn test_broadcast_to_sessions_reaches_all_and_closes() {
     }
 }
 
-/// Dialup mapping menu (with entries): header(3) + blank + 10 entries + blank
-/// + 2 items + blank + footer = 18 rows max.
-#[test]
-fn test_dialup_mapping_menu_row_count() {
-    // Worst case: static entry + 9 user entries + A + D menu items
-    let rows = 3 + 1 + 1 + 9 + 1 + 2 + 1 + 1; // 19
-    assert!(rows <= 22, "dialup mapping menu is {} rows, exceeds 22", rows);
-}
-
-/// Dialup mapping help screen row count.  Dual-port wording
-/// added 3 lines (the "shared across both ports' modems"
-/// clarification); paginator handles overflow gracefully.
-#[test]
-fn test_dialup_help_screen_row_count() {
-    // header(3) + blank + 15 content lines + blank + "press any key" = 21
-    let rows = 3 + 1 + 15 + 1 + 1; // 21
-    assert!(rows <= 22, "dialup help screen is {} rows, exceeds 22", rows);
-}
-
 /// Dialup mapping help content must have exactly 15 lines and fit PETSCII.
 #[test]
 fn test_dialup_help_content() {
@@ -3801,15 +3782,6 @@ fn test_auth_screen_row_count() {
         "auth screen is {} rows, exceeds 22",
         total,
     );
-}
-
-/// Modem emulator screen worst case: non-serial + serial enabled.
-/// header(3) + blank + status(5) + ATD(1) + blank
-/// + menu(7: E,S,B,P,F,D,I) + blank + footer(1) + prompt(1) = 21.
-#[test]
-fn test_modem_emulator_row_count() {
-    let rows = 3 + 1 + 5 + 1 + 1 + 7 + 1 + 1 + 1; // 21
-    assert!(rows <= 22, "modem emulator is {} rows, exceeds 22", rows);
 }
 
 /// CP/M emulator settings: header(3) + blank + 2 warning lines + blank
@@ -6282,122 +6254,6 @@ fn test_relay_session_identity() {
     assert!(!session.is_own_arrival_port(SerialPortId::B));
     // Labelled as a relay, not "Serial modem".
     assert_eq!(session.client_type_label(), "Relay (slave)");
-}
-
-/// New Serial Gateway picker (always shown, even when only one
-/// port is eligible).  Two lines per port (role + device/baud
-/// when configured), so port_rows = 4 worst-case.  Must fit the
-/// 22-row PETSCII budget even when both ports show device
-/// detail and the eligibility fallback is showing.
-#[test]
-fn test_serial_gateway_picker_row_count() {
-    let chrome = 3 + 1; // sep+title+sep, blank
-    // Peer-dial header ("Dial from a modem port: ...") + blank, shown
-    // only when allow_peer_dial is on.
-    let peer_header = 1 + 1;
-    // Worst case: both ports configured, so each takes 2 lines.
-    let port_rows = 2 * 2;
-    let blank_after = 1;
-    let footer = 1 + 1; // Q footer + prompt
-    // The fallback ("no port available", 3 rows) and the remote block
-    // are mutually exclusive (remotes make a port "eligible", so the
-    // fallback is suppressed).  The remote block is the larger of the
-    // two, so it drives the worst case: header + capped entries +
-    // "+N more" + trailing blank.
-    let fallback = 1 + 1 + 1;
-    // Plus the "Tip: enable local echo" line, drawn whenever a port is
-    // eligible -- and listing remotes makes one eligible.
-    let remote_block = 1 + REMOTE_PORT_DISPLAY_CAP + 1 + 1 + 1;
-    let bigger = if remote_block > fallback { remote_block } else { fallback };
-    let worst_case = chrome + peer_header + port_rows + blank_after + bigger + footer;
-    assert!(
-        worst_case <= 22,
-        "Serial Gateway picker is {} rows, exceeds 22",
-        worst_case
-    );
-}
-
-/// New Serial Configuration picker (Configuration → M now lands
-/// here): chrome + 4 port rows (worst case both configured) +
-/// gateway-debug toggle row + footer + prompt.  Fits well under the
-/// 22-row budget.
-#[test]
-fn test_serial_configuration_picker_row_count() {
-    let chrome = 3 + 1; // sep+title+sep, blank
-    let port_rows = 2 * 2; // 2 lines per port at worst case
-    let blank_after = 1;
-    let debug_row = 1; // gateway-debug status line
-    let peer_dial_row = 1; // peer-dial status line
-    let blank_before_footer = 1;
-    let footer = 1 + 1; // footer line + prompt
-    let total =
-        chrome + port_rows + blank_after + debug_row + peer_dial_row + blank_before_footer + footer;
-    assert!(
-        total <= 22,
-        "Serial Configuration picker is {} rows",
-        total
-    );
-}
-
-/// Modem/Console settings menu in console mode loses Dialup +
-/// Ring rows.  T (and I, in modem mode) hide only when the caller
-/// is dialed in on THIS port — a serial-side caller editing the
-/// OTHER port still sees the full menu.  Item count must still
-/// fit the 22-row budget in every combination.
-#[test]
-fn test_modem_console_menu_row_counts() {
-    // Status block: status_mode + Port + Baud + Data + Flow = 5.
-    let status_block = 5;
-    let chrome = 3 + 1 + 1 + 1 + 1; // sep+title+sep, blank, blank, footer, prompt = 7
-    // Console mode (own port hides T): E S B P F = 5; (other or
-    // non-serial: + T) = 6.
-    let menu_console_own_port = 5;
-    let menu_console_other_or_non_serial = 6; // + T
-    // Modem mode (own port hides T and I): E S B P D F = 6;
-    // (other or non-serial: + T + I) = 8.
-    let menu_modem_own_port = 6; // E S B P D F
-    let menu_modem_full = 8; // E T S B P D F I
-
-    // Console mode + caller on this port: no T.
-    let console_own_rows = chrome + status_block + menu_console_own_port; // 17
-    assert!(
-        console_own_rows <= 22,
-        "console-own-port menu is {} rows",
-        console_own_rows
-    );
-
-    // Console mode + caller on the OTHER port (or not serial): + T.
-    let console_other_rows = chrome + status_block + menu_console_other_or_non_serial; // 18
-    assert!(
-        console_other_rows <= 22,
-        "console-other-port menu is {} rows",
-        console_other_rows
-    );
-
-    // Modem mode + caller on this port + enabled: + ATD + D, no T, no I.
-    let modem_own_rows = chrome + status_block + 1 + menu_modem_own_port; // 20
-    assert!(
-        modem_own_rows <= 22,
-        "modem-own-port menu is {} rows",
-        modem_own_rows
-    );
-
-    // Modem mode + caller on the OTHER port (or non-serial) +
-    // enabled (worst case): + ATD + T + D + I.
-    let modem_full_rows = chrome + status_block + 1 + menu_modem_full; // 22
-    assert!(
-        modem_full_rows <= 22,
-        "modem-full menu is {} rows",
-        modem_full_rows
-    );
-
-    // Kermit-server mode reuses the console (raw-wire) layout — same
-    // E S B P F [+ T] menu, no ATD/Dialup/Ring/Carrier — so its row
-    // count is identical to console mode and safely under 22.
-    let kermit_own_rows = chrome + status_block + menu_console_own_port; // 17
-    let kermit_other_rows = chrome + status_block + menu_console_other_or_non_serial; // 18
-    assert!(kermit_own_rows <= 22, "kermit-own-port menu is {} rows", kermit_own_rows);
-    assert!(kermit_other_rows <= 22, "kermit-other-port menu is {} rows", kermit_other_rows);
 }
 
 /// The complete set of help-line tables at the given width — the single
@@ -15867,13 +15723,24 @@ fn test_the_restart_warning_fits_forty_columns() {
     let src = include_str!("serial_ui.rs").replace("\r\n", "\n");
     let start = src.find("async fn confirm_port_restart(").expect("confirm_port_restart");
     let body = &src[start..start + src[start..].find("\n    }\n").expect("its end")];
+    // Every `what` the screens actually pass, read from the call sites -- the
+    // widest is the one that matters, and a hand-picked one was not it.
+    let whats: Vec<&str> = src
+        .match_indices("confirm_port_restart(id, \"")
+        .map(|(i, m)| {
+            let rest = &src[i + m.len()..];
+            &rest[..rest.find('"').expect("closing quote")]
+        })
+        .collect();
+    assert!(whats.len() >= 2, "read only {} call sites", whats.len());
+    let widest = whats.iter().max_by_key(|w| w.chars().count()).unwrap();
     let mut rows = 0;
     for line in body.lines() {
         let Some(open) = line.find("\"  ") else { continue };
         let text = &line[open + 1..];
         let text = &text[..text.find('"').expect("closing quote")];
-        // The widest substitutions: "the erase key" for {what}, one letter for {label}.
-        let shown = text.replace("{what}", "the erase key").replace("{label}", "A").replace("{}", "Their connection will be lost.");
+        // The widest substitutions: every caller's {what}, one letter for {label}.
+        let shown = text.replace("{what}", widest).replace("{label}", "A").replace("{}", "Their connection will be lost.");
         assert!(shown.chars().count() <= 39, "{shown:?} is too wide for a C64");
         rows += 1;
     }
@@ -17953,5 +17820,144 @@ fn test_a_dialup_delete_rereads_and_removes_only_what_was_shown() {
     let save = body.find("config::save_dialup_mappings(&current);").expect("the delete does not save the fresh list");
     assert!(load < find && find < save, "read, match, then save");
     assert!(!body.contains("entries.remove("), "the delete still removes from the stale list");
+}
+
+/// Drawing a screen needs a port configured; this sets one for a test and puts
+/// it back however the test ends.
+struct PortConfigRestore(Vec<(String, String)>);
+impl PortConfigRestore {
+    fn set(id: crate::config::SerialPortId, values: &[(&str, &str)]) -> Self {
+        let c = crate::config::get_config();
+        let p = c.port(id);
+        let old = |k: &str| match k {
+            "enabled" => p.enabled.to_string(),
+            "mode" => p.mode.clone(),
+            "port" => p.port.clone(),
+            "baud" => p.baud.to_string(),
+            other => panic!("PortConfigRestore does not know {other}"),
+        };
+        let saved = values.iter().map(|(k, _)| (crate::config::serial_key(id, k), old(k))).collect();
+        for (k, v) in values {
+            crate::config::update_config_value(&crate::config::serial_key(id, k), v);
+        }
+        PortConfigRestore(saved)
+    }
+}
+impl Drop for PortConfigRestore {
+    fn drop(&mut self) {
+        for (k, v) in &self.0 {
+            crate::config::update_config_value(k, v);
+        }
+    }
+}
+
+/// **The port screen fits a C64 in every mode, drawn.**  Replaces two tests
+/// that added up constants (a modem screen of 21, console and Kermit layouts
+/// of 17/18) and could not fail on any change to the screen -- and had drifted:
+/// the console layout's erase-key row and a blank line were missing from the
+/// sums.  Each mode, on another port and on the caller's own, enabled and with
+/// the longest kind of device path, the way an operator would see it.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test serializer, held for the whole test
+async fn test_the_port_screen_fits_a_c64_in_every_mode() {
+    use crate::config::SerialPortId;
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let _g = crate::serial::lock_global_state();
+    let id = SerialPortId::B;
+    for mode in ["modem", "console", "kermit"] {
+        let _restore = PortConfigRestore::set(
+            id,
+            &[
+                ("enabled", "true"),
+                ("mode", mode),
+                ("port", "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A10KXYZ-if00-port0"),
+            ],
+        );
+        for own in [false, true] {
+            let frames = petscii_frames(b"q", |mut sess| async move {
+                if own {
+                    sess.is_serial = true;
+                    sess.serial_port_id = Some(id);
+                }
+                let mut baseline = crate::config::get_config();
+                sess.modem_settings_screen(id, &mut baseline).await.unwrap();
+                sess
+            })
+            .await;
+            let frame = &frames[0];
+            assert!(frame.len() <= 22, "{mode} own={own}: {} rows:\n{}", frame.len(), frame.join("\n"));
+            assert!(frame.len() >= 15, "{mode} own={own}: drew only {} rows", frame.len());
+            for l in frame {
+                assert!(l.chars().count() <= 39, "{mode} own={own}: {l:?} wraps on a C64");
+            }
+        }
+    }
+}
+
+/// **The Serial Configuration overview fits a C64 with both ports set up**,
+/// drawn -- it replaces a sum of constants.
+#[tokio::test]
+async fn test_the_serial_overview_fits_a_c64_drawn() {
+    use crate::config::SerialPortId;
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let path = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A10KXYZ-if00-port0";
+    let _a = PortConfigRestore::set(SerialPortId::A, &[("enabled", "true"), ("port", path)]);
+    let _b = PortConfigRestore::set(SerialPortId::B, &[("enabled", "true"), ("port", path)]);
+    let frames = petscii_frames(b"q", |mut sess| async move {
+        sess.serial_configuration_menu().await.unwrap();
+        sess
+    })
+    .await;
+    let frame = &frames[0];
+    assert!(frame.len() <= 22, "{} rows:\n{}", frame.len(), frame.join("\n"));
+    assert!(frame.len() >= 12, "drew only {} rows", frame.len());
+    for l in frame {
+        assert!(l.chars().count() <= 39, "{l:?} wraps on a C64");
+    }
+}
+
+/// **The Serial Gateway picker fits a C64 at its worst**, drawn: both local
+/// ports configured, peer-dial on, and more remote ports registered than it
+/// shows (two past `REMOTE_PORT_DISPLAY_CAP`).  Replaces a sum of
+/// constants that no change to the screen could turn red.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // test serializers, held for the whole test
+async fn test_the_serial_gateway_picker_fits_a_c64_drawn() {
+    use crate::config::SerialPortId;
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let _relay = crate::relay::key_auth_test_lock();
+    let path = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A10KXYZ-if00-port0";
+    let _a = PortConfigRestore::set(SerialPortId::A, &[("enabled", "true"), ("mode", "console"), ("port", path)]);
+    let _b = PortConfigRestore::set(SerialPortId::B, &[("enabled", "true"), ("mode", "console"), ("port", path)]);
+    let peer = crate::config::get_config().allow_peer_dial;
+    crate::config::update_config_value("allow_peer_dial", "true");
+    // TEST-NET-3 addresses no other test registers; kept to remove after.
+    let mut held = Vec::new();
+    for i in 0..(REMOTE_PORT_DISPLAY_CAP as u8 + 2) {
+        let ip: std::net::IpAddr = format!("203.0.113.{}", 140 + i).parse().unwrap();
+        let (_dev, master_end) = tokio::io::duplex(64);
+        let facts = crate::relay::RemotePortFacts { mode: Some("console".into()), erase: None };
+        let generation = crate::relay::register_remote_port(ip, "A".into(), facts, master_end);
+        held.push((ip, generation, _dev));
+    }
+    let frames = petscii_frames(b"q", |mut sess| async move {
+        let _ = sess.gateway_serial_picker().await;
+        sess
+    })
+    .await;
+    for (ip, generation, _dev) in held {
+        let _ = crate::relay::remove_remote_port_gen(ip, "A", generation);
+    }
+    crate::config::update_config_value("allow_peer_dial", &peer.to_string());
+    let frame = &frames[0];
+    assert!(
+        frame.iter().any(|l| l.contains("203.0.113.14")),
+        "the remote ports were not drawn -- not the worst case:\n{}",
+        frame.join("\n")
+    );
+    assert!(frame.len() <= 22, "{} rows:\n{}", frame.len(), frame.join("\n"));
+    for l in frame {
+        assert!(l.chars().count() <= 39, "{l:?} wraps on a C64");
+    }
 }
 

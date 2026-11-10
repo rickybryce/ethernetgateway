@@ -1021,7 +1021,10 @@ mod tests {
         let fmt = by_token("ibm3740").unwrap();
         for (what, at, value) in [
             ("a record count that cannot fit one extent", 15usize, 200u8),
-            ("a user number no CP/M uses", 0usize, 0x7F),
+            // Refused because the record is left with no live entry: an
+            // unmatched user byte by itself is skipped, not fatal (see
+            // `test_an_entry_under_no_user_is_skipped_not_refused`).
+            ("a record whose only entry is under a user no CP/M uses", 0usize, 0x7F),
         ] {
             let err = identify("whatever.dsk", fmt.min_bytes(), |f| {
                 if f.token != "ibm3740" {
@@ -1563,10 +1566,25 @@ mod tests {
         assert!(!looks_like_directory(&r));
     }
 
+    /// **A user byte past 15 is skipped, not refused** -- the rule the code
+    /// states, which this test's old name contradicted.  It passed only because
+    /// changing the record's one entry left no live entry at all.  Both halves
+    /// now: a record whose only entry is under no CP/M user is refused (nothing
+    /// live), and one whose label-like entry sits beside a real file is a
+    /// directory -- the ITC disks' vendor label, first byte `0x81`, is that.
     #[test]
-    fn test_directory_heuristic_rejects_bad_user_number() {
-        let mut r = dir_record("GOOD    COM");
-        r[0] = 99;
-        assert!(!looks_like_directory(&r));
+    fn test_an_entry_under_no_user_is_skipped_not_refused() {
+        let mut only = dir_record("GOOD    COM");
+        only[0] = 99;
+        assert!(!looks_like_directory(&only), "a record with no live entry passed");
+
+        let mut mixed = dir_record("GOOD    COM");
+        let label = {
+            let mut l = dir_record("USERDISK   ");
+            l[0] = 0x81;
+            l
+        };
+        mixed[32..64].copy_from_slice(&label[..32]);
+        assert!(looks_like_directory(&mixed), "an unmatched user byte refused a real directory");
     }
 }

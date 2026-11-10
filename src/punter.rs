@@ -2049,11 +2049,13 @@ mod tests {
         };
         let (peer_wr, mut rd) = duplex(64);
         drop(peer_wr); // immediate EOF on every read
-        let (mut wr, _drain) = duplex(256);
+        let (mut wr, mut drain) = duplex(256);
         let mut state = ReadState::default();
         // Returns `()`: it cannot fail a complete transfer.  What is left to
         // pin is that a closed pipe ends it at once rather than waiting out
-        // every stage.
+        // every stage -- and ends it: the one GOO and nothing after, because
+        // the timing alone passed with every error ignored and the handshake
+        // carried on into the closed pipe.
         let start = std::time::Instant::now();
         end_off_receiver(&mut rd, &mut wr, false, false, false, &mut state, &t, true).await;
         assert!(
@@ -2061,6 +2063,11 @@ mod tests {
             "a torn-down peer kept end-off waiting {:?}",
             start.elapsed()
         );
+        drop(wr);
+        let mut written = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut drain, &mut written).await.unwrap();
+        assert_eq!(written.len(), 3, "end-off kept writing to a closed peer: {written:?}");
+        assert_eq!(Code::from_window(&[written[0], written[1], written[2]]), Some(Code::Goo));
     }
 
     #[tokio::test]
@@ -2166,7 +2173,7 @@ mod tests {
         };
         let (peer_wr, mut rd) = duplex(64);
         drop(peer_wr);
-        let (mut wr, _drain) = duplex(256);
+        let (mut wr, mut drain) = duplex(256);
         let mut state = ReadState::default();
         let start = std::time::Instant::now();
         end_off_sender(&mut rd, &mut wr, false, false, false, &mut state, &t).await;
@@ -2174,6 +2181,21 @@ mod tests {
             start.elapsed() < std::time::Duration::from_millis(500),
             "a torn-down peer kept end-off waiting {:?}",
             start.elapsed()
+        );
+        // And the handshake stops: the one ACK, then no SYN -- only the three
+        // closing S/B, which are sent unconditionally and unread by design
+        // (CCGMS's receiver needs all three; see `end_off_sender`).  The
+        // timing alone passed with every error ignored and the handshake
+        // carried on into the closed pipe.
+        drop(wr);
+        let mut written = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut drain, &mut written).await.unwrap();
+        let codes: Vec<Option<Code>> =
+            written.chunks(3).map(|c| Code::from_window(&[c[0], c[1], c[2]])).collect();
+        assert_eq!(
+            codes,
+            [Some(Code::Ack), Some(Code::Sb), Some(Code::Sb), Some(Code::Sb)],
+            "end-off kept handshaking with a closed peer: {written:?}"
         );
     }
 

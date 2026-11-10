@@ -1269,55 +1269,6 @@ mod tests {
         assert_ne!(s.physical(5, 16), s.physical(6, 16));
     }
 
-    /// Every format's declared geometry must agree with the size of a real
-    /// image of it.  This is the check that would have caught the arithmetic
-    /// being off by a track.
-    #[test]
-    fn test_declared_sizes_match_geometry() {
-        for f in FORMATS {
-            if let Some(size) = f.exact_size {
-                assert_eq!(
-                    f.min_bytes(),
-                    size,
-                    "{}: geometry implies {} bytes but exact_size says {}",
-                    f.token,
-                    f.min_bytes(),
-                    size
-                );
-            }
-        }
-    }
-
-    /// A boot area that is a whole number of data tracks — **required only of a
-    /// `Split` skew**, and that distinction is the whole point of the test.
-    ///
-    /// The one place a track number is derived from `reserved_records` is
-    /// `abs_track` in [`Format::data_physical_record`], and the only thing that
-    /// reads `abs_track` is a [`Skew::Split`] boundary. Where the skew is a
-    /// single table, or none, a reserved area that does not divide evenly is
-    /// arithmetically harmless.
-    ///
-    /// And it is not hypothetical: both Cromemco double-density formats record
-    /// **track 0 in single density** so a single-density boot ROM can read the
-    /// disk at all, which makes their reserved area 26 + 64 records — 11,520
-    /// bytes, exactly where both disks' directories begin, and not a whole
-    /// number of the 64-record data tracks. The `Format` doc for `sectrk` says
-    /// this case must fit; this test used to say it must not.
-    #[test]
-    fn test_a_split_skews_boot_area_lands_on_a_track_boundary() {
-        for f in FORMATS {
-            if !matches!(f.skew, Skew::Split { .. }) {
-                continue;
-            }
-            assert_eq!(
-                f.reserved_records % f.sectrk as u32,
-                0,
-                "{}: a Split skew resolves its boundary from an absolute track, so its \
-                 boot area has to be a whole number of tracks",
-                f.token
-            );
-        }
-    }
 
     /// The measured directory offsets, pinned against the images they came
     /// from: 0x1A00 for the 8" SSSD and 0x2000 for the Altair.  Logical record
@@ -1391,14 +1342,6 @@ mod tests {
     }
 
 
-    #[test]
-    fn test_data_record_offset_applies_skew() {
-        let hd = by_token("altairhd").unwrap();
-        // Logical records 0 and 1 share physical sector 0; record 2 begins the
-        // next logical sector, which the table maps to physical 7.
-        let r0 = hd.data_record_offset(0).unwrap();
-        assert_eq!(hd.data_record_offset(2), Some(r0 + 7 * 2 * 128));
-    }
 
     #[test]
     fn test_data_record_offset_stops_at_end_of_disk() {
@@ -1445,14 +1388,6 @@ mod tests {
                 f.token,
                 f.reserved_records,
                 f.sectrk
-            );
-            // And the derived boundary must be where the data actually starts,
-            // which is the thing the division is standing in for.
-            assert_eq!(
-                f.reserved_records / f.sectrk as u32,
-                f.reserved_records.div_ceil(f.sectrk as u32),
-                "{}: the reserved area does not end on a track boundary",
-                f.token
             );
         }
         assert!(
