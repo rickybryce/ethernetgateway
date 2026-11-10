@@ -264,8 +264,6 @@ pub fn peer_outcome_code(outcome: PeerCallOutcome) -> &'static str {
     }
 }
 
-
-
 /// Wait for a placed peer call's outcome from the target's progress bytes
 /// (`0` RING, `1` answered, anything else an error).  Shared by
 /// [`request_peer_call`] and [`request_cpm_call`] so the two cannot disagree
@@ -414,8 +412,11 @@ pub struct CpmIncomingCall {
 /// any call waiting in the slot -- so a test that dials the pool, or counts it,
 /// could find another test's session there.  A session holds this shared for
 /// as long as it is in the pool (see `CpmPeerReg`); a test that needs the pool
-/// to itself holds it exclusively.  Take `CONFIG_TEST_LOCK` first if both are
-/// needed: a session under a test that holds that lock waits here.
+/// to itself holds it exclusively, and takes `CONFIG_TEST_LOCK` first: a
+/// session under a test that holds that lock waits here.  The lock is
+/// write-preferring, so a test that ran two CP/M sessions at once could stall
+/// its second behind a queued exclusive holder -- none does; one that must
+/// should take the gate itself, before either session starts.
 #[cfg(test)]
 pub(crate) static CPM_POOL_TEST_GATE: std::sync::LazyLock<std::sync::Arc<tokio::sync::RwLock<()>>> =
     std::sync::LazyLock::new(Default::default);
@@ -524,7 +525,12 @@ pub async fn request_cpm_call(
 ) -> Result<tokio::io::DuplexStream, PeerCallOutcome> {
     if nobody_else_listens(CPM_PEER_LISTENERS.load(Ordering::SeqCst), caller_in_pool) {
         // Busy at once, as a phone calling its own number is, rather than
-        // ringing out the caller's S7 with nobody there to pick up.
+        // ringing out the caller's S7 with nobody there to pick up.  Said in
+        // the log, or it reads like a slot another caller took.
+        glog!(
+            "CP/M endpoint: no {}CP/M session is listening to answer the call",
+            if caller_in_pool { "other " } else { "" }
+        );
         return Err(PeerCallOutcome::Busy);
     }
     let (caller_end, target_end) = tokio::io::duplex(65536);
@@ -10227,6 +10233,8 @@ mod tests {
     #[test]
     fn test_cpm_pool_listener_count_and_announce_owner() {
         // The claim is also exercised by the announcer-exit test.
+        // Config, then the gate, as `CPM_POOL_TEST_GATE` asks.
+        let _cfg = crate::config::CONFIG_TEST_LOCK.blocking_lock();
         let _lock = crate::relay::key_auth_test_lock();
         // The pool to itself: an emulator test's session would be counted.
         let _pool = CPM_POOL_TEST_GATE.blocking_write();
