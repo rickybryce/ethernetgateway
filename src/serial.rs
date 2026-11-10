@@ -247,14 +247,26 @@ pub enum PeerCallOutcome {
 /// the right numeric/verbose form and folds them to `NO CARRIER` at low `X`, so
 /// this says what happened and lets that decide what the caller can hear.
 fn send_peer_outcome_result(state: &mut ModemState, outcome: PeerCallOutcome) {
+    send_result(state, peer_outcome_code(outcome));
+}
+
+/// The result code a modem reports for a peer call that was not bridged.  One
+/// copy for the serial modem and the CP/M emulator's, which had three of their
+/// own.
+pub fn peer_outcome_code(outcome: PeerCallOutcome) -> &'static str {
     match outcome {
-        PeerCallOutcome::Busy => send_result(state, "BUSY"),
-        PeerCallOutcome::NoAnswer => send_result(state, "NO ANSWER"),
+        PeerCallOutcome::Busy => "BUSY",
+        PeerCallOutcome::NoAnswer => "NO ANSWER",
         // `Answered` cannot reach here -- an answered call is bridged, not
         // reported -- and an errored port is a failed call with nothing more
         // specific to say about it.
-        PeerCallOutcome::Error | PeerCallOutcome::Answered => send_result(state, "NO CARRIER"),
-    };
+        PeerCallOutcome::Error | PeerCallOutcome::Answered => "NO CARRIER",
+    }
+}
+
+/// How many CP/M sessions are in the inbound-call pool right now.
+pub fn cpm_peer_listener_count() -> usize {
+    CPM_PEER_LISTENERS.load(Ordering::SeqCst)
 }
 
 /// Wait for a placed peer call's outcome from the target's progress bytes

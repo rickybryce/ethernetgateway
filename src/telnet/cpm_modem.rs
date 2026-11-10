@@ -23,7 +23,7 @@
 
 use crate::config::SerialPortId;
 use crate::logger::glog;
-use crate::serial::{request_peer_call, CpmIncomingCall, PeerCallOutcome};
+use crate::serial::{request_peer_call, CpmIncomingCall};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
@@ -592,8 +592,13 @@ impl CpmModem {
                 // This gateway's CP/M endpoint.  It is a hunt group, not this
                 // session: any *other* idle CP/M session may answer, as it may
                 // a serial modem's `ATD CPM@<here>`.  This one cannot answer
-                // itself -- a dialling modem is not `can_answer` -- so with
-                // nobody else listening the call rings out to NO ANSWER.
+                // itself -- a dialling modem is not `can_answer` -- so when it
+                // is the pool's only member the line is busy at once, as a
+                // phone calling its own number is, rather than ringing out S7.
+                (Peer::Cpm, _) if crate::serial::cpm_peer_listener_count() <= 1 => {
+                    glog!("CP/M modem: CPM@{} has no other CP/M session to answer it", host.unwrap_or(""));
+                    self.result(out, "BUSY");
+                }
                 (Peer::Cpm, _) => {
                     let wait = self.carrier_wait();
                     self.start_call(Box::pin(async move {
@@ -601,11 +606,7 @@ impl CpmModem {
                             Ok(duplex) => Placed::connected(duplex),
                             Err(why) => {
                                 glog!("CP/M modem: dial to this gateway's CP/M endpoint: {why:?}");
-                                match why {
-                                    PeerCallOutcome::Busy => Placed::Failed("BUSY"),
-                                    PeerCallOutcome::NoAnswer => Placed::Failed("NO ANSWER"),
-                                    _ => Placed::Failed("NO CARRIER"),
-                                }
+                                Placed::Failed(crate::serial::peer_outcome_code(why))
                             }
                         }
                     }));
@@ -615,9 +616,7 @@ impl CpmModem {
                     self.start_call(Box::pin(async move {
                         match request_peer_call(id, wait).await {
                             Ok(duplex) => Placed::connected(duplex),
-                            Err(PeerCallOutcome::Busy) => Placed::Failed("BUSY"),
-                            Err(PeerCallOutcome::NoAnswer) => Placed::Failed("NO ANSWER"),
-                            Err(_) => Placed::Failed("NO CARRIER"),
+                            Err(why) => Placed::Failed(crate::serial::peer_outcome_code(why)),
                         }
                     }));
                 }
@@ -1029,11 +1028,7 @@ async fn call_remote_peer(label: &'static str, host: String) -> Placed {
         crate::relay::PeerClaim::Answered(dup) => Placed::connected(dup),
         crate::relay::PeerClaim::Failed(why) => {
             glog!("CP/M modem: dial to {addr}: {why:?}");
-            match why {
-                PeerCallOutcome::Busy => Placed::Failed("BUSY"),
-                PeerCallOutcome::NoAnswer => Placed::Failed("NO ANSWER"),
-                _ => Placed::Failed("NO CARRIER"),
-            }
+            Placed::Failed(crate::serial::peer_outcome_code(why))
         }
         crate::relay::PeerClaim::NotRegistered => {
             glog!("CP/M modem: dial to {addr}: no such endpoint is registered here");
@@ -1629,6 +1624,26 @@ mod tests {
                 crate::serial::cpm_peer_listen_exit();
                 crate::serial::cpm_peer_listen_exit();
             }
+        }
+        // Alone in the pool, nobody else can answer: busy at once, not S7 later.
+        crate::serial::cpm_peer_listen_enter();
+        {
+            struct One;
+            impl Drop for One {
+                fn drop(&mut self) {
+                    crate::serial::cpm_peer_listen_exit();
+                }
+            }
+            let _one = One;
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async {
+                let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+                let _peer = PeerDialConfig::on();
+                let mut alone = CpmModem::new(true);
+                let out = alone.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await;
+                assert!(String::from_utf8_lossy(&out).contains("BUSY"), "{:?}", String::from_utf8_lossy(&out));
+                assert!(alone.mode == Mode::Command, "a call nobody can answer is still dialling");
+            });
         }
         crate::serial::cpm_peer_listen_enter();
         crate::serial::cpm_peer_listen_enter();
