@@ -15321,15 +15321,26 @@ fn test_the_serial_revert_restores_every_field_the_change_test_compares() {
         let end = rest.find("\n    pub(in crate::telnet) ").expect("a following fn");
         rest[..end].to_string()
     };
-    let apply = body_of("async fn modem_apply_settings(");
+    // The change test is `port_settings_changed`, shared by Q and K; the
+    // apply must still be the one that uses it.
+    assert!(
+        body_of("async fn modem_apply_settings(")
+            .contains("let changed = port_settings_changed(original_cfg.port(id), new_cfg.port(id));"),
+        "modem_apply_settings no longer decides by the shared change test"
+    );
+    let apply = {
+        let start = src.find("\nfn port_settings_changed(").expect("the shared change test");
+        let rest = &src[start..];
+        rest[..rest.find("\n}\n").expect("its end")].to_string()
+    };
     let revert = body_of("async fn revert_serial_config(");
     let mut fields = Vec::new();
-    for (i, _) in apply.match_indices("new_port.") {
-        let field: String = apply[i + "new_port.".len()..]
+    for (i, _) in apply.match_indices("new.") {
+        let field: String = apply[i + "new.".len()..]
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
-        if apply.contains(&format!("new_port.{field} != old_port.{field}")) {
+        if apply.contains(&format!("new.{field} != old.{field}")) {
             fields.push(field);
         }
     }
