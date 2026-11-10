@@ -341,15 +341,17 @@ pub fn request_handover(stop: &AtomicBool) -> std::io::Result<Handover> {
 /// [`holder_agreed`] reads a claim as agreement, so the newcomer would wait out
 /// the agreed wait for a copy that never answered and then report it stuck.
 ///
-/// **Asked a few times first**, as [`acquire`] asks about a sharing violation:
-/// a virus scanner holding the file for a moment makes a delete fail too.
+/// **A sharing violation is asked about a few times first**, as [`acquire`]
+/// asks: a virus scanner holding the file for a moment makes a delete fail
+/// too.  Nothing else is retried -- a directory in the way, or a read-only
+/// folder, says the same thing every time.
 fn clear_leftover_claim(claim: &std::path::Path) -> std::io::Result<()> {
     let mut tries = 0;
     loop {
         match std::fs::remove_file(claim) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 tries += 1;
-                if tries < SHARING_RETRIES {
+                if claim_delete_may_clear(e.raw_os_error()) && tries < SHARING_RETRIES {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     continue;
                 }
@@ -362,6 +364,17 @@ fn clear_leftover_claim(claim: &std::path::Path) -> std::io::Result<()> {
             _ => return Ok(()),
         }
     }
+}
+
+/// Is a failed delete of the claim worth asking again?  Only a Windows sharing
+/// violation -- someone holding the file open for a moment.
+#[cfg(windows)]
+fn claim_delete_may_clear(raw: Option<i32>) -> bool {
+    is_sharing_violation(raw)
+}
+#[cfg(not(windows))]
+fn claim_delete_may_clear(_raw: Option<i32>) -> bool {
+    false
 }
 
 /// Has the running copy agreed to stand down?
@@ -675,14 +688,18 @@ mod tests {
         assert!(clear_leftover_claim(&claim).is_ok() && !claim.exists(), "a leftover claim is cleared");
         std::fs::create_dir(&claim).unwrap();
         assert!(clear_leftover_claim(&claim).is_err(), "a claim that will not go was ignored");
-        // One held for a moment -- a scanner -- is waited out, not fatal.
-        let held = claim.clone();
-        let scanner = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            std::fs::remove_dir(&held).unwrap();
-        });
-        assert!(clear_leftover_claim(&claim).is_ok(), "a claim held for a moment stopped the ask");
-        scanner.join().unwrap();
+        // Said at once: only a sharing violation is waited on, and that is
+        // Windows' alone.
+        #[cfg(not(windows))]
+        {
+            let started = std::time::Instant::now();
+            assert!(clear_leftover_claim(&claim).is_err());
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(100),
+                "a claim that cannot clear was asked about again"
+            );
+        }
+        std::fs::remove_dir(&claim).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         // A holder that claimed but could not delete the request has agreed:
         // read otherwise, the newcomer's give-up loses the claim on every pass.
