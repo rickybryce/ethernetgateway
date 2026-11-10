@@ -848,9 +848,15 @@ impl TelnetSession {
                     // whoever is connected through the port, so with someone
                     // there it is asked first, and "no" changes nothing.
                     let running = port.enabled && !port.port.is_empty();
+                    // **The restart applies everything saved, so the question
+                    // says so.**  A baud or framing change made earlier on this
+                    // screen waits for Q; K's restart applied it too, under a
+                    // question that named only the erase key, and then moved
+                    // the baseline so Q never asked about it either.
+                    let others = port_settings_changed(baseline.port(id), &port);
                     if running
                         && crate::serial::port_session_live(id)
-                        && !self.confirm_port_restart(id, "the erase key").await?
+                        && !self.confirm_port_restart(id, "the erase key", others).await?
                     {
                         continue;
                     }
@@ -1108,10 +1114,14 @@ impl TelnetSession {
     /// Ask before a restart that will drop a live connection on port `id`.
     /// `what` names the setting being changed ("the erase key").  True only on
     /// an explicit Y.
+    ///
+    /// `others`: other changes made on the screen are still waiting to be
+    /// applied, and this restart applies them too, so it says so.
     pub(in crate::telnet) async fn confirm_port_restart(
         &mut self,
         id: crate::config::SerialPortId,
         what: &str,
+        others: bool,
     ) -> Result<bool, std::io::Error> {
         let label = id.label();
         self.clear_screen().await?;
@@ -1123,6 +1133,10 @@ impl TelnetSession {
         self.send_line(&format!("  Changing {what} restarts")).await?;
         self.send_line(&format!("  Port {label}, and someone is connected")).await?;
         self.send_line("  through it right now.").await?;
+        if others {
+            self.send_line("  It also applies the other changes").await?;
+            self.send_line("  made on this screen.").await?;
+        }
         self.send_line("").await?;
         self.send_line(&format!("  {}", self.red("Their connection will be lost."))).await?;
         self.send_line("").await?;
@@ -1169,18 +1183,7 @@ impl TelnetSession {
         original_cfg: &config::Config,
     ) -> Result<(), std::io::Error> {
         let new_cfg = config::get_config();
-        let new_port = new_cfg.port(id);
-        let old_port = original_cfg.port(id);
-        let changed = new_port.enabled != old_port.enabled
-            || new_port.mode != old_port.mode
-            || new_port.port != old_port.port
-            || new_port.baud != old_port.baud
-            || new_port.databits != old_port.databits
-            || new_port.parity != old_port.parity
-            || new_port.stopbits != old_port.stopbits
-            || new_port.flowcontrol != old_port.flowcontrol
-            || new_port.petscii_translate != old_port.petscii_translate
-            || new_port.drive_carrier != old_port.drive_carrier;
+        let changed = port_settings_changed(original_cfg.port(id), new_cfg.port(id));
 
         if !changed {
             return Ok(());
@@ -1205,7 +1208,7 @@ impl TelnetSession {
             // An answer that never comes -- the connection asking it dropped --
             // is a "no": the revert must still run, so no `?` until it has.
             if crate::serial::port_session_live(id)
-                && !matches!(self.confirm_port_restart(id, "these settings").await, Ok(true))
+                && !matches!(self.confirm_port_restart(id, "these settings", false).await, Ok(true))
             {
                 Self::revert_serial_config(id, original_cfg).await;
                 let _ = self.send_line(&format!("  {}", self.yellow("Changes undone."))).await;
@@ -2373,4 +2376,19 @@ impl TelnetSession {
             ]
         }
     }
+}
+
+/// Has anything changed between two snapshots of a port that only a restart
+/// applies?  One test for the screen's Q and its K, which used to differ.
+fn port_settings_changed(old: &config::SerialPortConfig, new: &config::SerialPortConfig) -> bool {
+    new.enabled != old.enabled
+        || new.mode != old.mode
+        || new.port != old.port
+        || new.baud != old.baud
+        || new.databits != old.databits
+        || new.parity != old.parity
+        || new.stopbits != old.stopbits
+        || new.flowcontrol != old.flowcontrol
+        || new.petscii_translate != old.petscii_translate
+        || new.drive_carrier != old.drive_carrier
 }

@@ -1128,6 +1128,13 @@ pub(crate) fn take_restart_request(id: SerialPortId) -> bool {
     SERIAL_RESTART[id.index()].swap(false, Ordering::SeqCst)
 }
 
+/// Test hook: mark `id` as carrying a session, as a live bridge does, so a
+/// screen asks before restarting it.  Hold [`lock_global_state`], and clear it.
+#[cfg(test)]
+pub(crate) fn set_bridge_active_for_test(id: SerialPortId, on: bool) {
+    BRIDGE_ACTIVE[id.index()].store(on, Ordering::SeqCst);
+}
+
 /// Serialize tests that touch the global `CONSOLE_REQUEST`, `BRIDGE_ACTIVE`,
 /// or `SERIAL_RESTART` state.  cargo test runs tests in parallel by default;
 /// without this mutex two tests could interleave their reads/writes of the

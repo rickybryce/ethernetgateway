@@ -15416,7 +15416,7 @@ fn test_the_port_screen_applies_on_every_exit_and_k_asks_before_dropping_a_sessi
     let k = &screen[screen.find("\"k\" => {").expect("the K arm")..];
     let k = &k[..k.find("\"g\" => {").expect("the G arm follows K")];
     let ask = k
-        .find("&& crate::serial::port_session_live(id)\n                        && !self.confirm_port_restart(id, \"the erase key\").await?")
+        .find("&& crate::serial::port_session_live(id)\n                        && !self.confirm_port_restart(id, \"the erase key\", others).await?")
         .expect("K asks before dropping a live session");
     let declined = k[ask..].find("continue;").map(|i| ask + i).expect("a no changes nothing");
     let write = k.find("config::update_config_value(&key, &next);").expect("K writes the key");
@@ -15501,6 +15501,138 @@ async fn test_the_erase_key_restart_is_applied_once() {
     assert!(restarted, "K restarts a running port");
     assert!(!again, "leaving the screen applied the baud a second time");
     assert_eq!(baseline.port(id).baud, 19200, "the baseline moved forward");
+}
+
+/// **K's question names everything its restart applies.**  A baud changed on
+/// the screen waits for Q; K restarted the port for the erase key, applied the
+/// baud with it under a question about the erase key alone, and moved the
+/// baseline so Q never asked either.  With a caller on the port: the question
+/// says the other changes go too, and N leaves both the key and the baud
+/// waiting for Q, which still asks.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // test serializers, held for the whole test
+async fn test_the_erase_key_question_names_the_other_pending_changes() {
+    use crate::config::{serial_key, SerialPortId};
+    let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+    let _g = crate::serial::lock_global_state();
+    let _relay = crate::relay::key_auth_test_lock();
+    let id = SerialPortId::B;
+    struct Restore(Vec<(String, String)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            crate::serial::set_bridge_active_for_test(SerialPortId::B, false);
+            for (k, v) in &self.0 {
+                crate::config::update_config_value(k, v);
+            }
+        }
+    }
+    let _restore = {
+        let c = crate::config::get_config();
+        let p = c.port(id);
+        Restore(vec![
+            (serial_key(id, "enabled"), p.enabled.to_string()),
+            (serial_key(id, "mode"), p.mode.clone()),
+            (serial_key(id, "port"), p.port.clone()),
+            (serial_key(id, "baud"), p.baud.to_string()),
+            (serial_key(id, "backspace"), p.backspace.clone()),
+        ])
+    };
+    crate::config::update_config_value(&serial_key(id, "enabled"), "true");
+    crate::config::update_config_value(&serial_key(id, "mode"), "console");
+    crate::config::update_config_value(&serial_key(id, "port"), "/dev/egw-test-no-such-port");
+    crate::config::update_config_value(&serial_key(id, "baud"), "9600");
+    let screen_opened = crate::config::get_config();
+    let key_before = screen_opened.port(id).backspace.clone();
+
+    // K, then `answer` once the restart question is on the screen (it drains
+    // anything typed ahead), then Q -- with a caller on the port.  The text it
+    // drew, and whether the port restarted.
+    async fn run(baseline: &mut crate::config::Config, answer: &'static [u8]) -> (String, bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let id = SerialPortId::B;
+        crate::serial::take_restart_request(id);
+        crate::serial::set_bridge_active_for_test(id, true);
+        let (mut sess, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        let (mut rd, mut wr) = tokio::io::split(peer);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drain = {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = rd.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    seen.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+            })
+        };
+        let keys = {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                wr.write_all(b"k").await.unwrap();
+                let mut asked = false;
+                for _ in 0..1000 {
+                    if String::from_utf8_lossy(&seen.lock().unwrap()).contains("Restart Port B now?") {
+                        asked = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                assert!(asked, "K never asked about the restart");
+                // The question is drawn before the confirm drains typed-ahead
+                // input, so an answer sent the instant it shows can be drained.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                wr.write_all(answer).await.unwrap();
+                // And Q once the screen's prompt is back after the question.
+                let mut back = false;
+                for _ in 0..1000 {
+                    let text = String::from_utf8_lossy(&seen.lock().unwrap()).to_string();
+                    let after = text.rfind("Restart Port B now?").map(|i| &text[i..]).unwrap_or("");
+                    if after.contains("console-b") && after.ends_with("> ") {
+                        back = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                assert!(back, "the screen's prompt never came back after the question");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                wr.write_all(b"q").await.unwrap();
+                wr
+            })
+        };
+        let shown = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            sess.modem_settings_screen(id, baseline),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("the screen never left on Q; it drew:\n{}", String::from_utf8_lossy(&seen.lock().unwrap())));
+        shown.unwrap();
+        crate::serial::set_bridge_active_for_test(id, false);
+        let wr = keys.await.unwrap();
+        drop(sess);
+        drop(wr);
+        let _ = drain.await;
+        let text = String::from_utf8_lossy(&seen.lock().unwrap()).to_string();
+        (text, crate::serial::take_restart_request(id))
+    }
+
+    // Nothing else pending: the question is about the erase key alone.
+    let mut baseline = screen_opened.clone();
+    let (text, restarted) = run(&mut baseline, b"n").await;
+    assert!(text.contains("Changing the erase key restarts"), "{text}");
+    assert!(!text.contains("also applies"), "nothing else was pending: {text}");
+    assert!(!restarted);
+
+    // The baud changed on the screen, then K: the question says so, and N
+    // leaves the key unchanged and the baud still pending against the baseline.
+    let mut baseline = screen_opened.clone();
+    crate::config::update_config_value(&serial_key(id, "baud"), "19200");
+    let (text, restarted) = run(&mut baseline, b"n").await;
+    assert!(text.contains("It also applies the other changes"), "the question hid the baud: {text}");
+    assert!(!restarted, "N restarted the port");
+    assert_eq!(crate::config::get_config().port(id).backspace, key_before, "N changed the erase key");
+    assert_eq!(baseline.port(id).baud, 9600, "N moved the baseline past a baud nobody applied");
 }
 
 /// Drive a screen on a C64 terminal with `keys` and return each frame it drew
@@ -15707,7 +15839,7 @@ fn test_another_ports_restart_asks_and_a_no_reverts() {
     let other = &body[body.find("if !editing_own_port {").expect("the other-port path")..];
     let other = &other[..other.find("\n        }\n").expect("its end")];
     let ask = other
-        .find("if crate::serial::port_session_live(id)\n                && !matches!(self.confirm_port_restart(id, \"these settings\").await, Ok(true))")
+        .find("if crate::serial::port_session_live(id)\n                && !matches!(self.confirm_port_restart(id, \"these settings\", false).await, Ok(true))")
         .expect("the other-port restart no longer asks, or a lost answer skips the revert");
     let revert = other.find("Self::revert_serial_config(id, original_cfg).await;").expect("a no reverts");
     let restart = other.find("crate::serial::restart_serial(id);").expect("a yes restarts");
