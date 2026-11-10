@@ -585,10 +585,14 @@ fn main() {
         let server_handle = std::thread::spawn(move || {
             // First, so a panic building the runtime closes the window too.
             let _death = ServerDeathGuard { died: died_rt, shutdown: shutdown_rt.clone() };
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to create tokio runtime");
+            // Torn down by `BoundedRuntime`'s Drop, so the 2 s limit holds on a
+            // panic as well as on the normal path below.
+            let runtime = BoundedRuntime(Some(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create tokio runtime"),
+            ));
             // **And again here, which is the one that counts.**  Locals drop
             // in reverse, so on a panic the runtime is dropped before the guard
             // above -- and a runtime's Drop waits, with no limit, for every
@@ -596,7 +600,7 @@ fn main() {
             // the runtime, this one sets `shutdown` before that wait starts.
             let _death_before_runtime_drop = ServerDeathGuard { died: died_late, shutdown: shutdown_rt.clone() };
 
-            let serial_handles = runtime.block_on(async move {
+            let serial_handles = runtime.rt().block_on(async move {
                 let session_writers: telnet::SessionWriters =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
                 // One shared lockout map across telnet + SSH so an
@@ -741,7 +745,7 @@ fn main() {
             // returns.  Symptom we're closing: user hits Ctrl-C, sees
             // "Server stopped." once (this print) but never gets a
             // shell prompt because the join blocks on runtime drop.
-            runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+            drop(runtime);
         });
 
         if gui_cfg.enable_console {
@@ -995,6 +999,33 @@ pub(crate) fn should_run_another_cycle(restart: bool, stop_requested: bool) -> b
 /// `shutdown`, so a panicked server left a window up over a gateway serving
 /// nothing.  Setting `shutdown` closes it; `died` is what tells the exit path
 /// this was a death and not a quit, since `shutdown` alone can no longer say.
+/// The server thread's runtime, torn down with a time limit **however the
+/// thread ends**.
+///
+/// A runtime's own Drop waits with no limit for every blocking task, which is
+/// the hang the normal path's `shutdown_timeout` closes.  A panic inside
+/// `block_on` skipped that call and dropped the runtime the unbounded way, so a
+/// blocking task that does not watch `shutdown` -- a DNS lookup, a stuck
+/// filesystem call -- held the thread, and the headless wait's join, for ever.
+struct BoundedRuntime(Option<tokio::runtime::Runtime>);
+
+/// How long [`BoundedRuntime`] lets blocking tasks finish.
+const RUNTIME_TEARDOWN: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl BoundedRuntime {
+    fn rt(&self) -> &tokio::runtime::Runtime {
+        self.0.as_ref().expect("the runtime lives until Drop")
+    }
+}
+
+impl Drop for BoundedRuntime {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_timeout(RUNTIME_TEARDOWN);
+        }
+    }
+}
+
 struct ServerDeathGuard {
     died: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
@@ -1278,9 +1309,9 @@ mod tests {
         // The bound that matters: a guard declared AFTER the runtime, so it
         // drops (and sets `shutdown`) before the runtime's unbounded Drop, and
         // before the first thing that can panic inside it.
-        let rt = body.find("let runtime = tokio::runtime::Builder::new_multi_thread()").expect("the runtime");
+        let rt = body.find("let runtime = BoundedRuntime(Some(").expect("the runtime, in its bounded guard");
         let late = body.find("let _death_before_runtime_drop = ServerDeathGuard {").expect("no guard after the runtime");
-        let run = body.find("let serial_handles = runtime.block_on(").expect("block_on");
+        let run = body.find("let serial_handles = runtime.rt().block_on(").expect("block_on");
         assert!(rt < late && late < run, "the late guard must sit between the runtime and block_on");
     }
 
@@ -1317,6 +1348,31 @@ mod tests {
         };
         assert_eq!(run(true), (true, true), "a panic must close the window and mark the death");
         assert_eq!(run(false), (false, false), "a normal end is not a death");
+    }
+
+    /// **A server thread that panics still ends within the teardown limit.**
+    /// A blocking task that never finishes, then a panic inside `block_on`:
+    /// the runtime's own Drop would wait for that task for ever.
+    #[test]
+    fn test_a_panicking_server_thread_still_ends_in_bounded_time() {
+        let started = std::time::Instant::now();
+        let t = std::thread::spawn(|| {
+            let runtime = BoundedRuntime(Some(
+                tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap(),
+            ));
+            runtime.rt().block_on(async {
+                tokio::task::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_secs(60)));
+                panic!("bounded-runtime probe");
+            });
+        });
+        while !t.is_finished() {
+            assert!(
+                started.elapsed() < RUNTIME_TEARDOWN + std::time::Duration::from_secs(8),
+                "the panicking thread waited on a blocking task with no limit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(t.join().is_err(), "the probe panicked");
     }
 
     /// A transfer directory that cannot be created is fatal **only at launch**.
