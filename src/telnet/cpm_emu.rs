@@ -560,8 +560,8 @@ const CONIN_SPOOL_POLL: std::time::Duration = std::time::Duration::from_millis(2
 pub(in crate::telnet) struct CpmPeerReg {
     /// `Some` while this session owns the single crossbar announcer.
     announce: Option<(std::sync::Arc<AtomicBool>, tokio::task::JoinHandle<()>)>,
-    /// Whether this member is counted as a free line.
-    idle: crate::serial::CpmIdleMark,
+    /// This session's place in the pool, and whether it is a free line.
+    member: crate::serial::CpmPoolMember,
     /// Tests only: this session's shared hold on the pool, so a test that needs
     /// the pool to itself can have it (see `serial::CPM_POOL_TEST_GATE`).
     /// `None` for a member a test made while holding the gate itself.
@@ -571,24 +571,19 @@ pub(in crate::telnet) struct CpmPeerReg {
 impl CpmPeerReg {
     /// Say whether this member's modem is free to answer the next call.
     pub(in crate::telnet) fn set_idle(&mut self, idle: bool) {
-        self.idle.set(idle);
+        self.member.set_idle(idle);
     }
 
     /// A pool member for a test that holds `serial::CPM_POOL_TEST_GATE`
     /// exclusively (so cannot take it shared), and announces nothing.
     #[cfg(test)]
     pub(in crate::telnet) fn ungated() -> Self {
-        crate::serial::cpm_peer_listen_enter();
-        CpmPeerReg { announce: None, idle: Default::default(), _pool_gate: None }
+        CpmPeerReg { announce: None, member: crate::serial::CpmPoolMember::join(), _pool_gate: None }
     }
 }
 impl Drop for CpmPeerReg {
     fn drop(&mut self) {
-        // The free line goes first: between leaving the pool and the mark's
-        // own drop, a caller would see a line with no member behind it, and
-        // its call would sit in a slot the last member's exit had cleared.
-        self.idle.set(false);
-        crate::serial::cpm_peer_listen_exit();
+        // `member` leaves the pool as the fields drop, after this.
         if let Some((stop, jh)) = self.announce.take() {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
             // The task gives the claim up itself as it ends (its
@@ -620,7 +615,7 @@ pub(in crate::telnet) async fn cpm_peer_register(modem_enabled: bool) -> Option<
     }
     #[cfg(test)]
     let pool_gate = crate::serial::CPM_POOL_TEST_GATE.clone().read_owned().await;
-    crate::serial::cpm_peer_listen_enter();
+    let member = crate::serial::CpmPoolMember::join();
     let cfg = config::get_config();
     // Announcing to our own master is not gated on `allow_peer_dial` (see
     // serial::cpm_slave_announce): that setting governs dialing arbitrary
@@ -638,7 +633,7 @@ pub(in crate::telnet) async fn cpm_peer_register(modem_enabled: bool) -> Option<
     };
     Some(CpmPeerReg {
         announce,
-        idle: Default::default(),
+        member,
         #[cfg(test)]
         _pool_gate: Some(pool_gate),
     })
@@ -1767,6 +1762,10 @@ impl TelnetSession {
         let transfer_dir = cfg.transfer_dir.clone();
         drop(cfg);
         let mut spool: Option<crate::cpm::printer::SpoolJob> = None;
+        // Free to answer only while the program runs: the pump is what takes
+        // a call.  (A session dropped mid-run takes the modem, and its
+        // membership, with it.)
+        modem.set_answering(true);
         let result = self
             .cpmemu_run_program_inner(
                 cpm,
@@ -1780,6 +1779,7 @@ impl TelnetSession {
                 &transfer_dir,
             )
             .await;
+        modem.set_answering(false);
         if let Some(format) = print_format {
             let _ = self.cpmemu_spool_close(&mut spool, format, &transfer_dir).await;
         }

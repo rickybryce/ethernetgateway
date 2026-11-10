@@ -4149,15 +4149,17 @@ wherever <code>A@&lt;ip&gt;</code> / <code>B@&lt;ip&gt;</code> do.
 <span class="label">Answering requires a running comms program</span>
 The emulator picks up an inbound call only while a program is running its modem
 (that's when it polls for the ring) — run your terminal/BBS software first,
-exactly as on real hardware. A caller whose call is not picked up within three
-seconds hears <code>BUSY</code>, which is what a session sitting at
-<code>A&gt;</code> gives. Set <code>ATS0=</code><em>n</em> to auto-answer, or
+exactly as on real hardware. A session sitting at <code>A&gt;</code> is not
+listening, so a caller hears <code>BUSY</code> at once; one whose call is not
+picked up within three seconds (a program that is not polling its modem) hears
+<code>BUSY</code> then. Set <code>ATS0=</code><em>n</em> to auto-answer, or
 answer manually with <code>ATA</code> when you see <code>RING</code>.
 <code>CPM@&lt;ip&gt;</code> is a single dialable address, but every
 modem-enabled CP/M session joins an answer <em>pool</em> (a hunt group): the
 next inbound call rings whichever session is idle, so two concurrent CP/M
 users can both receive calls. When every session in the pool is already
-dialling, ringing or on a call, the caller hears <code>BUSY</code> at once. On a slave, one session announces <code>CPM</code>
+dialling, ringing, on a call or at <code>A&gt;</code>, the caller hears
+<code>BUSY</code> at once. On a slave, one session announces <code>CPM</code>
 to the master for remote reachability; if it exits while others remain, remote
 dialling pauses until a new session re-announces (local answering is
 unaffected).

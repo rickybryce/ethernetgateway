@@ -142,6 +142,10 @@ pub(in crate::telnet) struct CpmModem {
     /// one: kept here so the pool hears whether this modem is free to answer
     /// every time that changes (see [`Self::sync_pool`]).
     pool: Option<crate::telnet::cpm_emu::CpmPeerReg>,
+    /// A pump is running this modem now, so a call it is offered is taken.
+    /// At the `A>` prompt, or while a boot starts or saves, nothing would take
+    /// one, and the line is not free (see [`Self::set_answering`]).
+    answering: bool,
 }
 
 /// The session-owned handles a locally-dialed gateway menu session needs.
@@ -189,6 +193,7 @@ impl CpmModem {
             menu: None,
             saved: crate::config::CpmModemProfile::default(),
             pool: None,
+            answering: false,
         };
         m.saved = crate::config::get_config().cpm_emu_modem;
         let p = m.saved.clone();
@@ -283,21 +288,41 @@ impl CpmModem {
         self.enabled && self.mode == Mode::Command && self.incoming.is_none() && self.conn.is_none()
     }
 
-    /// Join the inbound `CPM@<ip>` pool for as long as this modem lives.
+    /// Join the inbound `CPM@<ip>` pool for as long as this modem lives.  Not
+    /// a free line until a pump runs it ([`Self::set_answering`]).
     pub(in crate::telnet) fn join_pool(&mut self, reg: crate::telnet::cpm_emu::CpmPeerReg) {
         self.pool = Some(reg);
-        self.sync_pool();
     }
 
-    /// Tell the pool whether this modem is free to answer.  Called wherever
-    /// that can change: the end of every [`Self::service`], a dial starting
-    /// (before its first poll, so a caller is never counted as the free line
-    /// for its own call), and a call being taken.
+    /// Tell the pool whether this modem is free to answer: a pump is running
+    /// it and it is idle.  Called wherever that can change: the end of every
+    /// [`Self::service`], a call being taken, and the pump starting or
+    /// stopping.  A dial clears it as it starts (see [`Self::dial`]), so a
+    /// caller is never counted as the free line for its own call.
     fn sync_pool(&mut self) {
-        let idle = self.can_answer();
+        let idle = self.answering && self.can_answer();
         if let Some(reg) = self.pool.as_mut() {
             reg.set_idle(idle);
         }
+    }
+
+    /// A pump starts (`true`) or stops (`false`) running this modem.
+    ///
+    /// **No dial outlives its pump.**  A dial is a future polled once per pump
+    /// cycle; left in place when the program ends (a double ESC breaks out to
+    /// `A>` with the modem still dialling), nothing polls it, and a CP/M
+    /// session that took the call would block on the ninth RING to a caller
+    /// that never reads them.  It is abandoned instead, as the dial awaited in
+    /// place used to end with its program.
+    pub(in crate::telnet) fn set_answering(&mut self, on: bool) {
+        self.answering = on;
+        if !on && self.mode == Mode::Dialing {
+            glog!("CP/M modem: dial abandoned -- the program ended");
+            self.placing = None;
+            self.placing_grace = false;
+            self.mode = Mode::Command;
+        }
+        self.sync_pool();
     }
 
     /// Take an inbound `CPM@<ip>` call and start ringing the guest.
@@ -566,6 +591,12 @@ impl CpmModem {
     }
 
     async fn dial(&mut self, target: &str, out: &mut Vec<u8>) {
+        // Off the free lines for as long as this takes: a dial to the
+        // gateway's menu goes online without `start_call`, and a caller must
+        // not be the free line for its own call.  `service` resyncs.
+        if let Some(reg) = self.pool.as_mut() {
+            reg.set_idle(false);
+        }
         let t = strip_dial_modifier(target);
 
         // This gateway's own menu, by keyword or by the built-in number — the
@@ -675,7 +706,6 @@ impl CpmModem {
         self.placing = Some(call);
         self.placing_grace = true;
         self.mode = Mode::Dialing;
-        self.sync_pool();
     }
 
     /// Poll the dial in progress once, without waiting for it.
@@ -1630,6 +1660,34 @@ mod tests {
         assert!(logged("dial to A@198.51.100.64 through master 127.0.0.1:1 failed"));
     }
 
+    /// **A session is a free line only while its pump runs**, in both places a
+    /// CP/M guest runs: the emulator's program and a booted machine.  Each
+    /// marks its modem answering just before the pump and stops it just after
+    /// -- the stop is also what abandons a dial the program left behind.  Those
+    /// need a live session to drive, so the rule is read from the source.
+    #[test]
+    fn test_a_session_answers_only_while_its_pump_runs() {
+        for (file, src, outer, pump) in [
+            ("cpm_emu.rs", include_str!("cpm_emu.rs"), "async fn cpmemu_run_program(", ".cpmemu_run_program_inner("),
+            ("cpm_boot_ui.rs", include_str!("cpm_boot_ui.rs"), "async fn cpm_boot_session(", "self.cpm_boot_run("),
+        ] {
+            let src = src.replace("\r\n", "\n");
+            let src = &src[..src.find("#[cfg(test)]\nmod ").expect("the test module")];
+            let at = src.find(outer).unwrap_or_else(|| panic!("{file}: {outer}"));
+            let end = at + 1 + src[at + 1..].find("\n    }\n").expect("fn end");
+            let body = &src[at..end];
+            let call = body.find(pump).unwrap_or_else(|| panic!("{file}: the pump call"));
+            let on = body[..call].rfind("modem.set_answering(true);").unwrap_or_else(|| panic!("{file}: never answering"));
+            let done = call + body[call..].find(".await;").expect("the pump's await");
+            let off = done + body[done..].find("modem.set_answering(false);").unwrap_or_else(|| panic!("{file}: never stops"));
+            // Nothing between the mark and the pump, or between the pump and
+            // the stop, that could return early and leave a line marked free.
+            assert!(!body[on..call].contains('?') && !body[on..call].contains("return"), "{file}: an exit before the pump");
+            assert!(!body[done..off].contains('?') && !body[done..off].contains("return"), "{file}: an exit before the stop");
+            assert_eq!(body.matches("set_answering(").count(), 2, "{file}: another answering switch");
+        }
+    }
+
     /// **`CPM@<this gateway>` rings another CP/M session**, as a serial
     /// modem's does: the endpoint is a hunt group, and it used to be refused
     /// outright as "a call to itself".  The caller cannot take its own call --
@@ -1646,19 +1704,33 @@ mod tests {
         let _pool = crate::relay::key_auth_test_lock();
         let _alone = crate::serial::CPM_POOL_TEST_GATE.blocking_write();
         use crate::telnet::cpm_emu::CpmPeerReg;
+        use crate::serial::cpm_free_lines;
+        // A session's modem, in the pool, with its program running.
         let member = || {
             let mut m = CpmModem::new(true);
             m.join_pool(CpmPeerReg::ungated());
+            m.set_answering(true);
             m
         };
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             let _peer = PeerDialConfig::on();
+            // A member whose program is not running (at `A>`) is not a free
+            // line: nothing would take the call.
+            {
+                let mut at_prompt = CpmModem::new(true);
+                at_prompt.join_pool(CpmPeerReg::ungated());
+                assert_eq!(cpm_free_lines(), 0, "a session at A> counted as free");
+                at_prompt.set_answering(true);
+                assert_eq!(cpm_free_lines(), 1);
+                at_prompt.set_answering(false);
+                assert_eq!(cpm_free_lines(), 0);
+            }
             // Alone in the pool: busy at once, and not counted as the free line
             // for its own call -- that would ring for the pickup window first.
             {
                 let mut alone = member();
-                assert!(alone.can_answer(), "a fresh member is not free");
+                assert_eq!(cpm_free_lines(), 1, "a running member is not free");
                 let out = alone.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await;
                 assert!(String::from_utf8_lossy(&out).contains("BUSY"), "{:?}", String::from_utf8_lossy(&out));
                 assert!(alone.mode == Mode::Command, "a call nobody can answer is still dialling");
@@ -1721,8 +1793,32 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             assert!(b.can_answer(), "B never noticed its caller go");
+            assert_eq!(cpm_free_lines(), 2, "B and C are both free again");
             let heard_c = String::from_utf8_lossy(&c.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await).to_string();
             assert!(c.mode == Mode::Dialing, "a free line was refused: {heard_c:?}");
+            assert_eq!(cpm_free_lines(), 1, "only B is free while C dials");
+            // And the free line is the one that takes it.
+            let mut taken = None;
+            for _ in 0..400 {
+                if b.can_answer() && let Some(t) = crate::serial::take_cpm_call_request() {
+                    taken = Some(t);
+                    break;
+                }
+                let _ = c.service(Vec::new(), 65536, false).await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(taken.is_some(), "B never got C's call");
+            drop(taken);
+            let _ = settle(&mut c).await;
+
+            // **No dial outlives its pump**: a program that ends while its
+            // modem dials (a double ESC to `A>`) leaves no call behind for
+            // another session to ring forever.
+            let _ = c.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await;
+            assert!(c.mode == Mode::Dialing);
+            c.set_answering(false);
+            assert!(c.mode == Mode::Command && c.placing.is_none(), "the dial outlived its program");
+            assert_eq!(cpm_free_lines(), 1, "a session at A> counted as free");
         });
     }
 

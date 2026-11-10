@@ -396,23 +396,34 @@ static CPM_PEER_LISTENERS: AtomicUsize = AtomicUsize::new(0);
 /// membership count, is what decides whether a call can ring: a pool whose
 /// every member is busy used to ring out the caller's S7 and report NO ANSWER,
 /// where a hunt group with every line in use is busy.  Each member's say is
-/// its [`CpmIdleMark`].
+/// its [`CpmPoolMember`].
 static CPM_IDLE_LISTENERS: AtomicUsize = AtomicUsize::new(0);
 
-/// One pool member's share of [`CPM_IDLE_LISTENERS`]: counted while it is set,
-/// and uncounted when it is cleared or dropped, so a member that leaves cannot
-/// leave a free line behind it.
-#[derive(Default)]
-pub struct CpmIdleMark(bool);
+/// One session's membership of the inbound-call pool, and its say in
+/// [`CPM_IDLE_LISTENERS`].  The only way into the pool, so a free line cannot
+/// be counted with no member behind it.  Leaving clears the line first, then
+/// the membership: a caller that reads a free line afterwards finds none.  (A
+/// caller already past its check may still place into a pool that has just
+/// emptied; it hears BUSY when the pickup window ends, as it did before free
+/// lines were counted.)
+pub struct CpmPoolMember {
+    idle: bool,
+}
 
-impl CpmIdleMark {
+impl CpmPoolMember {
+    /// Join the pool, not yet free to answer.
+    pub fn join() -> Self {
+        CPM_PEER_LISTENERS.fetch_add(1, Ordering::SeqCst);
+        CpmPoolMember { idle: false }
+    }
+
     /// Say whether this member is free to answer.  Only a change moves the
     /// count, so it may be called on every pump cycle.
-    pub fn set(&mut self, idle: bool) {
-        if idle == self.0 {
+    pub fn set_idle(&mut self, idle: bool) {
+        if idle == self.idle {
             return;
         }
-        self.0 = idle;
+        self.idle = idle;
         if idle {
             CPM_IDLE_LISTENERS.fetch_add(1, Ordering::SeqCst);
         } else {
@@ -421,10 +432,21 @@ impl CpmIdleMark {
     }
 }
 
-impl Drop for CpmIdleMark {
+impl Drop for CpmPoolMember {
     fn drop(&mut self) {
-        self.set(false);
+        self.set_idle(false);
+        // When the last member leaves, drop any unclaimed call so a stale
+        // duplex doesn't linger for a pool that no longer exists.
+        if CPM_PEER_LISTENERS.fetch_sub(1, Ordering::SeqCst) <= 1 {
+            CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
     }
+}
+
+/// How many pool members are free to answer right now (tests).
+#[cfg(test)]
+pub(crate) fn cpm_free_lines() -> usize {
+    CPM_IDLE_LISTENERS.load(Ordering::SeqCst)
 }
 
 /// The single gateway-level owner of the slave→master crossbar announcer for
@@ -456,22 +478,6 @@ pub struct CpmIncomingCall {
 #[cfg(test)]
 pub(crate) static CPM_POOL_TEST_GATE: std::sync::LazyLock<std::sync::Arc<tokio::sync::RwLock<()>>> =
     std::sync::LazyLock::new(Default::default);
-
-/// Join the inbound-call pool: a modem-enabled CP/M shell that can answer an
-/// inbound `CPM@<ip>` call.  Every such session joins (unlike the old single
-/// owner), and any idle member can claim the next call.  Balanced by
-/// [`cpm_peer_listen_exit`] on every exit path.
-pub fn cpm_peer_listen_enter() {
-    CPM_PEER_LISTENERS.fetch_add(1, Ordering::SeqCst);
-}
-
-/// Leave the pool.  When the last member leaves, drop any unclaimed call so a
-/// stale duplex doesn't linger for a pool that no longer exists.
-pub fn cpm_peer_listen_exit() {
-    if CPM_PEER_LISTENERS.fetch_sub(1, Ordering::SeqCst) <= 1 {
-        CPM_CALL_REQUEST.lock().unwrap_or_else(|e| e.into_inner()).take();
-    }
-}
 
 /// Claim the single per-gateway crossbar-announcer role (slave→master `CPM`
 /// registration).  Only one pool member announces, so the master's crossbar
@@ -10263,29 +10269,25 @@ mod tests {
         let _lock = crate::relay::key_auth_test_lock();
         // The pool to itself: an emulator test's session would be counted.
         let _pool = CPM_POOL_TEST_GATE.blocking_write();
-        // A free line is counted while its mark is set, once however often it
-        // is set, and given back when the mark is cleared or dropped.
+        // Members are counted while they live; a free line while its mark is
+        // set, once however often it is set, and given back when it is
+        // cleared or its member leaves.
+        assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 0);
         assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 0);
-        let (mut a, mut b) = (CpmIdleMark::default(), CpmIdleMark::default());
-        a.set(true);
-        a.set(true);
-        b.set(true);
+        let (mut a, mut b) = (CpmPoolMember::join(), CpmPoolMember::join());
+        assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 2);
+        assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 0, "a new member is not yet free");
+        a.set_idle(true);
+        a.set_idle(true);
+        b.set_idle(true);
         assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 2);
-        a.set(false);
-        a.set(false);
+        a.set_idle(false);
+        a.set_idle(false);
         assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 1);
         drop(b);
         assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 0);
-        drop(a);
-        assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 0);
-        // Pool: enter twice, exit twice, count returns to 0.
-        assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 0);
-        cpm_peer_listen_enter();
-        cpm_peer_listen_enter();
-        assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 2);
-        cpm_peer_listen_exit();
         assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 1);
-        cpm_peer_listen_exit();
+        drop(a);
         assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 0);
         // Announce ownership is a single-claimer CAS.
         assert!(cpm_announce_claim());

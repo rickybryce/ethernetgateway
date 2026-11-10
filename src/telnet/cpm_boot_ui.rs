@@ -1241,7 +1241,10 @@ impl TelnetSession {
         self.send_line("").await?;
         self.flush().await?;
 
+        // Free to answer only while the machine runs: the pump takes calls.
+        modem.set_answering(true);
         let result = self.cpm_boot_run(&mut cpu, &mut machine, &mut modem, erase, &screen).await;
+        modem.set_answering(false);
 
         // Save whatever the guest changed, whatever ended the session — a user
         // who pressed ESC still wants their work.
