@@ -292,7 +292,7 @@ pub fn request_handover(stop: &AtomicBool) -> std::io::Result<Handover> {
     let path = handover_path();
     let claim = claim_path();
     // A claim left by a copy that died mid-handover would win every race below.
-    let _ = std::fs::remove_file(&claim);
+    clear_leftover_claim(&claim)?;
     std::fs::write(&path, b"stand down\n")?;
     let start = std::time::Instant::now();
     let mut said_still_stopping = false;
@@ -332,6 +332,22 @@ pub fn request_handover(stop: &AtomicBool) -> std::io::Result<Handover> {
                 }
             }
         }
+    }
+}
+
+/// Clear a claim left by a copy that died mid-handover, before asking.
+///
+/// **A claim that will not go is an error, not a shrug.**  It would win the
+/// holder's claim on every pass, so the holder could never agree -- and
+/// [`holder_agreed`] reads a claim as agreement, so the newcomer would wait out
+/// the agreed wait for a copy that never answered and then report it stuck.
+fn clear_leftover_claim(claim: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(claim) {
+        // The path goes with it: it is the file the operator has to remove.
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(std::io::Error::new(e.kind(), format!("{} could not be removed: {e}", claim.display())))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -630,6 +646,23 @@ mod tests {
             ),
             "the wait no longer reads the stop flag, or reads agreement from the request alone"
         );
+        // That reading is only sound because a leftover claim was cleared
+        // before asking -- or the ask refused: one that cannot be removed (a
+        // directory stands in for a file held open) is an error.
+        assert!(
+            newcomer.contains("    clear_leftover_claim(&claim)?;\n    std::fs::write(&path,"),
+            "the newcomer asks without clearing a leftover claim, or ignores a claim that will not go"
+        );
+        let dir = std::env::temp_dir().join(format!("egw_leftover_claim_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let claim = dir.join(CLAIM_FILE);
+        assert!(clear_leftover_claim(&claim).is_ok(), "no leftover claim is not an error");
+        std::fs::write(&claim, b"").unwrap();
+        assert!(clear_leftover_claim(&claim).is_ok() && !claim.exists(), "a leftover claim is cleared");
+        std::fs::create_dir(&claim).unwrap();
+        assert!(clear_leftover_claim(&claim).is_err(), "a claim that will not go was ignored");
+        let _ = std::fs::remove_dir_all(&dir);
         // A holder that claimed but could not delete the request has agreed:
         // read otherwise, the newcomer's give-up loses the claim on every pass.
         assert!(holder_agreed(true, true), "a claim made with the request still there is agreement");
