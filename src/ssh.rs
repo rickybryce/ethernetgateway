@@ -1904,6 +1904,23 @@ impl russh::server::Handler for SshHandler {
             return Ok(());
         }
 
+        // **Dial and Peer targets need `allow_peer_dial`, refused here for the
+        // same reason.**  It was read only inside the relay task, after the
+        // channel was accepted: the slave's refusal message named it as a
+        // cause of `channel_failure`, which it never was, and a refusal sent
+        // the operator to the wrong setting.  The task still checks it too --
+        // the setting can change between here and there.
+        if (dial_target.is_some() || peer_target.is_some()) && !cfg.allow_peer_dial {
+            glog!(
+                "SSH: refused serial-relay from {:?} (port {}, dial/peer target: \
+                 allow_peer_dial=false)",
+                self.peer_addr,
+                port_label
+            );
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
         // Count this relay channel against the session cap.  Each relay
         // channel spawns a full master session, so it must occupy a slot —
         // previously relay sessions bypassed max_sessions, letting one
@@ -2730,6 +2747,84 @@ mod tests {
 
         drop(session);
         server.abort();
+    }
+
+    /// **A Dial or Peer relay that `allow_peer_dial` forbids is refused with
+    /// `channel_failure`**, through the real `exec_request` over a real
+    /// connection.  It used to be accepted and only then dropped inside the
+    /// relay task, so the slave's message -- which lists `allow_peer_dial` as a
+    /// cause of refusal -- named a setting that never refused anything.  With
+    /// the setting on, the same request is accepted, which is the control.
+    #[tokio::test]
+    async fn test_a_dial_relay_without_allow_peer_dial_is_refused_at_once() {
+        struct Client;
+        impl russh::client::Handler for Client {
+            type Error = russh::Error;
+            async fn check_server_key(
+                &mut self,
+                _key: &russh::keys::PublicKeyOrCertificate,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+        let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+        struct Restore(Vec<(&'static str, String)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (k, v) in &self.0 {
+                    crate::config::update_config_value(k, v);
+                }
+            }
+        }
+        let c = crate::config::get_config();
+        let _restore = Restore(vec![
+            ("gateway_role", c.gateway_role.clone()),
+            ("master_accept_relays", c.master_accept_relays.to_string()),
+            ("allow_peer_dial", c.allow_peer_dial.to_string()),
+        ]);
+        crate::config::update_config_value("gateway_role", "master");
+        crate::config::update_config_value("master_accept_relays", "true");
+
+        // The master's answer to one Dial relay request: true for success.
+        async fn answer(allow: bool) -> bool {
+            crate::config::update_config_value("allow_peer_dial", if allow { "true" } else { "false" });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handler = loopback_handler(addr, None);
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                if let Ok(running) = russh::server::run_stream(loopback_config(), tcp, handler).await {
+                    let _ = running.await;
+                }
+            });
+            let mut session =
+                russh::client::connect(Arc::new(russh::client::Config::default()), addr, Client)
+                    .await
+                    .expect("client could not connect");
+            assert!(session.authenticate_password("admin", "secret").await.unwrap().success());
+            let mut channel = session.channel_open_session().await.unwrap();
+            // A target nothing will resolve: the answer comes before any dial.
+            channel.exec(true, &b"serial-relay A dial egw-test.invalid:23"[..]).await.unwrap();
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while let Some(msg) = channel.wait().await {
+                    match msg {
+                        russh::ChannelMsg::Success => return Some(true),
+                        russh::ChannelMsg::Failure => return Some(false),
+                        _ => {}
+                    }
+                }
+                None
+            })
+            .await
+            .expect("the master never answered the relay request")
+            .expect("the channel closed with no answer");
+            drop(channel);
+            drop(session);
+            server.abort();
+            reply
+        }
+        assert!(!answer(false).await, "a dial relay was accepted with allow_peer_dial off");
+        assert!(answer(true).await, "a dial relay was refused with allow_peer_dial on");
     }
 
     /// **A slave's key logs in over a real connection.**
@@ -3756,8 +3851,10 @@ mod tests {
              decided after the hello is reported to the slave as a successful connection"
         );
 
-        // The other two refusals are already ahead of it; keep them there.
-        for earlier in ["master_accept_relays", "try_claim_slot"] {
+        // The other refusals are ahead of it too; keep them there.  The
+        // allow_peer_dial one names its own field, so the slave's message that
+        // lists it as a cause of a refusal is telling the truth.
+        for earlier in ["master_accept_relays", "try_claim_slot", "!cfg.allow_peer_dial"] {
             let at = body.find(earlier).unwrap_or_else(|| panic!("{earlier} gate is gone"));
             assert!(at < hello, "the {earlier} gate must also precede the hello");
         }
