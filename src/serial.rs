@@ -412,6 +412,29 @@ pub struct CpmIncomingCall {
     pub progress: tokio::sync::mpsc::Sender<u8>,
 }
 
+/// What a CP/M session holds while it is in the inbound-call pool, beside its
+/// registration.  Nothing in a build; in tests, a shared hold on
+/// [`CPM_POOL_TEST_GATE`].
+#[cfg(not(test))]
+pub(crate) type CpmPoolGate = ();
+#[cfg(test)]
+pub(crate) type CpmPoolGate = tokio::sync::OwnedRwLockReadGuard<()>;
+
+/// **Tests share one process, and so one pool.**  Every emulator test session
+/// with a modem joins it (the default UART gives one), and an idle one takes
+/// any call waiting in the slot -- so a test that dials the pool, or counts it,
+/// could find another test's session there.  Sessions hold this shared; a test
+/// that needs the pool to itself holds it exclusively.
+#[cfg(test)]
+pub(crate) static CPM_POOL_TEST_GATE: std::sync::LazyLock<std::sync::Arc<tokio::sync::RwLock<()>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Taken by a CP/M session before it joins the pool; see [`CpmPoolGate`].
+pub(crate) async fn cpm_pool_gate() -> CpmPoolGate {
+    #[cfg(test)]
+    return CPM_POOL_TEST_GATE.clone().read_owned().await;
+}
+
 /// Join the inbound-call pool: a modem-enabled CP/M shell that can answer an
 /// inbound `CPM@<ip>` call.  Every such session joins (unlike the old single
 /// owner), and any idle member can claim the next call.  Balanced by
@@ -10208,8 +10231,9 @@ mod tests {
     fn test_cpm_pool_listener_count_and_announce_owner() {
         // The claim is also exercised by the announcer-exit test.
         let _lock = crate::relay::key_auth_test_lock();
-        // Pool: enter twice, exit twice, count returns to 0.  (Global statics,
-        // but no other test touches the pool.)
+        // The pool to itself: an emulator test's session would be counted.
+        let _pool = CPM_POOL_TEST_GATE.blocking_write();
+        // Pool: enter twice, exit twice, count returns to 0.
         assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 0);
         cpm_peer_listen_enter();
         cpm_peer_listen_enter();

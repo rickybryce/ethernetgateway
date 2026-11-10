@@ -1039,6 +1039,7 @@ impl TelnetSession {
         // crossbar; if that member exits while others remain, remote
         // reachability pauses until a new session re-announces (local
         // answering is unaffected).
+        let _pool_gate = crate::serial::cpm_pool_gate().await;
         let _peer_reg = cpm_peer_register(modem.enabled());
         // The CCP-lite's own default drive (real CP/M's `CDISK`).  A transient
         // may SELECT another drive (BDOS 14) while it runs — STAT does exactly

@@ -595,7 +595,7 @@ impl CpmModem {
                 // itself -- a dialling modem is not `can_answer` -- so when it
                 // is the pool's only member the line is busy at once, as a
                 // phone calling its own number is, rather than ringing out S7.
-                (Peer::Cpm, _) if crate::serial::cpm_peer_listener_count() <= 1 => {
+                (Peer::Cpm, _) if alone_in_cpm_pool(crate::serial::cpm_peer_listener_count()) => {
                     glog!("CP/M modem: CPM@{} has no other CP/M session to answer it", host.unwrap_or(""));
                     self.result(out, "BUSY");
                 }
@@ -976,6 +976,13 @@ impl CpmModem {
             out.push(b'\r');
         }
     }
+}
+
+/// Is a dialling CP/M session the only one in the pool?  It is counted itself,
+/// so one member -- or none, for a modem not in a session -- leaves nobody to
+/// answer.
+fn alone_in_cpm_pool(listeners: usize) -> bool {
+    listeners <= 1
 }
 
 /// Dial an endpoint on another gateway: `label` (`A`, `B` or `CPM`) at
@@ -1616,8 +1623,14 @@ mod tests {
     /// a dialling modem is not free to answer -- so the other session does.
     #[test]
     fn test_a_cpm_session_calls_another_on_this_gateway() {
-        // The pool is global; the serial tests that count it hold this lock.
+        // The pool is global: the serial tests that count it hold this lock,
+        // and the gate keeps every other test's CP/M session out of it.
         let _pool = crate::relay::key_auth_test_lock();
+        let _alone = crate::serial::CPM_POOL_TEST_GATE.blocking_write();
+        // A session alone in the pool has nobody to answer it, which is decided
+        // from the count alone -- itself included.
+        assert!(alone_in_cpm_pool(0) && alone_in_cpm_pool(1), "nobody else is listening");
+        assert!(!alone_in_cpm_pool(2), "another session is listening");
         struct Members;
         impl Drop for Members {
             fn drop(&mut self) {
@@ -1625,7 +1638,7 @@ mod tests {
                 crate::serial::cpm_peer_listen_exit();
             }
         }
-        // Alone in the pool, nobody else can answer: busy at once, not S7 later.
+        // Alone in the pool: busy at once, not S7 later.
         crate::serial::cpm_peer_listen_enter();
         {
             struct One;
