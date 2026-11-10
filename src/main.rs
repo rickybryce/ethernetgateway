@@ -595,9 +595,11 @@ fn main() {
             ));
             // **And again here, which is the one that counts.**  Locals drop
             // in reverse, so on a panic the runtime is dropped before the guard
-            // above -- and a runtime's Drop waits, with no limit, for every
-            // blocking task, some of which wait on `shutdown`.  Declared after
-            // the runtime, this one sets `shutdown` before that wait starts.
+            // above -- and its teardown waits (up to `RUNTIME_TEARDOWN`) for
+            // blocking tasks, some of which end only when `shutdown` is set.
+            // Declared after the runtime, this one sets `shutdown` before that
+            // wait starts, so those tasks finish inside it instead of being
+            // abandoned at the limit.
             let _death_before_runtime_drop = ServerDeathGuard { died: died_late, shutdown: shutdown_rt.clone() };
 
             let serial_handles = runtime.rt().block_on(async move {
@@ -991,14 +993,6 @@ pub(crate) fn should_run_another_cycle(restart: bool, stop_requested: bool) -> b
     restart && !stop_requested
 }
 
-/// Marks the server as dead, and asks everything else to stop, when the
-/// server thread unwinds from a panic.
-///
-/// **The headless wait notices a dead thread by itself; the GUI does not.**  It
-/// blocks the main thread until its window closes, and closes only on
-/// `shutdown`, so a panicked server left a window up over a gateway serving
-/// nothing.  Setting `shutdown` closes it; `died` is what tells the exit path
-/// this was a death and not a quit, since `shutdown` alone can no longer say.
 /// The server thread's runtime, torn down with a time limit **however the
 /// thread ends**.
 ///
@@ -1026,6 +1020,14 @@ impl Drop for BoundedRuntime {
     }
 }
 
+/// Marks the server as dead, and asks everything else to stop, when the
+/// server thread unwinds from a panic.
+///
+/// **The headless wait notices a dead thread by itself; the GUI does not.**  It
+/// blocks the main thread until its window closes, and closes only on
+/// `shutdown`, so a panicked server left a window up over a gateway serving
+/// nothing.  Setting `shutdown` closes it; `died` is what tells the exit path
+/// this was a death and not a quit, since `shutdown` alone can no longer say.
 struct ServerDeathGuard {
     died: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
