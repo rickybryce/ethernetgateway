@@ -16038,6 +16038,36 @@ async fn test_a_failed_first_file_does_not_lose_the_rest_of_the_batch() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **An overwrite never empties the operator's file before the upload is
+/// safely written.**  It truncated in place, so a write that failed part-way --
+/// a full disk -- left the old file emptied and then deleted.  A failed write
+/// cannot be staged portably; what can be seen is the old file's contents
+/// surviving the overwrite through a second link to them, which only a write
+/// beside it and a rename over it leaves alone.
+#[tokio::test]
+async fn test_an_overwrite_is_written_beside_the_file_and_renamed_over_it() {
+    let dir = std::env::temp_dir().join(format!("egw_overwrite_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let none = std::collections::HashSet::new();
+    let game = dir.join("GAME");
+    std::fs::write(&game, b"the operator's game").unwrap();
+    std::fs::hard_link(&game, dir.join("OLD")).unwrap();
+    let upload = vec![(None, b"upload".to_vec(), None)];
+    let out = TelnetSession::save_uploads(&dir, &upload, Some(("GAME", game.as_path(), true)), false, &none, Vec::new())
+        .await;
+    assert_eq!(out.saved, vec![("GAME".to_string(), 6)]);
+    assert_eq!(std::fs::read(&game).unwrap(), b"upload");
+    assert_eq!(
+        std::fs::read(dir.join("OLD")).unwrap(),
+        b"the operator's game",
+        "the old file was rewritten in place, so a failed write could have emptied it"
+    );
+    let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left.len(), 2, "a temporary file was left behind: {left:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **The overwrite answer belongs to the name it was asked about.**
 ///
 /// Punter saves `GAME` as `GAME.prg`, and the "overwrite?" question is asked

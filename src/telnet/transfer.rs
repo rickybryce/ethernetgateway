@@ -964,31 +964,51 @@ impl TelnetSession {
                     failure = if overwrite && Self::is_symlink(&save_path).await {
                         Some(("That name is a link; not replaced.".into(), "a link; not replaced"))
                     } else {
-                        let mut opts = tokio::fs::OpenOptions::new();
-                        opts.write(true);
-                        if overwrite {
-                            opts.create(true).truncate(true);
-                        } else {
-                            opts.create_new(true);
+                        // **An overwrite is written beside the file and renamed
+                        // over it**, never truncated in place: a write that
+                        // failed part-way -- a full disk -- used to leave the
+                        // operator's file emptied and then deleted, with
+                        // neither the old copy nor the upload.  Until the
+                        // rename the old file is untouched.  The temporary name
+                        // starts with a dot, which no upload may.
+                        let temp = overwrite.then(|| {
+                            let base = save_path.file_name().map(|n| n.to_string_lossy().into_owned());
+                            save_path.with_file_name(format!(
+                                ".{}.upload-{}",
+                                base.unwrap_or_default(),
+                                std::process::id()
+                            ))
+                        });
+                        if let Some(t) = &temp {
+                            let _ = tokio::fs::remove_file(t).await;
                         }
-                        match opts.open(&save_path).await {
+                        let target = temp.as_deref().unwrap_or(&save_path);
+                        let mut opts = tokio::fs::OpenOptions::new();
+                        opts.write(true).create_new(true);
+                        match opts.open(target).await {
                             Ok(mut file) => {
-                                if let Err(e) = file.write_all(data).await {
+                                let written = match file.write_all(data).await {
+                                    Ok(()) => file.flush().await,
+                                    Err(e) => Err(e),
+                                };
+                                drop(file);
+                                let placed = match (written, &temp) {
+                                    (Ok(()), Some(t)) => tokio::fs::rename(t, &save_path).await,
+                                    (r, _) => r,
+                                };
+                                if let Err(e) = placed {
                                     // A partial file under the real name is
                                     // worse than none: it looks like the
                                     // upload, and it holds the name against
-                                    // the retry.
-                                    drop(file);
-                                    let _ = tokio::fs::remove_file(&save_path).await;
+                                    // the retry.  An overwrite's lives under
+                                    // the temporary name, and goes; the
+                                    // operator's file was never opened.
+                                    let _ = tokio::fs::remove_file(target).await;
                                     // **No fallback to the typed name here**, unlike
                                     // a failed open: the disk that refused this
-                                    // write holds that name too, and with an
-                                    // overwrite answered the fallback truncated the
-                                    // operator's file and then deleted it.
+                                    // write holds that name too.
                                     Some((format!("Failed to save: {}", e), "write failed"))
                                 } else {
-                                    let _ = file.flush().await;
-                                    drop(file);
                                     Self::apply_ymodem_meta(&save_path, ymeta.as_ref());
                                     None
                                 }
