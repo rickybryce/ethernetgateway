@@ -556,6 +556,10 @@ const CONIN_SPOOL_POLL: std::time::Duration = std::time::Duration::from_millis(2
 pub(in crate::telnet) struct CpmPeerReg {
     /// `Some` while this session owns the single crossbar announcer.
     announce: Option<(std::sync::Arc<AtomicBool>, tokio::task::JoinHandle<()>)>,
+    /// Tests only: this session's shared hold on the pool, so a test that needs
+    /// the pool to itself can have it (see `serial::CPM_POOL_TEST_GATE`).
+    #[cfg(test)]
+    _pool_gate: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 impl Drop for CpmPeerReg {
     fn drop(&mut self) {
@@ -585,10 +589,12 @@ impl Drop for CpmPeerReg {
 /// Shared by the emulator and the booted-disk driver: a guest with a virtual
 /// modem is dialable whichever of the two it is running under, and having one
 /// copy of this is what keeps that true.
-pub(in crate::telnet) fn cpm_peer_register(modem_enabled: bool) -> Option<CpmPeerReg> {
+pub(in crate::telnet) async fn cpm_peer_register(modem_enabled: bool) -> Option<CpmPeerReg> {
     if !modem_enabled {
         return None;
     }
+    #[cfg(test)]
+    let pool_gate = crate::serial::CPM_POOL_TEST_GATE.clone().read_owned().await;
     crate::serial::cpm_peer_listen_enter();
     let cfg = config::get_config();
     // Announcing to our own master is not gated on `allow_peer_dial` (see
@@ -605,7 +611,11 @@ pub(in crate::telnet) fn cpm_peer_register(modem_enabled: bool) -> Option<CpmPee
     } else {
         None
     };
-    Some(CpmPeerReg { announce })
+    Some(CpmPeerReg {
+        announce,
+        #[cfg(test)]
+        _pool_gate: pool_gate,
+    })
 }
 
 /// Outcome of the between-batch out-of-band input drain.
@@ -1039,8 +1049,7 @@ impl TelnetSession {
         // crossbar; if that member exits while others remain, remote
         // reachability pauses until a new session re-announces (local
         // answering is unaffected).
-        let _pool_gate = crate::serial::cpm_pool_gate().await;
-        let _peer_reg = cpm_peer_register(modem.enabled());
+        let _peer_reg = cpm_peer_register(modem.enabled()).await;
         // The CCP-lite's own default drive (real CP/M's `CDISK`).  A transient
         // may SELECT another drive (BDOS 14) while it runs — STAT does exactly
         // this for `STAT B:`, to read B:'s free space — but the real CCP

@@ -264,10 +264,7 @@ pub fn peer_outcome_code(outcome: PeerCallOutcome) -> &'static str {
     }
 }
 
-/// How many CP/M sessions are in the inbound-call pool right now.
-pub fn cpm_peer_listener_count() -> usize {
-    CPM_PEER_LISTENERS.load(Ordering::SeqCst)
-}
+
 
 /// Wait for a placed peer call's outcome from the target's progress bytes
 /// (`0` RING, `1` answered, anything else an error).  Shared by
@@ -412,28 +409,16 @@ pub struct CpmIncomingCall {
     pub progress: tokio::sync::mpsc::Sender<u8>,
 }
 
-/// What a CP/M session holds while it is in the inbound-call pool, beside its
-/// registration.  Nothing in a build; in tests, a shared hold on
-/// [`CPM_POOL_TEST_GATE`].
-#[cfg(not(test))]
-pub(crate) type CpmPoolGate = ();
-#[cfg(test)]
-pub(crate) type CpmPoolGate = tokio::sync::OwnedRwLockReadGuard<()>;
-
 /// **Tests share one process, and so one pool.**  Every emulator test session
 /// with a modem joins it (the default UART gives one), and an idle one takes
 /// any call waiting in the slot -- so a test that dials the pool, or counts it,
-/// could find another test's session there.  Sessions hold this shared; a test
-/// that needs the pool to itself holds it exclusively.
+/// could find another test's session there.  A session holds this shared for
+/// as long as it is in the pool (see `CpmPeerReg`); a test that needs the pool
+/// to itself holds it exclusively.  Take `CONFIG_TEST_LOCK` first if both are
+/// needed: a session under a test that holds that lock waits here.
 #[cfg(test)]
 pub(crate) static CPM_POOL_TEST_GATE: std::sync::LazyLock<std::sync::Arc<tokio::sync::RwLock<()>>> =
     std::sync::LazyLock::new(Default::default);
-
-/// Taken by a CP/M session before it joins the pool; see [`CpmPoolGate`].
-pub(crate) async fn cpm_pool_gate() -> CpmPoolGate {
-    #[cfg(test)]
-    return CPM_POOL_TEST_GATE.clone().read_owned().await;
-}
 
 /// Join the inbound-call pool: a modem-enabled CP/M shell that can answer an
 /// inbound `CPM@<ip>` call.  Every such session joins (unlike the old single
@@ -529,11 +514,18 @@ fn try_place_cpm_call(call: PeerCall) -> Result<(), PeerCall> {
 
 /// Caller side: place a peer-dial call to the CP/M endpoint and wait for it
 /// to ring/answer.  Mirrors [`request_peer_call`] but on the global CP/M slot.
+///
+/// `caller_in_pool`: the caller is a CP/M session, counted in the pool itself.
+/// It cannot answer its own call -- a dialling modem is not free to -- so it
+/// needs another member, where a serial port or a relay needs only one.
 pub async fn request_cpm_call(
     answer_wait: Duration,
+    caller_in_pool: bool,
 ) -> Result<tokio::io::DuplexStream, PeerCallOutcome> {
-    if CPM_PEER_LISTENERS.load(Ordering::SeqCst) == 0 {
-        return Err(PeerCallOutcome::Busy); // no CP/M modem session listening
+    if nobody_else_listens(CPM_PEER_LISTENERS.load(Ordering::SeqCst), caller_in_pool) {
+        // Busy at once, as a phone calling its own number is, rather than
+        // ringing out the caller's S7 with nobody there to pick up.
+        return Err(PeerCallOutcome::Busy);
     }
     let (caller_end, target_end) = tokio::io::duplex(65536);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(8);
@@ -556,6 +548,11 @@ pub async fn request_cpm_call(
         // The guard's drop reclaims the placed-but-unclaimed request.
         Err(outcome)
     }
+}
+
+/// The pool has nobody to answer a call: no member at all, or only the caller.
+fn nobody_else_listens(listeners: usize, caller_in_pool: bool) -> bool {
+    listeners <= usize::from(caller_in_pool)
 }
 
 /// Drop guard mirroring [`PeerSlotGuard`] for the single `CPM_CALL_REQUEST`
@@ -639,7 +636,7 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
     }
     let answer_wait =
         Duration::from_secs((state.s_regs[7].max(1)) as u64).min(MAX_CONNECT_TIMEOUT);
-    let ring = race_dial(state, request_cpm_call(answer_wait));
+    let ring = race_dial(state, request_cpm_call(answer_wait, false));
     match ring {
         None => {
             send_result(state, "NO CARRIER");
@@ -3001,7 +2998,7 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>, _exit: AnnouncerExit) {
                             biased;
                             _ = cpm_wait_stop(&stop) => {}
                             _ = async {
-                                match request_cpm_call(crate::relay::RELAY_PEER_ANSWER_WAIT).await {
+                                match request_cpm_call(crate::relay::RELAY_PEER_ANSWER_WAIT, false).await {
                                     Ok(mut caller) => {
                                         crate::relay::send_peer_answer(&mut stream, Ok(())).await;
                                         // A call, not two pipes: either side hanging up ends it
@@ -10233,6 +10230,9 @@ mod tests {
         let _lock = crate::relay::key_auth_test_lock();
         // The pool to itself: an emulator test's session would be counted.
         let _pool = CPM_POOL_TEST_GATE.blocking_write();
+        // The rule a caller is refused by: nobody, or only itself, in the pool.
+        assert!(nobody_else_listens(0, false) && !nobody_else_listens(1, false));
+        assert!(nobody_else_listens(1, true) && !nobody_else_listens(2, true));
         // Pool: enter twice, exit twice, count returns to 0.
         assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 0);
         cpm_peer_listen_enter();

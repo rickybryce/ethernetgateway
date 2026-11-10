@@ -1031,8 +1031,7 @@ impl TelnetSession {
         );
         // Joins the inbound `CPM@<ip>` pool for as long as the boot lasts, so a
         // booted guest is dialable exactly as an emulator session is.
-        let _pool_gate = crate::serial::cpm_pool_gate().await;
-        let _peer_reg = cpm_peer_register(modem.enabled());
+        let _peer_reg = cpm_peer_register(modem.enabled()).await;
 
         // Read once and used twice — to build the CPU and to say which one the
         // guest got.  Two reads could straddle another session's save and put a

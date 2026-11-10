@@ -592,17 +592,12 @@ impl CpmModem {
                 // This gateway's CP/M endpoint.  It is a hunt group, not this
                 // session: any *other* idle CP/M session may answer, as it may
                 // a serial modem's `ATD CPM@<here>`.  This one cannot answer
-                // itself -- a dialling modem is not `can_answer` -- so when it
-                // is the pool's only member the line is busy at once, as a
-                // phone calling its own number is, rather than ringing out S7.
-                (Peer::Cpm, _) if alone_in_cpm_pool(crate::serial::cpm_peer_listener_count()) => {
-                    glog!("CP/M modem: CPM@{} has no other CP/M session to answer it", host.unwrap_or(""));
-                    self.result(out, "BUSY");
-                }
+                // itself, so `request_cpm_call` is told it is a member: alone
+                // in the pool, the line is busy at once.
                 (Peer::Cpm, _) => {
                     let wait = self.carrier_wait();
                     self.start_call(Box::pin(async move {
-                        match crate::serial::request_cpm_call(wait).await {
+                        match crate::serial::request_cpm_call(wait, true).await {
                             Ok(duplex) => Placed::connected(duplex),
                             Err(why) => {
                                 glog!("CP/M modem: dial to this gateway's CP/M endpoint: {why:?}");
@@ -976,13 +971,6 @@ impl CpmModem {
             out.push(b'\r');
         }
     }
-}
-
-/// Is a dialling CP/M session the only one in the pool?  It is counted itself,
-/// so one member -- or none, for a modem not in a session -- leaves nobody to
-/// answer.
-fn alone_in_cpm_pool(listeners: usize) -> bool {
-    listeners <= 1
 }
 
 /// Dial an endpoint on another gateway: `label` (`A`, `B` or `CPM`) at
@@ -1625,12 +1613,11 @@ mod tests {
     fn test_a_cpm_session_calls_another_on_this_gateway() {
         // The pool is global: the serial tests that count it hold this lock,
         // and the gate keeps every other test's CP/M session out of it.
+        // Config first, then the gate: the order a session under a test that
+        // holds the config lock takes them in.
+        let _cfg = crate::config::CONFIG_TEST_LOCK.blocking_lock();
         let _pool = crate::relay::key_auth_test_lock();
         let _alone = crate::serial::CPM_POOL_TEST_GATE.blocking_write();
-        // A session alone in the pool has nobody to answer it, which is decided
-        // from the count alone -- itself included.
-        assert!(alone_in_cpm_pool(0) && alone_in_cpm_pool(1), "nobody else is listening");
-        assert!(!alone_in_cpm_pool(2), "another session is listening");
         struct Members;
         impl Drop for Members {
             fn drop(&mut self) {
@@ -1650,7 +1637,6 @@ mod tests {
             let _one = One;
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async {
-                let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
                 let _peer = PeerDialConfig::on();
                 let mut alone = CpmModem::new(true);
                 let out = alone.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await;
@@ -1663,7 +1649,6 @@ mod tests {
         let _members = Members;
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
-            let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
             let _peer = PeerDialConfig::on();
             let (mut a, mut b) = (CpmModem::new(true), CpmModem::new(true));
 
