@@ -1209,9 +1209,11 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
          checking nothing"
     );
     // `race_dial` itself: one `block_on`, `biased;`, the abort arm before the
-    // call's.  Bounded to its own body, which ends at the first column-0 `}`.
+    // call's.  Bounded to its own body, which ends at the first column-0 `}` --
+    // `"\n}"`, not `"\n}\n"`: a Windows checkout is CRLF, and the longer
+    // needle found nothing there (CI, 2026-11-10).
     let at = src.find("\nfn race_dial<").expect("race_dial is gone; the scan above trusts it");
-    let body = &src[at..at + src[at..].find("\n}\n").expect("race_dial's end")];
+    let body = &src[at..at + src[at..].find("\n}").expect("race_dial's end")];
     let (biased, abort, call) = (
         body.find("biased;"),
         body.find("wait_for_serial_abort("),
