@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A modem port's saved AT profile is editable from telnet.**  `A` on a
+  modem port's screen opens *PORT x - AT PROFILE*: the `E`/`V`/`Q` toggles,
+  `X`, `&D`, `&K` and `&C` cycled through the ranges the AT parser accepts,
+  the S-registers, and the four stored numbers (`-` empties one).  The web
+  page and the desktop editor already had it; from telnet the profile was
+  written only by a modem user typing `AT&W`.  Saved at once and never
+  restarts the port: the modem reads it at `ATZ` and at port start.
+
 ### Changed
 
 - **Any key abandons a dial**, as on a Hayes modem: while `ATD` is waiting
@@ -15,10 +25,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   modem and the CP/M emulator's modem; a dial used to ignore the keyboard
   for the whole of `S7`.  The CP/M guest also keeps running while its modem
   dials, where it used to stand still until the dial ended.
-- **A busy CP/M pool answers `BUSY` at once.**  `CPM@<ip>` is a hunt group;
-  when every CP/M session in it is dialling, ringing or on a call, a caller
-  is now refused straight away instead of after the three-second pickup
-  window.
+- **A CP/M session can call another on the same gateway.**  `ATD CPM@<this
+  gateway>` from the CP/M modem was refused as a call to itself; the
+  endpoint is a hunt group, and it now rings another CP/M session, as the
+  same dial from a serial modem always did.  A session cannot answer its
+  own call, so with no other session free -- alone in the pool, or every
+  other session dialling, ringing, on a call or sitting at `A>` -- the
+  caller hears `BUSY` at once, where it used to wait out the three-second
+  pickup window (or, alone, the whole of `S7`).  This goes for a serial
+  modem's or a relay's call to the pool too.
+- **The CP/M modem dials as the serial modem does**: `ATDT fe80::1` and other
+  IPv6 addresses (the CP/M modem split at the last colon and called host
+  `fe80:`), `ATD CPM@<ip>` to a remote CP/M endpoint through the crossbar or,
+  on a slave, its master (it was looked up as a host name), and
+  `ATD PORTA@<ip>` (which sent `PORTA`, a label no gateway registers).  A
+  failed remote dial is now logged; it said `NO CARRIER` and nothing else.
+- **Transfer summaries give a block count only where it is true**: after a
+  classic XMODEM download.  Every summary counted 128-byte blocks -- eight
+  times too many for XMODEM-1K and YMODEM, and invented for ZMODEM, Kermit
+  and Punter.  The others give bytes and time.
+- **A slave hears a master's refusal at once.**  Not a master, relays off,
+  at capacity or a target not allowed: the slave used to notice only when
+  the hello never came, 5 s for a registration and 40 s for a dial, while a
+  device dialling through the slave sat silent and the log said "no answer
+  after 40s".
+- **Long serial lists page.**  The device picker pages ten at a time past
+  eleven ports (a twelfth ran off a C64's screen), and the dialup list pages
+  where it stopped at nine with "... and N more".  The Serial Configuration
+  overview keeps the end of a long device path, where the device is named,
+  so `/dev/serial/by-id` paths no longer all read the same.
+- **Panics reach the log**, the GUI console and `/logs`, one line naming the
+  thread; they went to stderr only.
+- Dependencies updated, among them russh 0.65.
+
+### Fixed
+
+- **An upload never loses the operator's file.**  Answered `Y`, an upload
+  overwrote the file in place, and one that failed part-way (a full disk)
+  left neither the old copy nor the upload.  The upload is now written
+  beside the file and renamed over it only when complete.
+- **An upload's refined name never replaces a file unasked.**  The overwrite
+  question is about the name typed, but Punter saves `GAME` as `GAME.prg`,
+  and a sender may name file 1 itself: the answer was carried to the new
+  name, so `Y` replaced a file nobody was asked about, and with only the
+  refined name present the finished upload was thrown away as "already
+  exists".  A refined name is now only ever created new; if it is taken,
+  or cannot be written, the file goes under the typed name on the answer
+  given for it, and "Saved as" says so.
+- **A C64's cursor and colour keys stay out of typed lines and menus.**  On
+  a PETSCII terminal the cursor keys, CLR/HOME, INST, shifted RETURN, the
+  colour keys and F1-F8 were taken into a line and echoed -- a CRSR-LEFT at
+  the Telnet Gateway's Host prompt made "abcd" out of "abd", and the lookup
+  failed -- and at a menu were answered as an unknown choice.  Measured
+  under VICE with NovaTerm.
+- **A dead server thread no longer leaves a gateway that looks alive.**  With
+  the console window open, or headless, a panicked server thread left a
+  process serving nothing; it now closes the window and exits 1, and tears
+  its runtime down within two seconds where the window could stay up for
+  good.  "Server stopped." is logged once, not twice.
+- **A bad transfer folder is fatal only at launch.**  Set from a settings
+  screen and applied with Save and Restart, it exited the gateway with the
+  bad value already saved, and the next launch failed the same way with no
+  screen left to fix it from.  It now logs an error and keeps serving.
+- **Handing over to a newly started copy** (one gateway per folder) can no
+  longer leave nothing serving: at the newcomer's deadline both sides could
+  act on the request and both stop (seen in CI on macOS and Windows).  The
+  newcomer's wait (up to 2 min 15 s) now stops on Ctrl-C or SIGTERM, and a
+  leftover claim that cannot be removed is reported, with the file to
+  remove, rather than waited out.
+- **Serial port screen restarts once.**  `T` (mode) and `K` (erase key)
+  applied their change and then `Q` applied it again: a second restart, or
+  "Restart Port B now?" about a change already made, where `N` reverted the
+  file while the port kept the new mode.  `K` with a caller connected now
+  says which other pending changes its restart applies.
+- **Deleting a dialup entry** deletes the entry shown.  It removed by
+  position from the list as drawn and saved that back, erasing anything
+  added meanwhile from another screen.
+- **CP/M modem:** an `ATA` after the caller had given up answered `CONNECT`
+  and then `NO CARRIER`; it now answers `NO CARRIER`, as the serial modem
+  does.  A guest polling a unit that is not its own while peer bytes waited
+  spun the host instead of being paced as idle.
+- **CP/M disk images:** an image the gateway's account cannot write (root's
+  `0644` file under a service account), or one on a read-only filesystem,
+  mounts read-only instead of being refused "Permission denied"; a boot's
+  save asks the host for write access first, where it replaced root's image
+  with one the service account owns.  An image written under a different
+  `EXM` says so when it is identified, not later as merely "damaged".  A
+  mount is never published onto a drive lent to a running boot (the boot's
+  end silently put the old image back), and a new blank disk never
+  overwrites one created under the same name meanwhile.
+- **FD1771 (Tarbell, Cromemco):** the head unloads as the data sheet says --
+  on a Type I command without verify, and by the third index pulse once
+  idle; it stayed loaded for good.
+- **VDM-1:** the scroll register's upper nibble moves the display down under
+  a black band, as the manual's figure 2-11 shows; it blanked the rows above
+  and moved nothing.
+- **CP/M printing** writes a job off the async worker: closing a spool held a
+  worker, and every session on it, for as long as the SD card took.
+- **Punter:** a sender that hangs up mid-block is reported as hanging up,
+  not as "block read failed" after re-sending into a closed connection.
+- **Relay:** a Dial or Peer relay without `allow_peer_dial` is refused
+  before the master accepts it, so the slave's message names the real
+  cause; an enrol-key channel is closed once it is answered, where it stayed
+  open for the life of the relay link.
+- **Gateway address probe:** one that panicked stopped every later probe for
+  the life of the process, leaving the `x.x.x.1` fallback.
 
 ## [1.0.6] - 2026-10-26
 
