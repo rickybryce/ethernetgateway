@@ -988,10 +988,16 @@ impl TelnetSession {
                                     None
                                 }
                             }
+                            // **Any failure on a name the operator did not type
+                            // falls back to the one they did**, not only "already
+                            // exists": a folder called `GAME.prg` is "already
+                            // exists" on Linux and "access denied" on Windows, and
+                            // the second threw the finished upload away.
+                            Err(e) if ci < last => {
+                                glog!("Upload: {} not usable ({e}); saving under the typed name", save_path.display());
+                                continue;
+                            }
                             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                                if ci < last {
-                                    continue;
-                                }
                                 Some(("File already exists.".into(), "already exists"))
                             }
                             Err(e) => Some((format!("Failed to save: {}", e), "write failed")),

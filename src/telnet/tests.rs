@@ -15942,6 +15942,19 @@ async fn test_a_refined_upload_name_never_replaces_a_file_unasked() {
     .await;
     assert_eq!(out.saved, vec![("GAME.prg".to_string(), 6)]);
     assert!(!typed.exists());
+
+    // A *folder* with the refined name: the open fails -- "already exists" on
+    // Linux, "access denied" on Windows -- and either way the upload goes
+    // under the typed name rather than being thrown away.
+    std::fs::remove_file(dir.join("GAME.prg")).unwrap();
+    std::fs::create_dir(dir.join("GAME.prg")).unwrap();
+    let out = TelnetSession::save_uploads(
+        &dir, &refined(), Some(("GAME", typed.as_path(), false)), false, &none, Vec::new(),
+    )
+    .await;
+    assert_eq!(out.lone_failure, None, "a folder in the refined name's way lost the upload");
+    assert_eq!(out.saved, vec![("GAME".to_string(), 6)]);
+    assert_eq!(std::fs::read(&typed).unwrap(), b"upload");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
