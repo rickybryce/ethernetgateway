@@ -1166,6 +1166,15 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
         // *preceding* block's marker, which is the very defect this scoping was
         // added to stop.
         let head = lines[from..=i].join("\n");
+        // **A call handed to `race_dial` is raced by it**: `race_dial` is the
+        // `block_on` with the abort arm (and a keypress arm) built in, checked
+        // once below.  Only when it is the *last* opener before the call, so a
+        // plain `block_on` written after a `race_dial` is still checked here.
+        let rd = head.rfind("race_dial(");
+        if rd.is_some() && rd > head.rfind("block_on(") {
+            sites += 1;
+            continue;
+        }
         let Some(bo) = head.rfind("block_on(") else {
             continue; // not awaited on a blocking thread — see cpm_slave_announce
         };
@@ -1198,6 +1207,25 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
         "the scan found only {sites} block_on relay-call sites in serial.rs \
          (of {matched} relay calls) -- it has stopped finding them, so it is \
          checking nothing"
+    );
+    // `race_dial` itself: one `block_on`, `biased;`, the abort arm before the
+    // call's.  Bounded to its own body, which ends at the first column-0 `}`.
+    let at = src.find("\nfn race_dial<").expect("race_dial is gone; the scan above trusts it");
+    let body = &src[at..at + src[at..].find("\n}\n").expect("race_dial's end")];
+    let (biased, abort, call) = (
+        body.find("biased;"),
+        body.find("wait_for_serial_abort("),
+        body.find("r = fut =>"),
+    );
+    assert!(
+        body.matches("block_on(").count() == 1
+            && biased.is_some()
+            && biased < abort
+            && abort.is_some()
+            && abort < call
+            && call.is_some(),
+        "race_dial must race the call against wait_for_serial_abort in one biased \
+         block_on, abort arm first -- every relay call passed to it relies on that"
     );
     // The two counts are pinned together: a site that stops looking like a
     // `block_on` one has either been fixed by moving off the serial thread or

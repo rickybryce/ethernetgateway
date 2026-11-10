@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Any key abandons a dial**, as on a Hayes modem: while `ATD` is waiting
+  for a connection, an answer or carrier, a key from the terminal hangs up
+  with `NO CARRIER` and returns to command mode.  Both the serial ports'
+  modem and the CP/M emulator's modem; a dial used to ignore the keyboard
+  for the whole of `S7`.  The CP/M guest also keeps running while its modem
+  dials, where it used to stand still until the dial ended.
+
 ## [1.0.6] - 2026-10-26
 
 ### Added

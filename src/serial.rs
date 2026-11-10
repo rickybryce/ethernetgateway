@@ -565,15 +565,7 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
         } else if let Ok(ip) = host.parse::<std::net::IpAddr>() {
             // Raced against a restart for the same reason as the peer crossbar
             // below -- see the note there.
-            let sd = state.shutdown.clone();
-            let idx = state.port_id.index();
-            let claim = state.handle.block_on(async move {
-                tokio::select! {
-                    biased;
-                    _ = wait_for_serial_abort(&sd, idx) => None,
-                    c = crate::relay::claim_remote_peer(ip, "CPM") => Some(c),
-                }
-            });
+            let claim = race_dial(state, crate::relay::claim_remote_peer(ip, "CPM"));
             let Some(claim) = claim else {
                 send_result(state, "NO CARRIER");
                 return;
@@ -612,15 +604,7 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
     }
     let answer_wait =
         Duration::from_secs((state.s_regs[7].max(1)) as u64).min(MAX_CONNECT_TIMEOUT);
-    let sd = state.shutdown.clone();
-    let idx = state.port_id.index();
-    let ring = state.handle.block_on(async move {
-        tokio::select! {
-            biased;
-            _ = wait_for_serial_abort(&sd, idx) => None,
-            r = request_cpm_call(answer_wait) => Some(r),
-        }
-    });
+    let ring = race_dial(state, request_cpm_call(answer_wait));
     match ring {
         None => {
             send_result(state, "NO CARRIER");
@@ -2725,6 +2709,98 @@ where
 async fn wait_for_serial_abort(shutdown: &Arc<AtomicBool>, idx: usize) {
     while !shutdown.load(Ordering::SeqCst) && !SERIAL_RESTART[idx].load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Run one stage of a dial -- a connect, a ring, a claim -- **as a Hayes modem
+/// runs it: any key the caller presses abandons the call.**  Hayes modems
+/// abandon a call if they get any character from the terminal while they are
+/// dialling or waiting for carrier: they go back on hook, say `NO CARRIER`,
+/// and stay in command mode.  Every dial here has to wait on the network or on
+/// a far port, and it used to ignore the keyboard for the whole of `S7`.
+///
+/// `None` means the stage did not finish, either because the caller pressed a
+/// key or because a shutdown or restart cut it short.  Each caller answers
+/// both with `NO CARRIER`, which is what a modem says when it hangs up before
+/// carrier.  `fut` is dropped when the call is abandoned, so it must be safe
+/// to cancel; every stage passed here already was, because a restart cancels
+/// it in the same way.
+///
+/// The key is consumed, as a modem consumes it: it was a request to hang up,
+/// not the start of the next command.  The exception is the second half of the
+/// line ending that sent the `ATD`: a terminal that ends lines with CR LF
+/// still has the LF in the port when the dial starts.  That byte is swallowed
+/// by the rule `command_mode_tick` uses, or every such terminal would hang up
+/// on itself.
+fn race_dial<F: std::future::Future>(state: &mut ModemState, fut: F) -> Option<F::Output> {
+    let handle = state.handle.clone();
+    let sd = state.shutdown.clone();
+    let idx = state.port_id.index();
+    let (cr, lf) = (state.s_regs[3], state.s_regs[4]);
+    let label = state.port_id.label();
+    let keypress = wait_for_dial_keypress(
+        &mut state.port,
+        &mut state.pending_input,
+        &mut state.prev_cmd_byte,
+        cr,
+        lf,
+    );
+    handle.block_on(async {
+        tokio::select! {
+            biased;
+            _ = wait_for_serial_abort(&sd, idx) => None,
+            _ = keypress => {
+                glog!("Serial modem (Port {}): dial abandoned -- a key was pressed", label);
+                None
+            }
+            r = fut => Some(r),
+        }
+    })
+}
+
+/// Resolve when the terminal sends a byte that is not the second half of the
+/// line ending that sent the dial command.  See [`race_dial`].
+///
+/// A port that cannot say how much is waiting never resolves this: the dial
+/// then runs to its own end, as it did before keys could abandon it, and the
+/// next read in command mode finds the dead port.
+async fn wait_for_dial_keypress(
+    port: &mut Box<dyn serialport::SerialPort>,
+    pending: &mut std::collections::VecDeque<u8>,
+    prev: &mut u8,
+    cr: u8,
+    lf: u8,
+) {
+    // A byte is a keypress unless it pairs with the terminator before it.
+    let mut is_key = |b: u8| {
+        if is_paired_eol(b, *prev, cr, lf) {
+            *prev = 0;
+            return false;
+        }
+        *prev = b;
+        true
+    };
+    loop {
+        while let Some(b) = pending.pop_front() {
+            if is_key(b) {
+                pending.clear();
+                return;
+            }
+        }
+        let waiting = match port.bytes_to_read() {
+            Ok(n) => n as usize,
+            Err(_) => return std::future::pending().await,
+        };
+        if waiting > 0 {
+            let mut buf = [0u8; 64];
+            let want = waiting.min(buf.len());
+            if let Ok(n) = port.read(&mut buf[..want]) {
+                if buf[..n].iter().any(|&b| is_key(b)) {
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -5776,16 +5852,7 @@ fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
         // unraced wait would pin that thread for the whole 35 s and delay a
         // config restart by it -- the same trap `connect_local_peer` documents
         // for `request_peer_call`, which is where this shape is copied from.
-        let sd = state.shutdown.clone();
-        let idx = state.port_id.index();
-        let claim_label = label.clone();
-        let claim = state.handle.block_on(async move {
-            tokio::select! {
-                biased;
-                _ = wait_for_serial_abort(&sd, idx) => None,
-                c = crate::relay::claim_remote_peer(ip, &claim_label) => Some(c),
-            }
-        });
+        let claim = race_dial(state, crate::relay::claim_remote_peer(ip, &label));
         let Some(claim) = claim else {
             // The dial was cut short by the restart, not refused by the far end.
             send_result(state, "NO CARRIER");
@@ -5885,15 +5952,7 @@ fn bridge_local_modem_peer(state: &mut ModemState, target: SerialPortId) {
     // that long.  On abort the select drops the ring future, whose
     // PeerSlotGuard reclaims the placed call; we report NO CARRIER to the
     // caller (the dial was cut short).  Mirrors `modem_slave_announce_tick`.
-    let sd = state.shutdown.clone();
-    let idx = state.port_id.index();
-    let ring = state.handle.block_on(async move {
-        tokio::select! {
-            biased;
-            _ = wait_for_serial_abort(&sd, idx) => None,
-            r = request_peer_call(target, answer_wait) => Some(r),
-        }
-    });
+    let ring = race_dial(state, request_peer_call(target, answer_wait));
     match ring {
         None => {
             send_result(state, "NO CARRIER");
@@ -5944,15 +6003,7 @@ fn bridge_local_console_peer(state: &mut ModemState, target: SerialPortId) {
     // Cancelling the request is safe — its `ConsoleSlotGuard` reclaims the
     // slot on drop.  The slave-console wedge is already prevented up-front in
     // `connect_local_peer`; this bounds every other path.
-    let sd = state.shutdown.clone();
-    let idx = state.port_id.index();
-    let outcome = state.handle.block_on(async move {
-        tokio::select! {
-            biased;
-            _ = wait_for_serial_abort(&sd, idx) => None,
-            r = request_console_bridge(target) => Some(r),
-        }
-    });
+    let outcome = race_dial(state, request_console_bridge(target));
     let bridge = match outcome {
         Some(Ok(d)) => d,
         Some(Err(e)) => {
@@ -6020,16 +6071,10 @@ fn dial_master_relay(
     // the crossbar's answer byte pushed `RELAY_HELLO_TIMEOUT_DIALING` out.  A
     // far device that never picks up would otherwise hold the thread for all
     // of it, and a Save-and-Restart in that window waits it out.
-    let sd = state.shutdown.clone();
-    let idx = state.port_id.index();
-    let connected = state.handle.block_on(async move {
-        tokio::select! {
-            biased;
-            _ = wait_for_serial_abort(&sd, idx) => None,
-            r = crate::relay::connect_master_relay(&host, port, &user, &pass, &target, port_label)
-                => Some(r),
-        }
-    });
+    let connected = race_dial(
+        state,
+        crate::relay::connect_master_relay(&host, port, &user, &pass, &target, port_label),
+    );
     let Some(connected) = connected else {
         // Cut short by the restart, not refused by the far end.
         send_result(state, "NO CARRIER");
@@ -6374,10 +6419,9 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
     // Try each resolved address in turn; the first to connect wins.
     let mut connected: Option<std::net::TcpStream> = None;
     let mut last_err: Option<std::io::Error> = None;
-    let sd = state.shutdown.clone();
-    let idx = state.port_id.index();
     for addr in &addrs {
-        // Connect asynchronously, RACED against a shutdown/restart poll, on
+        // Connect asynchronously, RACED against a keypress (see `race_dial`)
+        // and a shutdown/restart poll, on
         // the serial thread's runtime handle.  The blocking
         // `connect_timeout` this replaces was blind to shutdown for the whole
         // S7 window (up to 60 s per address): if a config-restart dropped the
@@ -6389,32 +6433,26 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
         // socket is handed to the synchronous online phase as a blocking std
         // stream, so nothing downstream changes.
         let addr = *addr;
-        let outcome: Option<std::io::Result<std::net::TcpStream>> =
-            state.handle.block_on(async {
-                tokio::select! {
-                    biased;
-                    _ = wait_for_serial_abort(&sd, idx) => None,
-                    r = tokio::time::timeout(
-                        s7_timeout,
-                        tokio::net::TcpStream::connect(addr),
-                    ) => Some(match r {
-                        // Deregister from the reactor and restore blocking mode
-                        // (tokio sockets are non-blocking) for online_mode_tcp.
-                        Ok(Ok(tcp)) => match tcp.into_std() {
-                            Ok(s) => s.set_nonblocking(false).map(|_| s),
-                            Err(e) => Err(e),
-                        },
-                        Ok(Err(e)) => Err(e),
-                        Err(_elapsed) => Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "connect timed out",
-                        )),
-                    }),
+        // The conversion stays inside the race, on the runtime, where the
+        // socket was registered.
+        let connect = async move {
+            match tokio::time::timeout(s7_timeout, tokio::net::TcpStream::connect(addr)).await {
+                // Deregister from the reactor and restore blocking mode
+                // (tokio sockets are non-blocking) for online_mode_tcp.
+                Ok(Ok(tcp)) => match tcp.into_std() {
+                    Ok(s) => s.set_nonblocking(false).map(|_| s),
+                    Err(e) => Err(e),
+                },
+                Ok(Err(e)) => Err(e),
+                Err(_elapsed) => {
+                    Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out"))
                 }
-            });
+            }
+        };
+        let outcome: Option<std::io::Result<std::net::TcpStream>> = race_dial(state, connect);
         match outcome {
             None => {
-                // Shutdown/restart aborted the dial mid-connect.
+                // A key, or a shutdown/restart, abandoned the dial mid-connect.
                 send_result(state, "NO CARRIER");
                 return;
             }
@@ -11382,7 +11420,10 @@ mod tests {
         fn read_data_set_ready(&mut self) -> serialport::Result<bool> { Ok(true) }
         fn read_ring_indicator(&mut self) -> serialport::Result<bool> { Ok(false) }
         fn read_carrier_detect(&mut self) -> serialport::Result<bool> { Ok(false) }
-        fn bytes_to_read(&self) -> serialport::Result<u32> { Ok(0) }
+        // What the next scripted read will return, as a UART's count would say.
+        fn bytes_to_read(&self) -> serialport::Result<u32> {
+            Ok(self.script.lock().unwrap().front().map_or(0, |(_, b)| b.len() as u32))
+        }
         fn bytes_to_write(&self) -> serialport::Result<u32> { Ok(0) }
         fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> { Ok(()) }
         fn try_clone(&self) -> serialport::Result<Box<dyn serialport::SerialPort>> {
@@ -11450,6 +11491,45 @@ mod tests {
         ])));
         state.port = Box::new(MockPort { written, script });
         state
+    }
+
+    /// **Any key abandons a dial**, as on a Hayes modem, and the second half of
+    /// the CR LF that sent the `ATD` is not a key.  Both ways a byte arrives:
+    /// already read into `pending_input`, and still waiting in the port.
+    #[test]
+    fn test_a_key_abandons_a_serial_dial() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut state, written) = mock_modem_state(SerialPortId::A, rt.handle().clone());
+        let slow = || async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            7u8
+        };
+
+        // The LF after the dial's CR: the dial runs to its end.
+        state.prev_cmd_byte = b'\r';
+        state.pending_input.extend(b"\n");
+        assert_eq!(race_dial(&mut state, slow()), Some(7), "the LF of a CR LF hung up");
+
+        // A key already read: abandoned, and the key and what followed it spent.
+        state.pending_input.extend(b"xAT\r");
+        let t = Instant::now();
+        assert_eq!(race_dial(&mut state, slow()), None, "a pending key did not hang up");
+        assert!(t.elapsed() < Duration::from_millis(250), "the dial ran on after the key");
+        assert!(state.pending_input.is_empty(), "the hang-up key ran as a command");
+
+        // A key still in the port, after a silent spell.
+        let script = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+            (Duration::ZERO, b"y".to_vec()),
+        ])));
+        state.port = Box::new(MockPort { written: written.clone(), script });
+        let t = Instant::now();
+        assert_eq!(race_dial(&mut state, slow()), None, "a key in the port did not hang up");
+        assert!(t.elapsed() < Duration::from_millis(250), "the dial ran on after the key");
+
+        // A LF on its own, not after a CR, is a key.
+        state.prev_cmd_byte = b'y';
+        state.pending_input.extend(b"\n");
+        assert_eq!(race_dial(&mut state, slow()), None, "a lone LF is a key");
     }
 
     /// **An escape completed before a read returned is not lost to it.**  The

@@ -4424,7 +4424,7 @@ translation off &mdash; <code>AT+PETSCII=0</code> &mdash; before a binary transf
         <tr><td><code>CONNECT</code></td><td>Target answered (modem) or connected (console).</td></tr>
         <tr><td><code>BUSY</code></td><td>Target modem port is already in a call.</td></tr>
         <tr><td><code>NO ANSWER</code></td><td>Target rang but nobody answered within the caller's <code>S7</code> (needs <code>ATX3</code>+; else <code>NO CARRIER</code>).</td></tr>
-        <tr><td><code>NO CARRIER</code></td><td>Unknown/disabled port, peer-dial off, dialing your own port, or the call failed.</td></tr>
+        <tr><td><code>NO CARRIER</code></td><td>Unknown/disabled port, peer-dial off, dialing your own port, the call failed, or a key was pressed while the call was ringing (as on a Hayes modem, any key abandons a dial).</td></tr>
     </tbody>
 </table>
 
@@ -4629,7 +4629,7 @@ stored profile; <code>AT&amp;F</code> resets to factory defaults.
         <tr><td>S4</td><td>10</td><td>Line feed character.</td></tr>
         <tr><td>S5</td><td>8</td><td>Backspace character.</td></tr>
         <tr><td>S6</td><td>2</td><td>Wait-for-dial-tone seconds (used by <code>W</code> modifier).</td></tr>
-        <tr><td>S7</td><td><strong>15</strong></td><td>Wait-for-carrier seconds. Hayes default is 50; gateway reduces it for responsive TCP dials. Capped internally at 60.</td></tr>
+        <tr><td>S7</td><td><strong>15</strong></td><td>Wait-for-carrier seconds. Hayes default is 50; gateway reduces it for responsive TCP dials. Capped internally at 60. As on a Hayes modem, any key pressed while a dial is waiting abandons it with <code>NO CARRIER</code> (the CP/M emulator's modem too).</td></tr>
         <tr><td>S8</td><td>2</td><td>Comma pause time (seconds).</td></tr>
         <tr><td>S9</td><td>6</td><td>Carrier detect response time (1/10 s).</td></tr>
         <tr><td>S10</td><td>14</td><td>Carrier loss disconnect time (1/10 s).</td></tr>

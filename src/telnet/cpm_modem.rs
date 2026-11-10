@@ -6,8 +6,10 @@
 //! *other* side of that channel: it interprets the AT command stream the guest
 //! sends, dials out (to a local serial Port A/B via the existing peer-dial
 //! plumbing, or to a TCP host), and once connected pumps bytes both ways.  It
-//! runs in the emulator's async driver loop ([`super::cpm_emu`]), so unlike the
-//! blocking physical-serial modem it can simply `.await` a dial.
+//! runs in the emulator's async driver loop ([`super::cpm_emu`]).  A dial that
+//! has to wait is **not** awaited there: it is polled once per pump cycle while
+//! the guest keeps running, so the guest can abandon it with a keypress as on
+//! a Hayes modem (see [`CpmModem::poll_call`]).
 //!
 //! Both directions work: **outbound** (`ATD A`/`B` for the gateway's own
 //! ports, `ATD A@<remote-ip>` for a port on another gateway via the crossbar
@@ -47,8 +49,31 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> ModemStream for T {}
 #[derive(PartialEq)]
 enum Mode {
     Command,
+    /// A dial is in progress (`placing`): neither a command line nor data, and
+    /// any byte from the guest abandons the call.
+    Dialing,
     Online,
 }
+
+/// How a dial that had to wait came out.
+enum Placed {
+    Connected {
+        conn: Box<dyn ModemStream>,
+        /// A relay call's SSH session, kept alive alongside its channel.
+        keepalive: Option<Box<dyn std::any::Any + Send>>,
+    },
+    /// The result code to report instead of `CONNECT`.
+    Failed(&'static str),
+}
+
+impl Placed {
+    fn connected(conn: impl ModemStream + 'static) -> Self {
+        Placed::Connected { conn: Box::new(conn), keepalive: None }
+    }
+}
+
+/// A dial in progress, polled by [`CpmModem::poll_call`].
+type Placing = std::pin::Pin<Box<dyn std::future::Future<Output = Placed> + Send>>;
 
 /// The CP/M virtual modem.  Owned by the CP/M session and pumped each CPU
 /// batch with the bytes the guest has written; returns bytes for the guest.
@@ -65,6 +90,11 @@ pub(in crate::telnet) struct CpmModem {
     line_overflow: bool,
     /// The live connection while online.
     conn: Option<Box<dyn ModemStream>>,
+    /// The dial in progress while in [`Mode::Dialing`].
+    placing: Option<Placing>,
+    /// The next byte may be the second half of the line ending that sent the
+    /// dial (LF after CR, or a telnet NUL), which is not a keypress.
+    placing_grace: bool,
     echo: bool,
     /// Consecutive `+` count for the `+++` escape: the characters held back.
     plus_run: u8,
@@ -136,6 +166,8 @@ impl CpmModem {
             line: Vec::new(),
             line_overflow: false,
             conn: None,
+            placing: None,
+            placing_grace: false,
             echo: true,
             plus_run: 0,
             plus_at: None,
@@ -286,6 +318,20 @@ impl CpmModem {
         for b in guest_tx {
             match self.mode {
                 Mode::Command => self.feed_command_byte(b, &mut out).await,
+                Mode::Dialing => {
+                    if std::mem::take(&mut self.placing_grace) && matches!(b, 0x0A | 0x00) {
+                        continue;
+                    }
+                    // **Any key abandons a dial**, as on a Hayes modem: back on
+                    // hook, `NO CARRIER`, command mode.  The key is spent on the
+                    // hang-up, and so is the rest of this batch -- it was typed
+                    // at a modem that was not listening for commands.
+                    glog!("CP/M modem: dial abandoned -- the guest sent a byte");
+                    self.placing = None;
+                    self.mode = Mode::Command;
+                    self.result(&mut out, "NO CARRIER");
+                    break;
+                }
                 Mode::Online => {
                     self.feed_online_byte(b, &mut out).await;
                     // **The call died under this batch**: the rest of it was
@@ -307,6 +353,9 @@ impl CpmModem {
         // A `+` or two left held with no third: once guard time has passed
         // they were data.  Checked every cycle, because a guest that types one
         // `+` and then waits sends no byte that would flush it.
+        if self.mode == Mode::Dialing {
+            self.poll_call(&mut out).await;
+        }
         if self.mode == Mode::Online {
             self.release_stale_plus(Instant::now(), &mut out).await;
         }
@@ -538,7 +587,7 @@ impl CpmModem {
                 // `PORTA@<ip>` used to go out as `PORTA`, which no gateway
                 // registers, so it failed where `A@<ip>` connected.
                 (_, Some(h)) if !crate::serial::host_is_local_addr(h) => {
-                    self.dial_remote_peer(peer.wire_label(), h, out).await;
+                    self.start_call(Box::pin(call_remote_peer(peer.wire_label(), h.to_string())));
                 }
                 // This emulator's own endpoint: the guest calling itself, which
                 // the serial modem refuses for a port dialling itself too.
@@ -546,16 +595,17 @@ impl CpmModem {
                     glog!("CP/M modem: CPM@{} is this emulator; a call to itself refused", host.unwrap_or(""));
                     self.result(out, "NO CARRIER");
                 }
-                (Peer::Port(id), _) => match request_peer_call(id, self.carrier_wait()).await {
-                    Ok(duplex) => {
-                        self.conn = Some(Box::new(duplex));
-                        self.mode = Mode::Online;
-                        self.result(out, "CONNECT");
-                    }
-                    Err(PeerCallOutcome::Busy) => self.result(out, "BUSY"),
-                    Err(PeerCallOutcome::NoAnswer) => self.result(out, "NO ANSWER"),
-                    Err(_) => self.result(out, "NO CARRIER"),
-                },
+                (Peer::Port(id), _) => {
+                    let wait = self.carrier_wait();
+                    self.start_call(Box::pin(async move {
+                        match request_peer_call(id, wait).await {
+                            Ok(duplex) => Placed::connected(duplex),
+                            Err(PeerCallOutcome::Busy) => Placed::Failed("BUSY"),
+                            Err(PeerCallOutcome::NoAnswer) => Placed::Failed("NO ANSWER"),
+                            Err(_) => Placed::Failed("NO CARRIER"),
+                        }
+                    }));
+                }
             }
             return;
         }
@@ -568,91 +618,55 @@ impl CpmModem {
             // out the OS's own retry schedule (over two minutes on Linux),
             // and the guest -- spinning on its UART status for a result code
             // -- looks hung for all of it.
-            let connect = tokio::net::TcpStream::connect((host.as_str(), port));
-            match tokio::time::timeout(self.carrier_wait(), connect)
-                .await
-                .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
-            {
-                Ok(stream) => {
-                    self.conn = Some(Box::new(stream));
-                    self.mode = Mode::Online;
-                    self.result(out, "CONNECT");
+            let wait = self.carrier_wait();
+            self.start_call(Box::pin(async move {
+                let connect = tokio::net::TcpStream::connect((host.as_str(), port));
+                match tokio::time::timeout(wait, connect)
+                    .await
+                    .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
+                {
+                    Ok(stream) => Placed::connected(stream),
+                    Err(_) => Placed::Failed("NO CARRIER"),
                 }
-                Err(_) => self.result(out, "NO CARRIER"),
-            }
+            }));
             return;
         }
 
         self.result(out, "NO CARRIER");
     }
 
-    /// Dial an endpoint on another gateway: `label` (`A`, `B` or `CPM`) at
-    /// `host`.  On a slave the address goes to the master, which resolves or
-    /// crossbars it; on a master or a standalone gateway it is claimed from the
-    /// crossbar registry directly.
+    /// Begin a dial that has to wait.  Nothing is reported yet: the call is
+    /// polled by [`Self::poll_call`] on each pump cycle, and a byte from the
+    /// guest before it completes abandons it (see [`Self::service`]).
+    fn start_call(&mut self, call: Placing) {
+        self.placing = Some(call);
+        self.placing_grace = true;
+        self.mode = Mode::Dialing;
+    }
+
+    /// Poll the dial in progress once, without waiting for it.
     ///
-    /// **Every failure is logged**, as the serial modem logs its own: the
-    /// guest hears only a result code, and a slave whose master refused the
-    /// relay -- wrong password, relays switched off -- used to say NO CARRIER
-    /// and leave nothing anywhere to say why.
-    async fn dial_remote_peer(&mut self, label: &str, host: &str, out: &mut Vec<u8>) {
-        let cfg = crate::config::get_config();
-        let addr = format!("{label}@{host}");
-        if cfg.gateway_role == "slave" {
-            let target = crate::relay::RelayTarget::Peer { addr: addr.clone() };
-            match crate::relay::connect_master_relay(
-                &cfg.slave_master_host,
-                cfg.slave_master_port,
-                &cfg.slave_master_username,
-                &cfg.slave_master_password,
-                &target,
-                "CPM",
-            )
-            .await
-            {
-                Ok(crate::relay::MasterRelay { _session, stream }) => {
-                    self.relay_keepalive = Some(Box::new(_session));
-                    self.conn = Some(Box::new(stream));
-                    self.mode = Mode::Online;
-                    self.result(out, "CONNECT");
-                }
-                Err(e) => {
-                    glog!(
-                        "CP/M modem: dial to {addr} through master {}:{} failed: {e}",
-                        cfg.slave_master_host,
-                        cfg.slave_master_port
-                    );
-                    self.result(out, "NO CARRIER");
-                }
-            }
-            return;
-        }
-        let Ok(ip) = host.parse::<std::net::IpAddr>() else {
-            glog!("CP/M modem: dial to {addr}: a remote endpoint is named by its IP address");
-            self.result(out, "NO CARRIER");
-            return;
-        };
-        // `CONNECT` is only written for `Answered`: the guest's software treats
-        // it as carrier, so it must not stand for a channel that was merely
-        // claimed.  Busy and no-answer are told apart exactly as the local
-        // peer-dial tells them, and `result` folds both to NO CARRIER at X0.
-        match crate::relay::claim_remote_peer(ip, label).await {
-            crate::relay::PeerClaim::Answered(dup) => {
-                self.conn = Some(Box::new(dup));
+    /// The dial used to be awaited in place, and the pump that runs the guest
+    /// waited with it: for up to `S7` the CPU stood still, the guest could not
+    /// type, and even the session's double ESC went unread.  Polled here, the
+    /// guest runs on and a Hayes modem's rule holds: any key hangs up.
+    async fn poll_call(&mut self, out: &mut Vec<u8>) {
+        let Some(call) = self.placing.as_mut() else { return };
+        let polled =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(call.as_mut().poll(cx))).await;
+        let std::task::Poll::Ready(placed) = polled else { return };
+        self.placing = None;
+        self.placing_grace = false;
+        match placed {
+            Placed::Connected { conn, keepalive } => {
+                self.conn = Some(conn);
+                self.relay_keepalive = keepalive;
                 self.mode = Mode::Online;
                 self.result(out, "CONNECT");
             }
-            crate::relay::PeerClaim::Failed(why) => {
-                glog!("CP/M modem: dial to {addr}: {why:?}");
-                match why {
-                    PeerCallOutcome::Busy => self.result(out, "BUSY"),
-                    PeerCallOutcome::NoAnswer => self.result(out, "NO ANSWER"),
-                    _ => self.result(out, "NO CARRIER"),
-                }
-            }
-            crate::relay::PeerClaim::NotRegistered => {
-                glog!("CP/M modem: dial to {addr}: no such endpoint is registered here");
-                self.result(out, "NO CARRIER");
+            Placed::Failed(code) => {
+                self.mode = Mode::Command;
+                self.result(out, code);
             }
         }
     }
@@ -950,6 +964,69 @@ impl CpmModem {
     }
 }
 
+/// Dial an endpoint on another gateway: `label` (`A`, `B` or `CPM`) at
+/// `host`.  On a slave the address goes to the master, which resolves or
+/// crossbars it; on a master or a standalone gateway it is claimed from the
+/// crossbar registry directly.
+///
+/// **Every failure is logged**, as the serial modem logs its own: the
+/// guest hears only a result code, and a slave whose master refused the
+/// relay -- wrong password, relays switched off -- used to say NO CARRIER
+/// and leave nothing anywhere to say why.
+async fn call_remote_peer(label: &'static str, host: String) -> Placed {
+    let cfg = crate::config::get_config();
+    let addr = format!("{label}@{host}");
+    if cfg.gateway_role == "slave" {
+        let target = crate::relay::RelayTarget::Peer { addr: addr.clone() };
+        return match crate::relay::connect_master_relay(
+            &cfg.slave_master_host,
+            cfg.slave_master_port,
+            &cfg.slave_master_username,
+            &cfg.slave_master_password,
+            &target,
+            "CPM",
+        )
+        .await
+        {
+            Ok(crate::relay::MasterRelay { _session, stream }) => Placed::Connected {
+                conn: Box::new(stream),
+                keepalive: Some(Box::new(_session)),
+            },
+            Err(e) => {
+                glog!(
+                    "CP/M modem: dial to {addr} through master {}:{} failed: {e}",
+                    cfg.slave_master_host,
+                    cfg.slave_master_port
+                );
+                Placed::Failed("NO CARRIER")
+            }
+        };
+    }
+    let Ok(ip) = host.parse::<std::net::IpAddr>() else {
+        glog!("CP/M modem: dial to {addr}: a remote endpoint is named by its IP address");
+        return Placed::Failed("NO CARRIER");
+    };
+    // `CONNECT` is only written for `Answered`: the guest's software treats
+    // it as carrier, so it must not stand for a channel that was merely
+    // claimed.  Busy and no-answer are told apart exactly as the local
+    // peer-dial tells them, and `result` folds both to NO CARRIER at X0.
+    match crate::relay::claim_remote_peer(ip, label).await {
+        crate::relay::PeerClaim::Answered(dup) => Placed::connected(dup),
+        crate::relay::PeerClaim::Failed(why) => {
+            glog!("CP/M modem: dial to {addr}: {why:?}");
+            match why {
+                PeerCallOutcome::Busy => Placed::Failed("BUSY"),
+                PeerCallOutcome::NoAnswer => Placed::Failed("NO ANSWER"),
+                _ => Placed::Failed("NO CARRIER"),
+            }
+        }
+        crate::relay::PeerClaim::NotRegistered => {
+            glog!("CP/M modem: dial to {addr}: no such endpoint is registered here");
+            Placed::Failed("NO CARRIER")
+        }
+    }
+}
+
 /// The menu session a `ATDT ethernetgateway` dial runs, as an already-boxed
 /// `Send` future.
 ///
@@ -1141,8 +1218,14 @@ mod tests {
         assert_eq!(src.matches("TcpStream::connect(").count(), 1, "a second TCP connect appeared");
         let at = src.find("TcpStream::connect(").unwrap();
         assert!(
-            src[at..].starts_with("TcpStream::connect((host.as_str(), port));\n            match tokio::time::timeout(self.carrier_wait(), connect)"),
+            src[at..].starts_with("TcpStream::connect((host.as_str(), port));\n                match tokio::time::timeout(wait, connect)"),
             "the dial's connect is no longer bounded by S7"
+        );
+        let before = &src[..at];
+        let wait = before.rfind("let wait = ").expect("the bound is named");
+        assert!(
+            before[wait..].starts_with("let wait = self.carrier_wait();"),
+            "the dial's bound is no longer S7"
         );
     }
 
@@ -1192,6 +1275,68 @@ mod tests {
         assert!(s.contains("OK"));
     }
 
+    /// Pump the modem with no guest bytes until a dial in progress finishes,
+    /// as the emulator's loop does between CPU batches.
+    async fn settle(m: &mut CpmModem) -> Vec<u8> {
+        let mut out = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while m.mode == Mode::Dialing {
+            assert!(Instant::now() < deadline, "the dial never finished");
+            out.extend(m.service(Vec::new(), 65536, false).await);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        out
+    }
+
+    /// **A dial runs with the guest, and any key hangs it up**, as on a Hayes
+    /// modem.  The call here never completes, as a far end that never answers
+    /// does not; the guest's line ending is not a key, and the next byte is.
+    #[tokio::test]
+    async fn test_a_key_abandons_a_dial_in_progress() {
+        let mut m = CpmModem::new(true);
+        m.start_call(Box::pin(std::future::pending()));
+        // The second half of a CR LF that sent the ATD.
+        let out = m.service(b"\n".to_vec(), 65536, false).await;
+        assert!(out.is_empty(), "the line ending was answered: {out:?}");
+        assert!(m.mode == Mode::Dialing, "the line ending hung up the dial");
+        // Pumped with nothing typed, it keeps dialling.
+        assert!(m.service(Vec::new(), 65536, false).await.is_empty());
+        assert!(m.mode == Mode::Dialing);
+        // A key.  The rest of the batch is spent with it, not run as a command.
+        let out = m.service(b"xAT\r".to_vec(), 65536, false).await;
+        let s = String::from_utf8_lossy(&out).to_string();
+        assert!(s.contains("NO CARRIER"), "{s:?}");
+        assert!(!s.contains("OK"), "the batch after the key ran as a command: {s:?}");
+        assert!(m.mode == Mode::Command && m.placing.is_none() && m.conn.is_none());
+        // Only the first byte after the dial is excused: a LF typed later hangs up.
+        m.start_call(Box::pin(std::future::pending()));
+        let _ = m.service(b"y".to_vec(), 65536, false).await;
+        assert!(m.mode == Mode::Command, "the first byte after ATD must count when it is a key");
+        m.start_call(Box::pin(std::future::pending()));
+        let _ = m.service(b"\n".to_vec(), 65536, false).await;
+        let out = m.service(b"\n".to_vec(), 65536, false).await;
+        assert!(String::from_utf8_lossy(&out).contains("NO CARRIER"), "a second LF is a key");
+    }
+
+    /// The far end's answer is reported when it comes, through the same poll:
+    /// a failed call's own code, and a connected one's `CONNECT`, online.
+    #[tokio::test]
+    async fn test_a_dial_reports_its_outcome_when_it_completes() {
+        let mut m = CpmModem::new(true);
+        m.start_call(Box::pin(async { Placed::Failed("BUSY") }));
+        let out = settle(&mut m).await;
+        assert!(String::from_utf8_lossy(&out).contains("BUSY"), "{out:?}");
+        assert!(m.mode == Mode::Command);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut out = m.service(format!("ATDT 127.0.0.1:{port}\r").into_bytes(), 65536, false).await;
+        out.extend(settle(&mut m).await);
+        let s = String::from_utf8_lossy(&out).to_string();
+        assert!(s.contains("CONNECT"), "{s:?}");
+        assert!(m.mode == Mode::Online && m.conn.is_some());
+    }
+
     #[tokio::test]
     async fn test_nvt_cr_nul_line_endings_do_not_break_the_next_command() {
         // An NVT telnet client sends Return as CR NUL.  Every command after the
@@ -1209,7 +1354,12 @@ mod tests {
         // measured at 134 s, 83% of the whole suite's runtime, and it passed on
         // the timeout rather than on the resolution failure the comment claimed.
         // Loopback port 1 is refused immediately and needs no resolver at all.
-        let out = m.service(b"ATDT 127.0.0.1:1\r\0".to_vec(), 65536, false).await;
+        // The NUL after the CR is also the dial's grace byte: were it read as a
+        // keypress, the dial would be abandoned before it began -- `NO CARRIER`
+        // either way, so the mode is checked first.
+        let mut out = m.service(b"ATDT 127.0.0.1:1\r\0".to_vec(), 65536, false).await;
+        assert!(m.mode == Mode::Dialing, "the NUL of a CR NUL hung up the dial");
+        out.extend(settle(&mut m).await);
         let first = String::from_utf8_lossy(&out).to_string();
         assert!(first.contains("NO CARRIER"), "first command: {first}");
         // Second command must be parsed, not refused because of the NUL.
@@ -1408,7 +1558,8 @@ mod tests {
         ] {
             let slave = fake_remote_endpoint(ip, label);
             let mut m = CpmModem::new(true);
-            let out = m.service(dial.as_bytes().to_vec(), 65536, false).await;
+            let mut out = m.service(dial.as_bytes().to_vec(), 65536, false).await;
+            out.extend(settle(&mut m).await);
             let out = String::from_utf8_lossy(&out).to_string();
             assert!(out.contains("CONNECT"), "{dial:?} answered {out:?}");
             drop(m);
@@ -1426,7 +1577,9 @@ mod tests {
         let _peer = PeerDialConfig::on();
         let ask = |dial: &'static str| async move {
             let mut m = CpmModem::new(true);
-            String::from_utf8_lossy(&m.service(dial.as_bytes().to_vec(), 65536, false).await).to_string()
+            let mut out = m.service(dial.as_bytes().to_vec(), 65536, false).await;
+            out.extend(settle(&mut m).await);
+            String::from_utf8_lossy(&out).to_string()
         };
         let logged = |what: &str| crate::logger::snapshot(2000).iter().any(|l| l.contains(what));
 
@@ -1453,7 +1606,8 @@ mod tests {
     async fn test_tcp_dial_to_dead_port_reports_no_carrier() {
         let mut m = CpmModem::new(true);
         // Port 1 on loopback is (almost certainly) closed → NO CARRIER.
-        let out = m.service(b"ATDT 127.0.0.1:1\r".to_vec(), 65536, false).await;
+        let mut out = m.service(b"ATDT 127.0.0.1:1\r".to_vec(), 65536, false).await;
+        out.extend(settle(&mut m).await);
         assert!(String::from_utf8_lossy(&out).contains("NO CARRIER"));
     }
 
