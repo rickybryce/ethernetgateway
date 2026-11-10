@@ -5437,11 +5437,24 @@ pub(crate) mod tests {
     /// Give it that console, run it, and its sign-on is sitting in screen
     /// memory — where the web UI's viewer now finds it.
     ///
-    /// Ignored: set `CPM_VDM_IMAGE` to TDISK04.DSK (or another VDM-1 disk).
+    /// **The machine is the one a boot would pick.**  This gate hard-coded
+    /// `console_04`, which is right for TDISK04 and wrong for `cpm22-vdm.dsk`:
+    /// that disk has no VDM driver of its own.  Its BIOS prints only by calling
+    /// CUTER at `C019h` (measured: one `CALL C019`, no `OUT` to `C8h`, `04h` or
+    /// `05h` in its system tracks), so it is a VDM-1 guest only when the real
+    /// CUTER is fitted.  On `console_04` it calls empty memory and hangs at
+    /// `BBC5h`; on `console_04_cuter` with no ROM file the six-byte stand-in
+    /// sends its text to port `05h`, which is how the boot sweep runs it.  With
+    /// `vdmcuter.hex` it signs on on the card and scrolls with `C8h` -- measured
+    /// 2026-11-10.  It was parked as "never drives C8h" for weeks, and it was
+    /// the gate, not the emulator.
+    ///
+    /// Ignored: set `CPM_VDM_IMAGE` to TDISK04.DSK (or another VDM-1 disk), and
+    /// `CPM_CUTER_HEX` to `vdmcuter.hex` for a disk that needs the monitor.
     #[test]
     #[ignore]
     fn test_a_vdm_guest_writes_its_signon_into_screen_memory() {
-        use crate::cpm::{screen, vdm};
+        use crate::cpm::{rom, screen, vdm};
         let Ok(path) = std::env::var("CPM_VDM_IMAGE") else {
             eprintln!("set CPM_VDM_IMAGE to run this");
             return;
@@ -5449,10 +5462,22 @@ pub(crate) mod tests {
 
         let bytes = std::fs::read(&path).unwrap();
         let mut m = BootMachine::new();
-        // The keyboard half of the same board. Without it the guest never gets
-        // past its first `CONIN` and never prints at all, so this test would
-        // pass an empty screen for the wrong reason.
-        m.set_machine("console_04");
+        // The keyboard half of the same board, as a boot detects it. Without
+        // it the guest never gets past its first `CONIN` and never prints at
+        // all, so this test would pass an empty screen for the wrong reason.
+        let (machine, _) = crate::cpm::detect::machine_for(crate::cpm::console::AUTO_MACHINE, &bytes);
+        println!("machine: {machine}");
+        m.set_machine(&machine);
+        // A guest that prints through CUTER reaches the card only through the
+        // real ROM; the stand-in would send its text to a port instead.
+        if crate::cpm::console::resolve_console(&machine).rom == crate::cpm::console::MonitorRom::Cuter {
+            // Not an early return: an env-gated skip passes, and this disk
+            // would then be "checked" with nothing run.
+            let hex = std::env::var("CPM_CUTER_HEX")
+                .expect("this disk prints through the CUTER monitor: set CPM_CUTER_HEX to vdmcuter.hex");
+            let f = rom::file_for("cuter_vdm").expect("the catalogue names it");
+            m.set_rom(Some(rom::image_from_bytes(f, &std::fs::read(&hex).unwrap()).unwrap()));
+        }
         m.insert(0, bytes, true).expect("a bootable image");
         let mut cpu = BootMachine::new_cpu();
         m.boot(&mut cpu, 0).expect("boots");
