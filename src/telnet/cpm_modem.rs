@@ -589,11 +589,26 @@ impl CpmModem {
                 (_, Some(h)) if !crate::serial::host_is_local_addr(h) => {
                     self.start_call(Box::pin(call_remote_peer(peer.wire_label(), h.to_string())));
                 }
-                // This emulator's own endpoint: the guest calling itself, which
-                // the serial modem refuses for a port dialling itself too.
+                // This gateway's CP/M endpoint.  It is a hunt group, not this
+                // session: any *other* idle CP/M session may answer, as it may
+                // a serial modem's `ATD CPM@<here>`.  This one cannot answer
+                // itself -- a dialling modem is not `can_answer` -- so with
+                // nobody else listening the call rings out to NO ANSWER.
                 (Peer::Cpm, _) => {
-                    glog!("CP/M modem: CPM@{} is this emulator; a call to itself refused", host.unwrap_or(""));
-                    self.result(out, "NO CARRIER");
+                    let wait = self.carrier_wait();
+                    self.start_call(Box::pin(async move {
+                        match crate::serial::request_cpm_call(wait).await {
+                            Ok(duplex) => Placed::connected(duplex),
+                            Err(why) => {
+                                glog!("CP/M modem: dial to this gateway's CP/M endpoint: {why:?}");
+                                match why {
+                                    PeerCallOutcome::Busy => Placed::Failed("BUSY"),
+                                    PeerCallOutcome::NoAnswer => Placed::Failed("NO ANSWER"),
+                                    _ => Placed::Failed("NO CARRIER"),
+                                }
+                            }
+                        }
+                    }));
                 }
                 (Peer::Port(id), _) => {
                     let wait = self.carrier_wait();
@@ -1586,8 +1601,6 @@ mod tests {
         assert!(ask("ATD B@198.51.100.63\r").await.contains("NO CARRIER"));
         assert!(logged("dial to B@198.51.100.63: no such endpoint is registered here"));
 
-        assert!(ask("ATD CPM@127.0.0.1\r").await.contains("NO CARRIER"));
-        assert!(logged("CPM@127.0.0.1 is this emulator"));
 
         // A slave whose master is not there: the relay fails, and says so.
         crate::config::update_config_value("gateway_role", "slave");
@@ -1600,6 +1613,65 @@ mod tests {
         crate::config::update_config_value("slave_master_port", &port.to_string());
         assert!(out.contains("NO CARRIER"), "{out:?}");
         assert!(logged("dial to A@198.51.100.64 through master 127.0.0.1:1 failed"));
+    }
+
+    /// **`CPM@<this gateway>` rings another CP/M session**, as a serial
+    /// modem's does: the endpoint is a hunt group, and it used to be refused
+    /// outright as "a call to itself".  The caller cannot take its own call --
+    /// a dialling modem is not free to answer -- so the other session does.
+    #[test]
+    fn test_a_cpm_session_calls_another_on_this_gateway() {
+        // The pool is global; the serial tests that count it hold this lock.
+        let _pool = crate::relay::key_auth_test_lock();
+        struct Members;
+        impl Drop for Members {
+            fn drop(&mut self) {
+                crate::serial::cpm_peer_listen_exit();
+                crate::serial::cpm_peer_listen_exit();
+            }
+        }
+        crate::serial::cpm_peer_listen_enter();
+        crate::serial::cpm_peer_listen_enter();
+        let _members = Members;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+            let _peer = PeerDialConfig::on();
+            let (mut a, mut b) = (CpmModem::new(true), CpmModem::new(true));
+
+            let mut heard_a = a.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await;
+            assert!(a.mode == Mode::Dialing, "refused: {:?}", String::from_utf8_lossy(&heard_a));
+            assert!(!a.can_answer(), "the caller could answer its own call");
+            // B's pump, as a session runs it: an idle modem takes the call.
+            let mut call = None;
+            for _ in 0..400 {
+                if b.can_answer() && let Some(c) = crate::serial::take_cpm_call_request() {
+                    call = Some(c);
+                    break;
+                }
+                heard_a.extend(a.service(Vec::new(), 65536, false).await);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            b.accept_incoming(call.expect("the call never reached the CP/M pool"));
+            assert!(String::from_utf8_lossy(&b.service(Vec::new(), 65536, false).await).contains("RING"));
+            let answered = b.service(b"ATA\r".to_vec(), 65536, false).await;
+            assert!(String::from_utf8_lossy(&answered).contains("CONNECT"));
+            heard_a.extend(settle(&mut a).await);
+            let heard_a = String::from_utf8_lossy(&heard_a).to_string();
+            assert!(heard_a.contains("CONNECT") && a.mode == Mode::Online, "{heard_a:?}");
+
+            // And it is a call: the caller's bytes reach the answerer.
+            let _ = a.service(b"hi".to_vec(), 65536, false).await;
+            let mut got = Vec::new();
+            for _ in 0..200 {
+                got.extend(b.service(Vec::new(), 65536, false).await);
+                if got.windows(2).any(|w| w == b"hi") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(got.windows(2).any(|w| w == b"hi"), "{got:?}");
+        });
     }
 
     #[tokio::test]
