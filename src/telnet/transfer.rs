@@ -980,15 +980,11 @@ impl TelnetSession {
                                     // the retry.
                                     drop(file);
                                     let _ = tokio::fs::remove_file(&save_path).await;
-                                    // A refined name falls back here too, as for
-                                    // a failed open below.
-                                    if ci < last {
-                                        glog!(
-                                            "Upload: writing {} failed ({e}); saving under the typed name",
-                                            save_path.display()
-                                        );
-                                        continue;
-                                    }
+                                    // **No fallback to the typed name here**, unlike
+                                    // a failed open: the disk that refused this
+                                    // write holds that name too, and with an
+                                    // overwrite answered the fallback truncated the
+                                    // operator's file and then deleted it.
                                     Some((format!("Failed to save: {}", e), "write failed"))
                                 } else {
                                     let _ = file.flush().await;
