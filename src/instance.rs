@@ -196,7 +196,6 @@ pub fn acquire() -> std::io::Result<Instance> {
 }
 
 /// How many times a sharing violation is retried before it is believed.
-#[cfg(any(windows, test))]
 const SHARING_RETRIES: u32 = 5;
 
 /// `ERROR_SHARING_VIOLATION` (32) or `ERROR_LOCK_VIOLATION` (33): the file is
@@ -341,13 +340,27 @@ pub fn request_handover(stop: &AtomicBool) -> std::io::Result<Handover> {
 /// holder's claim on every pass, so the holder could never agree -- and
 /// [`holder_agreed`] reads a claim as agreement, so the newcomer would wait out
 /// the agreed wait for a copy that never answered and then report it stuck.
+///
+/// **Asked a few times first**, as [`acquire`] asks about a sharing violation:
+/// a virus scanner holding the file for a moment makes a delete fail too.
 fn clear_leftover_claim(claim: &std::path::Path) -> std::io::Result<()> {
-    match std::fs::remove_file(claim) {
-        // The path goes with it: it is the file the operator has to remove.
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            Err(std::io::Error::new(e.kind(), format!("{} could not be removed: {e}", claim.display())))
+    let mut tries = 0;
+    loop {
+        match std::fs::remove_file(claim) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                tries += 1;
+                if tries < SHARING_RETRIES {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+                // The path goes with it: it is the file the operator has to remove.
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("{} could not be removed: {e}", claim.display()),
+                ));
+            }
+            _ => return Ok(()),
         }
-        _ => Ok(()),
     }
 }
 
@@ -662,6 +675,14 @@ mod tests {
         assert!(clear_leftover_claim(&claim).is_ok() && !claim.exists(), "a leftover claim is cleared");
         std::fs::create_dir(&claim).unwrap();
         assert!(clear_leftover_claim(&claim).is_err(), "a claim that will not go was ignored");
+        // One held for a moment -- a scanner -- is waited out, not fatal.
+        let held = claim.clone();
+        let scanner = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            std::fs::remove_dir(&held).unwrap();
+        });
+        assert!(clear_leftover_claim(&claim).is_ok(), "a claim held for a moment stopped the ask");
+        scanner.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         // A holder that claimed but could not delete the request has agreed:
         // read otherwise, the newcomer's give-up loses the claim on every pass.
