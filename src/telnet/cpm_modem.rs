@@ -314,6 +314,12 @@ impl CpmModem {
     /// session that took the call would block on the ninth RING to a caller
     /// that never reads them.  It is abandoned instead, as the dial awaited in
     /// place used to end with its program.
+    ///
+    /// **No ring outlives it either.**  A call ringing in when the program
+    /// ends would ring no more -- nothing calls `service_ring` at `A>` -- and
+    /// the caller would wait out its whole `S7` for an answer that cannot
+    /// come, then ring again when the next program started.  It is let go,
+    /// and the caller hears `NO CARRIER` at once (its progress channel closes).
     pub(in crate::telnet) fn set_answering(&mut self, on: bool) {
         self.answering = on;
         if !on && self.mode == Mode::Dialing {
@@ -321,6 +327,11 @@ impl CpmModem {
             self.placing = None;
             self.placing_grace = false;
             self.mode = Mode::Command;
+        }
+        if !on && self.incoming.take().is_some() {
+            glog!("CP/M modem: inbound call let go -- the program ended");
+            self.ring_at = None;
+            self.rings = 0;
         }
         self.sync_pool();
     }
@@ -647,8 +658,9 @@ impl CpmModem {
                 // This gateway's CP/M endpoint.  It is a hunt group, not this
                 // session: any *other* idle CP/M session may answer, as it may
                 // a serial modem's `ATD CPM@<here>`.  This one cannot answer
-                // itself: dialling, it is not a free line (`start_call`), so
-                // with no other free member the line is busy at once.
+                // itself: dialling, it is not a free line (cleared at the top
+                // of `dial`), so with no other free member the line is busy at
+                // once.
                 (Peer::Cpm, _) => {
                     let wait = self.carrier_wait();
                     self.start_call(Box::pin(async move {
@@ -1658,6 +1670,27 @@ mod tests {
         crate::config::update_config_value("slave_master_port", &port.to_string());
         assert!(out.contains("NO CARRIER"), "{out:?}");
         assert!(logged("dial to A@198.51.100.64 through master 127.0.0.1:1 failed"));
+    }
+
+    /// **No ring outlives its pump**: a call ringing in when the program ends
+    /// is let go, so the caller hears at once rather than waiting out its S7
+    /// for a session at `A>` -- and it does not ring again in the next program.
+    #[tokio::test]
+    async fn test_a_ringing_call_is_let_go_when_the_program_ends() {
+        let mut m = CpmModem::new(true);
+        m.set_answering(true);
+        let (_caller_end, bridge) = tokio::io::duplex(64);
+        let (progress, mut heard) = tokio::sync::mpsc::channel::<u8>(8);
+        m.accept_incoming(CpmIncomingCall { bridge, progress });
+        assert!(String::from_utf8_lossy(&m.service(Vec::new(), 65536, false).await).contains("RING"));
+        assert_eq!(heard.recv().await, Some(0), "the caller heard no RING");
+        m.set_answering(false);
+        assert!(m.incoming.is_none() && m.ring_at.is_none(), "the call outlived its program");
+        let gone = tokio::time::timeout(Duration::from_secs(1), heard.recv()).await;
+        assert_eq!(gone, Ok(None), "the caller was left waiting");
+        m.set_answering(true);
+        let next = String::from_utf8_lossy(&m.service(Vec::new(), 65536, false).await).to_string();
+        assert!(!next.contains("RING") && m.can_answer(), "the old call rang again: {next:?}");
     }
 
     /// **A session is a free line only while its pump runs**, in both places a

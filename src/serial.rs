@@ -559,8 +559,8 @@ fn try_place_cpm_call(call: PeerCall) -> Result<(), PeerCall> {
 /// to ring/answer.  Mirrors [`request_peer_call`] but on the global CP/M slot.
 ///
 /// A CP/M session calling the endpoint is a member of the pool itself, but
-/// not a free one: its modem is dialling, so its mark is already clear (see
-/// `CpmModem::start_call`), and it cannot be the one that answers.
+/// not a free one: its modem clears its mark as the dial starts (see
+/// `CpmModem::dial`), and it cannot be the one that answers.
 pub async fn request_cpm_call(answer_wait: Duration) -> Result<tokio::io::DuplexStream, PeerCallOutcome> {
     if CPM_IDLE_LISTENERS.load(Ordering::SeqCst) == 0 {
         // Busy at once, as a hunt group with every line in use is, rather
