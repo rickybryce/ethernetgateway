@@ -553,16 +553,41 @@ const CONIN_SPOOL_POLL: std::time::Duration = std::time::Duration::from_millis(2
 /// (dropping any unclaimed call) on every exit path.  On a slave gateway it
 /// also owns the crossbar announcer task (registering `CPM` with the master),
 /// which it stops + aborts on drop.
+///
+/// Owned by the session's modem (`CpmModem::join_pool`), which says through
+/// [`Self::set_idle`] whether it is free to answer, so a caller is refused
+/// BUSY when every member is on a call rather than left ringing.
 pub(in crate::telnet) struct CpmPeerReg {
     /// `Some` while this session owns the single crossbar announcer.
     announce: Option<(std::sync::Arc<AtomicBool>, tokio::task::JoinHandle<()>)>,
+    /// Whether this member is counted as a free line.
+    idle: crate::serial::CpmIdleMark,
     /// Tests only: this session's shared hold on the pool, so a test that needs
     /// the pool to itself can have it (see `serial::CPM_POOL_TEST_GATE`).
+    /// `None` for a member a test made while holding the gate itself.
     #[cfg(test)]
-    _pool_gate: tokio::sync::OwnedRwLockReadGuard<()>,
+    _pool_gate: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+}
+impl CpmPeerReg {
+    /// Say whether this member's modem is free to answer the next call.
+    pub(in crate::telnet) fn set_idle(&mut self, idle: bool) {
+        self.idle.set(idle);
+    }
+
+    /// A pool member for a test that holds `serial::CPM_POOL_TEST_GATE`
+    /// exclusively (so cannot take it shared), and announces nothing.
+    #[cfg(test)]
+    pub(in crate::telnet) fn ungated() -> Self {
+        crate::serial::cpm_peer_listen_enter();
+        CpmPeerReg { announce: None, idle: Default::default(), _pool_gate: None }
+    }
 }
 impl Drop for CpmPeerReg {
     fn drop(&mut self) {
+        // The free line goes first: between leaving the pool and the mark's
+        // own drop, a caller would see a line with no member behind it, and
+        // its call would sit in a slot the last member's exit had cleared.
+        self.idle.set(false);
         crate::serial::cpm_peer_listen_exit();
         if let Some((stop, jh)) = self.announce.take() {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -613,8 +638,9 @@ pub(in crate::telnet) async fn cpm_peer_register(modem_enabled: bool) -> Option<
     };
     Some(CpmPeerReg {
         announce,
+        idle: Default::default(),
         #[cfg(test)]
-        _pool_gate: pool_gate,
+        _pool_gate: Some(pool_gate),
     })
 }
 
@@ -1049,7 +1075,11 @@ impl TelnetSession {
         // crossbar; if that member exits while others remain, remote
         // reachability pauses until a new session re-announces (local
         // answering is unaffected).
-        let _peer_reg = cpm_peer_register(modem.enabled()).await;
+        // The modem holds the registration: it is the one that knows, cycle
+        // by cycle, whether this session is free to answer.
+        if let Some(reg) = cpm_peer_register(modem.enabled()).await {
+            modem.join_pool(reg);
+        }
         // The CCP-lite's own default drive (real CP/M's `CDISK`).  A transient
         // may SELECT another drive (BDOS 14) while it runs — STAT does exactly
         // this for `STAT B:`, to read B:'s free space — but the real CCP

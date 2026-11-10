@@ -1031,7 +1031,10 @@ impl TelnetSession {
         );
         // Joins the inbound `CPM@<ip>` pool for as long as the boot lasts, so a
         // booted guest is dialable exactly as an emulator session is.
-        let _peer_reg = cpm_peer_register(modem.enabled()).await;
+        // The modem holds it, and keeps the pool told whether it is free.
+        if let Some(reg) = cpm_peer_register(modem.enabled()).await {
+            modem.join_pool(reg);
+        }
 
         // Read once and used twice — to build the CPU and to say which one the
         // guest got.  Two reads could straddle another session's save and put a

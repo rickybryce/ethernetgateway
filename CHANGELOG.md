@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   modem and the CP/M emulator's modem; a dial used to ignore the keyboard
   for the whole of `S7`.  The CP/M guest also keeps running while its modem
   dials, where it used to stand still until the dial ended.
+- **A busy CP/M pool answers `BUSY` at once.**  `CPM@<ip>` is a hunt group;
+  when every CP/M session in it is dialling, ringing or on a call, a caller
+  is now refused straight away instead of after the three-second pickup
+  window.
 
 ## [1.0.6] - 2026-10-26
 

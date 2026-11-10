@@ -323,7 +323,7 @@ where
     // local virtual modem and bridge, just like a local A/B port.  Additive —
     // sits ahead of the A/B resolution, which ignores the CPM label.
     if crate::serial::is_local_cpm_peer(&addr) {
-        match crate::serial::request_cpm_call(RELAY_PEER_ANSWER_WAIT, false).await {
+        match crate::serial::request_cpm_call(RELAY_PEER_ANSWER_WAIT).await {
             Ok(mut b) => {
                 glog!("Relay: peer-dial bridged to local CP/M endpoint");
                 answer_and_bridge(&mut relay, &mut b).await;

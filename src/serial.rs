@@ -384,12 +384,48 @@ fn take_if_mine(slot: &mut Option<PeerCall>, mine: &tokio::sync::mpsc::WeakSende
 // modem session is per-telnet-session, not one of the two fixed ports.  This
 // is entirely additive: the A/B slots and routing are untouched.
 
-/// How many CP/M sessions with a virtual modem are currently able to receive
-/// inbound calls.  `CPM@<ip>` is a single dialable address (like one physical
+/// How many CP/M sessions with a virtual modem are in the inbound-call pool,
+/// busy or not.  `CPM@<ip>` is a single dialable address (like one physical
 /// port), but any idle CP/M session in the pool can answer the next call — a
-/// hunt group.  >0 means at least one is listening (a fast reject so a caller
-/// doesn't wait out the pickup window when no CP/M modem exists).
+/// hunt group.  Whether a call can ring is [`CPM_IDLE_LISTENERS`]'s question;
+/// this count is what notices the last member leaving.
 static CPM_PEER_LISTENERS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many pool members are **free to answer right now**: in the pool, and
+/// their modem idle -- not dialling, ringing or on a call.  This, not the
+/// membership count, is what decides whether a call can ring: a pool whose
+/// every member is busy used to ring out the caller's S7 and report NO ANSWER,
+/// where a hunt group with every line in use is busy.  Each member's say is
+/// its [`CpmIdleMark`].
+static CPM_IDLE_LISTENERS: AtomicUsize = AtomicUsize::new(0);
+
+/// One pool member's share of [`CPM_IDLE_LISTENERS`]: counted while it is set,
+/// and uncounted when it is cleared or dropped, so a member that leaves cannot
+/// leave a free line behind it.
+#[derive(Default)]
+pub struct CpmIdleMark(bool);
+
+impl CpmIdleMark {
+    /// Say whether this member is free to answer.  Only a change moves the
+    /// count, so it may be called on every pump cycle.
+    pub fn set(&mut self, idle: bool) {
+        if idle == self.0 {
+            return;
+        }
+        self.0 = idle;
+        if idle {
+            CPM_IDLE_LISTENERS.fetch_add(1, Ordering::SeqCst);
+        } else {
+            CPM_IDLE_LISTENERS.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for CpmIdleMark {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
 
 /// The single gateway-level owner of the slave→master crossbar announcer for
 /// `CPM` (only one announcement per gateway, regardless of pool size).
@@ -516,21 +552,15 @@ fn try_place_cpm_call(call: PeerCall) -> Result<(), PeerCall> {
 /// Caller side: place a peer-dial call to the CP/M endpoint and wait for it
 /// to ring/answer.  Mirrors [`request_peer_call`] but on the global CP/M slot.
 ///
-/// `caller_in_pool`: the caller is a CP/M session, counted in the pool itself.
-/// It cannot answer its own call -- a dialling modem is not free to -- so it
-/// needs another member, where a serial port or a relay needs only one.
-pub async fn request_cpm_call(
-    answer_wait: Duration,
-    caller_in_pool: bool,
-) -> Result<tokio::io::DuplexStream, PeerCallOutcome> {
-    if nobody_else_listens(CPM_PEER_LISTENERS.load(Ordering::SeqCst), caller_in_pool) {
-        // Busy at once, as a phone calling its own number is, rather than
-        // ringing out the caller's S7 with nobody there to pick up.  Said in
-        // the log, or it reads like a slot another caller took.
-        glog!(
-            "CP/M endpoint: no {}CP/M session is listening to answer the call",
-            if caller_in_pool { "other " } else { "" }
-        );
+/// A CP/M session calling the endpoint is a member of the pool itself, but
+/// not a free one: its modem is dialling, so its mark is already clear (see
+/// `CpmModem::start_call`), and it cannot be the one that answers.
+pub async fn request_cpm_call(answer_wait: Duration) -> Result<tokio::io::DuplexStream, PeerCallOutcome> {
+    if CPM_IDLE_LISTENERS.load(Ordering::SeqCst) == 0 {
+        // Busy at once, as a hunt group with every line in use is, rather
+        // than ringing out the caller's S7 with nobody free to pick up.  Said
+        // in the log, or it reads like a slot another caller took.
+        glog!("CP/M endpoint: no CP/M session is free to answer the call");
         return Err(PeerCallOutcome::Busy);
     }
     let (caller_end, target_end) = tokio::io::duplex(65536);
@@ -554,11 +584,6 @@ pub async fn request_cpm_call(
         // The guard's drop reclaims the placed-but-unclaimed request.
         Err(outcome)
     }
-}
-
-/// The pool has nobody to answer a call: no member at all, or only the caller.
-fn nobody_else_listens(listeners: usize, caller_in_pool: bool) -> bool {
-    listeners <= usize::from(caller_in_pool)
 }
 
 /// Drop guard mirroring [`PeerSlotGuard`] for the single `CPM_CALL_REQUEST`
@@ -642,7 +667,7 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
     }
     let answer_wait =
         Duration::from_secs((state.s_regs[7].max(1)) as u64).min(MAX_CONNECT_TIMEOUT);
-    let ring = race_dial(state, request_cpm_call(answer_wait, false));
+    let ring = race_dial(state, request_cpm_call(answer_wait));
     match ring {
         None => {
             send_result(state, "NO CARRIER");
@@ -3004,7 +3029,7 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>, _exit: AnnouncerExit) {
                             biased;
                             _ = cpm_wait_stop(&stop) => {}
                             _ = async {
-                                match request_cpm_call(crate::relay::RELAY_PEER_ANSWER_WAIT, false).await {
+                                match request_cpm_call(crate::relay::RELAY_PEER_ANSWER_WAIT).await {
                                     Ok(mut caller) => {
                                         crate::relay::send_peer_answer(&mut stream, Ok(())).await;
                                         // A call, not two pipes: either side hanging up ends it
@@ -10238,9 +10263,21 @@ mod tests {
         let _lock = crate::relay::key_auth_test_lock();
         // The pool to itself: an emulator test's session would be counted.
         let _pool = CPM_POOL_TEST_GATE.blocking_write();
-        // The rule a caller is refused by: nobody, or only itself, in the pool.
-        assert!(nobody_else_listens(0, false) && !nobody_else_listens(1, false));
-        assert!(nobody_else_listens(1, true) && !nobody_else_listens(2, true));
+        // A free line is counted while its mark is set, once however often it
+        // is set, and given back when the mark is cleared or dropped.
+        assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 0);
+        let (mut a, mut b) = (CpmIdleMark::default(), CpmIdleMark::default());
+        a.set(true);
+        a.set(true);
+        b.set(true);
+        assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 2);
+        a.set(false);
+        a.set(false);
+        assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 1);
+        drop(b);
+        assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 0);
+        drop(a);
+        assert_eq!(CPM_IDLE_LISTENERS.load(Ordering::SeqCst), 0);
         // Pool: enter twice, exit twice, count returns to 0.
         assert_eq!(CPM_PEER_LISTENERS.load(Ordering::SeqCst), 0);
         cpm_peer_listen_enter();

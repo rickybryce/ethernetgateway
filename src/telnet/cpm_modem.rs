@@ -138,6 +138,10 @@ pub(in crate::telnet) struct CpmModem {
     /// is both what a real modem does and what keeps the reset independent of
     /// whatever else may have edited the config since.
     saved: crate::config::CpmModemProfile,
+    /// This session's membership of the inbound `CPM@<ip>` pool, if it joined
+    /// one: kept here so the pool hears whether this modem is free to answer
+    /// every time that changes (see [`Self::sync_pool`]).
+    pool: Option<crate::telnet::cpm_emu::CpmPeerReg>,
 }
 
 /// The session-owned handles a locally-dialed gateway menu session needs.
@@ -184,6 +188,7 @@ impl CpmModem {
             relay_keepalive: None,
             menu: None,
             saved: crate::config::CpmModemProfile::default(),
+            pool: None,
         };
         m.saved = crate::config::get_config().cpm_emu_modem;
         let p = m.saved.clone();
@@ -278,6 +283,23 @@ impl CpmModem {
         self.enabled && self.mode == Mode::Command && self.incoming.is_none() && self.conn.is_none()
     }
 
+    /// Join the inbound `CPM@<ip>` pool for as long as this modem lives.
+    pub(in crate::telnet) fn join_pool(&mut self, reg: crate::telnet::cpm_emu::CpmPeerReg) {
+        self.pool = Some(reg);
+        self.sync_pool();
+    }
+
+    /// Tell the pool whether this modem is free to answer.  Called wherever
+    /// that can change: the end of every [`Self::service`], a dial starting
+    /// (before its first poll, so a caller is never counted as the free line
+    /// for its own call), and a call being taken.
+    fn sync_pool(&mut self) {
+        let idle = self.can_answer();
+        if let Some(reg) = self.pool.as_mut() {
+            reg.set_idle(idle);
+        }
+    }
+
     /// Take an inbound `CPM@<ip>` call and start ringing the guest.
     pub(in crate::telnet) fn accept_incoming(&mut self, call: CpmIncomingCall) {
         if !self.can_answer() {
@@ -286,6 +308,7 @@ impl CpmModem {
         self.incoming = Some(call);
         self.rings = 0;
         self.ring_at = Some(Instant::now()); // ring on the next service tick
+        self.sync_pool();
     }
 
     /// Service one pump cycle: consume the bytes the guest wrote (`guest_tx`),
@@ -363,6 +386,7 @@ impl CpmModem {
             let budget = rx_budget.saturating_sub(out.len());
             self.poll_connection(&mut out, budget, guest_has_rx).await;
         }
+        self.sync_pool();
         out
     }
 
@@ -592,12 +616,12 @@ impl CpmModem {
                 // This gateway's CP/M endpoint.  It is a hunt group, not this
                 // session: any *other* idle CP/M session may answer, as it may
                 // a serial modem's `ATD CPM@<here>`.  This one cannot answer
-                // itself, so `request_cpm_call` is told it is a member: alone
-                // in the pool, the line is busy at once.
+                // itself: dialling, it is not a free line (`start_call`), so
+                // with no other free member the line is busy at once.
                 (Peer::Cpm, _) => {
                     let wait = self.carrier_wait();
                     self.start_call(Box::pin(async move {
-                        match crate::serial::request_cpm_call(wait, true).await {
+                        match crate::serial::request_cpm_call(wait).await {
                             Ok(duplex) => Placed::connected(duplex),
                             Err(why) => {
                                 glog!("CP/M modem: dial to this gateway's CP/M endpoint: {why:?}");
@@ -651,6 +675,7 @@ impl CpmModem {
         self.placing = Some(call);
         self.placing_grace = true;
         self.mode = Mode::Dialing;
+        self.sync_pool();
     }
 
     /// Poll the dial in progress once, without waiting for it.
@@ -1609,6 +1634,8 @@ mod tests {
     /// modem's does: the endpoint is a hunt group, and it used to be refused
     /// outright as "a call to itself".  The caller cannot take its own call --
     /// a dialling modem is not free to answer -- so the other session does.
+    /// And the pool counts only free lines: a member on a call does not make a
+    /// third caller ring out S7.
     #[test]
     fn test_a_cpm_session_calls_another_on_this_gateway() {
         // The pool is global: the serial tests that count it hold this lock,
@@ -1618,40 +1645,26 @@ mod tests {
         let _cfg = crate::config::CONFIG_TEST_LOCK.blocking_lock();
         let _pool = crate::relay::key_auth_test_lock();
         let _alone = crate::serial::CPM_POOL_TEST_GATE.blocking_write();
-        struct Members;
-        impl Drop for Members {
-            fn drop(&mut self) {
-                crate::serial::cpm_peer_listen_exit();
-                crate::serial::cpm_peer_listen_exit();
-            }
-        }
-        // Alone in the pool: busy at once, not S7 later.
-        crate::serial::cpm_peer_listen_enter();
-        {
-            struct One;
-            impl Drop for One {
-                fn drop(&mut self) {
-                    crate::serial::cpm_peer_listen_exit();
-                }
-            }
-            let _one = One;
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            rt.block_on(async {
-                let _peer = PeerDialConfig::on();
-                let mut alone = CpmModem::new(true);
-                let out = alone.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await;
-                assert!(String::from_utf8_lossy(&out).contains("BUSY"), "{:?}", String::from_utf8_lossy(&out));
-                assert!(alone.mode == Mode::Command, "a call nobody can answer is still dialling");
-            });
-        }
-        crate::serial::cpm_peer_listen_enter();
-        crate::serial::cpm_peer_listen_enter();
-        let _members = Members;
+        use crate::telnet::cpm_emu::CpmPeerReg;
+        let member = || {
+            let mut m = CpmModem::new(true);
+            m.join_pool(CpmPeerReg::ungated());
+            m
+        };
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             let _peer = PeerDialConfig::on();
-            let (mut a, mut b) = (CpmModem::new(true), CpmModem::new(true));
+            // Alone in the pool: busy at once, and not counted as the free line
+            // for its own call -- that would ring for the pickup window first.
+            {
+                let mut alone = member();
+                assert!(alone.can_answer(), "a fresh member is not free");
+                let out = alone.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await;
+                assert!(String::from_utf8_lossy(&out).contains("BUSY"), "{:?}", String::from_utf8_lossy(&out));
+                assert!(alone.mode == Mode::Command, "a call nobody can answer is still dialling");
+            }
 
+            let (mut a, mut b) = (member(), member());
             let mut heard_a = a.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await;
             assert!(a.mode == Mode::Dialing, "refused: {:?}", String::from_utf8_lossy(&heard_a));
             assert!(!a.can_answer(), "the caller could answer its own call");
@@ -1684,6 +1697,32 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             assert!(got.windows(2).any(|w| w == b"hi"), "{got:?}");
+
+            // **Every line in use is busy**: with A and B on their call, a third
+            // member is in the pool but nobody is free, so its dial is refused
+            // at once.  It used to be placed anyway, and BUSY came only when
+            // nobody had picked it up in the pickup window (`PEER_PICKUP_SECS`).
+            let mut c = member();
+            let asked = std::time::Instant::now();
+            let mut heard_c = c.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await;
+            heard_c.extend(settle(&mut c).await);
+            let heard_c = String::from_utf8_lossy(&heard_c).to_string();
+            assert!(heard_c.contains("BUSY"), "{heard_c:?}");
+            assert!(asked.elapsed() < Duration::from_secs(2), "rang out first: {:?}", asked.elapsed());
+
+            // A's session ends: B's line is free again, and the pool says so.
+            drop(a);
+            let _ = b.service(Vec::new(), 65536, false).await;
+            for _ in 0..400 {
+                if b.can_answer() {
+                    break;
+                }
+                let _ = b.service(Vec::new(), 65536, false).await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(b.can_answer(), "B never noticed its caller go");
+            let heard_c = String::from_utf8_lossy(&c.service(b"ATD CPM@127.0.0.1\r".to_vec(), 65536, false).await).to_string();
+            assert!(c.mode == Mode::Dialing, "a free line was refused: {heard_c:?}");
         });
     }
 

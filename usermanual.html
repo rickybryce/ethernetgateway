@@ -4156,7 +4156,8 @@ answer manually with <code>ATA</code> when you see <code>RING</code>.
 <code>CPM@&lt;ip&gt;</code> is a single dialable address, but every
 modem-enabled CP/M session joins an answer <em>pool</em> (a hunt group): the
 next inbound call rings whichever session is idle, so two concurrent CP/M
-users can both receive calls. On a slave, one session announces <code>CPM</code>
+users can both receive calls. When every session in the pool is already
+dialling, ringing or on a call, the caller hears <code>BUSY</code> at once. On a slave, one session announces <code>CPM</code>
 to the master for remote reachability; if it exits while others remain, remote
 dialling pauses until a new session re-announces (local answering is
 unaffected).
