@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-11-11
+
 ### Added
 
 - **A modem port's saved AT profile is editable from telnet.**  `A` on a
@@ -8658,7 +8660,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.6...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.7...HEAD
+[1.0.7]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.7
 [1.0.6]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.6
 [1.0.5]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.5
 [1.0.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.4
