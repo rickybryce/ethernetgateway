@@ -12,10 +12,10 @@ from `about.toml` + `about.hbs`. Do not edit by hand — regenerate with:
 cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
 ```
 
-- 426 crate(s) under **MIT License** (MIT)
+- 425 crate(s) under **MIT License** (MIT)
 - 19 crate(s) under **Unicode License v3** (Unicode-3.0)
 - 18 crate(s) under **Apache License 2.0** (Apache-2.0)
-- 7 crate(s) under **ISC License** (ISC)
+- 6 crate(s) under **ISC License** (ISC)
 - 5 crate(s) under **BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License** (BSD-3-Clause)
 - 2 crate(s) under **Boost Software License 1.0** (BSL-1.0)
 - 2 crate(s) under **zlib License** (Zlib)
@@ -1317,7 +1317,7 @@ Used by:
 - [pageant 0.2.3](https://github.com/warp-tech/russh)
 - [russh-cryptovec 0.62.0](https://github.com/warp-tech/russh)
 - [russh-util 0.52.0](https://github.com/warp-tech/russh)
-- [russh 0.64.1](https://github.com/warp-tech/russh)
+- [russh 0.65.1](https://github.com/warp-tech/russh)
 - [spirv 0.4.0+sdk-1.4.341.0](https://github.com/gfx-rs/rspirv)
 
 ```
@@ -2524,7 +2524,6 @@ Public License instead of this License.  But first, please read
 ## ISC License (ISC)
 
 Used by:
-- [untrusted 0.7.1](https://github.com/briansmith/untrusted)
 - [untrusted 0.9.0](https://github.com/briansmith/untrusted)
 
 ```
@@ -4408,7 +4407,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - [signal-hook-registry 1.4.8](https://github.com/vorner/signal-hook)
-- [signal-hook 0.4.5](https://github.com/vorner/signal-hook)
+- [signal-hook 0.4.6](https://github.com/vorner/signal-hook)
 
 ```
 Copyright (c) 2017 tokio-jsonrpc developers
@@ -6830,7 +6829,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [libc 0.2.190](https://github.com/rust-lang/libc)
+- [libc 0.2.191](https://github.com/rust-lang/libc)
 
 ```
 Copyright (c) The Rust Project Developers
@@ -7155,7 +7154,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [ureq-proto 0.6.4](https://github.com/algesten/ureq-proto)
+- [ureq-proto 0.7.1](https://github.com/algesten/ureq-proto)
 
 ```
 Copyright 2022 Martin Algesten
@@ -7303,7 +7302,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [html2text 0.17.3](https://github.com/jugglerchris/rust-html2text/)
+- [html2text 0.17.4](https://github.com/jugglerchris/rust-html2text/)
 
 ```
 MIT License
@@ -7548,7 +7547,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [ureq 3.4.2](https://github.com/algesten/ureq)
+- [ureq 3.5.1](https://github.com/algesten/ureq)
 
 ```
 MIT License
@@ -7729,7 +7728,7 @@ SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [rfd 0.16.0](https://github.com/PolyMeilex/rfd)
+- [rfd 0.16.1](https://github.com/PolyMeilex/rfd)
 
 ```
 MIT License
@@ -8034,7 +8033,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [tokio 1.53.3](https://github.com/tokio-rs/tokio)
+- [tokio 1.54.1](https://github.com/tokio-rs/tokio)
 
 ```
 MIT License
@@ -9101,7 +9100,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License (MIT)
 
 Used by:
-- [generic-array 0.14.9](https://github.com/fizyk20/generic-array.git)
 - [generic-array 1.4.5](https://github.com/fizyk20/generic-array.git)
 
 ```
