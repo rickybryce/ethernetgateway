@@ -1188,10 +1188,7 @@ pub fn looks_bootable(payload: &[u8]) -> bool {
         .iter()
         .filter(|&&b| (0x20..0x7F).contains(&b) || b == b'\r' || b == b'\n')
         .count();
-    if printable == payload.len() {
-        return false;
-    }
-    true
+    printable != payload.len()
 }
 
 #[cfg(test)]

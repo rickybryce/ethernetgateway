@@ -1109,10 +1109,9 @@ impl TelnetSession {
 
         // Serial sessions don't authenticate — they arrived via
         // ATDT on a physical port, which is its own trust boundary.
-        if !self.is_serial && security_enabled && !self.authenticate().await? {
-            return Ok(false);
-        }
-        Ok(true)
+        // Short-circuits, so the login prompt runs only for a network
+        // session with security on.
+        Ok(self.is_serial || !security_enabled || self.authenticate().await?)
     }
 
     // ─── Main session loop ──────────────────────────────────
