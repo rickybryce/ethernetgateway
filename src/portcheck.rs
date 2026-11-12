@@ -268,6 +268,9 @@ pub struct Summary {
     pub blocked: usize,
     pub untested: usize,
     pub answered: usize,
+    /// No listener was bound, so there was nothing to probe -- a different
+    /// answer from a check that was overtaken or lost, which asking again cures.
+    pub nothing_bound: bool,
 }
 
 impl Summary {
@@ -297,10 +300,13 @@ impl Summary {
                 self.untested,
                 if self.untested == 1 { "" } else { "s" }
             )
+        } else if self.nothing_bound {
+            // Asking again would give the same answer, so it is not offered.
+            "no listener is bound to test".to_string()
         } else {
-            // Nothing stored and nothing logged: no listener was bound, a
-            // restart overtook the check, or its thread died.  Asking again
-            // is the remedy; "see why" would point at a line that is not there.
+            // Nothing stored and nothing logged: a restart overtook the
+            // check, or its thread died.  Asking again is the remedy; "see
+            // why" would point at a line that is not there.
             "nothing was tested; try again".to_string()
         }
     }
@@ -308,7 +314,14 @@ impl Summary {
 
 /// The stored results, counted -- `None` until a check has run this cycle.
 pub fn summary() -> Option<Summary> {
-    with(|s| s.ran.then(|| Summary::of(s.results.values().map(|(_, r)| r))))
+    // A check that ran and stored nothing found no listener bound: the only
+    // path that stores an empty table.
+    with(|s| {
+        s.ran.then(|| Summary {
+            nothing_bound: s.results.is_empty(),
+            ..Summary::of(s.results.values().map(|(_, r)| r))
+        })
+    })
 }
 
 /// How long ago the last check ran.
@@ -495,7 +508,7 @@ fn run_check_inner(cycle: u64) -> Summary {
             s.ran_at = Some(std::time::Instant::now());
         });
         glog!("Port check: no listener is bound, so there is nothing to test.");
-        return Summary::default();
+        return Summary { nothing_bound: true, ..Summary::default() };
     }
 
     glog!(
@@ -700,7 +713,7 @@ mod tests {
                 ],
                 cycle(),
             ),
-            Summary { blocked: 0, untested: 0, answered: 2 }
+            Summary { blocked: 0, untested: 0, answered: 2, nothing_bound: false }
         );
         assert!(!result_of("telnet").unwrap().1.is_blocked(), "the red must clear");
         assert_eq!(results().iter().filter(|(_, _, r)| r.is_blocked()).count(), 0);
@@ -743,6 +756,13 @@ mod tests {
         // Nothing probed at all is not an all-clear either.
         assert!(!Summary::default().all_answered());
         assert_eq!(Summary::default().untested_phrase(), "nothing was tested; try again");
+        // Nothing bound is said as that, not as "try again" -- and the stored
+        // table, empty, reads the same way on every surface.
+        let none = Summary { nothing_bound: true, ..Summary::default() };
+        assert!(!none.all_answered());
+        assert_eq!(none.untested_phrase(), "no listener is bound to test");
+        store_for(Vec::new(), cycle());
+        assert_eq!(summary(), Some(none), "an empty stored table did not read as nothing bound");
         // Positive control: everything answered is.
         let said = store_for(vec![("web".into(), 8080, Reach::Answered)], cycle());
         assert!(said.all_answered());

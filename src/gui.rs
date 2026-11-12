@@ -1747,15 +1747,15 @@ impl App {
                 if self.port_check_rx.is_none() {
                     // Off the frame thread: four connect timeouts is over a
                     // second of blocking, and the window would freeze for it.
-                    // The count comes back through a channel so the popup opens
-                    // when the check is actually finished rather than a guess
-                    // later.
+                    // The summary comes back through a channel so the popup
+                    // opens when the check is actually finished rather than a
+                    // guess later.
                     let (tx, rx) = std::sync::mpsc::channel();
                     self.port_check_rx = Some(rx);
                     let cycle = crate::portcheck::cycle();
                     std::thread::spawn(move || {
-                        let blocked = crate::portcheck::run_check_for_cycle(cycle);
-                        let _ = tx.send(blocked);
+                        let found = crate::portcheck::run_check_for_cycle(cycle);
+                        let _ = tx.send(found);
                     });
                 }
             }
@@ -4259,13 +4259,12 @@ impl App {
         );
     }
 
-    /// Flush numeric text buffers into `cfg`, persist to disk, refresh
-    /// the sync snapshot, and clear the dirty flag.  Shared prefix for
-    /// every Save action; callers follow it with a log line and any
-    /// restart signals they need.
     /// Would saving the editor put two listeners on one port?  Logged, and
     /// `true`, when it would -- the edits stay in their boxes to be corrected.
-    fn refuse_port_clash(&self) -> bool {
+    /// The text boxes are flushed into `cfg` first, as the save itself does,
+    /// or a port typed and not yet copied over would never be looked at.
+    fn refuse_port_clash(&mut self) -> bool {
+        self.sync_numeric_fields();
         match config::new_port_clash(&config::get_config(), &self.cfg) {
             Some(clash) => {
                 logger::log(format!(
@@ -4278,7 +4277,12 @@ impl App {
         }
     }
 
-    fn persist_config(&mut self) -> Result<(), String> {
+    /// Flush numeric text buffers into `cfg`, persist to disk, refresh
+    /// the sync snapshot, and clear the dirty flag.  Shared prefix for
+    /// every Save action; callers follow it with a log line and any
+    /// restart signals they need.  A port clash changes nothing at all:
+    /// the edits, passwords included, stay in their boxes.
+    fn persist_config(&mut self) -> Result<(), config::SaveError> {
         self.sync_numeric_fields();
         // An empty password box means "unchanged", so carry the stored
         // credential forward rather than saving a blank one -- a blank
@@ -4303,9 +4307,15 @@ impl App {
         // edits left in the boxes (still dirty) to be corrected.  Same rule
         // as the web page and telnet -- `config::new_port_clash`.
         if let Some(clash) = config::new_port_clash(&config::get_config(), &out) {
-            return Err(format!("{clash}; two listeners can't share a port"));
+            return Err(config::SaveError::PortClash(clash));
         }
         let result = config::save_config(&out);
+        // The same refusal from under the lock, where a save from another
+        // surface since the check above made it a clash: nothing was stored,
+        // so nothing here is resynced either.
+        if let Err(e @ config::SaveError::PortClash(_)) = result {
+            return Err(e);
+        }
         // Re-read rather than cloning `out`: the password was hashed on its
         // way in (`password_for_save`), so the global is the only place the
         // value we actually stored can be read back from.  Syncing to anything
@@ -4380,34 +4390,42 @@ impl App {
     /// The Save and Restart buttons: asks first when someone is connected
     /// ([`crate::telnet::server_session_live`]), since a whole-server restart
     /// disconnects every session and both serial ports.
-    fn request_save_and_restart(&mut self) {
+    ///
+    /// `false` when the save was refused -- nothing saved, nothing restarted.
+    fn request_save_and_restart(&mut self) -> bool {
         // Refused before the "someone is connected" prompt, which would
         // otherwise ask the operator to drop sessions for a save that is then
         // refused.
         if self.refuse_port_clash() {
-            return;
+            return false;
         }
         if crate::telnet::server_session_live() {
             self.server_restart_prompt = true;
+            true
         } else {
-            self.save_and_restart_all();
+            self.save_and_restart_all()
         }
     }
 
     /// Persist config and trigger a full server restart.  Used by the
     /// Save and Restart buttons and the setup wizard's finish, through
-    /// `request_save_and_restart`.
-    fn save_and_restart_all(&mut self) {
+    /// `request_save_and_restart`.  `false` when refused for a port clash.
+    fn save_and_restart_all(&mut self) -> bool {
         // **No restart for a refused save.**  "NOT saved -- restarting
         // anyway" is right for a disk error, where the restart was asked for
         // and the old file is still sound; for a clash it dropped every
         // session and then rebuilt the window from the file, throwing away
         // the edits the refusal had kept for the operator to correct.
         if self.refuse_port_clash() {
-            return;
+            return false;
         }
         match self.persist_config() {
             Ok(()) => logger::log("Configuration saved — restarting server...".into()),
+            // Overtaken under the lock by a save from another surface.
+            Err(e @ config::SaveError::PortClash(_)) => {
+                logger::log(format!("Configuration NOT saved: {e}. Nothing was restarted."));
+                return false;
+            }
             Err(e) => {
                 logger::log(format!("Configuration NOT saved: {} — restarting anyway...", e))
             }
@@ -4416,6 +4434,7 @@ impl App {
         // restart when it checks after join().
         self.restart.store(true, Ordering::SeqCst);
         self.shutdown.store(true, Ordering::SeqCst);
+        true
     }
 
     /// Stop the server and end the process.
@@ -4701,8 +4720,12 @@ impl App {
                     // disk download waits for the answer too: on Cancel the
                     // transfer directory it would land in was never saved.
                     self.wizard_fetch_pending = fetch_disks;
-                    self.request_save_and_restart();
-                    if !self.server_restart_prompt {
+                    if !self.request_save_and_restart() {
+                        // Refused: the answers stay as unsaved edits, and no
+                        // disks go to a transfer directory that was not saved.
+                        self.wizard_fetch_pending = false;
+                        self.dirty = true;
+                    } else if !self.server_restart_prompt {
                         self.start_wizard_fetch_if_pending(&ctx);
                     }
                 }
@@ -7249,20 +7272,19 @@ impl eframe::App for App {
                 }
             });
         });
-        if ks_commit
-            && let Some(clash) = config::port_clash_after(
-                &config::get_config(),
-                &[("kermit_server_enabled", "true")],
-            )
-        {
-            logger::log(format!(
-                "Kermit server NOT enabled: {clash}. Change one of the two ports first."
-            ));
-        } else if ks_commit {
-            self.cfg.kermit_server_enabled = true;
-            self.last_synced_cfg.kermit_server_enabled = true;
-            config::update_config_value("kermit_server_enabled", "true");
-            logger::log("Kermit server enabled.".into());
+        // The writer's own answer, not a check beforehand: it decides under
+        // the config lock, where no other surface's save can overtake it.
+        if ks_commit {
+            match config::update_config_value("kermit_server_enabled", "true") {
+                Some(clash) => logger::log(format!(
+                    "Kermit server NOT enabled: {clash}. Change one of the two ports first."
+                )),
+                None => {
+                    self.cfg.kermit_server_enabled = true;
+                    self.last_synced_cfg.kermit_server_enabled = true;
+                    logger::log("Kermit server enabled.".into());
+                }
+            }
         }
         if ks_close {
             ks_warn_open = false;
@@ -7528,8 +7550,9 @@ impl eframe::App for App {
                 }
             });
         });
+        // Decided by the writer, under the config lock (see the Kermit popup).
         let vdm_clash = vdm_commit
-            .then(|| config::port_clash_after(&config::get_config(), &[("web_enabled", "true")]))
+            .then(|| config::update_config_value("web_enabled", "true"))
             .flatten();
         if let Some(clash) = vdm_clash {
             logger::log(format!(
@@ -7545,7 +7568,6 @@ impl eframe::App for App {
             // few lines up already does the narrow thing; this now matches it.
             self.cfg.web_enabled = true;
             self.last_synced_cfg.web_enabled = true;
-            config::update_config_value("web_enabled", "true");
             // Written before the restart, because the restart takes this window
             // with it: the server unwinds, `gui::run` returns and `main` builds
             // a fresh `App`.  That one spends the marker and opens the page, so
@@ -7765,8 +7787,11 @@ impl eframe::App for App {
             });
             if go {
                 self.server_restart_prompt = false;
-                self.start_wizard_fetch_if_pending(&ctx);
-                self.save_and_restart_all();
+                if self.save_and_restart_all() {
+                    self.start_wizard_fetch_if_pending(&ctx);
+                } else {
+                    self.wizard_fetch_pending = false;
+                }
             } else if cancel || !open {
                 self.server_restart_prompt = false;
                 self.wizard_fetch_pending = false;

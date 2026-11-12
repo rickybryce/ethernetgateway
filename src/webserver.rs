@@ -1487,35 +1487,30 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
         }
     }
 
-    // Two listeners on one port: the listener settings are left as they
-    // were and the rest of the save goes ahead, so one bad port does not
-    // throw away everything else on the page.  Same rule as telnet and the
-    // desktop editor -- `config::port_clash_after`.
-    let clash = {
-        let pairs: Vec<(&str, &str)> =
-            updates.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        config::port_clash_after(&old_cfg, &pairs)
-    };
-    if let Some(clash) = clash {
-        updates.retain(|(k, _)| config::listener_of_key(k).is_none());
-        // Nothing about the web listener changes now, so its "reconnect at
-        // the new port" must not stand: acted on, it loses the page.
+    let pairs: Vec<(&str, &str)> = updates
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    // Two listeners on one port: the writer leaves the listener settings as
+    // they were and saves the rest, so one bad port does not throw away
+    // everything else on the page.  Its answer, not a check made beforehand,
+    // because it decides under the config lock -- the same answer telnet and
+    // the desktop editor report.
+    if let Some(clash) = config::update_config_values(&pairs) {
+        // Nothing about the web listener changed, so its "reconnect at the
+        // new port" must not stand: acted on, it loses the page.  Always the
+        // tail of a sentence ("saved." or "not changed.") and so preceded by
+        // its one space.
         let reconnect = web_reconnect_warning(&fields, &old_cfg);
         if !reconnect.is_empty() {
-            notice = notice.replace(&reconnect, "").replace("  ", " ").trim().to_string();
+            notice = notice.replacen(&format!(" {reconnect}"), "", 1);
         }
         let msg = format!(
             "Not saved: {clash}. Two listeners can't share a port, so the telnet, SSH, \
              web and Kermit server settings were left as they were."
         );
-        notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
+        notice = format!("{notice} {msg}");
     }
-
-    let pairs: Vec<(&str, &str)> = updates
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    config::update_config_values(&pairs);
 
     logger::log("Web: configuration saved.".into());
     (notice, action)
@@ -6202,12 +6197,12 @@ mod tests {
         let src = include_str!("gui.rs").replace("\r\n", "\n");
         let code = &src[..src.find("\n#[cfg(test)]\nmod tests {").expect("the tests")];
         assert_eq!(
-            code.matches("self.request_save_and_restart();").count(),
+            code.matches("self.request_save_and_restart()").count(),
             4,
             "a button or the wizard's finish skips the ask"
         );
         assert_eq!(
-            code.matches("self.save_and_restart_all();").count(),
+            code.matches("self.save_and_restart_all()").count(),
             2,
             "restarted only from request_save_and_restart and the window"
         );
@@ -6732,6 +6727,43 @@ mod tests {
         assert!(same_origin_ok(&req(&[("host", "gw:8080")])));
         // No Host header at all → nothing to compare against; allowed.
         assert!(same_origin_ok(&req(&[("origin", "http://whatever")])));
+    }
+
+    /// **A web save refused for a port clash says so, and takes back only the
+    /// reconnect sentence.**  The listener settings are kept as they were, so
+    /// "Reconnect at the new port" would send the operator to a port nothing
+    /// listens on; the rest of the notice, and the rest of the save, stand.
+    #[tokio::test]
+    async fn test_a_web_save_onto_a_taken_port_withdraws_the_reconnect_line() {
+        use crate::config::{self, Config};
+        let _lock = config::CONFIG_TEST_LOCK.lock().await;
+        let _cheap = crate::credential::CheapRounds::new();
+        let saved = config::swap_config_for_test(None);
+        let base = Config { telnet_enabled: true, web_enabled: true, ..Config::default() };
+        config::save_config(&base).expect("a clean starting file");
+        let form = |web: u16, sessions: &str| {
+            format!(
+                "telnet_enabled=true&telnet_port={}&web_enabled=true&web_port={web}&max_sessions={sessions}",
+                base.telnet_port
+            )
+        };
+
+        let (notice, _) = apply_form_post(form(base.telnet_port, "7").as_bytes());
+        assert!(notice.contains("Not saved: port"), "{notice}");
+        assert!(!notice.contains("Reconnect"), "the withdrawn line stood: {notice}");
+        assert!(notice.starts_with("Configuration saved. Not saved"), "{notice}");
+        assert!(!notice.contains("  "), "{notice}");
+        let live = config::get_config();
+        assert_eq!(live.web_port, base.web_port, "the clashing port was saved");
+        assert_eq!(live.max_sessions, 7, "the rest of the page was thrown away");
+
+        // Positive control: a free port is saved and the line is kept.
+        let (notice, _) = apply_form_post(form(8099, "7").as_bytes());
+        assert!(notice.contains("Reconnect at the new port"), "{notice}");
+        assert!(!notice.contains("Not saved"), "{notice}");
+        assert_eq!(config::get_config().web_port, 8099);
+
+        config::swap_config_for_test(saved);
     }
 
     /// `is_authorized`, driven to completion for a synchronous test.

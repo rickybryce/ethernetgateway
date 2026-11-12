@@ -3105,7 +3105,25 @@ pub fn enable_ports_that_gained_a_device(old: &Config, new: &mut Config) {
     }
 }
 
-pub fn save_config(cfg: &Config) -> Result<(), String> {
+/// Why [`save_config`] did not save.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SaveError {
+    /// Refused whole: nothing was written and nothing changed in memory.
+    PortClash(PortClash),
+    /// The file could not be written; the in-memory config took the change.
+    Write(String),
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SaveError::PortClash(clash) => write!(f, "{clash}; two listeners can't share a port"),
+            SaveError::Write(e) => f.write_str(e),
+        }
+    }
+}
+
+pub fn save_config(cfg: &Config) -> Result<(), SaveError> {
     // A password typed into the desktop editor or the first-run wizard is
     // hashed before it reaches the disk *or* the in-memory config, so the two
     // cannot disagree about the credential.  Idempotent, so re-saving an
@@ -3119,11 +3137,11 @@ pub fn save_config(cfg: &Config) -> Result<(), String> {
     // `update_config_values` for why the rule is also enforced here.
     if let Some(current) = guard.as_ref() {
         if let Some(clash) = new_port_clash(current, cfg) {
-            return Err(format!("{clash}; two listeners can't share a port"));
+            return Err(SaveError::PortClash(clash));
         }
     }
     let was_cpm_enabled = guard.as_ref().map(|c| c.cpm_emu_enabled).unwrap_or(false);
-    let result = write_config_file(&config_file_path(), cfg);
+    let result = write_config_file(&config_file_path(), cfg).map_err(SaveError::Write);
     if let Err(ref e) = result {
         glog!("Warning: {}", e);
     }
@@ -4203,7 +4221,8 @@ fn keep_listeners(from: &Config, cfg: &mut Config) {
 
 /// [`new_port_clash`] for a save of `pairs` over `cfg`, applied as
 /// [`update_config_values`] would apply them.
-pub fn port_clash_after(cfg: &Config, pairs: &[(&str, &str)]) -> Option<PortClash> {
+#[cfg(test)]
+fn port_clash_after(cfg: &Config, pairs: &[(&str, &str)]) -> Option<PortClash> {
     let mut after = cfg.clone();
     for &(key, value) in pairs {
         apply_config_key(&mut after, key, value);
@@ -4214,14 +4233,21 @@ pub fn port_clash_after(cfg: &Config, pairs: &[(&str, &str)]) -> Option<PortClas
 /// Update a single key in the config file and the in-memory singleton.
 /// Reads the current file, updates the key, writes it back, and refreshes
 /// the global config so that subsequent `get_config()` calls see the change.
-pub fn update_config_value(key: &str, value: &str) {
-    update_config_values(&[(key, value)]);
+/// `Some` when the listener settings were refused -- see
+/// [`update_config_values`].
+pub fn update_config_value(key: &str, value: &str) -> Option<PortClash> {
+    update_config_values(&[(key, value)])
 }
 
 /// Update multiple keys in a single read-modify-write cycle.
 /// Holds the global CONFIG lock for the entire operation to prevent
 /// concurrent callers from overwriting each other's changes.
-pub fn update_config_values(pairs: &[(&str, &str)]) {
+///
+/// `Some(clash)` when the save would have put two listeners on one port: the
+/// listener settings were left as they were and everything else was saved.
+/// An editor reports it from here rather than from a check of its own made
+/// beforehand, which a save from another surface can overtake.
+pub fn update_config_values(pairs: &[(&str, &str)]) -> Option<PortClash> {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     let path = config_file_path();
     let mut cfg = if Path::new(&path).exists() {
@@ -4261,7 +4287,8 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
     // to the rule too.  The editors check first only to say why; this is
     // what makes it true.  The listener settings stay as they were; the rest
     // of the save goes ahead.
-    if let Some(clash) = new_port_clash(&before_ports, &cfg) {
+    let refused = new_port_clash(&before_ports, &cfg);
+    if let Some(clash) = refused {
         glog!("Not saved: {clash}. Two listeners can't share a port; the listener settings were left as they were.");
         keep_listeners(&before_ports, &mut cfg);
     }
@@ -4291,6 +4318,7 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
         glog!("Warning: {}", e);
     }
     *guard = Some(cfg);
+    refused
 }
 
 /// Apply one per-port key/value pair to a `SerialPortConfig`.  `suffix`
@@ -5699,42 +5727,90 @@ mod tests {
         }
     }
 
-    /// All three editors apply that rule, each before it writes: bounded to
-    /// the function that saves, and ahead of the write in it.
+    /// **The writers say when they refused**, and keep everything else.  The
+    /// editors report the clash from this answer -- not from a check of their
+    /// own beforehand, which a save from another surface can overtake.
+    #[tokio::test]
+    async fn test_the_writers_report_a_refused_port_clash() {
+        let _lock = CONFIG_TEST_LOCK.lock().await;
+        let _cheap = crate::credential::CheapRounds::new();
+        let saved = swap_config_for_test(None);
+        let base = Config { telnet_enabled: true, web_enabled: true, ssh_enabled: true, ..Config::default() };
+        save_config(&base).expect("a clean starting file");
+        let telnet = base.telnet_port.to_string();
+
+        // update_config_values: the listener keys refused, the rest saved.
+        let refused = update_config_values(&[("web_port", &telnet), ("max_sessions", "7")]);
+        let clash = refused.expect("a web port on the telnet port was not refused");
+        assert_eq!(clash.port, base.telnet_port);
+        let live = get_config();
+        assert_eq!(live.web_port, base.web_port, "the clashing port was kept");
+        assert_eq!(live.max_sessions, 7, "and the rest of the save was lost");
+        assert_eq!(update_config_value("web_port", "8099"), None, "a free port was refused");
+        assert_eq!(get_config().web_port, 8099);
+
+        // save_config: refused whole, nothing stored in memory or on disk.
+        let before = get_config();
+        let text_before = std::fs::read_to_string(config_file_path()).expect("read");
+        let clashing = Config { ssh_port: base.telnet_port, max_sessions: 9, ..before.clone() };
+        match save_config(&clashing) {
+            Err(SaveError::PortClash(c)) => assert_eq!(c.port, base.telnet_port),
+            other => panic!("expected a port clash, got {other:?}"),
+        }
+        assert_eq!(get_config(), before, "a refused save changed memory");
+        let text_after = std::fs::read_to_string(config_file_path()).expect("read");
+        assert_eq!(text_after, text_before, "a refused save reached the disk");
+        let fine = Config { max_sessions: 9, ..before };
+        assert_eq!(save_config(&fine), Ok(()), "positive control");
+
+        swap_config_for_test(saved);
+    }
+
+    /// Every editor acts on that answer: bounded to the function that saves.
     #[test]
-    fn test_every_editor_refuses_a_port_clash_before_saving() {
+    fn test_every_editor_reports_the_writers_refusal() {
         fn body<'a>(src: &'a str, start: &str) -> &'a str {
             let b = &src[src.find(start).unwrap_or_else(|| panic!("{start}"))..];
             &b[..b.find("\n    }\n").unwrap()]
         }
-        fn before(body: &str, check: &str, write: &str) {
-            let c = body.find(check).unwrap_or_else(|| panic!("no {check}"));
-            let w = body.find(write).unwrap_or_else(|| panic!("no {write}"));
-            assert!(c < w, "{check} comes after {write}");
+        fn before(body: &str, first: &str, then: &str) {
+            let c = body.find(first).unwrap_or_else(|| panic!("no {first}"));
+            let w = body.find(then).unwrap_or_else(|| panic!("no {then}"));
+            assert!(c < w, "{first} comes after {then}");
         }
         let gui = include_str!("gui.rs").replace('\r', "");
-        before(body(&gui, "fn persist_config("), "config::new_port_clash(", "config::save_config(");
+        // A clash from under the lock leaves the editor as it was...
+        before(
+            body(&gui, "fn persist_config("),
+            "if let Err(e @ config::SaveError::PortClash(_)) = result {\n            return Err(e);",
+            "self.dirty = false;",
+        );
+        // ...and restarts nothing.
+        before(
+            body(&gui, "fn save_and_restart_all("),
+            "Err(e @ config::SaveError::PortClash(_)) => {",
+            "self.restart.store(true",
+        );
+        assert!(body(&gui, "fn save_and_restart_all(").contains("return false;\n            }\n            Err(e) =>"));
+        // The pre-check reads the text boxes, as the save does.
+        before(body(&gui, "fn refuse_port_clash("), "self.sync_numeric_fields();", "config::new_port_clash(");
+        assert!(gui.contains("match config::update_config_value(\"kermit_server_enabled\", \"true\") {"));
+        assert!(gui.contains(".then(|| config::update_config_value(\"web_enabled\", \"true\"))"));
+
         let web = include_str!("webserver.rs").replace('\r', "");
         let web = &web[web.find("fn apply_form_post(").unwrap()..];
         let web = &web[..web.find("\n}\n").unwrap()];
-        before(web, "config::port_clash_after(&old_cfg", "config::update_config_values(");
+        assert!(web.contains("if let Some(clash) = config::update_config_values(&pairs) {"));
+
         let tn = include_str!("telnet/config_ui.rs").replace('\r', "");
-        before(
-            body(&tn, "async fn config_set_port("),
-            "config_refuse_port_clash(",
-            "config::update_config_value(",
-        );
-        before(
-            body(&tn, "async fn kermit_server_toggle("),
-            "config_refuse_port_clash(&[(\"kermit_server_enabled\", \"true\")])",
-            "config::update_config_value(\"kermit_server_enabled\", \"true\")",
-        );
+        assert!(body(&tn, "async fn config_save_listener(").contains("config::update_config_value(&k, &v)"));
+        assert!(body(&tn, "async fn config_set_port(")
+            .contains("if let Some(clash) = self.config_save_listener(&k, &v).await? {"));
+        assert!(body(&tn, "async fn kermit_server_toggle(")
+            .contains("self.config_save_listener(\"kermit_server_enabled\", \"true\").await? {"));
         for key in ["telnet_enabled", "ssh_enabled", "web_enabled"] {
-            before(
-                &tn,
-                &format!("config_refuse_port_clash(&[(\"{key}\", &v)])"),
-                &format!("config::update_config_value(\"{key}\", &v)"),
-            );
+            assert!(tn.contains(&format!("if let Some(clash) = self.config_save_listener(\"{key}\", &v).await? {{")));
+            assert!(!tn.contains(&format!("config::update_config_value(\"{key}\"")), "{key} written around the check");
         }
     }
 

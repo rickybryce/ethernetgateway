@@ -2737,14 +2737,10 @@ impl TelnetSession {
                 "t" => {
                     let new_val = if cfg.telnet_enabled { "false" } else { "true" };
                     let v = new_val.to_string();
-                    if self.config_refuse_port_clash(&[("telnet_enabled", &v)]).await? {
+                    if let Some(clash) = self.config_save_listener("telnet_enabled", &v).await? {
+                        self.config_show_port_clash("telnet_enabled", clash).await?;
                         continue;
                     }
-                    tokio::task::spawn_blocking(move || {
-                        config::update_config_value("telnet_enabled", &v);
-                    })
-                    .await
-                    .ok();
                     self.config_restart_notice().await?;
                 }
                 "p" => {
@@ -2753,14 +2749,10 @@ impl TelnetSession {
                 "s" => {
                     let new_val = if cfg.ssh_enabled { "false" } else { "true" };
                     let v = new_val.to_string();
-                    if self.config_refuse_port_clash(&[("ssh_enabled", &v)]).await? {
+                    if let Some(clash) = self.config_save_listener("ssh_enabled", &v).await? {
+                        self.config_show_port_clash("ssh_enabled", clash).await?;
                         continue;
                     }
-                    tokio::task::spawn_blocking(move || {
-                        config::update_config_value("ssh_enabled", &v);
-                    })
-                    .await
-                    .ok();
                     self.config_restart_notice().await?;
                 }
                 "o" => {
@@ -2780,14 +2772,10 @@ impl TelnetSession {
                 "w" => {
                     let new_val = if cfg.web_enabled { "false" } else { "true" };
                     let v = new_val.to_string();
-                    if self.config_refuse_port_clash(&[("web_enabled", &v)]).await? {
+                    if let Some(clash) = self.config_save_listener("web_enabled", &v).await? {
+                        self.config_show_port_clash("web_enabled", clash).await?;
                         continue;
                     }
-                    tokio::task::spawn_blocking(move || {
-                        config::update_config_value("web_enabled", &v);
-                    })
-                    .await
-                    .ok();
                     self.config_restart_notice().await?;
                 }
                 "b" => {
@@ -3510,15 +3498,14 @@ impl TelnetSession {
         );
 
         self.send_line("").await?;
-        if confirmed && self.config_refuse_port_clash(&[("kermit_server_enabled", "true")]).await? {
-            return Ok(());
-        }
         if confirmed {
-            tokio::task::spawn_blocking(move || {
-                config::update_config_value("kermit_server_enabled", "true");
-            })
-            .await
-            .ok();
+            if let Some(clash) = self.config_save_listener("kermit_server_enabled", "true").await? {
+                // On a screen of its own: under the warning above it would run
+                // to 23 rows and push the title off.
+                self.clear_screen().await?;
+                self.config_show_port_clash("kermit_server_enabled", clash).await?;
+                return Ok(());
+            }
             self.send_line(&format!(
                 "  {}",
                 self.green("Kermit server enabled.")
@@ -3964,25 +3951,36 @@ impl TelnetSession {
         }
     }
 
-    /// Refuse a change that would put two of this process's listeners on one
-    /// port -- `true` when it was refused.  One binds and the other fails with
-    /// "address in use", and nothing on this screen would say why.  The rule
-    /// is `config::port_clash_after`, the same one the web page and the
-    /// desktop editor apply.
-    pub(in crate::telnet) async fn config_refuse_port_clash(
+    /// Save a listener setting -- `Some` when it was refused because it would
+    /// put two of this process's listeners on one port.  One would bind and
+    /// the other fail with "address in use", and nothing on this screen would
+    /// say why.  The writer decides, under the config lock, so a save from
+    /// another surface cannot slip between a check and the write; the web
+    /// page and the desktop editor take the same answer from it.
+    pub(in crate::telnet) async fn config_save_listener(
         &mut self,
-        pairs: &[(&str, &str)],
-    ) -> Result<bool, std::io::Error> {
-        let Some(clash) = config::port_clash_after(&config::get_config(), pairs) else {
-            return Ok(false);
-        };
-        let mine = pairs.iter().find_map(|(k, _)| config::listener_of_key(k)).unwrap_or(clash.a);
+        key: &str,
+        value: &str,
+    ) -> Result<Option<config::PortClash>, std::io::Error> {
+        let (k, v) = (key.to_string(), value.to_string());
+        Ok(tokio::task::spawn_blocking(move || config::update_config_value(&k, &v))
+            .await
+            .ok()
+            .flatten())
+    }
+
+    /// Say why [`Self::config_save_listener`] refused `key`.
+    pub(in crate::telnet) async fn config_show_port_clash(
+        &mut self,
+        key: &str,
+        clash: config::PortClash,
+    ) -> Result<(), std::io::Error> {
+        let mine = config::listener_of_key(key).unwrap_or(clash.a);
         // 39 columns at most on a C64: "Port 65535 is the telnet port." is 30
         // with the indent, the second line 35.
         let first = self.red(&format!("Port {} is the {} port.", clash.port, clash.other_than(mine)));
         let second = self.dim("Two listeners can't share a port.");
-        self.show_error_lines(&[&first, &second]).await?;
-        Ok(true)
+        self.show_error_lines(&[&first, &second]).await
     }
 
     pub(in crate::telnet) async fn config_set_port(
@@ -4010,14 +4008,10 @@ impl TelnetSession {
             if port >= 1 {
                 let k = key.to_string();
                 let v = port.to_string();
-                if self.config_refuse_port_clash(&[(&k, &v)]).await? {
+                if let Some(clash) = self.config_save_listener(&k, &v).await? {
+                    self.config_show_port_clash(&k, clash).await?;
                     return Ok(());
                 }
-                tokio::task::spawn_blocking(move || {
-                    config::update_config_value(&k, &v);
-                })
-                .await
-                .ok();
                 self.config_restart_notice().await?;
             } else {
                 self.show_error("Invalid port number.").await?;
@@ -4211,7 +4205,7 @@ impl TelnetSession {
             let defaults = config::Config::default();
             let saved = tokio::task::spawn_blocking(move || config::save_config(&defaults))
                 .await
-                .unwrap_or_else(|e| Err(format!("save task panicked: {e}")));
+                .unwrap_or_else(|e| Err(config::SaveError::Write(format!("save task panicked: {e}"))));
             self.send_line("").await?;
             match saved {
                 Ok(()) => {
