@@ -4410,13 +4410,10 @@ impl App {
         // anyway" is right for a disk error, where the restart was asked for
         // and the old file is still sound; for a clash it dropped every
         // session and then rebuilt the window from the file, throwing away
-        // the edits the refusal had kept for the operator to correct.
-        if self.refuse_port_clash() {
-            return false;
-        }
+        // the edits the refusal had kept for the operator to correct.  The
+        // writer's refusal, under the lock, is the check.
         match self.persist_config() {
             Ok(()) => logger::log("Configuration saved — restarting server...".into()),
-            // Overtaken under the lock by a save from another surface.
             Err(e @ config::SaveError::PortClash(_)) => {
                 logger::log(format!("Configuration NOT saved: {e}. Nothing was restarted."));
                 return false;

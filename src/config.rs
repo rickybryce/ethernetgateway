@@ -3132,9 +3132,11 @@ pub fn save_config(cfg: &Config) -> Result<(), SaveError> {
     crate::credential::hash_if_cleartext(&mut cfg.password);
     let cfg = &cfg;
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    // Refused whole, under the lock: this is the desktop editor's save, which
-    // checks first to keep the edits in their boxes -- see
-    // `update_config_values` for why the rule is also enforced here.
+    // Refused whole, under the lock: this is the desktop editor's save, and
+    // this refusal is the answer that counts (the editor looks earlier only so
+    // it never asks to drop sessions for a save that would be refused) --
+    // nothing is written, so the edits stay in their boxes to be corrected.
+    // See `update_config_values` for why the rule lives in the writer.
     if let Some(current) = guard.as_ref() {
         if let Some(clash) = new_port_clash(current, cfg) {
             return Err(SaveError::PortClash(clash));

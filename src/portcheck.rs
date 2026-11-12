@@ -468,6 +468,22 @@ fn store_for(found: Vec<(String, u16, Reach)>, cycle: u64) -> Summary {
     if stored { summary } else { Summary::default() }
 }
 
+/// [`store_for`] for a check that found no listener bound: an empty table,
+/// said as "nothing is bound".  Overtaken by a restart, it is "try again", as
+/// `store_for` answers -- the new cycle's listeners were never looked at.
+fn store_nothing_bound(cycle: u64) -> Summary {
+    let stored = with(|s| {
+        if cycle != s.cycle {
+            return false;
+        }
+        s.results.clear();
+        s.ran = true;
+        s.ran_at = Some(std::time::Instant::now());
+        true
+    });
+    Summary { nothing_bound: stored, ..Summary::default() }
+}
+
 fn run_check_inner(cycle: u64) -> Summary {
     let host = crate::serial::primary_local_ip();
     let listeners = bound_listeners();
@@ -499,19 +515,8 @@ fn run_check_inner(cycle: u64) -> Summary {
         );
     }
     if listeners.is_empty() {
-        let stored = with(|s| {
-            if cycle != s.cycle {
-                return false;
-            }
-            s.results.clear();
-            s.ran = true;
-            s.ran_at = Some(std::time::Instant::now());
-            true
-        });
         glog!("Port check: no listener is bound, so there is nothing to test.");
-        // Overtaken by a restart, it is "try again", as `store_for` answers:
-        // the new cycle's listeners were never looked at.
-        return Summary { nothing_bound: stored, ..Summary::default() };
+        return store_nothing_bound(cycle);
     }
 
     glog!(
@@ -791,6 +796,19 @@ mod tests {
         // Positive control: the current cycle's answer is stored.
         store_for(vec![("telnet".into(), 2323, Reach::Answered)], cycle());
         assert!(result_of("telnet").is_some());
+        reset();
+
+        // The same for a check that found nothing bound: overtaken, it is
+        // "try again", not "nothing is bound", and the new cycle stays unchecked.
+        let old = cycle();
+        reset(); // the restart
+        let said = store_nothing_bound(old);
+        assert!(!said.nothing_bound, "an overtaken check said nothing is bound");
+        assert_eq!(said.untested_phrase(), "nothing was tested; try again");
+        assert!(summary().is_none(), "and the new cycle still reads as unchecked");
+        // Positive control: the current cycle's empty answer is "nothing bound".
+        assert!(store_nothing_bound(cycle()).nothing_bound);
+        assert!(summary().is_some_and(|s| s.nothing_bound));
         reset();
 
         let src = include_str!("portcheck.rs").replace('\r', "");
