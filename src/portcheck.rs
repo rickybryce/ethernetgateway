@@ -499,16 +499,19 @@ fn run_check_inner(cycle: u64) -> Summary {
         );
     }
     if listeners.is_empty() {
-        with(|s| {
+        let stored = with(|s| {
             if cycle != s.cycle {
-                return;
+                return false;
             }
             s.results.clear();
             s.ran = true;
             s.ran_at = Some(std::time::Instant::now());
+            true
         });
         glog!("Port check: no listener is bound, so there is nothing to test.");
-        return Summary { nothing_bound: true, ..Summary::default() };
+        // Overtaken by a restart, it is "try again", as `store_for` answers:
+        // the new cycle's listeners were never looked at.
+        return Summary { nothing_bound: stored, ..Summary::default() };
     }
 
     glog!(

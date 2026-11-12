@@ -4284,9 +4284,9 @@ pub fn update_config_values(pairs: &[(&str, &str)]) -> Option<PortClash> {
     // against the file it rewrites -- so two editors changing one port each
     // at the same moment cannot each pass a check on a snapshot and combine
     // into a clash, and a writer that never asked (a confirm popup) is held
-    // to the rule too.  The editors check first only to say why; this is
-    // what makes it true.  The listener settings stay as they were; the rest
-    // of the save goes ahead.
+    // to the rule too.  The editors report the clash returned here rather
+    // than checking for themselves.  The listener settings stay as they
+    // were; the rest of the save goes ahead.
     let refused = new_port_clash(&before_ports, &cfg);
     if let Some(clash) = refused {
         glog!("Not saved: {clash}. Two listeners can't share a port; the listener settings were left as they were.");

@@ -4303,16 +4303,11 @@ impl App {
             &out.slave_master_password,
             &config::get_config().slave_master_password,
         );
-        // Two listeners on one port: refused before anything is written, the
-        // edits left in the boxes (still dirty) to be corrected.  Same rule
-        // as the web page and telnet -- `config::new_port_clash`.
-        if let Some(clash) = config::new_port_clash(&config::get_config(), &out) {
-            return Err(config::SaveError::PortClash(clash));
-        }
         let result = config::save_config(&out);
-        // The same refusal from under the lock, where a save from another
-        // surface since the check above made it a clash: nothing was stored,
-        // so nothing here is resynced either.
+        // Two listeners on one port: refused by the writer, under the config
+        // lock, before anything is written.  Nothing was stored, so nothing
+        // here is resynced either -- the edits stay in their boxes (still
+        // dirty) to be corrected.  The same answer telnet and the web report.
         if let Err(e @ config::SaveError::PortClash(_)) = result {
             return Err(e);
         }
