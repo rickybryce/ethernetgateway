@@ -2673,13 +2673,15 @@ impl TelnetSession {
                     // The cycle is taken before the hand-off: a restart that
                     // lands mid-probe must not have this check's answers.
                     let cycle = crate::portcheck::cycle();
-                    let blocked = tokio::task::spawn_blocking(move || {
+                    // A join error is "nothing tested", never an all-clear.
+                    let found = tokio::task::spawn_blocking(move || {
                         crate::portcheck::run_check_for_cycle(cycle)
                     })
                     .await
-                    .unwrap_or(0);
+                    .unwrap_or_default();
+                    let blocked = found.blocked;
                     self.send_line("").await?;
-                    if blocked == 0 {
+                    if found.all_answered() {
                         // Not "all ports are open": a self-connection skips the
                         // firewall on Windows and macOS, so a pass proves
                         // nothing there.
@@ -2698,7 +2700,7 @@ impl TelnetSession {
                             self.dim("a port still looks fine from here.")
                         ))
                         .await?;
-                    } else {
+                    } else if blocked > 0 {
                         self.send_line(&format!(
                             "  {}",
                             self.red(&format!("{blocked} bound port(s) did not answer."))
@@ -2709,6 +2711,23 @@ impl TelnetSession {
                             self.dim("They are marked on the screen.")
                         ))
                         .await?;
+                    } else {
+                        // "N bound ports could not be tested" is 34 columns at
+                        // most, inside a C64's 39 with the indent.
+                        self.send_line(&format!(
+                            "  {}",
+                            self.amber(&{
+                                // A sentence on its own line: capitalised.
+                                let mut line = format!("{}.", found.untested_phrase());
+                                line[..1].make_ascii_uppercase();
+                                line
+                            })
+                        ))
+                        .await?;
+                        if found.untested > 0 {
+                            self.send_line(&format!("  {}", self.dim("The log says why.")))
+                                .await?;
+                        }
                     }
                     self.send_line("").await?;
                     self.send("  Press any key to continue.").await?;
@@ -2718,6 +2737,9 @@ impl TelnetSession {
                 "t" => {
                     let new_val = if cfg.telnet_enabled { "false" } else { "true" };
                     let v = new_val.to_string();
+                    if self.config_refuse_port_clash(&[("telnet_enabled", &v)]).await? {
+                        continue;
+                    }
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value("telnet_enabled", &v);
                     })
@@ -2731,6 +2753,9 @@ impl TelnetSession {
                 "s" => {
                     let new_val = if cfg.ssh_enabled { "false" } else { "true" };
                     let v = new_val.to_string();
+                    if self.config_refuse_port_clash(&[("ssh_enabled", &v)]).await? {
+                        continue;
+                    }
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value("ssh_enabled", &v);
                     })
@@ -2755,6 +2780,9 @@ impl TelnetSession {
                 "w" => {
                     let new_val = if cfg.web_enabled { "false" } else { "true" };
                     let v = new_val.to_string();
+                    if self.config_refuse_port_clash(&[("web_enabled", &v)]).await? {
+                        continue;
+                    }
                     tokio::task::spawn_blocking(move || {
                         config::update_config_value("web_enabled", &v);
                     })
@@ -3482,6 +3510,9 @@ impl TelnetSession {
         );
 
         self.send_line("").await?;
+        if confirmed && self.config_refuse_port_clash(&[("kermit_server_enabled", "true")]).await? {
+            return Ok(());
+        }
         if confirmed {
             tokio::task::spawn_blocking(move || {
                 config::update_config_value("kermit_server_enabled", "true");
@@ -3933,6 +3964,27 @@ impl TelnetSession {
         }
     }
 
+    /// Refuse a change that would put two of this process's listeners on one
+    /// port -- `true` when it was refused.  One binds and the other fails with
+    /// "address in use", and nothing on this screen would say why.  The rule
+    /// is `config::port_clash_after`, the same one the web page and the
+    /// desktop editor apply.
+    pub(in crate::telnet) async fn config_refuse_port_clash(
+        &mut self,
+        pairs: &[(&str, &str)],
+    ) -> Result<bool, std::io::Error> {
+        let Some(clash) = config::port_clash_after(&config::get_config(), pairs) else {
+            return Ok(false);
+        };
+        let mine = pairs.iter().find_map(|(k, _)| config::listener_of_key(k)).unwrap_or(clash.a);
+        // 39 columns at most on a C64: "Port 65535 is the telnet port." is 30
+        // with the indent, the second line 35.
+        let first = self.red(&format!("Port {} is the {} port.", clash.port, clash.other_than(mine)));
+        let second = self.dim("Two listeners can't share a port.");
+        self.show_error_lines(&[&first, &second]).await?;
+        Ok(true)
+    }
+
     pub(in crate::telnet) async fn config_set_port(
         &mut self,
         label: &str,
@@ -3958,6 +4010,9 @@ impl TelnetSession {
             if port >= 1 {
                 let k = key.to_string();
                 let v = port.to_string();
+                if self.config_refuse_port_clash(&[(&k, &v)]).await? {
+                    return Ok(());
+                }
                 tokio::task::spawn_blocking(move || {
                     config::update_config_value(&k, &v);
                 })

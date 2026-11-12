@@ -521,8 +521,9 @@ pub(crate) fn key_to_ansi_host(byte: u8) -> Option<&'static [u8]> {
 /// left, space, left — the character is overwritten and the cursor ends up
 /// before it, exactly as intended.
 ///
-/// Note the contrast with the AT-command echo in `process_at_byte`, which
-/// deliberately writes a bare `0x14`: there the emulator is *originating* an
+/// Note the contrast with the AT-command echo in `serial.rs`'s command mode
+/// (`command_mode_tick`, `is_command_backspace`), which deliberately writes a
+/// bare `0x14`: there the emulator is *originating* an
 /// erase for its own local echo, so the self-contained destructive delete is
 /// the right primitive.  Here we are *translating someone else's* stream.
 /// ASCII DEL (0x7F) is treated exactly like BS, which is how this codebase
@@ -689,6 +690,30 @@ impl PetsciiPunctState {
 #[derive(Default)]
 pub(crate) struct PetsciiText {
     punct: PetsciiPunctState,
+    /// The C64's cursor column as far as this stream has moved it, for TAB.
+    /// Counted over everything sent -- text and the control bytes
+    /// `AnsiToPetscii` emits -- by [`PetsciiText::settle`].  An estimate: a
+    /// host's absolute cursor addressing is dropped, not followed, so after one
+    /// this can be wrong until the next CR, CLR or HOME.  Wrong costs a tab
+    /// stop's alignment; the 0x09 it replaces cost the spacing altogether.
+    col: u8,
+}
+
+/// A C64 screen's width, and so where its cursor wraps.
+const C64_COLS: u8 = 40;
+/// ASCII horizontal tab.
+const TAB: u8 = 0x09;
+
+/// The column after `byte` reaches a C64 at `col`.
+fn next_col(col: u8, byte: u8) -> u8 {
+    match byte {
+        0x0D | 0x8D | CLR | HOME => 0,
+        // Left at column 0 is the end of the row above.
+        CRSR_LEFT | 0x14 => col.checked_sub(1).unwrap_or(C64_COLS - 1),
+        CRSR_RIGHT | 0x20..=0x7F | 0xA0..=0xFF => (col + 1) % C64_COLS,
+        // Colours, RVS, up/down, LF, bell: the column stays.
+        _ => col,
+    }
 }
 
 impl PetsciiText {
@@ -697,6 +722,40 @@ impl PetsciiText {
         self.punct.feed(byte, out);
         for v in out[start..].iter_mut() {
             *v = translate_ascii_to_petscii_byte(*v);
+        }
+    }
+
+    /// **A host's TAB, as spaces.**  On a C64 0x09 enables the case-switch
+    /// key and moves nothing, so a tab-aligned listing -- `ls -C`, a tabbed
+    /// source file -- arrived with its columns run together.  Expanded to the
+    /// next multiple of eight, as a VT100's default stops are, and like a
+    /// VT100 never past the last column: a tab there stays put rather than
+    /// wrapping into the row below.  The CP/M emulator's BDOS does the same
+    /// for its guests (`cpm_term::bdos_conout`).
+    ///
+    /// Everything `out` gained from `start` is walked to keep [`Self::col`]:
+    /// only text bytes can be a TAB (`AnsiToPetscii` never emits one, and the
+    /// text half passes 0x09 through untouched), but every byte moves the
+    /// cursor.
+    fn settle(&mut self, out: &mut Vec<u8>, start: usize) {
+        if !out[start..].contains(&TAB) {
+            for &b in &out[start..] {
+                self.col = next_col(self.col, b);
+            }
+            return;
+        }
+        let sent: Vec<u8> = out.drain(start..).collect();
+        for b in sent {
+            if b == TAB {
+                let to_stop = 8 - self.col % 8;
+                for _ in 0..to_stop.min(C64_COLS - 1 - self.col) {
+                    out.push(b' ');
+                    self.col += 1;
+                }
+            } else {
+                out.push(b);
+                self.col = next_col(self.col, b);
+            }
         }
     }
 
@@ -724,10 +783,12 @@ pub(crate) fn feed_petscii(
     out: &mut Vec<u8>,
 ) {
     for &b in input {
+        let start = out.len();
         if b == 0x1B && ansi.state == 0 {
             text.flush_held(out);
         }
         ansi.feed(b, &mut |b, out: &mut Vec<u8>| text.feed(b, out), out);
+        text.settle(out, start);
     }
 }
 
@@ -735,9 +796,6 @@ pub(crate) fn feed_petscii(
 mod tests {
     use super::*;
 
-    /// Run a whole stream through, with a text handler that passes bytes
-    /// through unchanged — the escape translation is what is under test here,
-    /// not any caller's character mapping.
     /// A held character split across reads still decodes as one: the state
     /// is the caller's, kept between `feed_petscii` calls.
     #[test]
@@ -758,6 +816,9 @@ mod tests {
         );
     }
 
+    /// Run a whole stream through, with a text handler that passes bytes
+    /// through unchanged — the escape translation is what is under test here,
+    /// not any caller's character mapping.
     fn xlate(input: &[u8]) -> Vec<u8> {
         let mut st = AnsiToPetscii::new();
         let mut out = Vec::new();
@@ -903,25 +964,74 @@ mod tests {
     }
 
     /// The property that makes this safe to put on a live byte stream: a
-    /// sequence split at any point must translate to the same thing as one
-    /// that arrived whole, because a 4 KB read boundary falls wherever it
-    /// likes.
+    /// stream split at any point must translate to the same thing as one that
+    /// arrived whole, because a 4 KB read boundary falls wherever it likes.
+    ///
+    /// Through `feed_petscii`, two calls, as the gateway and the modem make
+    /// them -- so everything carried between reads is under test: an escape
+    /// half read, a UTF-8 character half held, and the column a TAB counts
+    /// from.  It fed one `AnsiToPetscii` byte by byte in both halves, which is
+    /// the same loop as feeding it whole and could not fail.
     #[test]
-    fn test_a_sequence_split_at_any_byte_gives_the_same_answer() {
-        let wire = b"a\x1b[1;32mb\x1b[2Jc\x1b[3Dd\x1b[0me";
-        let whole = xlate(wire);
+    fn test_a_stream_split_at_any_byte_gives_the_same_answer() {
+        let wire = "a\x1b[1;32mb\x1b[2Jc\x1b[3Dd\x1b[0me\u{2019}f\tg\u{4E2D}\th".as_bytes();
+        let whole = {
+            let (mut ansi, mut text, mut out) = (AnsiToPetscii::new(), PetsciiText::default(), Vec::new());
+            feed_petscii(&mut ansi, &mut text, wire, &mut out);
+            out
+        };
+        assert!(whole.contains(&b' ') && !whole.contains(&TAB), "the tabs were expanded");
         for cut in 0..wire.len() {
-            let mut st = AnsiToPetscii::new();
-            let mut out = Vec::new();
-            let mut text = |b: u8, out: &mut Vec<u8>| out.push(b);
-            for &b in &wire[..cut] {
-                st.feed(b, &mut text, &mut out);
-            }
-            for &b in &wire[cut..] {
-                st.feed(b, &mut text, &mut out);
-            }
+            let (mut ansi, mut text, mut out) = (AnsiToPetscii::new(), PetsciiText::default(), Vec::new());
+            feed_petscii(&mut ansi, &mut text, &wire[..cut], &mut out);
+            feed_petscii(&mut ansi, &mut text, &wire[cut..], &mut out);
             assert_eq!(out, whole, "split at {} changed the output", cut);
         }
+    }
+
+    fn petscii(input: &[u8]) -> Vec<u8> {
+        let (mut ansi, mut text, mut out) = (AnsiToPetscii::new(), PetsciiText::default(), Vec::new());
+        feed_petscii(&mut ansi, &mut text, input, &mut out);
+        out
+    }
+
+    /// **A host's TAB reaches a C64 as spaces to the next stop of eight.**
+    /// 0x09 on a C64 enables the case switch and moves nothing, so `ls -C`
+    /// arrived with its columns run together.
+    #[test]
+    fn test_a_tab_becomes_spaces_to_the_next_stop() {
+        let a = translate_ascii_to_petscii_byte(b'a');
+        let b = translate_ascii_to_petscii_byte(b'b');
+        let spaces = |n: usize| vec![b' '; n];
+        assert_eq!(petscii(b"a\tb"), [vec![a], spaces(7), vec![b]].concat());
+        assert_eq!(petscii(b"\tb"), [spaces(8), vec![b]].concat(), "column 0 tabs a full stop");
+        assert_eq!(petscii(b"aaaaaaaa\tb")[8..], [spaces(8), vec![b]].concat(), "on a stop, the next");
+        // A CR, CLR or HOME starts the count again.
+        assert_eq!(petscii(b"aaa\r\tb")[4..], [spaces(8), vec![b]].concat());
+        assert_eq!(petscii(b"aaa\x1b[2J\tb")[4..], [spaces(8), vec![b]].concat());
+        assert_eq!(petscii(b"aaa\x1b[H\tb")[4..], [spaces(8), vec![b]].concat());
+        // Colour codes are not columns; cursor moves are.
+        assert_eq!(petscii(b"\x1b[32m\tb")[1..], [spaces(8), vec![b]].concat());
+        assert_eq!(petscii(b"\x1b[3C\tb")[3..], [spaces(5), vec![b]].concat());
+        // A UTF-8 character is one column, as the one `?` it becomes.
+        assert_eq!(petscii("\u{2019}\tb".as_bytes())[1..], [spaces(7), vec![b]].concat());
+        // Never past the last column: from 35 to 39, and from 39 nowhere --
+        // a C64 wraps at the 40th, and a TAB that wrapped would cost a row.
+        let mut line = vec![b'a'; 35];
+        line.push(TAB);
+        line.push(b'b');
+        assert_eq!(petscii(&line)[35..], [spaces(4), vec![b]].concat());
+        let mut line = vec![b'a'; 39];
+        line.extend_from_slice(b"\tb");
+        assert_eq!(petscii(&line)[39..], [b], "a tab at the last column stays put");
+        // Past the 40th the cursor is on the next row.
+        let mut line = vec![b'a'; 41];
+        line.extend_from_slice(b"\tb");
+        assert_eq!(petscii(&line)[41..], [spaces(7), vec![b]].concat());
+        // A TAB that cuts an escape short is still a TAB (ECMA-48 executes it).
+        assert_eq!(petscii(b"\x1b[\tb"), [spaces(8), vec![b]].concat());
+        // No 0x09 survives anywhere.
+        assert!(!petscii(b"\t\t\x1b[1;31m\t\r\t").contains(&TAB));
     }
 
     #[test]

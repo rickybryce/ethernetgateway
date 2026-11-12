@@ -223,9 +223,35 @@ fn summarize(entries: &[(&str, u16, Status)]) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let any_in_use = failed
+    // **Our own two listeners on one port** is not "someone else has it".
+    // One binds and the other fails with address-in-use, and the advice below
+    // -- another gateway, another program, `pkill -x ethernetgateway` -- would
+    // stop this one.  The editors refuse such a save now
+    // (`config::new_port_clash`), but a hand-edited file can still carry one.
+    // Only a partner that *bound*: if both failed, something else holds the
+    // port, and that is the stranger case the advice below is for.
+    let shares_with = |name: &str, port: u16| {
+        entries
+            .iter()
+            .find(|(other, p, st)| *other != name && *p == port && *st == Status::Bound)
+            .map(|(other, _, _)| *other)
+    };
+    let self_clashes: Vec<String> = failed
         .iter()
-        .any(|(_, _, st)| matches!(st, Status::Failed { in_use: true }));
+        .filter(|(_, _, st)| matches!(st, Status::Failed { in_use: true }))
+        .filter_map(|(name, port, _)| {
+            shares_with(name, *port).map(|other| {
+                [
+                    format!("         Port {port} is configured for both {other} and {name}: this"),
+                    "         gateway's own listener holds it. Change one of the two ports.".to_string(),
+                ]
+            })
+        })
+        .flatten()
+        .collect();
+    let any_in_use = failed.iter().any(|(name, port, st)| {
+        matches!(st, Status::Failed { in_use: true }) && shares_with(name, *port).is_none()
+    });
 
     let mut out = Vec::new();
     if failed.len() == entries.len() {
@@ -296,6 +322,7 @@ fn summarize(entries: &[(&str, u16, Status)]) -> Vec<String> {
             out.extend(how_to_check());
         }
     }
+    out.extend(self_clashes);
     out
 }
 
@@ -483,6 +510,34 @@ mod tests {
         assert!(text.contains("web 8080"), "{text}");
         assert!(text.contains("the rest are running"), "{text}");
         assert!(!text.contains("NONE"), "{text}");
+    }
+
+    /// **Two of our own listeners on one port** fail the second with
+    /// address-in-use.  It used to be blamed on another gateway or program,
+    /// with `pkill -x ethernetgateway` as the remedy -- which stops this one,
+    /// and the restart fails the same way.
+    #[test]
+    fn test_our_own_two_listeners_on_one_port_are_named_not_pkilled() {
+        let lines = summarize(&[("telnet", 2323, Status::Bound), ("Kermit", 2323, IN_USE)]);
+        let text = lines.join("\n");
+        assert!(text.contains("1 of 2"), "{text}");
+        assert!(text.contains("Port 2323 is configured for both telnet and Kermit"), "{text}");
+        assert!(!text.contains("pkill"), "advice that stops this gateway: {text}");
+        assert!(!text.contains("another program"), "{text}");
+        // Positive control: a stranger on a port of its own still gets the advice.
+        let lines = summarize(&[
+            ("telnet", 2323, Status::Bound),
+            ("Kermit", 2323, IN_USE),
+            ("web", 8080, IN_USE),
+        ]);
+        let text = lines.join("\n");
+        assert!(text.contains("Port 2323 is configured for both"), "{text}");
+        assert!(text.contains("another program") && text.contains("ethernetgateway"), "{text}");
+        // Both on the shared port failed: neither holds it, a stranger does.
+        let lines = summarize(&[("telnet", 2323, IN_USE), ("Kermit", 2323, IN_USE)]);
+        let text = lines.join("\n");
+        assert!(!text.contains("configured for both"), "blamed ourselves: {text}");
+        assert!(text.contains("ethernetgateway"), "the stranger advice: {text}");
     }
 
     /// Written at the watch's deadline with a listener still pending, the

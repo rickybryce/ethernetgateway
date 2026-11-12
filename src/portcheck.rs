@@ -256,9 +256,59 @@ pub fn results() -> Vec<(String, u16, Reach)> {
     with(|s| s.results.iter().map(|(n, (p, r))| (n.clone(), *p, r.clone())).collect())
 }
 
-/// Has a check been run since this server cycle started?
-pub fn has_run() -> bool {
-    with(|s| s.ran)
+/// What a check found, counted three ways.
+///
+/// **Three, because two lose the one distinction this module exists for.** A
+/// bare blocked count of 0 meant "every bound port answered" on every surface
+/// -- and 0 was also what a check that could not look at all returned (no
+/// non-loopback address yet, a lookup error, a probe thread that died).  Only
+/// [`Summary::all_answered`] earns the all-answered sentence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub blocked: usize,
+    pub untested: usize,
+    pub answered: usize,
+}
+
+impl Summary {
+    fn of<'a>(found: impl Iterator<Item = &'a Reach>) -> Self {
+        let mut s = Summary::default();
+        for r in found {
+            match r {
+                Reach::Blocked { .. } => s.blocked += 1,
+                Reach::Unknown(_) => s.untested += 1,
+                Reach::Answered => s.answered += 1,
+            }
+        }
+        s
+    }
+
+    /// Something was probed, it all answered, and nothing went untested.
+    pub fn all_answered(&self) -> bool {
+        self.blocked == 0 && self.untested == 0 && self.answered > 0
+    }
+
+    /// The sentence for a check that found nothing blocked but did not earn
+    /// [`Summary::all_answered`].
+    pub fn untested_phrase(&self) -> String {
+        if self.untested > 0 {
+            format!(
+                "{} bound port{} could not be tested",
+                self.untested,
+                if self.untested == 1 { "" } else { "s" }
+            )
+        } else {
+            // Nothing stored and nothing logged: no listener was bound, a
+            // restart overtook the check, or its thread died.  Asking again
+            // is the remedy; "see why" would point at a line that is not there.
+            "nothing was tested; try again".to_string()
+        }
+    }
+}
+
+/// The stored results, counted -- `None` until a check has run this cycle.
+pub fn summary() -> Option<Summary> {
+    with(|s| s.ran.then(|| Summary::of(s.results.values().map(|(_, r)| r))))
 }
 
 /// How long ago the last check ran.
@@ -306,10 +356,11 @@ pub fn cycle() -> u64 {
 /// Take `cycle` **before** handing the work to another thread, so the window
 /// it guards includes the hand-off.
 ///
-/// Blocking, and meant to be: callers run it off their event loop. Returns the
-/// number found blocked, so a caller can say something without re-reading the
-/// table.
-pub fn run_check_for_cycle(cycle: u64) -> usize {
+/// Blocking, and meant to be: callers run it off their event loop. Returns what
+/// was found, so a caller can say something without re-reading the table -- or
+/// an empty [`Summary`] when a restart made the answers stale, since nothing
+/// they describe is still there to mark.
+pub fn run_check_for_cycle(cycle: u64) -> Summary {
     run_check_inner(cycle)
 }
 
@@ -385,23 +436,26 @@ pub fn probe_addr(addr: SocketAddr, timeout: Duration) -> Reach {
 /// again, and a leftover entry would tell them it had not worked. Every surface
 /// reads `is_blocked` straight from this table, so clearing here is what turns
 /// the labels and the More button back to their ordinary colour.
-/// Refuses to write if `cycle` is not the current one.
-fn store_for(found: Vec<(String, u16, Reach)>, cycle: u64) -> usize {
-    let blocked = found.iter().filter(|(_, _, r)| r.is_blocked()).count();
-    with(|s| {
+/// Refuses to write if `cycle` is not the current one, and then reports an
+/// empty summary: "N ports did not answer -- marked below" over a table that
+/// marks nothing would be the stale answer the guard exists to drop.
+fn store_for(found: Vec<(String, u16, Reach)>, cycle: u64) -> Summary {
+    let summary = Summary::of(found.iter().map(|(_, _, r)| r));
+    let stored = with(|s| {
         if cycle != s.cycle {
             // The server restarted while this check was in flight.  Its ports
             // belong to a machine that no longer exists.
-            return;
+            return false;
         }
         s.results = found.into_iter().map(|(n, p, r)| (n, (p, r))).collect();
         s.ran = true;
         s.ran_at = Some(std::time::Instant::now());
+        true
     });
-    blocked
+    if stored { summary } else { Summary::default() }
 }
 
-fn run_check_inner(cycle: u64) -> usize {
+fn run_check_inner(cycle: u64) -> Summary {
     let host = crate::serial::primary_local_ip();
     let listeners = bound_listeners();
     // **Loopback is not an address we can learn anything from.**
@@ -421,7 +475,7 @@ fn run_check_inner(cycle: u64) -> usize {
             "Port check: this machine has no network address of its own yet (only {host}), \
              so there is nothing to test against. Try again once it has one."
         );
-        store_for(
+        return store_for(
             listeners
                 .into_iter()
                 .map(|(n, p)| {
@@ -430,7 +484,6 @@ fn run_check_inner(cycle: u64) -> usize {
                 .collect(),
             cycle,
         );
-        return 0;
     }
     if listeners.is_empty() {
         with(|s| {
@@ -442,7 +495,7 @@ fn run_check_inner(cycle: u64) -> usize {
             s.ran_at = Some(std::time::Instant::now());
         });
         glog!("Port check: no listener is bound, so there is nothing to test.");
-        return 0;
+        return Summary::default();
     }
 
     glog!(
@@ -473,8 +526,8 @@ fn run_check_inner(cycle: u64) -> usize {
         found.push((name, port, reach));
     }
 
-    let blocked = store_for(found, cycle);
-    if blocked == 0 {
+    let summary = store_for(found, cycle);
+    if summary.all_answered() {
         // Deliberately not "all ports are open".  A pass proves next to nothing
         // on any platform -- self-traffic rides loopback on Linux, which the
         // usual firewalls accept, and skips the firewall on Windows and macOS.
@@ -484,8 +537,10 @@ fn run_check_inner(cycle: u64) -> usize {
              firewall's port rules (on Linux it arrives on loopback, which firewalls \
              accept), and no check here can see a router that is not forwarding a port."
         );
+    } else if summary.untested > 0 {
+        glog!("Port check: {} -- see the results for why.", summary.untested_phrase());
     }
-    blocked
+    summary
 }
 
 #[cfg(test)]
@@ -629,11 +684,11 @@ mod tests {
             store_for(vec![
                 ("telnet".into(), 2323, Reach::Blocked { refused: false }),
                 ("web".into(), 8080, Reach::Answered),
-            ], cycle()),
+            ], cycle()).blocked,
             1
         );
         assert!(result_of("telnet").unwrap().1.is_blocked());
-        assert!(has_run());
+        assert!(summary().is_some());
 
         // Firewall opened, checked again: nothing is blocked, and nothing is
         // left over to keep a surface red.
@@ -645,7 +700,7 @@ mod tests {
                 ],
                 cycle(),
             ),
-            0
+            Summary { blocked: 0, untested: 0, answered: 2 }
         );
         assert!(!result_of("telnet").unwrap().1.is_blocked(), "the red must clear");
         assert_eq!(results().iter().filter(|(_, _, r)| r.is_blocked()).count(), 0);
@@ -657,9 +712,42 @@ mod tests {
         // And a reset puts it back to "nobody has looked", which is a third
         // state -- not the same as "nothing is blocked".
         reset();
-        assert!(!has_run());
+        assert!(summary().is_none());
         assert!(results().is_empty());
         assert!(age().is_none());
+    }
+
+    /// **"Could not test" never reads as "every port answered".**  A blocked
+    /// count of 0 used to be the all-clear on every surface, and a check with
+    /// no address to probe from returned 0 too.
+    #[test]
+    fn test_an_untested_check_is_not_an_all_clear() {
+        let _g = tests_lock();
+        reset();
+        let why = || Reach::Unknown("no non-loopback address on this host".into());
+        let said = store_for(
+            vec![("telnet".into(), 2323, why()), ("web".into(), 8080, why())],
+            cycle(),
+        );
+        assert_eq!(said.blocked, 0);
+        assert!(!said.all_answered(), "an untested check claimed every port answered");
+        assert_eq!(said.untested_phrase(), "2 bound ports could not be tested");
+        assert_eq!(summary(), Some(said), "the stored table counts the same");
+        // One answer among the unknowns is still not an all-clear.
+        let said = store_for(
+            vec![("telnet".into(), 2323, Reach::Answered), ("web".into(), 8080, why())],
+            cycle(),
+        );
+        assert!(!said.all_answered());
+        assert_eq!(said.untested_phrase(), "1 bound port could not be tested");
+        // Nothing probed at all is not an all-clear either.
+        assert!(!Summary::default().all_answered());
+        assert_eq!(Summary::default().untested_phrase(), "nothing was tested; try again");
+        // Positive control: everything answered is.
+        let said = store_for(vec![("web".into(), 8080, Reach::Answered)], cycle());
+        assert!(said.all_answered());
+        reset();
+        assert_eq!(summary(), None, "a reset reads as unchecked");
     }
 
     /// **A check from a previous cycle stores nothing.**  The startup check
@@ -673,9 +761,10 @@ mod tests {
         reset();
         let old = cycle();
         reset(); // the restart
-        store_for(vec![("telnet".into(), 2323, Reach::Blocked { refused: true })], old);
+        let said = store_for(vec![("telnet".into(), 2323, Reach::Blocked { refused: true })], old);
         assert!(result_of("telnet").is_none(), "a stale answer reached the new cycle");
-        assert!(!has_run(), "and the new cycle still reads as unchecked");
+        assert_eq!(said, Summary::default(), "a stale check announced a count nothing marks");
+        assert!(summary().is_none(), "and the new cycle still reads as unchecked");
         // Positive control: the current cycle's answer is stored.
         store_for(vec![("telnet".into(), 2323, Reach::Answered)], cycle());
         assert!(result_of("telnet").is_some());

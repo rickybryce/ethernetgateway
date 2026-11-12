@@ -1114,7 +1114,7 @@ struct App {
     /// height while drawing the first, so a one-repaint lag is the only way to
     /// do this; layout is stable, so it settles on the first repaint.
     config_row_h: [f32; 3],
-    port_check_rx: Option<std::sync::mpsc::Receiver<usize>>,
+    port_check_rx: Option<std::sync::mpsc::Receiver<crate::portcheck::Summary>>,
     /// Whether the port-check result popup is open.
     ///
     /// **A popup, because the console window is not where anybody looks.** The
@@ -1759,23 +1759,31 @@ impl App {
                     });
                 }
             }
-            let blocked =
-                crate::portcheck::results().iter().filter(|(_, _, r)| r.is_blocked()).count();
-            if blocked > 0 {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{blocked} port{} did not answer",
-                        if blocked == 1 { "" } else { "s" }
-                    ))
-                    .small()
-                    .color(RED_ALERT),
-                );
-            } else if crate::portcheck::has_run() {
-                ui.label(
-                    egui::RichText::new("every bound port answered here")
+            match crate::portcheck::summary() {
+                Some(found) if found.blocked > 0 => {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} port{} did not answer",
+                            found.blocked,
+                            if found.blocked == 1 { "" } else { "s" }
+                        ))
                         .small()
-                        .color(AMBER_DIM),
-                );
+                        .color(RED_ALERT),
+                    );
+                }
+                Some(found) if found.all_answered() => {
+                    ui.label(
+                        egui::RichText::new("every bound port answered here")
+                            .small()
+                            .color(AMBER_DIM),
+                    );
+                }
+                Some(found) => {
+                    ui.label(
+                        egui::RichText::new(found.untested_phrase()).small().color(AMBER_DIM),
+                    );
+                }
+                None => {}
             }
         });
         // Always, not only when something was found.  A red Port label means
@@ -4255,6 +4263,21 @@ impl App {
     /// the sync snapshot, and clear the dirty flag.  Shared prefix for
     /// every Save action; callers follow it with a log line and any
     /// restart signals they need.
+    /// Would saving the editor put two listeners on one port?  Logged, and
+    /// `true`, when it would -- the edits stay in their boxes to be corrected.
+    fn refuse_port_clash(&self) -> bool {
+        match config::new_port_clash(&config::get_config(), &self.cfg) {
+            Some(clash) => {
+                logger::log(format!(
+                    "Configuration NOT saved: {clash}; two listeners can't share a port. \
+                     Nothing was restarted."
+                ));
+                true
+            }
+            None => false,
+        }
+    }
+
     fn persist_config(&mut self) -> Result<(), String> {
         self.sync_numeric_fields();
         // An empty password box means "unchanged", so carry the stored
@@ -4276,6 +4299,12 @@ impl App {
             &out.slave_master_password,
             &config::get_config().slave_master_password,
         );
+        // Two listeners on one port: refused before anything is written, the
+        // edits left in the boxes (still dirty) to be corrected.  Same rule
+        // as the web page and telnet -- `config::new_port_clash`.
+        if let Some(clash) = config::new_port_clash(&config::get_config(), &out) {
+            return Err(format!("{clash}; two listeners can't share a port"));
+        }
         let result = config::save_config(&out);
         // Re-read rather than cloning `out`: the password was hashed on its
         // way in (`password_for_save`), so the global is the only place the
@@ -4352,6 +4381,12 @@ impl App {
     /// ([`crate::telnet::server_session_live`]), since a whole-server restart
     /// disconnects every session and both serial ports.
     fn request_save_and_restart(&mut self) {
+        // Refused before the "someone is connected" prompt, which would
+        // otherwise ask the operator to drop sessions for a save that is then
+        // refused.
+        if self.refuse_port_clash() {
+            return;
+        }
         if crate::telnet::server_session_live() {
             self.server_restart_prompt = true;
         } else {
@@ -4363,6 +4398,14 @@ impl App {
     /// Save and Restart buttons and the setup wizard's finish, through
     /// `request_save_and_restart`.
     fn save_and_restart_all(&mut self) {
+        // **No restart for a refused save.**  "NOT saved -- restarting
+        // anyway" is right for a disk error, where the restart was asked for
+        // and the old file is still sound; for a clash it dropped every
+        // session and then rebuilt the window from the file, throwing away
+        // the edits the refusal had kept for the operator to correct.
+        if self.refuse_port_clash() {
+            return;
+        }
         match self.persist_config() {
             Ok(()) => logger::log("Configuration saved — restarting server...".into()),
             Err(e) => {
@@ -7206,7 +7249,16 @@ impl eframe::App for App {
                 }
             });
         });
-        if ks_commit {
+        if ks_commit
+            && let Some(clash) = config::port_clash_after(
+                &config::get_config(),
+                &[("kermit_server_enabled", "true")],
+            )
+        {
+            logger::log(format!(
+                "Kermit server NOT enabled: {clash}. Change one of the two ports first."
+            ));
+        } else if ks_commit {
             self.cfg.kermit_server_enabled = true;
             self.last_synced_cfg.kermit_server_enabled = true;
             config::update_config_value("kermit_server_enabled", "true");
@@ -7476,7 +7528,15 @@ impl eframe::App for App {
                 }
             });
         });
-        if vdm_commit {
+        let vdm_clash = vdm_commit
+            .then(|| config::port_clash_after(&config::get_config(), &[("web_enabled", "true")]))
+            .flatten();
+        if let Some(clash) = vdm_clash {
+            logger::log(format!(
+                "Web server NOT enabled, and nothing restarted: {clash}. Change one of the \
+                 two ports first."
+            ));
+        } else if vdm_commit {
             // **Only the two keys this dialog asked about.**  The obvious
             // `save_and_restart_all()` would persist every unsaved edit in the
             // window -- a half-typed telnet port, a transfer directory being

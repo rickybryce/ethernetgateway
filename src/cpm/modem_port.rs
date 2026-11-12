@@ -163,7 +163,10 @@ impl ModemPort {
         None
     }
 
-    /// Take an `OUT`; returns whether the port belonged to the modem.
+    /// Take an `OUT`; returns whether the port belonged to the modem.  Both
+    /// machines ignore the answer -- an `OUT` nobody claims goes nowhere, so
+    /// there is nothing to fall back to -- and the tests read it; kept for the
+    /// symmetry with [`ModemPort::port_in`]'s `Option`.
     pub fn port_out(&mut self, port: u8, value: u8) -> bool {
         let ModemAccess::Ports(u) = self.access else {
             return false;

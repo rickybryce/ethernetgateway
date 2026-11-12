@@ -73,6 +73,12 @@ const ORDER: &[Step] = &[
 /// value; they are parsed on the Next click that leaves their screen.
 pub(super) struct Wizard {
     step: Step,
+    /// Started on a configuration that has already been through setup, so
+    /// the Welcome screen's Exit keeps current settings rather than defaults.
+    rerun: bool,
+    /// Already a master with its accept-relays gate off: kept off on Finish,
+    /// so the review screen says so.
+    relays_off_on_master: bool,
     /// Validation message for the current screen, cleared on any navigation.
     error: Option<String>,
 
@@ -151,6 +157,8 @@ impl Wizard {
     pub(super) fn new(cfg: &Config) -> Self {
         Self {
             step: Step::Welcome,
+            rerun: cfg.setup_wizard_completed,
+            relays_off_on_master: cfg.gateway_role == "master" && !cfg.master_accept_relays,
             error: None,
             username: cfg.username.clone(),
             password: String::new(),
@@ -232,16 +240,24 @@ impl Wizard {
             (true, existing) => existing.to_string(),
         };
 
+        // Read before it is overwritten: the gate below is armed on the
+        // *change* into Master, as the editor (gui.rs) and telnet do.
+        let was_master = cfg.gateway_role == "master";
         cfg.gateway_role = self.role.clone();
         match self.role.as_str() {
             // A master exists to accept slaves, so arm the accept-relays gate
-            // with the role.  The SSH server it needs is NOT forced on here:
+            // when the role becomes Master.  A re-run on a master that has the
+            // gate deliberately off keeps it off -- the Finish screen promises
+            // that settings this wizard didn't ask about keep their values.
+            // The SSH server it needs is NOT forced on here:
             // the Role screen explains why a master wants it and offers a
             // button, and the review screen warns if it is still off — an
             // operator who declines keeps their choice (main.rs logs the same
             // warning at startup).
             "master" => {
-                cfg.master_accept_relays = true;
+                if !was_master {
+                    cfg.master_accept_relays = true;
+                }
             }
             "slave" => {
                 cfg.slave_master_host = self.master_host.trim().to_string();
@@ -467,6 +483,17 @@ impl Wizard {
                     .into(),
             );
         }
+        // A re-run keeps a master's relay gate as it is (see `apply_to`), so
+        // one that has it off has to be told -- picking Master here does not
+        // turn it back on.
+        if self.role == "master" && self.relays_off_on_master {
+            out.push(
+                "This master is set NOT to accept relay connections from slaves, and \
+                 finishing keeps that. Turn on \"Master: accept relay connections from \
+                 slaves\" in the editor to let slaves connect."
+                    .into(),
+            );
+        }
         out
     }
 
@@ -535,7 +562,9 @@ impl Wizard {
     fn draw_nav(&mut self, ui: &mut egui::Ui, cfg: &Config) -> Outcome {
         let mut outcome = Outcome::Continue;
         ui.horizontal(|ui| {
-            let exit_label = if self.step == Step::Welcome {
+            // "Use defaults" only on a first run: a re-run starts from the
+            // operator's current settings, and Exit keeps those.
+            let exit_label = if self.step == Step::Welcome && !self.rerun {
                 "Skip setup — use defaults"
             } else {
                 "Exit setup — keep current settings"
@@ -706,7 +735,11 @@ impl Wizard {
         ui.add_enabled_ui(self.telnet_enabled, |ui| {
             ui.horizontal(|ui| {
                 labeled_field(ui, "Port:", &mut self.telnet_port, 70.0);
-                ui.label(egui::RichText::new("(default 2323)").italics().color(AMBER_DIM));
+                ui.label(
+                    egui::RichText::new(format!("(default {})", crate::config::DEFAULT_TELNET_PORT))
+                        .italics()
+                        .color(AMBER_DIM),
+                );
             });
         });
         ui.add_space(6.0);
@@ -730,7 +763,11 @@ impl Wizard {
         ui.add_enabled_ui(self.ssh_enabled, |ui| {
             ui.horizontal(|ui| {
                 labeled_field(ui, "Port:", &mut self.ssh_port, 70.0);
-                ui.label(egui::RichText::new("(default 2222)").italics().color(AMBER_DIM));
+                ui.label(
+                    egui::RichText::new(format!("(default {})", crate::config::DEFAULT_SSH_PORT))
+                        .italics()
+                        .color(AMBER_DIM),
+                );
             });
         });
         ui.add_space(6.0);
@@ -801,7 +838,11 @@ impl Wizard {
         ui.add_enabled_ui(self.web_enabled, |ui| {
             ui.horizontal(|ui| {
                 labeled_field(ui, "Port:", &mut self.web_port, 70.0);
-                ui.label(egui::RichText::new("(default 8080)").italics().color(AMBER_DIM));
+                ui.label(
+                    egui::RichText::new(format!("(default {})", crate::config::DEFAULT_WEB_PORT))
+                        .italics()
+                        .color(AMBER_DIM),
+                );
             });
         });
         ui.add_space(6.0);
@@ -944,7 +985,7 @@ impl Wizard {
             ui.add_space(2.0);
             warn(
                 ui,
-                "You turned the SSH server off on step 3, but a master needs it: a slave \
+                "The SSH server is off (the SSH step), but a master needs it: a slave \
                  links to its master by logging into the master's SSH server, so with SSH \
                  off no slave can ever connect. Nothing else about the master role uses \
                  that port — it is not a second way into the menus beyond the SSH access \
@@ -990,7 +1031,11 @@ impl Wizard {
         });
         ui.horizontal(|ui| {
             labeled_field(ui, "Master SSH port:", &mut self.master_port, 70.0);
-            ui.label(egui::RichText::new("(default 2222)").italics().color(AMBER_DIM));
+            ui.label(
+                egui::RichText::new(format!("(default {})", crate::config::DEFAULT_SLAVE_MASTER_PORT))
+                    .italics()
+                    .color(AMBER_DIM),
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Master username:");
@@ -1830,6 +1875,37 @@ mod tests {
         w.web_enabled = false;
         w.role = "slave".into();
         assert!(w.inbound_ports(&Config::default()).is_empty());
+    }
+
+    /// The accept-relays gate is armed on the *change* into Master, as the
+    /// editor and telnet arm it.  A re-run on a master that turned the gate off
+    /// keeps it off: the Finish screen says what the wizard didn't ask about
+    /// keeps its value, and this is not something it asks about.
+    #[test]
+    fn test_a_rerun_on_a_master_keeps_relays_off() {
+        let current = Config {
+            gateway_role: "master".into(),
+            master_accept_relays: false,
+            setup_wizard_completed: true,
+            ..Config::default()
+        };
+        let w = Wizard::new(&current);
+        assert_eq!(w.role, "master", "a re-run starts from the current role");
+        let mut cfg = current.clone();
+        w.apply_to(&mut cfg);
+        assert!(!cfg.master_accept_relays, "a re-run turned relay acceptance back on");
+        assert!(
+            w.warnings().iter().any(|s| s.contains("NOT to accept relay connections")),
+            "and the review screen says it stays off"
+        );
+        let on = Wizard::new(&Config { master_accept_relays: true, ..current.clone() });
+        assert!(!on.warnings().iter().any(|s| s.contains("NOT to accept relay")), "only when off");
+
+        // Positive control: becoming a master does arm it.
+        let mut cfg = Config { master_accept_relays: false, ..Config::default() };
+        assert_ne!(cfg.gateway_role, "master");
+        w.apply_to(&mut cfg);
+        assert!(cfg.master_accept_relays, "the change into Master arms the gate");
     }
 
     /// A Master needs SSH but is no longer given it silently: the role screen

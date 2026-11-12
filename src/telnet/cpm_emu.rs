@@ -897,7 +897,7 @@ impl TelnetSession {
         }
         let bytes = job.len();
         // **Off the async worker.**  Closing a job renders it -- an ODT is a
-        // zip built in memory -- writes and syncs the file, and measures and
+        // zip built in memory -- writes the file, and measures and
         // sweeps the spool folder: file I/O that on an SD card can take a
         // tokio worker for long enough to stall every other session on it.
         let dir = transfer_dir.to_string();

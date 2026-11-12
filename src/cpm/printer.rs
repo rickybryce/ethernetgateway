@@ -744,10 +744,11 @@ impl SpoolJob {
     /// time anything prints, and a transfer directory is somewhere people keep
     /// their own files.
     ///
-    /// Written to a temporary name and renamed into place, the same rule whole
-    /// image writes follow — a reader who lists the folder while a long job is
-    /// being rendered must not find a half-written document that looks
-    /// finished.
+    /// Staged under a temporary name, then claimed by hard link -- a reader who
+    /// lists the folder while a long job is being rendered must not find a
+    /// half-written document that looks finished.  Where the filesystem has no
+    /// hard links (FAT) the final name is written in place, and that promise
+    /// does not hold: see `claim_free_name`.
     ///
     /// **Two sessions can print at once**, and the timestamp only resolves to a
     /// second, so neither name may be assumed unique. The staging name carries a
@@ -765,21 +766,27 @@ impl SpoolJob {
         // runaway's every job a render it then discards, and after, against
         // the size of the document actually built.
         let held = Self::spool_dir_bytes(&dir);
-        let full = || {
-            std::io::Error::other(format!(
-                "the {SPOOL_DIR} folder holds {} MB, its limit; empty it to print again",
-                held / (1024 * 1024)
-            ))
-        };
+        const MB: u64 = 1024 * 1024;
         if held >= MAX_SPOOL_BYTES {
-            return Err(full());
+            return Err(std::io::Error::other(format!(
+                "the {SPOOL_DIR} folder holds {} MB, its limit; empty it to print again",
+                held / MB
+            )));
         }
         let body = match format {
             Format::Odt => build_odt(&self.pages),
             Format::Text => self.plain_text().into_bytes(),
         };
+        // Its own words: `held` is under the limit here, and naming it as the
+        // limit told the operator their folder was full when it was not.
         if held + body.len() as u64 > MAX_SPOOL_BYTES {
-            return Err(full());
+            return Err(std::io::Error::other(format!(
+                "the {SPOOL_DIR} folder holds {} MB and this job needs {} MB more, past its \
+                 {} MB limit; empty it to print again",
+                held / MB,
+                (body.len() as u64).div_ceil(MB),
+                MAX_SPOOL_BYTES / MB
+            )));
         }
 
         // Unique per call, so concurrent jobs cannot share a staging file.
@@ -1719,8 +1726,6 @@ mod tests {
         assert!(job.cost() < MAX_JOB_CELLS + MAX_COLUMNS + 3, "held {} cells", job.cost());
     }
 
-    /// The positive control: a long, ordinary document -- 400 pages of 66
-    /// lines at 64 columns -- is not cut by the memory bound.
     /// Line feeds alone must be charged as they arrive: four million of them
     /// allocate nothing until the next character, which then built every row
     /// at once, far past the budget.
@@ -1736,6 +1741,8 @@ mod tests {
         assert!(job.pages.last().unwrap().lines.len() < 10, "nothing was allocated for them");
     }
 
+    /// The positive control: a long, ordinary document -- 400 pages of 66
+    /// lines at 64 columns -- is not cut by the memory bound.
     #[test]
     fn test_a_long_real_document_fits_one_job() {
         let mut job = SpoolJob::new();
@@ -1846,7 +1853,7 @@ mod tests {
             .filter(|n| *n != SPOOL_DIR)
             .collect();
         assert!(loose.is_empty(), "left {loose:?} in the transfer root");
-        // The staging file is renamed into place, never left behind: a reader
+        // The staging file is claimed into place, never left behind: a reader
         // listing the folder mid-render must not find a half-written document
         // that looks finished.
         let leftovers: Vec<String> = std::fs::read_dir(dir.join(SPOOL_DIR))

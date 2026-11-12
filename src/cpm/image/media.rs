@@ -162,9 +162,29 @@ impl Media for FileMedia {
         self.file.flush()
     }
 
+    /// **Off the worker's books.**  The emulator's BDOS is synchronous and
+    /// runs inside its session's async task, so this fsync -- one for every
+    /// block a guest claims, milliseconds or tens of them on an SD card --
+    /// held a tokio worker and every task queued behind it.  `block_in_place`
+    /// hands that worker's queue to another thread for the wait.
     fn sync(&mut self) -> std::io::Result<()> {
         self.file.flush()?;
-        self.file.sync_data()
+        let file = &self.file;
+        off_the_worker(|| file.sync_data())
+    }
+}
+
+/// Run blocking `f` without stalling the tasks queued on this tokio worker.
+///
+/// `block_in_place` panics on a current-thread runtime (every `#[tokio::test]`,
+/// and the GUI's own), and outside a runtime there is no worker to spare; both
+/// run `f` inline, which is what they did before.
+fn off_the_worker<R>(f: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
     }
 }
 
@@ -224,7 +244,8 @@ mod tests {
         m.read_at(256, &mut buf).unwrap();
         assert_eq!(&buf, b"HELLO");
 
-        let _ = std::fs::remove_file(&path);
+        drop(m);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -238,6 +259,41 @@ mod tests {
         assert!(m.read_at(0, &mut [0u8; 16]).is_ok(), "reads still work");
         assert!(m.write_at(0, b"nope").is_err(), "opened without write access");
 
-        let _ = std::fs::remove_file(&path);
+        drop(m);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The fsync works from every place a guest's write can come from: a
+    /// multi-thread worker (a session), a current-thread runtime (where
+    /// `block_in_place` would panic), and no runtime at all.  And it is the
+    /// fsync that goes through `off_the_worker` -- bounded to `sync`'s body.
+    #[test]
+    fn test_sync_runs_off_the_worker_on_every_runtime() {
+        let dir = std::env::temp_dir().join(format!("egw_media_test_sync_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("img.dsk");
+        std::fs::write(&path, vec![0u8; 256]).unwrap();
+        let write_and_sync = |p: &std::path::Path| {
+            let mut m = FileMedia::open(p, false).unwrap();
+            m.write_at(0, b"SYNC").unwrap();
+            m.sync().unwrap();
+        };
+        write_and_sync(&path);
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async { write_and_sync(&path) });
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).build().unwrap();
+        let p = path.clone();
+        rt.block_on(async move {
+            tokio::spawn(async move { write_and_sync(&p) }).await.unwrap();
+        });
+        assert_eq!(&std::fs::read(&path).unwrap()[..4], b"SYNC");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let src = include_str!("media.rs").replace('\r', "");
+        let body = &src[src.find("    fn sync(&mut self) -> std::io::Result<()> {\n        self.file").unwrap()..];
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        assert!(body.contains("off_the_worker(|| file.sync_data())"), "the fsync is back on the worker");
     }
 }

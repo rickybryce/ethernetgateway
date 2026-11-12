@@ -519,6 +519,10 @@ pub(in crate::cpm) fn get(url: &str, user_agent: &str, limit: u64, expected: u64
             // timeout just to connect, where a reachable server answers a
             // connect in well under a second.
             .timeout_connect(Some(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+            // The status is ours to check, below.  ureq 3 otherwise turns a
+            // 4xx/5xx into its own error first, and the operator read "http
+            // status: 404" where this module says "HTTP 404".
+            .http_status_as_error(false)
             .build(),
     );
     let mut resp =
@@ -958,9 +962,6 @@ mod generate {
 mod tests {
     use super::*;
 
-    /// A download never replaces a file that is already there -- including one
-    /// that appeared after the run's own up-front check -- and leaves no
-    /// temporary file behind either way.
     /// **A run that cannot reach the server stops asking.**  Thirty-five files
     /// each waiting out a connect behind an uncancellable telnet screen came to
     /// over an hour on a firewalled network.  Three identical failures in a row
@@ -995,6 +996,9 @@ mod tests {
         assert_eq!(body.matches("give_up.note(").count(), 2);
     }
 
+    /// A download never replaces a file that is already there -- including one
+    /// that appeared after the run's own up-front check -- and leaves no
+    /// temporary file behind either way.
     #[test]
     fn test_place_new_never_replaces_and_leaves_no_part_file() {
         let dir = std::env::temp_dir().join(format!("egw_place_new_{}", std::process::id()));
@@ -1240,7 +1244,7 @@ mod tests {
     /// length that matters.
     ///
     /// The four published vectors above are 0, 3, 56 and 64 bytes; the files
-    /// this function actually verifies are 90 KB to 4 MB.  Nothing was checked
+    /// this function actually verifies are 90 KB to 5 MB.  Nothing was checked
     /// between those two scales, and the arithmetic that differs there is the
     /// multi-block loop and the 64-bit length field -- not the padding rule the
     /// short vectors cover.  A hash that is right on four inputs and wrong on

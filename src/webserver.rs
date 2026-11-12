@@ -1429,18 +1429,23 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     if fields.get("action").map(String::as_str) == Some("portcheck") {
         // Its cycle taken here: a Save and Restart from another surface can
         // land while this is still probing -- see `run_check_for_cycle`.
-        let blocked = crate::portcheck::run_check_for_cycle(crate::portcheck::cycle());
-        let msg = if blocked == 0 {
+        let found = crate::portcheck::run_check_for_cycle(crate::portcheck::cycle());
+        let blocked = found.blocked;
+        let msg = if found.all_answered() {
             // Never "all ports are open".  A self-connection rides loopback on
             // Linux (accepted by the usual firewalls) and skips the firewall on
             // Windows and macOS, so a pass is not evidence on any of them.
             "Port check: every bound listener answered on this machine. That is not evidence the firewall is open: a connection to your own address skips the firewall's port rules (on Linux it arrives on loopback, which firewalls accept), and nothing here can see a router that is not forwarding a port."
                 .to_string()
-        } else {
+        } else if blocked > 0 {
             format!(
                 "Port check: {blocked} bound port{} did not answer on this machine — marked below.",
                 if blocked == 1 { "" } else { "s" }
             )
+        } else {
+            // "Why" only where there are results to say it.
+            let why = if found.untested > 0 { " — see the results for why" } else { "" };
+            format!("Port check: {}{why}.", found.untested_phrase())
         };
         notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
     }
@@ -1480,6 +1485,30 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
                 format!("{notice} {mount_notice}")
             };
         }
+    }
+
+    // Two listeners on one port: the listener settings are left as they
+    // were and the rest of the save goes ahead, so one bad port does not
+    // throw away everything else on the page.  Same rule as telnet and the
+    // desktop editor -- `config::port_clash_after`.
+    let clash = {
+        let pairs: Vec<(&str, &str)> =
+            updates.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        config::port_clash_after(&old_cfg, &pairs)
+    };
+    if let Some(clash) = clash {
+        updates.retain(|(k, _)| config::listener_of_key(k).is_none());
+        // Nothing about the web listener changes now, so its "reconnect at
+        // the new port" must not stand: acted on, it loses the page.
+        let reconnect = web_reconnect_warning(&fields, &old_cfg);
+        if !reconnect.is_empty() {
+            notice = notice.replace(&reconnect, "").replace("  ", " ").trim().to_string();
+        }
+        let msg = format!(
+            "Not saved: {clash}. Two listeners can't share a port, so the telnet, SSH, \
+             web and Kermit server settings were left as they were."
+        );
+        notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
     }
 
     let pairs: Vec<(&str, &str)> = updates
@@ -1597,6 +1626,27 @@ fn bool_checkbox_gated_off(key: &str, fields: &HashMap<String, String>) -> bool 
     }
 }
 
+/// What a save's web-listener change will do to this very connection --
+/// "disabled" or "port changed", or nothing.  Its own function so a save that
+/// ends up *not* applying the listener settings (two on one port) can take
+/// back exactly the sentence it would otherwise leave standing.
+fn web_reconnect_warning(fields: &HashMap<String, String>, old_cfg: &Config) -> String {
+    let new_web_enabled = fields
+        .get("web_enabled")
+        .map(|v| is_truthy(v))
+        .unwrap_or(false);
+    let new_web_port = fields.get("web_port").and_then(|s| s.parse::<u16>().ok());
+    if old_cfg.web_enabled && !new_web_enabled {
+        "Web server disabled — this connection will stop responding.".into()
+    } else if let Some(v) = new_web_port
+        && v != old_cfg.web_port
+    {
+        format!("Web server port changed to {}. Reconnect at the new port.", v)
+    } else {
+        String::new()
+    }
+}
+
 fn collect_form_updates(
     fields: &HashMap<String, String>,
     old_cfg: &Config,
@@ -1606,22 +1656,7 @@ fn collect_form_updates(
     // notice.  The change still applies — the operator already
     // confirmed in the JS dialog — but the next page render flags it
     // so they know to reconnect.
-    let new_web_enabled = fields
-        .get("web_enabled")
-        .map(|v| is_truthy(v))
-        .unwrap_or(false);
-    let new_web_port = fields.get("web_port").and_then(|s| s.parse::<u16>().ok());
-    let mut warning = String::new();
-    if old_cfg.web_enabled && !new_web_enabled {
-        warning = "Web server disabled — this connection will stop responding.".into();
-    } else if let Some(v) = new_web_port
-        && v != old_cfg.web_port
-    {
-        warning = format!(
-            "Web server port changed to {}. Reconnect at the new port.",
-            v
-        );
-    }
+    let mut warning = web_reconnect_warning(fields, old_cfg);
 
     // Collect every key=value pair into a single batch so the underlying
     // CONFIG mutex is taken once and the conf file is rewritten once.
@@ -3991,18 +4026,17 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         portcheck = save_button("portcheck", "Test ports", "secondary"),
-        portcheck_note = {
-            let blocked = crate::portcheck::results().iter().filter(|(_, _, r)| r.is_blocked()).count();
-            if blocked > 0 {
-                format!(
-                    "{blocked} bound port{} did not answer &mdash; reddened below",
-                    if blocked == 1 { "" } else { "s" }
-                )
-            } else if crate::portcheck::has_run() {
+        portcheck_note = match crate::portcheck::summary() {
+            Some(found) if found.blocked > 0 => format!(
+                "{} bound port{} did not answer &mdash; reddened below",
+                found.blocked,
+                if found.blocked == 1 { "" } else { "s" }
+            ),
+            Some(found) if found.all_answered() => {
                 "every bound port answered on this machine".to_string()
-            } else {
-                String::new()
             }
+            Some(found) => found.untested_phrase(),
+            None => String::new(),
         },
         sessions = numfield("max_sessions", "Sessions", cfg.max_sessions),
         idle = numfield("idle_timeout_secs", "Idle (s)", cfg.idle_timeout_secs),

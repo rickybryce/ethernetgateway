@@ -17865,7 +17865,7 @@ fn test_the_hand_off_and_form_timeout_are_wired() {
 }
 
 /// **A print job is written off the async worker.**  Closing one renders it
-/// (an ODT is a zip built in memory), writes and syncs the file, and sweeps the
+/// (an ODT is a zip built in memory), writes the file, and sweeps the
 /// spool folder -- blocking file I/O that held a tokio worker, and every
 /// session sharing it, for as long as an SD card took.  Both CP/M machines
 /// close their spool through this one function.  Bounded to it; the write

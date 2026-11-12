@@ -170,7 +170,7 @@ pub(crate) static CONFIG_TEST_LOCK: tokio::sync::Mutex<()> =
 
 // ─── Defaults ──────────────────────────────────────────────
 const DEFAULT_TELNET_ENABLED: bool = true;
-const DEFAULT_TELNET_PORT: u16 = 2323;
+pub(crate) const DEFAULT_TELNET_PORT: u16 = 2323;
 /// Default for the outgoing Telnet Gateway's cooperative negotiation.
 /// Off by default so dialing raw-TCP-on-port-23 services (legacy MUDs,
 /// hand-rolled BBS software) still works — those services don't speak
@@ -562,7 +562,7 @@ const DEFAULT_PUNTER_NEGOTIATION_RETRY_INTERVAL: u64 = 5;
 /// hatch — but, unlike telnet, applies the private-IP allowlist regardless of
 /// whether login is required (M-9; the page renders secrets).
 const DEFAULT_WEB_ENABLED: bool = false;
-const DEFAULT_WEB_PORT: u16 = 8080;
+pub(crate) const DEFAULT_WEB_PORT: u16 = 8080;
 /// CP/M emulator — a real CP/M 2.2 Z80 environment reachable from
 /// the main menu.  **On by default.**
 ///
@@ -731,7 +731,7 @@ const DEFAULT_SERIAL_PETSCII_TRANSLATE: bool = false;
 /// (console mode has no AT&C carrier concept).
 const DEFAULT_SERIAL_DRIVE_CARRIER: bool = false;
 const DEFAULT_SSH_ENABLED: bool = false;
-const DEFAULT_SSH_PORT: u16 = 2222;
+pub(crate) const DEFAULT_SSH_PORT: u16 = 2222;
 /// Default SSH-gateway authentication mode: "key" uses the gateway's
 /// auto-generated Ed25519 client key; "password" prompts the operator
 /// for a remote password on each connect.  Password is the default
@@ -752,7 +752,7 @@ const DEFAULT_GATEWAY_ROLE: &str = "standalone";
 const DEFAULT_MASTER_ACCEPT_RELAYS: bool = false;
 /// Slave → the master's relay port.  Defaults to the SSH port, since the
 /// recommended transport rides the master's existing SSH server.
-const DEFAULT_SLAVE_MASTER_PORT: u16 = 2222;
+pub(crate) const DEFAULT_SLAVE_MASTER_PORT: u16 = 2222;
 /// Relay transport: `ssh` (recommended — reuses the master's SSH server,
 /// auth + encryption for free) or `raw` (a dedicated plaintext port, the
 /// §4.3 alternative).
@@ -2785,17 +2785,22 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
         // The two cases really are distinguishable: a fresh install has the key
         // written out with everything else, so only an older file can be
         // missing it.
+        //
+        // Lower-cased like the other choice keys.  `format_for` and friends
+        // ignore case, but the labels and the web form's `selected` compare
+        // exactly -- so a hand-edited `ODT` printed ODT, read "Off" on every
+        // surface, and a web Save for any other reason wrote `off`.
         cpm_printer: map
             .get("cpm_printer")
-            .cloned()
+            .map(|v| v.trim().to_ascii_lowercase())
             .unwrap_or_else(|| crate::cpm::printer::PRINTER_OFF.to_string()),
         cpm_printer_port: map
             .get("cpm_printer_port")
-            .cloned()
+            .map(|v| v.trim().to_ascii_lowercase())
             .unwrap_or_else(|| crate::cpm::printer::DEFAULT_PRINTER_PORT.to_string()),
         cpm_printer_autolf: map
             .get("cpm_printer_autolf")
-            .cloned()
+            .map(|v| v.trim().to_ascii_lowercase())
             .unwrap_or_else(|| crate::cpm::printer::DEFAULT_PRINTER_AUTOLF.to_string()),
         // Missing means the Z80, which is what every config written before this
         // key existed was already running -- so an upgrade changes nothing.
@@ -3109,6 +3114,14 @@ pub fn save_config(cfg: &Config) -> Result<(), String> {
     crate::credential::hash_if_cleartext(&mut cfg.password);
     let cfg = &cfg;
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    // Refused whole, under the lock: this is the desktop editor's save, which
+    // checks first to keep the edits in their boxes -- see
+    // `update_config_values` for why the rule is also enforced here.
+    if let Some(current) = guard.as_ref() {
+        if let Some(clash) = new_port_clash(current, cfg) {
+            return Err(format!("{clash}; two listeners can't share a port"));
+        }
+    }
     let was_cpm_enabled = guard.as_ref().map(|c| c.cpm_emu_enabled).unwrap_or(false);
     let result = write_config_file(&config_file_path(), cfg);
     if let Err(ref e) = result {
@@ -4105,6 +4118,99 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Two of this process's listeners configured onto one port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortClash {
+    pub port: u16,
+    pub a: &'static str,
+    pub b: &'static str,
+}
+
+impl PortClash {
+    /// The listener of the two that is not `name`.
+    pub fn other_than(&self, name: &str) -> &'static str {
+        if self.a == name { self.b } else { self.a }
+    }
+}
+
+impl std::fmt::Display for PortClash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "port {} is set for both the {} and {} listeners", self.port, self.a, self.b)
+    }
+}
+
+/// Every listener this process binds: its name (as `bindwatch` registers it),
+/// whether it is on, and its port.  The SSH listener also carries the relay.
+pub fn listeners(cfg: &Config) -> [(&'static str, bool, u16); 4] {
+    [
+        ("telnet", cfg.telnet_enabled, cfg.telnet_port),
+        ("SSH", cfg.ssh_enabled, cfg.ssh_port),
+        ("web", cfg.web_enabled, cfg.web_port),
+        ("Kermit", cfg.kermit_server_enabled, cfg.kermit_server_port),
+    ]
+}
+
+/// The listener a port or enable key belongs to, if it belongs to one.
+pub fn listener_of_key(key: &str) -> Option<&'static str> {
+    match key {
+        "telnet_port" | "telnet_enabled" => Some("telnet"),
+        "ssh_port" | "ssh_enabled" => Some("SSH"),
+        "web_port" | "web_enabled" => Some("web"),
+        "kermit_server_port" | "kermit_server_enabled" => Some("Kermit"),
+        _ => None,
+    }
+}
+
+fn port_clashes(cfg: &Config) -> Vec<PortClash> {
+    let l = listeners(cfg);
+    let mut out = Vec::new();
+    for i in 0..l.len() {
+        for j in i + 1..l.len() {
+            if l[i].1 && l[j].1 && l[i].2 == l[j].2 {
+                out.push(PortClash { port: l[i].2, a: l[i].0, b: l[j].0 });
+            }
+        }
+    }
+    out
+}
+
+/// A clash `after` has that `before` did not.
+///
+/// **Only a new one.**  Two listeners on one port bind one and fail the other
+/// with "address in use", and the startup warning used to blame another
+/// program for it -- and advise `pkill`, which stops this gateway.  The setup
+/// wizard refused such a save; the three editors did not.  They refuse it now
+/// through this, on the configuration the save would produce.  A clash already
+/// in the file (hand-edited) does not block saving something unrelated: it is
+/// named at startup by `bindwatch`, and refusing every save until it is fixed
+/// would lock the operator out of the screen they would fix it from.
+pub fn new_port_clash(before: &Config, after: &Config) -> Option<PortClash> {
+    let old = port_clashes(before);
+    port_clashes(after).into_iter().find(|c| !old.contains(c))
+}
+
+/// Put every listener setting in `cfg` back to what `from` has.
+fn keep_listeners(from: &Config, cfg: &mut Config) {
+    cfg.telnet_enabled = from.telnet_enabled;
+    cfg.telnet_port = from.telnet_port;
+    cfg.ssh_enabled = from.ssh_enabled;
+    cfg.ssh_port = from.ssh_port;
+    cfg.web_enabled = from.web_enabled;
+    cfg.web_port = from.web_port;
+    cfg.kermit_server_enabled = from.kermit_server_enabled;
+    cfg.kermit_server_port = from.kermit_server_port;
+}
+
+/// [`new_port_clash`] for a save of `pairs` over `cfg`, applied as
+/// [`update_config_values`] would apply them.
+pub fn port_clash_after(cfg: &Config, pairs: &[(&str, &str)]) -> Option<PortClash> {
+    let mut after = cfg.clone();
+    for &(key, value) in pairs {
+        apply_config_key(&mut after, key, value);
+    }
+    new_port_clash(cfg, &after)
+}
+
 /// Update a single key in the config file and the in-memory singleton.
 /// Reads the current file, updates the key, writes it back, and refreshes
 /// the global config so that subsequent `get_config()` calls see the change.
@@ -4148,6 +4254,17 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
     // false) Enabled checkbox the operator forgot.  That is the whole point:
     // the forgotten tick is the defect being fixed.
     enable_ports_that_gained_a_device(&before_ports, &mut cfg);
+    // **The last word on two listeners sharing a port**, under the lock and
+    // against the file it rewrites -- so two editors changing one port each
+    // at the same moment cannot each pass a check on a snapshot and combine
+    // into a clash, and a writer that never asked (a confirm popup) is held
+    // to the rule too.  The editors check first only to say why; this is
+    // what makes it true.  The listener settings stay as they were; the rest
+    // of the save goes ahead.
+    if let Some(clash) = new_port_clash(&before_ports, &cfg) {
+        glog!("Not saved: {clash}. Two listeners can't share a port; the listener settings were left as they were.");
+        keep_listeners(&before_ports, &mut cfg);
+    }
     // Whatever the caller was setting, the password does not go back to disk
     // in the clear.  Unconditional rather than gated on `pairs` naming
     // `password`: this rewrites the file from the whole struct, so a save of
@@ -5502,6 +5619,151 @@ mod tests {
         assert!(leftovers.is_empty(), "atomic write left a .tmp behind");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **Two listeners on one port is refused as a new change, not as an old
+    /// one.**  The editors save through this; a clash already in the file
+    /// must not block saving something else.
+    #[test]
+    fn test_a_save_may_not_put_two_listeners_on_one_port() {
+        let cfg = Config {
+            telnet_enabled: true,
+            telnet_port: 2323,
+            kermit_server_enabled: false,
+            kermit_server_port: 2323,
+            ssh_enabled: true,
+            ssh_port: 2222,
+            web_enabled: true,
+            web_port: 8080,
+            ..Config::default()
+        };
+        assert_eq!(new_port_clash(&cfg, &cfg), None);
+        // A port onto another's.
+        let c = port_clash_after(&cfg, &[("web_port", "2222")]).expect("web onto SSH");
+        assert_eq!((c.port, c.a, c.b), (2222, "SSH", "web"));
+        assert_eq!(c.other_than("web"), "SSH");
+        assert!(c.to_string().contains("port 2222"), "{c}");
+        // Switching on a listener whose port is taken.
+        let c = port_clash_after(&cfg, &[("kermit_server_enabled", "true")]).expect("Kermit");
+        assert_eq!(c.other_than("Kermit"), "telnet");
+        // An off listener's port is no clash, and neither is a free one.
+        assert_eq!(port_clash_after(&cfg, &[("kermit_server_port", "2222")]), None);
+        assert_eq!(port_clash_after(&cfg, &[("web_port", "8081")]), None);
+        // Turning one off resolves it.
+        let both = Config { kermit_server_enabled: true, ..cfg.clone() };
+        assert_eq!(port_clash_after(&both, &[("kermit_server_enabled", "false")]), None);
+        // An existing clash does not block an unrelated save...
+        assert_eq!(port_clash_after(&both, &[("max_sessions", "5")]), None);
+        // ...but a second one is still new.
+        assert!(port_clash_after(&both, &[("web_port", "2222")]).is_some());
+        // Every listener `bindwatch` registers is covered, by the same name.
+        let names: Vec<&str> = listeners(&cfg).iter().map(|(n, _, _)| *n).collect();
+        for name in ["telnet", "SSH", "web", "Kermit"] {
+            assert!(names.contains(&name), "{name}");
+        }
+        for key in ["telnet_port", "ssh_enabled", "web_port", "kermit_server_enabled"] {
+            assert!(listener_of_key(key).is_some(), "{key}");
+        }
+        assert_eq!(listener_of_key("slave_master_port"), None, "not a listener");
+
+        // The writers' own guard puts back every listener setting, not some.
+        let mut moved = Config {
+            telnet_enabled: false,
+            telnet_port: 1,
+            ssh_enabled: false,
+            ssh_port: 2,
+            web_enabled: false,
+            web_port: 3,
+            kermit_server_enabled: true,
+            kermit_server_port: 4,
+            max_sessions: 77,
+            ..cfg.clone()
+        };
+        keep_listeners(&cfg, &mut moved);
+        assert_eq!(listeners(&moved), listeners(&cfg), "a listener setting was not kept");
+        assert_eq!(moved.max_sessions, 77, "and nothing else was touched");
+
+        // And both writers apply it before they write, under their lock --
+        // the guarantee behind every editor and every popup.
+        let src = include_str!("config.rs").replace('\r', "");
+        for (start, write) in [
+            ("pub fn update_config_values(", "write_config_file(&path, &cfg)"),
+            ("pub fn save_config(", "write_config_file(&config_file_path(), cfg)"),
+        ] {
+            let body = &src[src.find(start).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            let lock = body.find("CONFIG.lock()").expect("the lock");
+            let check = body.find("new_port_clash(").unwrap_or_else(|| panic!("{start}: no clash check"));
+            let w = body.find(write).unwrap_or_else(|| panic!("{start}: no write"));
+            assert!(lock < check && check < w, "{start}: the check must sit inside the lock, before the write");
+        }
+    }
+
+    /// All three editors apply that rule, each before it writes: bounded to
+    /// the function that saves, and ahead of the write in it.
+    #[test]
+    fn test_every_editor_refuses_a_port_clash_before_saving() {
+        fn body<'a>(src: &'a str, start: &str) -> &'a str {
+            let b = &src[src.find(start).unwrap_or_else(|| panic!("{start}"))..];
+            &b[..b.find("\n    }\n").unwrap()]
+        }
+        fn before(body: &str, check: &str, write: &str) {
+            let c = body.find(check).unwrap_or_else(|| panic!("no {check}"));
+            let w = body.find(write).unwrap_or_else(|| panic!("no {write}"));
+            assert!(c < w, "{check} comes after {write}");
+        }
+        let gui = include_str!("gui.rs").replace('\r', "");
+        before(body(&gui, "fn persist_config("), "config::new_port_clash(", "config::save_config(");
+        let web = include_str!("webserver.rs").replace('\r', "");
+        let web = &web[web.find("fn apply_form_post(").unwrap()..];
+        let web = &web[..web.find("\n}\n").unwrap()];
+        before(web, "config::port_clash_after(&old_cfg", "config::update_config_values(");
+        let tn = include_str!("telnet/config_ui.rs").replace('\r', "");
+        before(
+            body(&tn, "async fn config_set_port("),
+            "config_refuse_port_clash(",
+            "config::update_config_value(",
+        );
+        before(
+            body(&tn, "async fn kermit_server_toggle("),
+            "config_refuse_port_clash(&[(\"kermit_server_enabled\", \"true\")])",
+            "config::update_config_value(\"kermit_server_enabled\", \"true\")",
+        );
+        for key in ["telnet_enabled", "ssh_enabled", "web_enabled"] {
+            before(
+                &tn,
+                &format!("config_refuse_port_clash(&[(\"{key}\", &v)])"),
+                &format!("config::update_config_value(\"{key}\", &v)"),
+            );
+        }
+    }
+
+    /// A hand-edited printer value in capitals is read as what it does: the
+    /// labels and the web form compare exactly, so `ODT` kept raw printed ODT
+    /// while every surface said "Off".
+    #[test]
+    fn test_printer_values_are_lower_cased_on_load() {
+        let dir = std::env::temp_dir().join(format!("egw_printer_case_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hand.conf");
+        std::fs::write(
+            &path,
+            "cpm_printer = ODT\ncpm_printer_port =  ALTAIR_C \ncpm_printer_autolf = ON\n",
+        )
+        .unwrap();
+        let cfg = read_config_file(&path.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(cfg.cpm_printer, crate::cpm::printer::PRINTER_ODT);
+        assert_eq!(
+            crate::cpm::printer::printer_label(&cfg.cpm_printer),
+            crate::cpm::printer::printer_label(crate::cpm::printer::PRINTER_ODT)
+        );
+        assert_ne!(
+            crate::cpm::printer::printer_label(&cfg.cpm_printer),
+            crate::cpm::printer::printer_label(crate::cpm::printer::PRINTER_OFF)
+        );
+        assert_eq!(cfg.cpm_printer_port, "altair_c");
+        assert_eq!(cfg.cpm_printer_autolf, crate::cpm::printer::AUTOLF_ON);
     }
 
     /// **A default may change; somebody else's installation may not.**

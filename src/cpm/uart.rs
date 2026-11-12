@@ -1,4 +1,6 @@
-//! Virtual-modem UART profiles for the CP/M emulator.
+//! Virtual-modem UART profiles for the CP/M emulator -- and, through
+//! [`UartFamily`], the status-register conventions the booted machines'
+//! console boards answer with (`console.rs`).
 //!
 //! A CP/M communications program reaches its "modem" by doing `IN`/`OUT` to a
 //! UART at a fixed I/O port address — a *status/command* register and a *data*
@@ -7,7 +9,8 @@
 //! naming the machine/port; the profile resolves to a [`ModemAccess`] telling
 //! the emulator how the guest reaches the modem:
 //! - `Ports(profile)` — direct `IN`/`OUT` at the profile's status + data ports
-//!   ([`crate::cpm::CpmMachine`] answers there).
+//!   (`modem_port::ModemPort::port_in`/`port_out` answer there, for the
+//!   emulator's `CpmMachine` and a booted `BootMachine` alike).
 //! - `Aux` — the modem is on the CP/M BDOS `AUX:` device (functions 3/4), the
 //!   hardware-independent path RomWBW/SC126 comms software uses (a Z180 ASCI
 //!   *port* profile can't work: our Z80 core doesn't decode the Z180
@@ -18,7 +21,7 @@
 //!
 //! **Polled-only.**  Every profile is a *polled* UART: the guest reads the
 //! status register to learn when a byte is ready / the transmitter is free
-//! (`CpmMachine::port_in`).  The emulator never raises a serial interrupt in
+//! (`ModemPort::port_in`).  The emulator never raises a serial interrupt in
 //! any Z80 interrupt mode (nothing in the core asserts `/INT`; the iz80 core
 //! only implements IM 1 anyway).  So the choice of family (SIO / ACIA / 88-SIO)
 //! only selects port addresses and status-bit layout — none of them provide

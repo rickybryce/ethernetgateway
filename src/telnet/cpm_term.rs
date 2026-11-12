@@ -472,8 +472,34 @@ mod tests {
         // Every BDOS console write goes through it: functions 1 (its echo),
         // 2 and 9, and function 10's echo, line end and erase.  BIOS CONOUT
         // and function 6 stay raw, as on CP/M.
-        let emu = include_str!("cpm_emu.rs");
-        assert_eq!(emu.matches("term.bdos_conout(").count(), 6, "a BDOS write skips the tab rule");
+        //
+        // Pinned on what reaches the screen, not on a count of calls: every
+        // `cpmemu_emit` is given either bytes `bdos_conout` produced, or one
+        // of the three raw bytes CP/M sends raw -- BIOS CONOUT, function 6,
+        // and function 5's list output with no printer.  A count of the
+        // `bdos_conout` calls alone let a new BDOS write that bypassed it
+        // through.
+        let emu = include_str!("cpm_emu.rs").replace('\r', "");
+        // Production code only: the file's own test module starts at the
+        // first top-level `#[cfg(test)]` (indented ones gate helpers).
+        let emu = &emu[..emu.find("\n#[cfg(test)]").unwrap_or(emu.len())];
+        let mut raw = 0;
+        let mut cooked = 0;
+        for call in emu.split("self.cpmemu_emit(").skip(1) {
+            let arg = call.split(')').next().unwrap().split(',').nth(1).unwrap().trim();
+            if arg.starts_with("&[") {
+                raw += 1;
+            } else {
+                let name = arg.trim_start_matches('&');
+                assert!(
+                    emu.contains(&format!("let {name} = term.bdos_conout(")),
+                    "a BDOS write skips the tab rule: cpmemu_emit(.., {arg})"
+                );
+                cooked += 1;
+            }
+        }
+        assert_eq!(raw, 3, "a new raw console write: BIOS CONOUT, BDOS 6 and 5 are the raw ones");
+        assert_eq!(cooked, 6, "functions 1, 2, 9 and 10's three");
     }
 
     /// Bit 7 never reaches a terminal: on a C64 0x93 would clear the screen.
