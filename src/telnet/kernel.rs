@@ -1180,7 +1180,7 @@ impl TelnetSession {
 
     /// `ERA file` — erase file(s).  A wildcard pattern erases every match
     /// after a `(Y/N)` confirmation; a directory is refused.
-    async fn cpm_era(&mut self, operand: &str) -> Result<(), std::io::Error> {
+    pub(in crate::telnet) async fn cpm_era(&mut self, operand: &str) -> Result<(), std::io::Error> {
         let (dir_part, leaf) = Self::cpm_split_leaf(operand);
         if leaf.is_empty() {
             return self.cpm_err("ERA takes a filename.").await;
@@ -1210,14 +1210,25 @@ impl TelnetSession {
                 return self.send_line(&format!("  {}", self.dim("Cancelled."))).await;
             }
             let mut erased = 0u64;
+            let mut in_use = 0u64;
             for name in &matches {
+                // A disk the emulator is using, or a file a CP/M program is
+                // writing, is kept -- see `outside_change_refusal`.  Counted,
+                // so the summary says why the total is short.
+                if crate::cpm::outside_change_refusal(&dir.join(name)).is_some() {
+                    in_use += 1;
+                    continue;
+                }
                 if tokio::fs::remove_file(dir.join(name)).await.is_ok() {
                     erased += 1;
                 }
             }
-            return self
-                .send_line(&format!("  {}", self.green(&format!("{} erased.", erased))))
-                .await;
+            let summary = if in_use > 0 {
+                format!("{} erased, {} in use.", erased, in_use)
+            } else {
+                format!("{} erased.", erased)
+            };
+            return self.send_line(&format!("  {}", self.green(&summary))).await;
         }
 
         // Single named file.
@@ -1225,6 +1236,9 @@ impl TelnetSession {
             Ok(p) => p,
             Err(e) => return self.cpm_err(e).await,
         };
+        if let Some(why) = crate::cpm::outside_change_refusal(&path) {
+            return self.cpm_err(why).await;
+        }
         match tokio::fs::remove_file(&path).await {
             Ok(()) => self.send_line(&format!("  {}", self.green("Erased."))).await,
             Err(_) => self.cpm_err("Could not erase.").await,
@@ -1233,7 +1247,7 @@ impl TelnetSession {
 
     /// `REN new=old` — rename within one directory.  Both operands must be
     /// bare filenames (no path); cross-directory relocation is `MOVE`.
-    async fn cpm_ren(&mut self, new: &str, old: &str) -> Result<(), std::io::Error> {
+    pub(in crate::telnet) async fn cpm_ren(&mut self, new: &str, old: &str) -> Result<(), std::io::Error> {
         if new.contains('/') || old.contains('/') {
             return self
                 .cpm_err("REN is in-place; use MOVE across dirs.")
@@ -1246,6 +1260,11 @@ impl TelnetSession {
             Ok(p) => p,
             Err(e) => return self.cpm_err(e).await,
         };
+        // Renaming a mounted or booted disk moves it out from under the
+        // emulator; see `outside_change_refusal`.
+        if let Some(why) = crate::cpm::outside_change_refusal(&src) {
+            return self.cpm_err(why).await;
+        }
         let dst = self.transfer_path().join(new);
         // Courtesy pre-check; not atomic (see MOVE) — `rename(2)` would replace
         // an existing target, but a concurrent racer is out of scope under the
@@ -1357,7 +1376,7 @@ impl TelnetSession {
     /// `MOVE dst src` — relocate a file across directories via a jailed
     /// rename, falling back to copy-then-erase when rename can't cross a
     /// boundary.  Never clobbers an existing destination.
-    async fn cpm_move(&mut self, dst: &str, src: &str) -> Result<(), std::io::Error> {
+    pub(in crate::telnet) async fn cpm_move(&mut self, dst: &str, src: &str) -> Result<(), std::io::Error> {
         // Like COPY, MOVE takes the destination first; echo the form on
         // operand errors so a swapped-order command is self-correcting.
         let eg = "MOVE dst src (dest first)";
@@ -1368,6 +1387,11 @@ impl TelnetSession {
             Ok(p) => p,
             Err(e) => return self.cpm_err_eg(e, eg).await,
         };
+        // MOVE removes the source, so it is guarded like ERA and REN.  (COPY
+        // needs no guard: it only reads its source and never overwrites.)
+        if let Some(why) = crate::cpm::outside_change_refusal(&src_path) {
+            return self.cpm_err(why).await;
+        }
         let src_name = src_path
             .file_name()
             .and_then(|n| n.to_str())

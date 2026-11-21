@@ -10673,6 +10673,94 @@ fn test_session_slot_guard_releases_on_armed_drop() {
 
 use super::kernel::CpmCmd;
 
+/// **ERA, REN and MOVE leave a disk the emulator is using alone.**  Deleting or
+/// renaming a booted image loses the guest's work when it writes the image
+/// back (and a mounted one's cached directory then describes a file that is
+/// gone) -- "one session per image", which the Gateway Shell used to bypass.
+/// Each command is driven for real against a booted claim; the image must
+/// survive every one, the refusal must be said, and an unclaimed file beside
+/// it must still go, so the guard cannot pass by refusing everything.  The
+/// wildcard ERA also has to say how many it kept.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // test serializers, held for the whole test
+async fn test_the_shell_will_not_erase_or_move_a_disk_in_use() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let _reg = crate::cpm::image::registry::tests_lock();
+    struct TransferDirGuard(String);
+    impl Drop for TransferDirGuard {
+        fn drop(&mut self) {
+            config::update_config_value("transfer_dir", &self.0);
+        }
+    }
+    let _dir_guard = TransferDirGuard(config::get_config().transfer_dir);
+    let base = std::env::temp_dir().join(format!("egw_shell_inuse_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("SUB")).unwrap();
+    config::update_config_value("transfer_dir", &base.to_string_lossy());
+    let disk = base.join("GAME.DSK");
+    std::fs::write(&disk, b"disk").unwrap();
+    let key = crate::cpm::image::registry::claim_booted_image(&disk).expect("claim");
+
+    // One command on a fresh session; answers a (Y/N) once it is asked.  The
+    // pause lets the confirm's input drain finish first, or it would eat the Y.
+    async fn run(cmd: &str) -> String {
+        let (mut session, peer) = make_test_session_with_peer(TerminalType::Ansi);
+        let (mut pr, mut pw) = tokio::io::split(peer);
+        let reader = tokio::spawn(async move {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 256];
+            let mut answered = false;
+            loop {
+                match pr.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => out.extend_from_slice(&buf[..n]),
+                }
+                if !answered && String::from_utf8_lossy(&out).contains("(Y/N)") {
+                    answered = true;
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    let _ = pw.write_all(b"Y").await;
+                }
+            }
+            String::from_utf8_lossy(&out).to_string()
+        });
+        match TelnetSession::cpm_parse(cmd) {
+            CpmCmd::Era(p) => session.cpm_era(&p).await.unwrap(),
+            CpmCmd::Ren { new, old } => session.cpm_ren(&new, &old).await.unwrap(),
+            CpmCmd::Move { dst, src } => session.cpm_move(&dst, &src).await.unwrap(),
+            _ => panic!("not a command this test drives: {cmd}"),
+        }
+        drop(session);
+        reader.await.unwrap()
+    }
+
+    let era = run("ERA GAME.DSK").await;
+    assert!(disk.exists(), "ERA erased a booted disk: {era}");
+    assert!(era.contains("In use by the CP/M emulator."), "ERA did not say why: {era}");
+
+    let ren = run("REN OTHER.DSK=GAME.DSK").await;
+    assert!(disk.exists() && !base.join("OTHER.DSK").exists(), "REN moved a booted disk: {ren}");
+    assert!(ren.contains("In use by the CP/M emulator."), "REN did not say why: {ren}");
+
+    let mv = run("MOVE SUB GAME.DSK").await;
+    assert!(disk.exists() && !base.join("SUB").join("GAME.DSK").exists(), "MOVE took a booted disk: {mv}");
+    assert!(mv.contains("In use by the CP/M emulator."), "MOVE did not say why: {mv}");
+
+    // The positive control: a wildcard that also matches a free file erases
+    // that one, keeps the disk, and says it kept one.
+    std::fs::write(base.join("SPARE.DSK"), b"spare").unwrap();
+    let wild = run("ERA *.DSK").await;
+    assert!(disk.exists(), "a wildcard ERA erased a booted disk: {wild}");
+    assert!(!base.join("SPARE.DSK").exists(), "the free file should have gone: {wild}");
+    assert!(wild.contains("1 erased, 1 in use."), "the summary hid the kept disk: {wild}");
+
+    // And once the boot ends, the disk is an ordinary file again.
+    crate::cpm::image::registry::release_booted_image(&key);
+    let freed = run("ERA GAME.DSK").await;
+    assert!(!disk.exists(), "a released disk should erase: {freed}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 // ---- Wildcard glob matcher ----
 
 #[test]
@@ -16065,6 +16153,37 @@ async fn test_an_overwrite_is_written_beside_the_file_and_renamed_over_it() {
     );
     let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(left.len(), 2, "a temporary file was left behind: {left:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **An overwrite does not replace a disk the CP/M emulator is using.**  The
+/// operator said Y to "Overwrite?" at the prompt, but the disk was booted while
+/// the transfer ran -- the save asks again, so the image survives and the file
+/// is reported not replaced.  Once the boot ends the same save goes through,
+/// so the refusal is the claim's and nothing else's.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // a test serializer, held for the whole test
+async fn test_an_overwrite_spares_a_disk_in_use() {
+    let _reg = crate::cpm::image::registry::tests_lock();
+    let dir = std::env::temp_dir().join(format!("egw_overwrite_inuse_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let none = std::collections::HashSet::new();
+    let disk = dir.join("GAME.DSK");
+    std::fs::write(&disk, b"the guest's disk").unwrap();
+    let key = crate::cpm::image::registry::claim_booted_image(&disk).expect("claim");
+    let upload = vec![(None, b"upload".to_vec(), None)];
+
+    let out = TelnetSession::save_uploads(&dir, &upload, Some(("GAME.DSK", disk.as_path(), true)), false, &none, Vec::new())
+        .await;
+    assert!(out.saved.is_empty(), "a booted disk was overwritten: {:?}", out.saved);
+    assert_eq!(out.lone_failure.as_deref(), Some("In use by the CP/M emulator."));
+    assert_eq!(std::fs::read(&disk).unwrap(), b"the guest's disk");
+
+    crate::cpm::image::registry::release_booted_image(&key);
+    let out = TelnetSession::save_uploads(&dir, &upload, Some(("GAME.DSK", disk.as_path(), true)), false, &none, Vec::new())
+        .await;
+    assert_eq!(out.saved, vec![("GAME.DSK".to_string(), 6)], "a free file overwrites");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

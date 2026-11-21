@@ -961,8 +961,17 @@ impl TelnetSession {
                 let last = candidates.len() - 1;
                 for (ci, (name, save_path, overwrite)) in candidates.into_iter().enumerate() {
                     save_name = name;
+                    // Asked again at the save, not only at the prompt: a disk
+                    // can be mounted or booted while the transfer runs.
+                    let in_use = if overwrite {
+                        crate::cpm::outside_change_refusal(&save_path)
+                    } else {
+                        None
+                    };
                     failure = if overwrite && Self::is_symlink(&save_path).await {
                         Some(("That name is a link; not replaced.".into(), "a link; not replaced"))
+                    } else if let Some(why) = in_use {
+                        Some((why.to_string(), "in use; not replaced"))
                     } else {
                         // **An overwrite is written beside the file and renamed
                         // over it**, never truncated in place: a write that
@@ -1159,6 +1168,14 @@ impl TelnetSession {
             // points.  Refused before the transfer, not after it.
             if Self::is_symlink(&filepath).await {
                 self.show_error("That name is a link; not replaced.").await?;
+                return Ok(());
+            }
+            // Before the transfer, not after it: overwriting a disk the CP/M
+            // emulator is using loses the work saved to it (see
+            // `outside_change_refusal`), and nobody should sit through an
+            // upload only to be told so.  The save asks again.
+            if let Some(why) = crate::cpm::outside_change_refusal(&filepath) {
+                self.show_error(why).await?;
                 return Ok(());
             }
 

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Gateway Shell no longer erases or renames a disk the CP/M emulator is
+  using.**  `ERA`, `REN` and `MOVE` refuse a disk image that is mounted on a
+  drive or running in a booted machine, and a file a CP/M program has open for
+  writing, with `In use by the CP/M emulator.` (or `Being written by a CP/M
+  session.`).  Deleting a booted disk lost the guest's work when it wrote the
+  image back, and a mounted disk's cached directory then described a file that
+  was gone.  A wildcard `ERA` erases the rest and says how many it kept.
+  `COPY` needed no change: it never overwrites.
+- **An upload no longer overwrites a disk the CP/M emulator is using.**
+  Answering Y to "Overwrite?" in the telnet transfer menu replaced a mounted
+  or booted disk image the same way.  It is now refused before the transfer
+  starts, and asked again when the file is saved, since a disk can be mounted
+  while the upload runs.
+
 ## [1.0.7] - 2026-11-11
 
 ### Added

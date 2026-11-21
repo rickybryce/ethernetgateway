@@ -445,6 +445,32 @@ pub fn is_image_booted(path: &Path) -> bool {
     lock!(booted_images()).contains(&key)
 }
 
+/// Is this host file an image the emulator is using right now -- mounted on a
+/// drive, or in a booted machine?
+///
+/// For the code that changes files from *outside* the emulator (the Gateway
+/// Shell's ERA/REN/MOVE, and the FTP server): deleting, renaming or rewriting
+/// an image in use is the silent loss "one session per image" exists to stop.
+/// A mounted image's directory is cached in its `ImageFs`; a booted one is
+/// rewritten from memory when the guest leaves.
+///
+/// **By identity, not by name.** `Mount::path` is absolute and the booted keys
+/// are canonical, so both are compared canonically: a bare-filename match
+/// ([`drive_holding`]) would also refuse a same-named file in another folder.
+/// A lent drive needs no case of its own -- every disk a boot uses, lent mounts
+/// included, is claimed booted.  An *unrestored* drive is not in use: the
+/// session that held it has ended.
+pub fn image_in_use(path: &Path) -> bool {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if lock!(booted_images()).contains(&key) {
+        return true;
+    }
+    let t = table().read().unwrap_or_else(|e| e.into_inner());
+    t.iter()
+        .flatten()
+        .any(|m| m.path.canonicalize().unwrap_or_else(|_| m.path.clone()) == key)
+}
+
 /// Drives lent to a booted session, as `drive -> filename`.
 ///
 /// A booted guest is given the *bytes* of a mounted image and rewrites the file
@@ -909,6 +935,56 @@ mod tests {
         session_end(1);
         assert!(usage_of(3).describe().is_none());
         reset();
+    }
+
+    /// **An image is in use by identity, not by name.**  A mounted image counts
+    /// under any spelling of its path, a booted one too, and a file with the
+    /// same bare name in another folder does not -- the bare-name lookup
+    /// (`drive_holding`) would have refused that one as well.  Each half goes
+    /// red on its own: drop the table scan and the mounted case fails; compare
+    /// raw paths and the second-spelling cases fail; match by filename and the
+    /// stranger is refused.
+    #[test]
+    fn test_image_in_use_matches_the_file_not_the_name() {
+        // The config lock too, taken first as every other test that holds both
+        // takes it: a config test turning the emulator off calls `clear_all`,
+        // which emptied the table between this test's mount and its check.
+        let _cfg = crate::config::CONFIG_TEST_LOCK.blocking_lock();
+        let _g = registry_lock();
+        reset();
+        let dir = std::env::temp_dir().join(format!("egw_inuse_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        let image = dir.join("images").join("GAME.DSK");
+        let stranger = dir.join("other").join("GAME.DSK");
+        let booted = dir.join("images").join("BOOT.DSK");
+        for p in [&image, &stranger, &booted] {
+            std::fs::write(p, b"disk").unwrap();
+        }
+        // Another spelling of the same file: through `other/..`.
+        let respelt = dir.join("other").join("..").join("images").join("GAME.DSK");
+
+        assert!(!image_in_use(&image), "nothing mounted yet");
+        let mut m = dummy_mount();
+        m.path = image.clone();
+        m.filename = "GAME.DSK".into();
+        mount(2, m).unwrap();
+        assert!(image_in_use(&image), "a mounted image is in use");
+        assert!(image_in_use(&respelt), "under any spelling of its path");
+        assert!(!image_in_use(&stranger), "a same-named file elsewhere is not");
+
+        assert!(!image_in_use(&booted));
+        let key = claim_booted_image(&dir.join("other").join("..").join("images").join("BOOT.DSK"))
+            .expect("claim");
+        assert!(image_in_use(&booted), "a booted image is in use");
+        release_booted_image(&key);
+        assert!(!image_in_use(&booted), "and free again once released");
+
+        unmount(2);
+        assert!(!image_in_use(&image), "an unmounted image is free");
+        reset();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

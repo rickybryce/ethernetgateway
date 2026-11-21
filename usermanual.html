@@ -3147,6 +3147,16 @@ wildcard <code>ERA</code> confirms before deleting.
 
 <p>
 <code>TYPE</code>, <code>DUMP</code>, and <code>DIR</code> page their output
+<p>
+<code>ERA</code>, <code>REN</code>, and <code>MOVE</code> leave alone a disk
+image the CP/M emulator is using &mdash; mounted on a drive, or in a booted
+machine &mdash; and a file a CP/M program has open for writing, and say why
+(<code>In use by the CP/M emulator.</code>). Deleting or renaming one would
+lose the work saved to it. A wildcard <code>ERA</code> erases the rest and
+reports how many it kept. Unmount the disk, or leave the booted machine, and
+the file is an ordinary file again.
+</p>
+
 one screenful at a time. At each <code>--More--</code> prompt, press
 <span class="kbd">SPACE</span> for the next page,
 <span class="kbd">RETURN</span> to advance a single line, or

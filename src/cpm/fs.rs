@@ -55,6 +55,37 @@ fn cpm_writers() -> &'static Mutex<HashMap<PathBuf, u64>> {
     CPM_WRITERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Is a CP/M session writing this host file right now (see [`CPM_WRITERS`])?
+///
+/// Compared canonically on both sides: a claim is keyed by the path `CpmFs`
+/// built, which need not be spelled the way an outside caller spells the same
+/// file.  The keys for files *inside* a mounted image are synthetic and never
+/// canonicalise to a real file, so they can't match one -- that case is
+/// [`super::image::registry::image_in_use`]'s.
+pub(crate) fn host_file_being_written(path: &Path) -> bool {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let key = canon(path);
+    let held = cpm_writers().lock().unwrap_or_else(|e| e.into_inner());
+    held.keys().any(|k| canon(k) == key)
+}
+
+/// Why a host file must not be deleted, renamed or rewritten from outside the
+/// emulator right now, or `None` when it may be.
+///
+/// One rule for every outside writer -- the Gateway Shell today, the FTP server
+/// next -- so they refuse the same files with the same words.  Both reasons fit
+/// a 40-column screen after a two-space indent.  Reading a file is never
+/// refused here.
+pub(crate) fn outside_change_refusal(path: &Path) -> Option<&'static str> {
+    if super::image::registry::image_in_use(path) {
+        return Some("In use by the CP/M emulator.");
+    }
+    if host_file_being_written(path) {
+        return Some("Being written by a CP/M session.");
+    }
+    None
+}
+
 /// A synthetic 32-byte CP/M directory entry (one extent of one file).
 pub type DirEntry = [u8; 32];
 
@@ -1317,6 +1348,43 @@ fn dir_entries_for_file(
 
 #[cfg(test)]
 mod tests {
+    /// **An outside writer sees a CP/M session's claim, by identity.**  The
+    /// claim is taken by a real `write_record`, so the key is whatever `CpmFs`
+    /// really builds, and the question is asked under another spelling of the
+    /// same file -- the comparison is canonical on both sides.  A file the
+    /// session is not writing is free, and closing the file frees it.
+    #[test]
+    fn test_outside_writers_see_a_cpm_write_claim() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        let base = std::env::temp_dir().join(format!("cpm_outside_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("A")).unwrap();
+        std::fs::create_dir_all(base.join("B")).unwrap();
+        std::fs::write(base.join("A").join("BUSY.TXT"), vec![0u8; 128]).unwrap();
+        std::fs::write(base.join("A").join("IDLE.TXT"), vec![0u8; 128]).unwrap();
+        let busy = base.join("B").join("..").join("A").join("BUSY.TXT");
+        let idle = base.join("A").join("IDLE.TXT");
+
+        let session = CpmFs::new(base.clone());
+        let fcb = Fcb::from_bytes(&{
+            let mut raw = [0u8; FCB_SIZE];
+            raw[1..9].copy_from_slice(b"BUSY    ");
+            raw[9..12].copy_from_slice(b"TXT");
+            raw
+        });
+        assert_eq!(outside_change_refusal(&busy), None, "nothing claimed yet");
+        session.write_record(&fcb, 0, &[b'x'; 128]).unwrap();
+        assert_eq!(
+            outside_change_refusal(&busy),
+            Some("Being written by a CP/M session."),
+            "the claimed file, asked for under another spelling"
+        );
+        assert_eq!(outside_change_refusal(&idle), None, "an unclaimed file is free");
+        drop(session);
+        assert_eq!(outside_change_refusal(&busy), None, "leaving the emulator frees it");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Two sessions must not write the same file at once.
     ///
     /// Every session has its own `CpmFs` but they share one set of drive
