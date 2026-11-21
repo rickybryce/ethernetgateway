@@ -370,6 +370,10 @@ impl Wizard {
         if cfg.kermit_server_enabled && cfg.kermit_server_port == port {
             return Err(collision_msg(port, "the Kermit server"));
         }
+        // The FTP server likewise: not set here, but bound by this process.
+        if cfg.ftp_enabled && cfg.ftp_port == port {
+            return Err(collision_msg(port, "the FTP server"));
+        }
         Ok(())
     }
 
@@ -440,6 +444,9 @@ impl Wizard {
         }
         if cfg.kermit_server_enabled {
             out.push((cfg.kermit_server_port, "standalone Kermit server"));
+        }
+        if cfg.ftp_enabled {
+            out.push((cfg.ftp_port, "FTP server"));
         }
         out
     }
@@ -1189,6 +1196,10 @@ impl Wizard {
                     cfg.kermit_server_port
                 ),
             );
+            any = true;
+        }
+        if cfg.ftp_enabled {
+            connect_line(ui, &format!("FTP server on port {} (already enabled)", cfg.ftp_port));
             any = true;
         }
         if !any {

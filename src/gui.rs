@@ -851,6 +851,7 @@ struct App {
     ssh_port_buf: String,
     kermit_server_port_buf: String,
     web_port_buf: String,
+    ftp_port_buf: String,
     slave_master_port_buf: String,
     /// What the operator is typing into the "master password needed" panel.
     ///
@@ -1252,6 +1253,7 @@ impl App {
         let ssh_port_buf = cfg.ssh_port.to_string();
         let kermit_server_port_buf = cfg.kermit_server_port.to_string();
         let web_port_buf = cfg.web_port.to_string();
+        let ftp_port_buf = cfg.ftp_port.to_string();
         let slave_master_port_buf = cfg.slave_master_port.to_string();
         let max_sessions_buf = cfg.max_sessions.to_string();
         let conn_rate_max_buf = cfg.conn_rate_max.to_string();
@@ -1328,6 +1330,7 @@ impl App {
             ssh_port_buf,
             kermit_server_port_buf,
             web_port_buf,
+            ftp_port_buf,
             slave_master_port_buf,
             max_sessions_buf,
             conn_rate_max_buf,
@@ -1442,6 +1445,7 @@ impl App {
         if let Ok(v) = self.ssh_port_buf.parse::<u16>() && v >= 1 { self.cfg.ssh_port = v; }
         if let Ok(v) = self.kermit_server_port_buf.parse::<u16>() && v >= 1 { self.cfg.kermit_server_port = v; }
         if let Ok(v) = self.web_port_buf.parse::<u16>() && v >= 1 { self.cfg.web_port = v; }
+        if let Ok(v) = self.ftp_port_buf.parse::<u16>() && v >= 1 { self.cfg.ftp_port = v; }
         if let Ok(v) = self.slave_master_port_buf.parse::<u16>() && v >= 1 { self.cfg.slave_master_port = v; }
         if let Ok(v) = self.max_sessions_buf.parse::<usize>() && v >= 1 { self.cfg.max_sessions = v; }
         // 0 is legal here (it disables the limit), so no `>= 1` guard -- but
@@ -1800,6 +1804,42 @@ impl App {
             .small()
             .color(AMBER_DIM),
         );
+        ui.add_space(4.0);
+        // The FTP server: on/off, its port, and the passive data range.  Here
+        // rather than on the frame, which is full; "Changes Require Restart"
+        // covers the first two, and the range is read on every PASV.
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.cfg.ftp_enabled, "FTP Server");
+            labeled_port_field(ui, "FTP", &mut self.ftp_port_buf, 50.0);
+            ui.add_space(8.0);
+            ui.label("Passive:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.cfg.ftp_passive_ports)
+                    .desired_width(90.0)
+                    .hint_text("any"),
+            )
+            .on_hover_text(
+                "Ports for passive data connections, as low-high (low at least \
+                 1024), so a firewall can be opened for them. Empty lets the \
+                 operating system choose.",
+            );
+        });
+        if config::parse_passive_ports(&self.cfg.ftp_passive_ports).is_none() {
+            ui.label(
+                egui::RichText::new("Passive ports: use low-high, both 1024-65535, or leave empty.")
+                    .small()
+                    .color(RED_ALERT),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new(
+                    "FTP serves the transfer folder (a slave's goes to its master) with \
+                     the same login and IP rules as telnet.",
+                )
+                .small()
+                .color(AMBER_DIM),
+            );
+        }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             labeled_field(ui, "Sessions:", &mut self.max_sessions_buf, 50.0);
@@ -4895,6 +4935,7 @@ impl App {
             || self.ssh_port_buf != self.last_synced_cfg.ssh_port.to_string()
             || self.kermit_server_port_buf != self.last_synced_cfg.kermit_server_port.to_string()
             || self.web_port_buf != self.last_synced_cfg.web_port.to_string()
+            || self.ftp_port_buf != self.last_synced_cfg.ftp_port.to_string()
             || self.slave_master_port_buf != self.last_synced_cfg.slave_master_port.to_string()
             || self.max_sessions_buf != self.last_synced_cfg.max_sessions.to_string()
             || self.conn_rate_max_buf != self.last_synced_cfg.conn_rate_max.to_string()
@@ -4951,6 +4992,7 @@ impl App {
         self.ssh_port_buf = self.cfg.ssh_port.to_string();
         self.kermit_server_port_buf = self.cfg.kermit_server_port.to_string();
         self.web_port_buf = self.cfg.web_port.to_string();
+        self.ftp_port_buf = self.cfg.ftp_port.to_string();
         self.slave_master_port_buf = self.cfg.slave_master_port.to_string();
         self.max_sessions_buf = self.cfg.max_sessions.to_string();
         self.conn_rate_max_buf = self.cfg.conn_rate_max.to_string();

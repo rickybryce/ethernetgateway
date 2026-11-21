@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **An FTP server.**  Off by default; turn it on under Server -> More... in the
+  desktop window or the web page, or with `X` on the telnet Server
+  Configuration screen (`Y` sets the port, default 2121; `V` the passive data
+  range).  It serves the transfer directory with the gateway's own security:
+  with login required it asks for the gateway username and password, sharing
+  the lockout with telnet, SSH and the web page; without it, logins are
+  anonymous and only private addresses may connect, with IP safety and
+  block-gateway applying as on telnet.  Downloads, uploads, resume, append,
+  rename, delete and folders all work.  New names follow the gateway's upload
+  rule, files are always sent unchanged (ASCII mode included, so CP/M and
+  Commodore files survive), active mode connects only back to the client, and
+  disks the CP/M emulator is using cannot be replaced or deleted.  RFC 959
+  with FEAT, EPSV/EPRT, MLSD/MLST, SIZE, MDTM, REST and UTF-8.  **On a slave,
+  every file operation happens on the master**: the slave serves FTP to its own
+  clients and carries each operation over its SSH link (one shared connection,
+  a channel per FTP session), so files always land on, and come from, the
+  master's transfer directory.  An unreachable master refuses the login rather
+  than falling back to the slave's folder.  Master and slave must both be on
+  this version.
+
 ### Fixed
 
 - **The Gateway Shell no longer erases or renames a disk the CP/M emulator is

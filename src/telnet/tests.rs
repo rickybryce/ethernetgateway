@@ -4637,9 +4637,9 @@ fn test_server_config_screen_row_count() {
          and the 23rd scrolls the header off",
     );
     // What it is today, so the next row added has to be a deliberate act.
-    // Header(3) + 5 status + blank + 8 item rows + the firewall note + Q/H +
-    // prompt.
-    assert_eq!(rows, 20, "the screen grew or shrank; check it still fits and update this");
+    // Header(3) + 6 status (FTP joined 2026-11-21) + blank + 9 item rows +
+    // the firewall note + Q/H + prompt: the full PETSCII budget.
+    assert_eq!(rows, 22, "the screen grew or shrank; check it still fits and update this");
 }
 
 /// Master/Slave sub-screen row budget.  The status rows differ by role, so both

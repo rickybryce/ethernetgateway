@@ -1661,6 +1661,7 @@ fn collect_form_updates(
     // silently rejects bad input.
     let plain_keys: &[&str] = &[
         "telnet_port", "ssh_port", "kermit_server_port", "web_port",
+        "ftp_port", "ftp_passive_ports",
         "username", "password",
         "transfer_dir", "max_sessions", "idle_timeout_secs", "gui_zoom",
         "conn_rate_max", "conn_rate_window_secs",
@@ -1773,6 +1774,7 @@ fn collect_form_updates(
     // saves are not supported (the full form is always submitted).
     let bool_keys: &[&str] = &[
         "telnet_enabled", "ssh_enabled", "kermit_server_enabled", "web_enabled",
+        "ftp_enabled",
         "security_enabled", "disable_ip_safety", "disable_gateway_connections",
         "enable_console", "verbose", "log_to_file",
         "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
@@ -2908,7 +2910,7 @@ fn render_header(cfg: &Config) -> String {
          <a class=\"linkbtn\" href=\"{manual}\" target=\"_blank\" \
          rel=\"noopener\">User Manual</a></div>\
          </header>\
-         <div class=\"hint\">Telnet: {tport} &middot; SSH: {sport} &middot; Kermit: {kport} &middot; Web: {wport}</div>",
+         <div class=\"hint\">Telnet: {tport} &middot; SSH: {sport} &middot; Kermit: {kport} &middot; Web: {wport}{ftp}</div>",
         ver = env!("CARGO_PKG_VERSION"),
         connect = html_escape(&telnet_command(&ip, cfg.telnet_port)),
         manual = MANUAL_URL,
@@ -2916,6 +2918,13 @@ fn render_header(cfg: &Config) -> String {
         sport = cfg.ssh_port,
         kport = cfg.kermit_server_port,
         wport = cfg.web_port,
+        // Only when it is on: the other four are always listed because they
+        // are the frame's own rows; FTP lives under More.
+        ftp = if cfg.ftp_enabled {
+            format!(" &middot; FTP: {}", cfg.ftp_port)
+        } else {
+            String::new()
+        },
     )
 }
 
@@ -3992,6 +4001,12 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"hint\">Per-IP connection rate for telnet and SSH. 0 = no limit. \
          Not applied to this web server: every request here is its own \
          connection and the booted-disk screen polls several times a second.</div>\
+         <h3>FTP Server</h3>\
+         <div class=\"row\">{ftp_chk} {ftp_label} {ftp_port} {ftp_passive}</div>\
+         <div class=\"hint\">Serves the transfer folder (on a slave, the master&rsquo;s) \
+         with the same login and IP rules as telnet. Passive ports are low-high (low at \
+         least 1024) so a firewall can be opened for them; empty lets the system choose. \
+         The server and its port take effect on restart.</div>\
          <div class=\"row\"><span class=\"label\">GUI display scale:</span>\
          <select name=\"gui_zoom\">\
          <option value=\"auto\" {z_auto}>Auto</option>\
@@ -4034,6 +4049,10 @@ fn render_more_popups(cfg: &Config) -> String {
             None => String::new(),
         },
         sessions = numfield("max_sessions", "Sessions", cfg.max_sessions),
+        ftp_chk = checkbox("ftp_enabled", "FTP Server", cfg.ftp_enabled),
+        ftp_label = port_label("FTP"),
+        ftp_port = port_input_for("ftp_port", cfg.ftp_port, None),
+        ftp_passive = textfield("ftp_passive_ports", "Passive", &cfg.ftp_passive_ports, false, 12),
         idle = numfield("idle_timeout_secs", "Idle (s)", cfg.idle_timeout_secs),
         rate_max = numfield("conn_rate_max", "Conn/IP", cfg.conn_rate_max),
         rate_win = numfield("conn_rate_window_secs", "Per (s)", cfg.conn_rate_window_secs),
@@ -8513,8 +8532,12 @@ mod tests {
         // 6-char wide.  Lock the structure down so a future revert
         // to flex `<div class="row">` would visibly mis-align the
         // colons and trip this test.
-        let html = render_main_page(&Config::default(), None, false);
-        assert!(html.contains(r#"class="server-grid""#));
+        let page = render_main_page(&Config::default(), None, false);
+        assert!(page.contains(r#"class="server-grid""#));
+        // The Server frame itself: the FTP port lives in its More popup, which
+        // uses the same input and label helpers but is not part of this grid.
+        let start = page.find(r#"class="server-grid""#).unwrap();
+        let html = &page[start..start + page[start..].find("</section>").expect("frame end")];
         // Four port inputs, all with class="port-num" + size="6".
         let port_num_count = html.matches(r#"class="port-num""#).count();
         assert_eq!(port_num_count, 4, "expected 4 port-num inputs in Server frame, got {}", port_num_count);

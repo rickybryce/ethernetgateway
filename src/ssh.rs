@@ -1260,6 +1260,64 @@ impl SshHandler {
     /// addition sends none, and `None` renders as nothing rather than guessing a
     /// default. (The log line used to say "console port" for either, which was
     /// wrong for every modem port from the day they began registering.)
+    /// Accept or refuse a slave's `ftp-store` channel.
+    ///
+    /// **Refused before `channel_success`**, every time, so the slave learns
+    /// at once (the `allow_relay_kermit` lesson): not authenticated, not a
+    /// master that accepts relays, a protocol version we don't speak, or no
+    /// session slot.  No new setting gates it -- Ricky, 2026-11-21: served
+    /// whenever the master accepts relays and the caller has logged in.  The
+    /// caller holds the master's own credentials or an enrolled key, which
+    /// already reach the transfer menus over telnet.
+    async fn ftp_store_request(
+        &mut self,
+        channel: russh::ChannelId,
+        version: &str,
+        session: &mut russh::server::Session,
+    ) -> Result<(), russh::Error> {
+        let cfg = config::get_config();
+        let refuse = |why: &str| {
+            glog!("SSH: refused ftp-store from {:?} ({})", self.peer_addr, why);
+        };
+        if !self.counted {
+            refuse("not authenticated");
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        if cfg.gateway_role != "master" || !cfg.master_accept_relays {
+            refuse(&format!("role={}, accept_relays={}", cfg.gateway_role, cfg.master_accept_relays));
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        if version != "1" {
+            refuse(&format!("unknown store protocol version {version:?}"));
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        if !try_claim_slot(&self.session_count, self.max_sessions) {
+            refuse(&format!("server at capacity {}", self.max_sessions));
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        if let Err(e) = session.channel_success(channel) {
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(e);
+        }
+        glog!("SSH: accepted ftp-store from {:?}", self.peer_addr);
+        let (gateway_stream, handler_stream) = tokio::io::duplex(256 * 1024);
+        let (handler_read, handler_write) = tokio::io::split(handler_stream);
+        self.relay_inputs.insert(channel, spawn_input_pump(handler_write));
+        let session_count = self.session_count.clone();
+        let slave = self.peer_addr.map(|a| a.to_string()).unwrap_or_else(|| "?".into());
+        tokio::spawn(async move {
+            let _slot = SlotGuard(session_count);
+            let _live = telnet::LiveConnection::new();
+            crate::ftp::remote::serve(gateway_stream, slave).await;
+        });
+        spawn_channel_reader(session.handle(), channel, handler_read);
+        Ok(())
+    }
+
     async fn register_console_port(
         &mut self,
         channel: russh::ChannelId,
@@ -1757,6 +1815,13 @@ impl russh::server::Handler for SshHandler {
         // the slave offers a console port; we hold the channel idle in the
         // remote-port registry until a master user picks it in the Serial
         // Gateway picker.
+        // A slave's FTP store channel: the slave runs the FTP protocol for its
+        // own clients and does every file operation here, against this
+        // master's transfer directory (see `ftp::remote`).
+        if let Some(version) = command.strip_prefix("ftp-store ") {
+            return self.ftp_store_request(channel, version.trim(), session).await;
+        }
+
         if let Some(rest) = command.strip_prefix("serial-register ") {
             // `<label> [mode]`.  Tokens, not "everything after the space":
             // the mode was added as a second token, and a master that took the

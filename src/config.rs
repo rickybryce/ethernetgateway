@@ -519,6 +519,20 @@ const DEFAULT_ALLOW_RELAY_KERMIT: bool = false;
 /// (24 ≈ "kermit").
 const DEFAULT_KERMIT_SERVER_ENABLED: bool = false;
 const DEFAULT_KERMIT_SERVER_PORT: u16 = 2424;
+/// FTP server listener.  Off by default, like SSH and the web server.  Unlike
+/// the Kermit listener it keeps every security check: with `security_enabled`
+/// it asks for the gateway's username and password (with the shared lockout);
+/// without it, logins are anonymous and the private-IP allowlist applies, as on
+/// telnet.  It serves `transfer_dir` -- or, on a slave, the master's.  See
+/// `src/ftp/`.
+const DEFAULT_FTP_ENABLED: bool = false;
+/// 2121: the conventional unprivileged stand-in for FTP's 21 (no root needed),
+/// and what most FTP clients' documentation uses for a non-standard port.
+const DEFAULT_FTP_PORT: u16 = 2121;
+/// Ports a passive (PASV/EPSV) data connection may use, as `low-high`; empty
+/// lets the OS choose.  A firewall or NAT can only be opened for a known
+/// range, which is why it exists.
+const DEFAULT_FTP_PASSIVE_PORTS: &str = "";
 /// Punter (C1) total block size in bytes (8..=255).  255 is the native C1
 /// maximum and the right choice for virtually every connection; lowering it
 /// (40 is the recommended floor) cuts the resend cost on a noisy line at the
@@ -1193,6 +1207,14 @@ pub struct Config {
     /// Port for the standalone Kermit server listener.  Only consulted
     /// when `kermit_server_enabled` is true.
     pub kermit_server_port: u16,
+    /// Run the FTP server.  See [`DEFAULT_FTP_ENABLED`].
+    pub ftp_enabled: bool,
+    /// The FTP control port.  Only consulted when `ftp_enabled` is true.
+    pub ftp_port: u16,
+    /// Passive data ports as `low-high` (`low` >= 1024), or empty for any.
+    /// Parsed by [`parse_passive_ports`]; read on every PASV, so a change
+    /// applies without a restart.
+    pub ftp_passive_ports: String,
     /// Punter (C1) total block size in bytes (8..=255, header included).
     pub punter_block_size: u16,
     /// Punter negotiation timeout (seconds): wait for the peer's first
@@ -1529,6 +1551,9 @@ impl std::fmt::Debug for Config {
             .field("allow_peer_dial", &self.allow_peer_dial)
             .field("kermit_server_enabled", &self.kermit_server_enabled)
             .field("kermit_server_port", &self.kermit_server_port)
+            .field("ftp_enabled", &self.ftp_enabled)
+            .field("ftp_port", &self.ftp_port)
+            .field("ftp_passive_ports", &self.ftp_passive_ports)
             .field("punter_block_size", &self.punter_block_size)
             .field("punter_negotiation_timeout", &self.punter_negotiation_timeout)
             .field("punter_block_timeout", &self.punter_block_timeout)
@@ -1639,6 +1664,9 @@ impl Default for Config {
             allow_peer_dial: DEFAULT_ALLOW_PEER_DIAL,
             kermit_server_enabled: DEFAULT_KERMIT_SERVER_ENABLED,
             kermit_server_port: DEFAULT_KERMIT_SERVER_PORT,
+            ftp_enabled: DEFAULT_FTP_ENABLED,
+            ftp_port: DEFAULT_FTP_PORT,
+            ftp_passive_ports: DEFAULT_FTP_PASSIVE_PORTS.into(),
             punter_block_size: DEFAULT_PUNTER_BLOCK_SIZE,
             punter_negotiation_timeout: DEFAULT_PUNTER_NEGOTIATION_TIMEOUT,
             punter_block_timeout: DEFAULT_PUNTER_BLOCK_TIMEOUT,
@@ -2643,6 +2671,20 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u16| v >= 1)
             .unwrap_or(DEFAULT_KERMIT_SERVER_PORT),
+        ftp_enabled: map
+            .get("ftp_enabled")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_FTP_ENABLED),
+        ftp_port: map
+            .get("ftp_port")
+            .and_then(|v| v.parse().ok())
+            .filter(|&v: &u16| v >= 1)
+            .unwrap_or(DEFAULT_FTP_PORT),
+        ftp_passive_ports: map
+            .get("ftp_passive_ports")
+            .map(|v| v.trim().to_string())
+            .filter(|v| parse_passive_ports(v).is_some())
+            .unwrap_or_else(|| DEFAULT_FTP_PASSIVE_PORTS.into()),
         punter_block_size: map
             .get("punter_block_size")
             .and_then(|v| v.parse().ok())
@@ -3659,6 +3701,23 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push('\n');
 
     content.push_str("\
+# FTP server.
+# ftp_enabled:        serve the transfer directory over FTP (on a slave, the
+#                     master's).  With security_enabled it asks for the
+#                     username and password above; without it, logins are
+#                     anonymous and only private addresses may connect, as on
+#                     telnet.  FTP sends passwords in clear text, like telnet.
+# ftp_port:           the FTP control port (default 2121).
+# ftp_passive_ports:  ports for passive data connections, as low-high (low at
+#                     least 1024), so a firewall can be opened for them; empty
+#                     lets the operating system choose.
+");
+    write_kv(&mut content, "ftp_enabled", cfg.ftp_enabled);
+    write_kv(&mut content, "ftp_port", cfg.ftp_port);
+    write_kv(&mut content, "ftp_passive_ports", &cfg.ftp_passive_ports);
+    content.push('\n');
+
+    content.push_str("\
 # Punter (C1) protocol tunables.  C1 is the file-transfer protocol CCGMS /
 # Novaterm / StrikeTerm speak natively on Commodore BBSes.
 # punter_block_size:                 total block size in bytes (8..=255, the
@@ -4161,13 +4220,38 @@ impl std::fmt::Display for PortClash {
 
 /// Every listener this process binds: its name (as `bindwatch` registers it),
 /// whether it is on, and its port.  The SSH listener also carries the relay.
-pub fn listeners(cfg: &Config) -> [(&'static str, bool, u16); 4] {
+pub fn listeners(cfg: &Config) -> [(&'static str, bool, u16); 5] {
     [
         ("telnet", cfg.telnet_enabled, cfg.telnet_port),
         ("SSH", cfg.ssh_enabled, cfg.ssh_port),
         ("web", cfg.web_enabled, cfg.web_port),
         ("Kermit", cfg.kermit_server_enabled, cfg.kermit_server_port),
+        ("FTP", cfg.ftp_enabled, cfg.ftp_port),
     ]
+}
+
+/// The name a clash with the FTP passive range is reported under.  Not a
+/// listener of its own, but it binds ports, and a range that takes in a
+/// listener's port fails one of them at random.
+pub const FTP_PASSIVE_RANGE: &str = "FTP passive range";
+
+/// Parse `ftp_passive_ports`: `Some(None)` for empty (the OS chooses),
+/// `Some(Some(range))` for `low-high` or a single port, `None` for anything
+/// else -- including a range starting below 1024, which would need root on
+/// Unix and collide with well-known services everywhere.
+pub fn parse_passive_ports(value: &str) -> Option<Option<std::ops::RangeInclusive<u16>>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Some(None);
+    }
+    let (lo, hi) = match value.split_once('-') {
+        Some((lo, hi)) => (lo.trim().parse::<u16>().ok()?, hi.trim().parse::<u16>().ok()?),
+        None => {
+            let p = value.parse::<u16>().ok()?;
+            (p, p)
+        }
+    };
+    (lo >= 1024 && lo <= hi).then_some(Some(lo..=hi))
 }
 
 /// The listener a port or enable key belongs to, if it belongs to one.
@@ -4177,6 +4261,8 @@ pub fn listener_of_key(key: &str) -> Option<&'static str> {
         "ssh_port" | "ssh_enabled" => Some("SSH"),
         "web_port" | "web_enabled" => Some("web"),
         "kermit_server_port" | "kermit_server_enabled" => Some("Kermit"),
+        "ftp_port" | "ftp_enabled" => Some("FTP"),
+        "ftp_passive_ports" => Some(FTP_PASSIVE_RANGE),
         _ => None,
     }
 }
@@ -4188,6 +4274,17 @@ fn port_clashes(cfg: &Config) -> Vec<PortClash> {
         for j in i + 1..l.len() {
             if l[i].1 && l[j].1 && l[i].2 == l[j].2 {
                 out.push(PortClash { port: l[i].2, a: l[i].0, b: l[j].0 });
+            }
+        }
+    }
+    // A passive range that takes in an enabled listener's port -- the FTP
+    // control port included.  Reported once per listener, at that port.
+    if cfg.ftp_enabled
+        && let Some(Some(range)) = parse_passive_ports(&cfg.ftp_passive_ports)
+    {
+        for (name, on, port) in l {
+            if on && range.contains(&port) {
+                out.push(PortClash { port, a: FTP_PASSIVE_RANGE, b: name });
             }
         }
     }
@@ -4219,6 +4316,9 @@ fn keep_listeners(from: &Config, cfg: &mut Config) {
     cfg.web_port = from.web_port;
     cfg.kermit_server_enabled = from.kermit_server_enabled;
     cfg.kermit_server_port = from.kermit_server_port;
+    cfg.ftp_enabled = from.ftp_enabled;
+    cfg.ftp_port = from.ftp_port;
+    cfg.ftp_passive_ports = from.ftp_passive_ports.clone();
 }
 
 /// [`new_port_clash`] for a save of `pairs` over `cfg`, applied as
@@ -4662,6 +4762,17 @@ pub(crate) fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "kermit_server_port" => {
             if let Ok(v) = value.parse::<u16>() && v >= 1 {
                 cfg.kermit_server_port = v;
+            }
+        }
+        "ftp_enabled" => cfg.ftp_enabled = value.eq_ignore_ascii_case("true"),
+        "ftp_port" => {
+            if let Ok(v) = value.parse::<u16>() && v >= 1 {
+                cfg.ftp_port = v;
+            }
+        }
+        "ftp_passive_ports" => {
+            if parse_passive_ports(value).is_some() {
+                cfg.ftp_passive_ports = value.trim().to_string();
             }
         }
         "punter_block_size" => {
@@ -6543,6 +6654,9 @@ mod tests {
             allow_peer_dial: true,
             kermit_server_enabled: true,
             kermit_server_port: 2525,
+            ftp_enabled: true,
+            ftp_port: 2122,
+            ftp_passive_ports: "50000-50010".into(),
             punter_block_size: 200,
             punter_negotiation_timeout: 50,
             punter_block_timeout: 25,
@@ -6730,6 +6844,9 @@ mod tests {
         assert_eq!(loaded.allow_peer_dial, original.allow_peer_dial);
         assert_eq!(loaded.kermit_server_enabled, original.kermit_server_enabled);
         assert_eq!(loaded.kermit_server_port, original.kermit_server_port);
+        assert_eq!(loaded.ftp_enabled, original.ftp_enabled);
+        assert_eq!(loaded.ftp_port, original.ftp_port);
+        assert_eq!(loaded.ftp_passive_ports, original.ftp_passive_ports);
         assert_eq!(loaded.punter_block_size, original.punter_block_size);
         assert_eq!(loaded.punter_negotiation_timeout, original.punter_negotiation_timeout);
         assert_eq!(loaded.punter_block_timeout, original.punter_block_timeout);

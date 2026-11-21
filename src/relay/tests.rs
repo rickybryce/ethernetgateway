@@ -2816,7 +2816,8 @@ fn test_a_refused_password_is_not_retried_by_the_next_loop() {
     const { assert!(super::REFUSED_PASSWORD_HOLD.as_secs() >= crate::telnet::LOCKOUT_DURATION.as_secs()) };
 
     let src = include_str!("../relay.rs").replace("\r\n", "\n");
-    let f = &src[src.find("async fn connect_master_relay_inner(").expect("the connect")..];
+    // The login moved to `connect_master_session` (shared with the FTP store).
+    let f = &src[src.find("async fn connect_master_session(").expect("the connect")..];
     let f = &f[..f.find("\n}\n").expect("its end")];
     let turn = f.find("PASSWORD_TURN.lock().await").expect("attempts take no turns");
     let check = f.find("recently_refused(host, port, username, password)").expect("no check");

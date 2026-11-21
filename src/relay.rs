@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use crate::logger::glog;
 use crate::telnet::{LockoutMap, SessionWriters, SharedWriter, TelnetSession};
 
-/// Held across one relay password attempt; see `connect_master_relay_inner`.
+/// Held across one relay password attempt; see `connect_master_session`.
 static PASSWORD_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The last password a master refused: a digest of master and password, and
@@ -1682,15 +1682,17 @@ fn relay_budget_expired(
     ))
 }
 
-async fn connect_master_relay_inner(
+/// Connect and authenticate to the master: the SSH connection, the host-key
+/// check (TOFU, with a changed key reported for an operator to resolve), the
+/// key-then-password login, and the key-enrolment offer.  Shared by every
+/// relay call and by the FTP store, which opens its own channels on the
+/// session this returns.
+pub(crate) async fn connect_master_session(
     host: &str,
     port: u16,
     username: &str,
     password: &str,
-    exec_command: &str,
-    hello_wait: std::time::Duration,
-    awaiting_answer: &AtomicBool,
-) -> Result<MasterRelay, RelayConnectError> {
+) -> Result<RelaySession, RelayConnectError> {
     // Keepalive (§9 #15): without it a silently-dropped relay link (master
     // powered off, cable pulled, NAT idle-eviction) isn't noticed until the
     // next write fails — leaving an idle console registration wedged.  Ping
@@ -1924,6 +1926,19 @@ async fn connect_master_relay_inner(
         offer_key_for_enrolment_once(&session).await;
     }
 
+    Ok(session)
+}
+
+async fn connect_master_relay_inner(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    exec_command: &str,
+    hello_wait: std::time::Duration,
+    awaiting_answer: &AtomicBool,
+) -> Result<MasterRelay, RelayConnectError> {
+    let session = connect_master_session(host, port, username, password).await?;
     let mut channel = session
         .channel_open_session()
         .await
@@ -1964,6 +1979,26 @@ async fn connect_master_relay_inner(
         _session: session,
         stream,
     })
+}
+
+/// Open one more channel on an authenticated master session and run `command`
+/// on it, returning the channel as a byte stream once the master accepts.
+///
+/// For the FTP store, which multiplexes one channel per FTP session on a
+/// single connection (see `ftp::remote`).  A refusal is the master's
+/// `channel_failure`, known as soon as it answers.
+pub(crate) async fn open_exec_channel(
+    session: &RelaySession,
+    command: &str,
+    wait: std::time::Duration,
+) -> Result<russh::ChannelStream<russh::client::Msg>, RelayConnectError> {
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| RelayConnectError::Network(format!("channel open failed: {}", e)))?;
+    channel.exec(true, command.as_bytes()).await.map_err(exec_send_failed)?;
+    await_exec_reply(&mut channel, tokio::time::Instant::now() + wait).await?;
+    Ok(channel.into_stream())
 }
 
 /// Wait for the master's answer to the relay `exec`: `channel_success` or

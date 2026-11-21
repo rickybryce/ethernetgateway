@@ -691,7 +691,7 @@ impl TelnetSession {
     }
 
     /// Returns true if disk usage exceeds 90%.
-    pub(in crate::telnet) fn is_disk_full() -> bool {
+    pub(crate) fn is_disk_full() -> bool {
         #[cfg(unix)]
         {
             use std::ffi::CString;

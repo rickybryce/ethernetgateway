@@ -45,6 +45,7 @@ mod bindwatch;
 mod config;
 mod cpm;
 mod credential;
+mod ftp;
 mod gui;
 mod instance;
 #[cfg(test)]
@@ -643,7 +644,7 @@ fn main() {
                     notify_rt.clone(),
                     session_writers.clone(),
                     lockouts.clone(),
-                    conn_rates,
+                    conn_rates.clone(),
                 );
                 let serial_handles = serial::start_serial(shutdown_rt.clone(), restart_rt.clone());
                 // On a slave, offer the CP/M endpoint to the master for the whole
@@ -654,6 +655,15 @@ fn main() {
                 telnet::start_kermit_server(
                     shutdown_rt.clone(),
                     notify_rt.clone(),
+                );
+                // FTP shares telnet's lockout and connection-rate maps: one
+                // address gets one budget of guesses and connections across
+                // every login surface.
+                ftp::start_ftp_server(
+                    shutdown_rt.clone(),
+                    notify_rt.clone(),
+                    lockouts.clone(),
+                    conn_rates,
                 );
                 webserver::start_web_server(
                     shutdown_rt.clone(),
