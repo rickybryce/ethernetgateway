@@ -2635,11 +2635,8 @@ impl TelnetSession {
             // Per-IP connection rate.  One key for two values because this
             // screen is at its 22-row PETSCII budget and the pair is one
             // decision -- "how many, how often" -- not two.
-            // The FTP passive range shares this row: the screen is at its
-            // 22-row PETSCII budget, and the row has room (37 columns at
-            // most, with a `100/3600s` rate).
             self.send_line(&format!(
-                "  {}  Conn rate: {}  {}  Passive",
+                "  {}  Conn rate: {}",
                 self.cyan("L"),
                 if cfg.conn_rate_max == 0 {
                     self.green("off")
@@ -2648,8 +2645,7 @@ impl TelnetSession {
                         "{}/{}s",
                         cfg.conn_rate_max, cfg.conn_rate_window_secs
                     ))
-                },
-                self.cyan("V")
+                }
             ))
             .await?;
             // **Always shown, not only when a star was drawn.**  The star means
@@ -2810,10 +2806,12 @@ impl TelnetSession {
                     self.config_restart_notice().await?;
                 }
                 "y" => {
+                    // Both halves of "where FTP listens", as L asks both halves
+                    // of the rate: the control port, then the passive range.
+                    // One key because the screen is at its 22-row budget.
                     self.config_set_port("FTP", "ftp_port", cfg.ftp_port).await?;
-                }
-                "v" => {
-                    self.ftp_passive_ports_prompt(&cfg.ftp_passive_ports).await?;
+                    let live = config::get_config();
+                    self.ftp_passive_ports_prompt(&live.ftp_passive_ports).await?;
                 }
                 "i" => {
                     self.disable_ip_safety_toggle(cfg.disable_ip_safety).await?;
@@ -4013,12 +4011,14 @@ impl TelnetSession {
         // 39 columns at most on a C64: "Port 65535 is the telnet port." is 30
         // with the indent, the second line 35.  The passive range gets its own
         // wording -- "the FTP passive range port" would run to 43.
-        let other = clash.other_than(mine);
-        let first = if other == config::FTP_PASSIVE_RANGE {
-            self.red(&format!("Port {} is FTP's passive range.", clash.port))
-        } else {
-            self.red(&format!("Port {} is the {} port.", clash.port, other))
-        };
+        // A passive-range clash names the listener whose port is inside the
+        // range -- whichever key was being changed, FTP's own toggle included.
+        if clash.a == config::FTP_PASSIVE_RANGE {
+            let first = self.red(&format!("Port {} is the {} port,", clash.port, clash.b));
+            let second = self.dim("inside FTP's passive range.");
+            return self.show_error_lines(&[&first, &second]).await;
+        }
+        let first = self.red(&format!("Port {} is the {} port.", clash.port, clash.other_than(mine)));
         let second = self.dim("Two listeners can't share a port.");
         self.show_error_lines(&[&first, &second]).await
     }
@@ -4329,9 +4329,9 @@ impl TelnetSession {
                 "  X  Enable or disable the FTP",
                 "     server (same login and IP",
                 "     rules as telnet)",
-                "  Y  Change the FTP port",
-                "  V  FTP passive data ports, as",
-                "     low-high, for a firewall",
+                "  Y  Change the FTP port, then",
+                "     the passive data ports",
+                "     (low-high, for a firewall)",
                 "",
                 "  I  Toggle IP safety. When OFF,",
                 "     telnet accepts every source",
@@ -4370,7 +4370,8 @@ impl TelnetSession {
                 "",
                 "  Most changes are saved at once",
                 "  but require a server restart;",
-                "  IP safety applies immediately.",
+                "  IP safety and FTP passive",
+                "  ports apply immediately.",
             ]
         } else {
             &[
@@ -4392,9 +4393,9 @@ impl TelnetSession {
                 "  X  Enable or disable the FTP server.  Serves the",
                 "     transfer folder (on a slave, the master's)",
                 "     with the same login and IP rules as telnet.",
-                "  Y  Change the FTP listening port",
-                "  V  FTP passive data ports, as low-high, so a",
-                "     firewall can be opened for them; - for any",
+                "  Y  Change the FTP listening port, then the",
+                "     passive data ports (low-high, so a firewall",
+                "     can be opened for them; - for any)",
                 "",
                 "  I  Toggle IP safety. When ON (default), and",
                 "     login is not required, the telnet listener",
@@ -4432,8 +4433,9 @@ impl TelnetSession {
                 "",
                 "  Most changes are saved to the config file",
                 "  immediately but require a server restart to",
-                "  take effect; IP safety is the exception and",
-                "  applies on the next connection.",
+                "  take effect; IP safety and the FTP passive",
+                "  ports are the exceptions and apply on the next",
+                "  connection or transfer.",
             ]
         }
     }

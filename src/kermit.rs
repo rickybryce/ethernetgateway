@@ -6066,6 +6066,15 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
             return Ok(());
         }
         let path = self.dir().join(&fname);
+        // `remote cd` can reach the CP/M emulator's folders: a disk it is
+        // using, or a file a CP/M program is writing, is not deleted.
+        if let Some(why) = crate::cpm::outside_change_refusal(&path) {
+            self.refuse(seq, why).await?;
+            if self.verbose {
+                glog!("Kermit server: G E '{}' refused ({})", fname, why);
+            }
+            return Ok(());
+        }
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {
                 self.ack(seq).await?;
@@ -6129,6 +6138,15 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> KermitServer<'_, R, W> {
         // Refuse rename-to-existing — would silently
         // clobber an unrelated file.  Make the operator
         // delete the target first if that's their intent.
+        // Renaming a disk the CP/M emulator is using moves it out from under
+        // the mount or the booted machine.
+        if let Some(why) = crate::cpm::outside_change_refusal(&old_path) {
+            self.refuse(seq, why).await?;
+            if self.verbose {
+                glog!("Kermit server: G R '{}' refused ({})", old_name, why);
+            }
+            return Ok(());
+        }
         if new_path.exists() {
             self.refuse(seq, "Destination exists").await?;
             if self.verbose {

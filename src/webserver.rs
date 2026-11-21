@@ -1507,7 +1507,7 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
         }
         let msg = format!(
             "Not saved: {clash}. Two listeners can't share a port, so the telnet, SSH, \
-             web and Kermit server settings were left as they were."
+             web, Kermit and FTP server settings were left as they were."
         );
         notice = format!("{notice} {msg}");
     }
@@ -3998,7 +3998,7 @@ fn render_more_popups(cfg: &Config) -> String {
          skips the firewall entirely.</span></div>\
          <div class=\"row\">{sessions} {idle}</div>\
          <div class=\"row\">{rate_max} {rate_win}</div>\
-         <div class=\"hint\">Per-IP connection rate for telnet and SSH. 0 = no limit. \
+         <div class=\"hint\">Per-IP connection rate for telnet, SSH and FTP. 0 = no limit. \
          Not applied to this web server: every request here is its own \
          connection and the booted-disk screen polls several times a second.</div>\
          <h3>FTP Server</h3>\

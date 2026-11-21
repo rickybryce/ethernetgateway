@@ -1244,22 +1244,6 @@ impl SshHandler {
         Ok(russh::server::Auth::Accept)
     }
 
-    /// Register a remote slave port (`serial-register <port>`, §9 #12).
-    /// Gated like the relay path (master + accept_relays + a known peer IP)
-    /// and counted against the session cap (a registered idle port holds a
-    /// slot until it disconnects).  The channel is held idle in the global
-    /// registry; the Serial Gateway picker claims it.
-    ///
-    /// **The wire says the mode now, and it did not until 2026-08-23.**
-    /// `serial-register` carried only the port label, so this end could not tell
-    /// a console port from a modem or Kermit one -- all three register here --
-    /// and the picker listed every remote port as a bare `B@ip`. An operator
-    /// therefore could not see what they were about to pick, while the *local*
-    /// rows beside them said "Console mode" plainly. The mode is now an optional
-    /// second token, and optional is the operative word: a slave older than the
-    /// addition sends none, and `None` renders as nothing rather than guessing a
-    /// default. (The log line used to say "console port" for either, which was
-    /// wrong for every modem port from the day they began registering.)
     /// Accept or refuse a slave's `ftp-store` channel.
     ///
     /// **Refused before `channel_success`**, every time, so the slave learns
@@ -1318,6 +1302,22 @@ impl SshHandler {
         Ok(())
     }
 
+    /// Register a remote slave port (`serial-register <port>`, §9 #12).
+    /// Gated like the relay path (master + accept_relays + a known peer IP)
+    /// and counted against the session cap (a registered idle port holds a
+    /// slot until it disconnects).  The channel is held idle in the global
+    /// registry; the Serial Gateway picker claims it.
+    ///
+    /// **The wire says the mode now, and it did not until 2026-08-23.**
+    /// `serial-register` carried only the port label, so this end could not tell
+    /// a console port from a modem or Kermit one -- all three register here --
+    /// and the picker listed every remote port as a bare `B@ip`. An operator
+    /// therefore could not see what they were about to pick, while the *local*
+    /// rows beside them said "Console mode" plainly. The mode is now an optional
+    /// second token, and optional is the operative word: a slave older than the
+    /// addition sends none, and `None` renders as nothing rather than guessing a
+    /// default. (The log line used to say "console port" for either, which was
+    /// wrong for every modem port from the day they began registering.)
     async fn register_console_port(
         &mut self,
         channel: russh::ChannelId,
@@ -1811,10 +1811,6 @@ impl russh::server::Handler for SshHandler {
         let command = String::from_utf8_lossy(data);
         let command = command.trim();
 
-        // Console-mode registration (§9 #12): `serial-register <port>` —
-        // the slave offers a console port; we hold the channel idle in the
-        // remote-port registry until a master user picks it in the Serial
-        // Gateway picker.
         // A slave's FTP store channel: the slave runs the FTP protocol for its
         // own clients and does every file operation here, against this
         // master's transfer directory (see `ftp::remote`).
@@ -1822,6 +1818,10 @@ impl russh::server::Handler for SshHandler {
             return self.ftp_store_request(channel, version.trim(), session).await;
         }
 
+        // Console-mode registration (§9 #12): `serial-register <port>` —
+        // the slave offers a console port; we hold the channel idle in the
+        // remote-port registry until a master user picks it in the Serial
+        // Gateway picker.
         if let Some(rest) = command.strip_prefix("serial-register ") {
             // `<label> [mode]`.  Tokens, not "everything after the space":
             // the mode was added as a second token, and a master that took the

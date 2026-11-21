@@ -67,10 +67,19 @@ impl StoreError {
 }
 
 fn io_err(e: std::io::Error) -> StoreError {
+    use std::io::ErrorKind as K;
     match e.kind() {
-        std::io::ErrorKind::NotFound => StoreError::NotFound,
-        std::io::ErrorKind::AlreadyExists => StoreError::Exists,
-        std::io::ErrorKind::DirectoryNotEmpty => StoreError::NotEmpty,
+        K::NotFound => StoreError::NotFound,
+        K::AlreadyExists => StoreError::Exists,
+        K::DirectoryNotEmpty => StoreError::NotEmpty,
+        K::NotADirectory => StoreError::NotADirectory,
+        K::IsADirectory => StoreError::NotAFile,
+        // Permanent on Unix, so 550 rather than the "try again" of a 451.  Not
+        // on Windows, where it is also what a file held open by another
+        // program, or briefly by an antivirus scanner, looks like.
+        K::PermissionDenied if !cfg!(windows) => StoreError::Denied(Cow::Borrowed("Permission denied on this machine.")),
+        K::ReadOnlyFilesystem => StoreError::Denied(Cow::Borrowed("The transfer folder is read-only.")),
+        K::StorageFull | K::QuotaExceeded => StoreError::DiskFull,
         _ => StoreError::Io(e.kind().to_string()),
     }
 }
@@ -103,7 +112,8 @@ fn writing() -> &'static Mutex<HashSet<PathBuf>> {
 }
 
 fn is_being_written(p: &Path) -> bool {
-    writing().lock().unwrap_or_else(|e| e.into_inner()).contains(p)
+    let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    writing().lock().unwrap_or_else(|e| e.into_inner()).contains(&key)
 }
 
 /// A claim in [`writing`], released when dropped -- however the upload ends.
@@ -162,6 +172,28 @@ impl Drop for Upload {
     fn drop(&mut self) {
         if let Some(temp) = self.temp.take() {
             let _ = std::fs::remove_file(temp);
+        }
+    }
+}
+
+/// Whether two existing paths are the same folder: by device and inode on
+/// Unix (whatever the case of the name or the filesystem), by a
+/// case-insensitive canonical comparison on Windows, where folders are
+/// case-insensitive.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x.to_string_lossy().to_lowercase() == y.to_string_lossy().to_lowercase(),
+            _ => false,
         }
     }
 }
@@ -248,20 +280,52 @@ impl LocalStore {
     /// it that is a directory (its drive folders and its images folder) --
     /// may not be renamed or removed.  Renaming one moves mounted disks out
     /// from under their mounts; the files inside are guarded one by one.
+    ///
+    /// Asked of the name as given *and* of where it really leads, so neither
+    /// spelling nor a link slips past: on Windows and macOS `/cpm` is the
+    /// `CPM` folder (compared without case there), and a `CPM` or `CPM/images`
+    /// that is a symlink -- a supported layout -- is still the emulator's.
     fn is_structural_dir(base: &Path, p: &Path) -> bool {
+        if !p.is_dir() {
+            return false;
+        }
         let cpm = Self::cpm_container(base);
-        let cpm = std::fs::canonicalize(&cpm).unwrap_or(cpm);
-        p.is_dir() && p.starts_with(&cpm)
+        if !cpm.is_dir() {
+            return false;
+        }
+        // The name as given, or anything above it up to the transfer folder,
+        // *is* the container -- by identity, so neither case nor a link
+        // decides: `/cpm` on a case-insensitive disk is `CPM`, and a `CPM`
+        // that is a symlink (a supported layout) is still the emulator's.
+        let mut at = Some(p);
+        while let Some(dir) = at {
+            if dir == base {
+                break;
+            }
+            if same_dir(dir, &cpm) {
+                return true;
+            }
+            at = dir.parent();
+        }
+        // Where it leads: inside the container's real location.
+        match (std::fs::canonicalize(p), std::fs::canonicalize(&cpm)) {
+            (Ok(real), Ok(cpm_real)) => real.starts_with(&cpm_real),
+            _ => false,
+        }
     }
 
-    fn entry_for(name: String, meta: &std::fs::Metadata, path: &Path) -> Entry {
+    fn entry_for(base: &Path, name: String, meta: &std::fs::Metadata, path: &Path) -> Entry {
         let mtime = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let locked = !meta.is_dir() && crate::cpm::outside_change_refusal(path).is_some();
+        let locked = if meta.is_dir() {
+            Self::is_structural_dir(base, path)
+        } else {
+            crate::cpm::outside_change_refusal(path).is_some()
+        };
         Entry { name, is_dir: meta.is_dir(), len: if meta.is_dir() { 0 } else { meta.len() }, mtime, locked }
     }
 
@@ -280,7 +344,7 @@ impl LocalStore {
             let p = Self::existing(&base, &vpath)?;
             let meta = std::fs::metadata(&p).map_err(io_err)?;
             let name = super::proto::split_leaf(&vpath).1.unwrap_or_else(|| "/".into());
-            Ok(Self::entry_for(name, &meta, &p))
+            Ok(Self::entry_for(&base, name, &meta, &p))
         })
         .await
     }
@@ -296,7 +360,7 @@ impl LocalStore {
             let meta = std::fs::metadata(&p).map_err(io_err)?;
             if !meta.is_dir() {
                 let name = super::proto::split_leaf(&vpath).1.unwrap_or_default();
-                return Ok(vec![Self::entry_for(name, &meta, &p)]);
+                return Ok(vec![Self::entry_for(&base, name, &meta, &p)]);
             }
             let mut out = Vec::new();
             for e in std::fs::read_dir(&p).map_err(io_err)?.flatten() {
@@ -308,7 +372,7 @@ impl LocalStore {
                 // Follows a symlink, so a link shows as what it points at;
                 // reaching through it is still refused by `existing`.
                 let Ok(m) = std::fs::metadata(&path) else { continue };
-                out.push(Self::entry_for(name, &m, &path));
+                out.push(Self::entry_for(&base, name, &m, &path));
             }
             out.sort_by(|a, b| a.name.cmp(&b.name));
             Ok(out)
@@ -371,15 +435,34 @@ impl LocalStore {
                     return Err(StoreError::Locked(Cow::Borrowed(why)));
                 }
             }
-            let claim = WriteClaim::take(&target)?;
+            // Claimed under the file's real path when it exists, so two
+            // sessions spelling one file differently (on a case-insensitive
+            // disk) still see each other.
+            let claim_key = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+            let claim = WriteClaim::take(&claim_key)?;
             let mut opts = std::fs::OpenOptions::new();
             let (file, temp) = match mode {
                 WriteMode::Replace => {
                     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let temp = parent.join(format!("{TEMP_PREFIX}{}-{n}", std::process::id()));
-                    let f = opts.write(true).create_new(true).open(&temp).map_err(io_err)?;
-                    (f, Some(temp))
+                    opts.write(true).create_new(true);
+                    // A temp left by a crash of an earlier run with the same
+                    // process ID would make `create_new` fail and the client
+                    // hear "Already exists" about a file it can't see: take
+                    // the next number instead.
+                    let mut placed = None;
+                    for _ in 0..100 {
+                        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let temp = parent.join(format!("{TEMP_PREFIX}{}-{n}", std::process::id()));
+                        match opts.open(&temp) {
+                            Ok(f) => {
+                                placed = Some((f, Some(temp)));
+                                break;
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                            Err(e) => return Err(io_err(e)),
+                        }
+                    }
+                    placed.ok_or(StoreError::Io("no free temporary name".into()))?
                 }
                 WriteMode::New => (opts.write(true).create_new(true).open(&target).map_err(io_err)?, None),
                 WriteMode::Append => (opts.append(true).create(true).open(&target).map_err(io_err)?, None),
@@ -469,10 +552,13 @@ impl LocalStore {
         let leaf = leaf.ok_or(StoreError::Denied(Cow::Borrowed("That is the top folder.")))?;
         let src = Self::existing(base, &dir)?.join(&leaf);
         let meta = std::fs::symlink_metadata(&src).map_err(io_err)?;
-        if meta.is_dir() && Self::is_structural_dir(base, &src) {
+        // A link to a folder counts as the folder here: a symlinked `CPM` or
+        // drive folder is still the emulator's.
+        let is_folder = meta.is_dir() || (meta.file_type().is_symlink() && src.is_dir());
+        if is_folder && Self::is_structural_dir(base, &src) {
             return Err(StoreError::Locked(Cow::Borrowed("Used by the CP/M emulator.")));
         }
-        if !meta.is_dir() {
+        if !is_folder {
             if is_being_written(&src) {
                 return Err(StoreError::Busy);
             }

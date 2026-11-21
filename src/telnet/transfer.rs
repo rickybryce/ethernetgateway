@@ -456,7 +456,11 @@ impl TelnetSession {
         let resumed = resumed && converted == filename;
         let filename = converted.as_str();
         if resumed {
-            // Resume replaces the partial it pre-loaded — exact name only.
+            // Resume replaces the partial it pre-loaded — exact name only --
+            // unless that "partial" is a disk the CP/M emulator is using.
+            if crate::cpm::outside_change_refusal(&dir.join(filename)).is_some() {
+                return Err(SaveError::WriteFailed);
+            }
             return Self::save_received_file_sync(&dir.join(filename), data, meta, true)
                 .map(|()| filename.to_string());
         }
@@ -2511,6 +2515,15 @@ impl TelnetSession {
                     if let Ok(num) = other.parse::<usize>() {
                         if num >= 1 && num <= page_files.len() {
                             let (ref filename, _) = page_files[num - 1];
+                            // The menu can browse into the CP/M emulator's
+                            // folders: a disk it is using, or a file a CP/M
+                            // program is writing, is not offered for deletion.
+                            if let Some(why) =
+                                crate::cpm::outside_change_refusal(&self.transfer_path().join(filename))
+                            {
+                                self.show_error(why).await?;
+                                continue;
+                            }
                             self.send_line("").await?;
                             let p = format!(
                                 "  Delete {}? ({}/{}) ",

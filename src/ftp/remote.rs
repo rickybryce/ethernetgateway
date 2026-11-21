@@ -42,9 +42,11 @@ pub const MAX_REQUEST: usize = 8 * 1024;
 pub const MAX_CHUNK: usize = 32 * 1024;
 /// A listing reply: a directory of tens of thousands of entries still fits.
 pub const MAX_REPLY: usize = 16 * 1024 * 1024;
-/// The master gives up on an upload that sends nothing for this long, and
-/// removes its temporary file.
-pub const WRITE_STALL: Duration = Duration::from_secs(60);
+/// The master gives up on an upload that sends nothing for this long (and
+/// removes its temporary file), or a download whose slave stops taking it.
+/// Longer than the slave's own data-connection stall timeout (120 s), so the
+/// slave -- which can tell its client why -- always gives up first.
+pub const WRITE_STALL: Duration = Duration::from_secs(150);
 
 const OP_STAT: u8 = 1;
 const OP_LIST: u8 = 2;
@@ -61,6 +63,20 @@ const TAG_OK: u8 = 0x80;
 const TAG_ERR: u8 = 0x81;
 const TAG_DATA: u8 = 0x82;
 const TAG_END: u8 = 0x83;
+/// Slave -> master: "I have consumed one DATA frame of the download."
+const TAG_CREDIT: u8 = 0x84;
+
+/// DATA frames the master may have outstanding on a download.
+///
+/// **Why a download is credit-paced at all.**  The slave's russh client hands
+/// each arriving packet to the channel's queue with an `await` *inside its
+/// connection loop* (`client/encrypted.rs`), and that queue is bounded.  A
+/// download whose FTP client reads slowly therefore filled it and stalled the
+/// loop -- and with it every other FTP session sharing the connection.  With at
+/// most this many 32 KiB frames in flight the queue can never fill, and a
+/// download nobody is reading (an ABOR, a stalled client) stops the master
+/// instead of making it read the rest of the file.
+const READ_WINDOW: u32 = 4;
 
 // ─── framing ────────────────────────────────────────────────
 
@@ -225,6 +241,11 @@ pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut s: S, slave: String) {
         let Ok((op, payload)) = read_frame(&mut s, MAX_REQUEST).await else {
             return;
         };
+        // Credits for frames the slave consumed after the download ended
+        // arrive between requests; they mean nothing now.
+        if op == TAG_CREDIT {
+            continue;
+        }
         if serve_one(&store, &mut s, op, &payload, &slave).await.is_err() {
             return;
         }
@@ -301,12 +322,23 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
             write_frame(s, TAG_OK, &[]).await?;
             let mut buf = vec![0u8; MAX_CHUNK];
             let mut sent = 0u64;
+            let mut credits = READ_WINDOW;
             loop {
+                while credits == 0 {
+                    let (tag, _) = tokio::time::timeout(WRITE_STALL, read_frame(s, MAX_REQUEST))
+                        .await
+                        .map_err(|_| bad("download stalled"))??;
+                    if tag != TAG_CREDIT {
+                        return Err(bad("unexpected frame in a download"));
+                    }
+                    credits += 1;
+                }
                 match file.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
                         write_frame(s, TAG_DATA, &buf[..n]).await?;
                         sent += n as u64;
+                        credits -= 1;
                     }
                     Err(e) => {
                         write_frame(s, TAG_END, &[]).await?;
@@ -371,6 +403,12 @@ fn shared() -> &'static tokio::sync::Mutex<Option<Shared>> {
 /// Live `RemoteStore`s; the shared connection closes a minute after this
 /// reaches zero.
 static LIVE: AtomicUsize = AtomicUsize::new(0);
+/// Bumped each time `LIVE` leaves zero.  A linger task closes the connection
+/// only if no FTP session has started since it was spawned -- otherwise two
+/// lingers from a quick 1-0-1-0 would let the first close the second's
+/// connection early, and a login racing a linger could lose its connection
+/// the moment it was opened.
+static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const LINGER: Duration = Duration::from_secs(60);
 const CHANNEL_WAIT: Duration = Duration::from_secs(15);
 
@@ -387,7 +425,7 @@ async fn open_channel() -> Result<Chan, String> {
         && sh.key == key
         && !sh.session.is_closed()
     {
-        match crate::relay::open_exec_channel(&sh.session, STORE_COMMAND, CHANNEL_WAIT).await {
+        match open_store_channel(&sh.session).await {
             Ok(c) => return Ok(c),
             // The connection died under us: reconnect below.
             Err(crate::relay::RelayConnectError::Network(_)) => {}
@@ -401,9 +439,67 @@ async fn open_channel() -> Result<Chan, String> {
     .await
     .map_err(|_| "the master gateway did not answer".to_string())?
     .map_err(describe)?;
+    // The host key verified, so a pinned-key warning for this master no
+    // longer applies -- the relay path withdraws it the same way.
+    crate::resolve::clear(&crate::resolve::Problem::MasterHostKeyChanged { host: key.0.clone(), port: key.1 }.id());
     let session = Arc::new(session);
-    *guard = Some(Shared { key, session: session.clone() });
-    crate::relay::open_exec_channel(&session, STORE_COMMAND, CHANNEL_WAIT).await.map_err(describe)
+    // A connection being replaced is closed, not just dropped: dropping a
+    // russh handle closes nothing, and the old one would stay authenticated
+    // on the master -- holding its slots -- for as long as keepalives last.
+    // Not at once, though: a connection replaced because one channel open
+    // was slow may still be carrying other sessions' transfers.  Once the
+    // stall limit has passed, anything still on it is stuck anyway.
+    if let Some(old) = guard.replace(Shared { key, session: session.clone() }) {
+        tokio::spawn(async move {
+            tokio::time::sleep(WRITE_STALL).await;
+            let _ = old.session.disconnect(russh::Disconnect::ByApplication, "FTP reconnect", "").await;
+        });
+    }
+    open_store_channel(&session).await.map_err(describe)
+}
+
+/// `open_exec_channel` with a bound on the whole of it: opening the channel
+/// itself has no timeout of its own, and the shared lock is held across this,
+/// so a half-open link must not keep every other FTP login waiting until the
+/// keepalive gives up.
+async fn open_store_channel(session: &crate::relay::RelaySession) -> Result<Chan, crate::relay::RelayConnectError> {
+    tokio::time::timeout(CHANNEL_WAIT + Duration::from_secs(5), crate::relay::open_exec_channel(session, STORE_COMMAND, CHANNEL_WAIT))
+        .await
+        .unwrap_or_else(|_| Err(crate::relay::RelayConnectError::Network("the master did not open a channel".into())))
+}
+
+/// Count an FTP session in.  Before its channel is opened, so a linger
+/// waiting on the shared lock sees it.
+fn hold() {
+    if LIVE.fetch_add(1, Ordering::SeqCst) == 0 {
+        EPOCH.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Count one out; the last out starts the linger.  Also the path for a login
+/// whose first channel was refused, so its connection doesn't stay open.
+fn release() {
+    // Read before the count drops, so a session starting in between always
+    // shows up as a newer epoch to this linger.
+    let epoch = EPOCH.load(Ordering::SeqCst);
+    if LIVE.fetch_sub(1, Ordering::SeqCst) == 1 {
+        tokio::spawn(async move {
+            tokio::time::sleep(LINGER).await;
+            // Taken under the lock, disconnected after it: the disconnect may
+            // wait on russh, and no FTP login should wait behind that.
+            let idle = {
+                let mut guard = shared().lock().await;
+                if LIVE.load(Ordering::SeqCst) == 0 && EPOCH.load(Ordering::SeqCst) == epoch {
+                    guard.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(sh) = idle {
+                let _ = sh.session.disconnect(russh::Disconnect::ByApplication, "FTP idle", "").await;
+            }
+        });
+    }
 }
 
 fn describe(e: crate::relay::RelayConnectError) -> String {
@@ -430,21 +526,7 @@ pub struct RemoteStore {
 
 impl Drop for RemoteStore {
     fn drop(&mut self) {
-        if LIVE.fetch_sub(1, Ordering::SeqCst) == 1 {
-            // The last one: close the connection unless another FTP login
-            // arrives within the linger.
-            tokio::spawn(async {
-                tokio::time::sleep(LINGER).await;
-                if LIVE.load(Ordering::SeqCst) == 0 {
-                    let mut guard = shared().lock().await;
-                    if LIVE.load(Ordering::SeqCst) == 0
-                        && let Some(sh) = guard.take()
-                    {
-                        let _ = sh.session.disconnect(russh::Disconnect::ByApplication, "FTP idle", "").await;
-                    }
-                }
-            });
-        }
+        release();
     }
 }
 
@@ -458,8 +540,21 @@ impl RemoteStore {
     /// Open this session's channel to the master.  Called at login, so a
     /// master that can't be reached is said at once (`421`).
     pub async fn connect() -> Result<RemoteStore, String> {
+        // Held by a guard, so a login whose future is dropped part-way can't
+        // leave the count raised and the connection never lingering out.
+        struct Held(bool);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                if self.0 {
+                    release();
+                }
+            }
+        }
+        hold();
+        let mut held = Held(true);
         let chan = open_channel().await?;
-        LIVE.fetch_add(1, Ordering::SeqCst);
+        // From here the RemoteStore's own Drop releases.
+        held.0 = false;
         Ok(RemoteStore { chan: Arc::new(tokio::sync::Mutex::new(Some(chan))) })
     }
 
@@ -471,9 +566,23 @@ impl RemoteStore {
         Ok(g)
     }
 
+    /// [`Self::call_once`], tried a second time for a request that changes
+    /// nothing, when the first failed because the channel or the connection
+    /// had gone (a master restart while the client sat idle): the module's
+    /// promise that a dropped channel is "simply reopened on the next
+    /// operation" means that operation, not the one after it.
+    async fn call(&self, op: u8, payload: Vec<u8>) -> Result<Vec<u8>, StoreError> {
+        let first = self.call_once(op, payload.clone()).await;
+        let idempotent = matches!(op, OP_STAT | OP_LIST | OP_RENAME_CHECK);
+        match first {
+            Err(StoreError::Io(ref m)) if idempotent && m.starts_with("lost the master") => self.call_once(op, payload).await,
+            other => other,
+        }
+    }
+
     /// One request, one reply.  A broken channel is dropped, so the next
     /// operation reopens it.
-    async fn call(&self, op: u8, payload: Vec<u8>) -> Result<Vec<u8>, StoreError> {
+    async fn call_once(&self, op: u8, payload: Vec<u8>) -> Result<Vec<u8>, StoreError> {
         let mut g = self.channel().await?;
         let Some(ch) = g.as_mut() else { return Err(StoreError::Io("no channel".into())) };
         let r = async {
@@ -613,18 +722,28 @@ impl RemoteRead {
                 TAG_DATA => {
                     self.pending = data;
                     self.at = 0;
+                    // Consumed: the master may send one more.
+                    write_frame(ch, TAG_CREDIT, &[]).await?;
                 }
                 TAG_END => {
                     let (tag, p) = read_frame(ch, MAX_REPLY).await?;
                     self.done = true;
-                    // The master answered, so the channel is in step either
-                    // way and is kept for the next operation.
-                    self.guard.take();
-                    if tag == TAG_ERR {
-                        let (_, text) = decode_error(&p).reply();
-                        return Err(std::io::Error::other(text));
+                    match tag {
+                        // The master answered, so the channel is in step and
+                        // is kept for the next operation.
+                        TAG_OK => {
+                            self.guard.take();
+                            return Ok(0);
+                        }
+                        TAG_ERR => {
+                            self.guard.take();
+                            let (_, text) = decode_error(&p).reply();
+                            return Err(std::io::Error::other(text));
+                        }
+                        // Anything else: out of step; the guard's drop
+                        // discards the channel.
+                        _ => return Err(bad("unexpected reply after a download")),
                     }
-                    return Ok(0);
                 }
                 _ => return Err(bad("unexpected frame in a download")),
             }

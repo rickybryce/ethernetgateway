@@ -50,6 +50,10 @@ fn allowed_before_login(verb: &str) -> bool {
     )
 }
 
+/// Queued in place of a line too long to take, so its `500` goes out in
+/// command order rather than ahead of replies still owed (RFC 959 §4.2).
+const TOO_LONG: &str = "\u{1}too-long";
+
 /// Every verb we answer, for HELP.  Order is HELP's.
 const HELP_VERBS: &[&str] = &[
     "ABOR ACCT ALLO APPE CDUP CWD  DELE EPRT EPSV FEAT HELP HOST",
@@ -110,6 +114,8 @@ pub(super) struct Session {
     rnfr: Option<String>,
     data: Option<DataPlan>,
     epsv_all: bool,
+    /// TYPE A was asked for.  Files go unchanged either way; STAT says which.
+    type_ascii: bool,
     transfer: Option<Transfer>,
 }
 
@@ -141,6 +147,7 @@ impl Session {
             rnfr: None,
             data: None,
             epsv_all: false,
+            type_ascii: false,
             transfer: None,
         })
     }
@@ -173,6 +180,21 @@ impl Session {
         let mut buf = [0u8; 2048];
         let mut last_activity = tokio::time::Instant::now();
         loop {
+            // ABOR is urgent (RFC 959 §4.1.3): during a transfer it is taken
+            // from wherever it sits in the queue, not only from the front --
+            // a pipelining client may have queued the next PASV ahead of it.
+            // Only when something ahead of it is blocked: a NOOP or STAT in
+            // front runs anyway, and jumping it would answer out of order.
+            if self.transfer.is_some()
+                && let Some(i) = queue.iter().position(|l| proto::split_command(l).0 == "ABOR")
+                && queue.iter().take(i).any(|l| !matches!(proto::split_command(l).0.as_str(), "STAT" | "NOOP"))
+            {
+                let line = queue.remove(i).unwrap_or_default();
+                if self.command(&line).await == Flow::Close {
+                    return;
+                }
+                last_activity = tokio::time::Instant::now();
+            }
             // Run what can run now.
             while let Some(line) = queue.front() {
                 let (verb, _) = proto::split_command(line);
@@ -237,11 +259,7 @@ impl Session {
                         match self.reader.feed(b) {
                             Fed::Nothing => {}
                             Fed::Line(l) => queue.push_back(l),
-                            Fed::TooLong => {
-                                if !self.reply(500, "Command line too long.").await {
-                                    return;
-                                }
-                            }
+                            Fed::TooLong => queue.push_back(TOO_LONG.to_string()),
                             Fed::Reply(r) => {
                                 if !self.send_raw(&r).await {
                                     return;
@@ -301,9 +319,14 @@ impl Session {
 
     /// Handle one command line.
     async fn command(&mut self, line: &str) -> Flow {
+        if line == TOO_LONG {
+            return Self::flow(self.reply(500, "Command line too long.").await);
+        }
         let (verb, arg) = proto::split_command(line);
         if verb.is_empty() {
-            return Flow::Continue;
+            // Someone pressing Enter in a telnet window: say so rather than
+            // leave them waiting for a reply that never comes.
+            return Self::flow(self.reply(500, "Empty command.").await);
         }
         if Self::verbose() {
             // Never the password, verbose or not.
@@ -341,6 +364,7 @@ impl Session {
                 self.cwd = "/".into();
                 self.data = None;
                 self.epsv_all = false;
+                self.type_ascii = false;
                 self.reply(220, "Service ready for new user.").await
             }
             "ACCT" | "ALLO" => self.reply(202, "Not needed here.").await,
@@ -376,7 +400,8 @@ impl Session {
                 }
             }
             "HOST" => {
-                if self.logged_in {
+                // RFC 7151 §3: HOST comes before USER, not merely before PASS.
+                if self.logged_in || self.user.is_some() {
                     self.reply(503, "HOST must come before login.").await
                 } else if arg.is_empty() {
                     self.reply(501, "HOST needs a host name.").await
@@ -534,6 +559,10 @@ impl Session {
             return Flow::Close;
         }
         glog!("FTP: failed login from {}", ip);
+        // As telnet does: a second between guesses, after the turn is given
+        // back (so it delays only this connection, never the address's other
+        // logins).
+        tokio::time::sleep(Duration::from_secs(1)).await;
         Self::flow(self.reply(530, "Login incorrect.").await)
     }
 
@@ -605,6 +634,9 @@ impl Session {
     }
 
     async fn cmd_cwd(&mut self, arg: &str) -> bool {
+        if arg.trim().is_empty() {
+            return self.reply(501, "CWD needs a directory.").await;
+        }
         let target = self.path_arg(arg);
         match self.store.stat(&target).await {
             Ok(e) if e.is_dir => {
@@ -628,8 +660,14 @@ impl Session {
         // a byte-exact store for vintage machines (CP/M text keeps its CRLFs,
         // a C64 file its CRs) -- see .claude/design/ftp.md.
         match words.as_slice() {
-            ["A"] | ["A", "N"] => self.reply(200, "Type set to A (files are sent unchanged).").await,
-            ["I"] | ["L", "8"] => self.reply(200, "Type set to I.").await,
+            ["A"] | ["A", "N"] => {
+                self.type_ascii = true;
+                self.reply(200, "Type set to A (files are sent unchanged).").await
+            }
+            ["I"] | ["L", "8"] => {
+                self.type_ascii = false;
+                self.reply(200, "Type set to I.").await
+            }
             ["A", "T"] | ["A", "C"] => self.reply(504, "Only non-print format is available.").await,
             ["E"] | ["E", _] => self.reply(504, "EBCDIC is not available.").await,
             ["L", _] => self.reply(504, "Only 8-bit local bytes are available.").await,
@@ -752,15 +790,34 @@ impl Session {
     }
 
     async fn cmd_list(&mut self, verb: &str, arg: &str) -> bool {
-        let target = self.path_arg(proto::strip_list_options(arg));
-        let entries = match self.store.list(&target).await {
+        let arg = proto::strip_list_options(arg);
+        // A wildcard in the last component (`NLST *.prg`) -- how mget, mdelete
+        // and `ls *.COM` work in Windows ftp, tnftp and the DOS clients -- is
+        // matched against the folder it names, as vsftpd and wu-ftpd do.
+        // Names come back with the client's own folder prefix, so each can be
+        // handed straight to RETR or DELE.
+        let (target, pattern, prefix) = match arg.rsplit_once('/') {
+            _ if !arg.contains(['*', '?']) => (self.path_arg(arg), None, String::new()),
+            Some((dir, leaf)) if !dir.contains(['*', '?']) => {
+                (self.path_arg(if dir.is_empty() { "/" } else { dir }), Some(leaf.to_string()), format!("{dir}/"))
+            }
+            Some(_) => return self.reply(550, "Wildcards only in the last part of a path.").await,
+            None => (self.cwd.clone(), Some(arg.to_string()), String::new()),
+        };
+        let mut entries = match self.store.list(&target).await {
             Ok(e) => e,
             Err(e) => return self.store_error(e).await,
         };
+        if let Some(p) = &pattern {
+            entries.retain(|e| proto::glob_match(p, &e.name));
+            if entries.is_empty() {
+                return self.reply(550, "No files match.").await;
+            }
+        }
         let now = chrono::Utc::now().timestamp();
         let mut body = Vec::new();
         for e in &entries {
-            let line = if verb == "NLST" { e.name.clone() } else { proto::list_line(e, now) };
+            let line = if verb == "NLST" { format!("{prefix}{}", e.name) } else { proto::list_line(e, now) };
             body.extend_from_slice(line.as_bytes());
             body.extend_from_slice(b"\r\n");
         }
@@ -807,7 +864,11 @@ impl Session {
                 "Ethernet Gateway FTP server status:",
                 &format!("Connected from {}.", self.peer.ip()),
                 who,
-                "TYPE: I (nothing translated), STRU: F, MODE: S.",
+                if self.type_ascii {
+                    "TYPE: A (files are sent unchanged), STRU: F, MODE: S."
+                } else {
+                    "TYPE: I, STRU: F, MODE: S."
+                },
                 &state,
                 "End of status.",
             ];
@@ -868,8 +929,16 @@ impl Session {
         if self.data.is_none() {
             return self.reply(425, "Use PORT, EPRT, PASV or EPSV first.").await;
         }
-        let hint = proto::split_leaf(&self.path_arg(arg)).1.filter(|_| !arg.trim().is_empty());
-        let name = match self.store.unique_name(&self.cwd.clone(), hint).await {
+        // A path in the argument names the folder as well as the stem.
+        let (dir, hint) = if arg.trim().is_empty() {
+            (self.cwd.clone(), None)
+        } else if arg.trim_end().ends_with('/') {
+            // `STOU sub/`: a folder, no stem.
+            (self.path_arg(arg), None)
+        } else {
+            proto::split_leaf(&self.path_arg(arg))
+        };
+        let name = match self.store.unique_name(&dir, hint).await {
             Ok(n) => n,
             Err(e) => return self.store_error(e).await,
         };
@@ -959,6 +1028,16 @@ impl Session {
 
     async fn cmd_abor(&mut self) -> bool {
         match self.transfer.take() {
+            // Already done -- it finished in the same instant the ABOR arrived.
+            // RFC 959: a completed transfer gets its own 226, not a 426; the
+            // client must not be told an upload that was saved was not.
+            Some(t) if t.handle.is_finished() => {
+                let done = t.handle.await.unwrap_or(Done { code: 451, text: "Transfer failed.".into(), log: None });
+                if let Some(l) = &done.log {
+                    glog!("FTP: {} {}", self.peer, l);
+                }
+                self.reply(done.code, &done.text).await && self.reply(226, "Nothing to abort; the transfer had finished.").await
+            }
             Some(t) => {
                 t.handle.abort();
                 glog!("FTP: {} aborted {}", self.peer, t.what);

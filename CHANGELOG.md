@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An FTP server.**  Off by default; turn it on under Server -> More... in the
   desktop window or the web page, or with `X` on the telnet Server
-  Configuration screen (`Y` sets the port, default 2121; `V` the passive data
-  range).  It serves the transfer directory with the gateway's own security:
+  Configuration screen (`Y` sets the port, default 2121, then the passive
+  data range).  It serves the transfer directory with the gateway's own security:
   with login required it asks for the gateway username and password, sharing
   the lockout with telnet, SSH and the web page; without it, logins are
   anonymous and only private addresses may connect, with IP safety and
@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or booted disk image the same way.  It is now refused before the transfer
   starts, and asked again when the file is saved, since a disk can be mounted
   while the upload runs.
+- **The File Transfer menu's Delete, and the Kermit server's REMOTE DELETE,
+  REMOTE RENAME and resume, leave a disk in use alone too.**  Both can reach
+  the emulator's folders (`remote cd CPM/images`), and deleted, renamed or
+  replaced a mounted or booted image without asking.
 
 ## [1.0.7] - 2026-11-11
 

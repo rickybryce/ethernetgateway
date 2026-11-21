@@ -1854,7 +1854,7 @@ impl App {
         });
         ui.label(
             egui::RichText::new(
-                "Per-IP connection rate for telnet and SSH. 0 = no limit.",
+                "Per-IP connection rate for telnet, SSH and FTP. 0 = no limit.",
             )
             .small()
             .color(AMBER_DIM),
@@ -4329,6 +4329,18 @@ impl App {
         // password is "refuse every login", which would lock the operator out.
         let mut out = self.cfg.clone();
         out.password = password_for_save(&out.password, &config::get_config().password);
+        // An invalid passive range is never saved: the loader would drop it
+        // and the server would quietly let the system choose ports.  The
+        // stored range is saved in its place and the console says why.  The
+        // box is put back only once the save succeeds (below), so a save
+        // refused for a port clash still changes nothing on screen.
+        if config::parse_passive_ports(&out.ftp_passive_ports).is_none() {
+            logger::log(format!(
+                "FTP passive ports {:?} not saved: use low-high, both 1024-65535, or leave it empty.",
+                out.ftp_passive_ports
+            ));
+            out.ftp_passive_ports = config::get_config().ftp_passive_ports;
+        }
         // A username no surface could log in with keeps the stored one, and
         // the box goes back to it below, or the editor would read as unsaved.
         let username_refused = crate::credential::username_problem(&out.username);
@@ -4356,6 +4368,10 @@ impl App {
         // value we actually stored can be read back from.  Syncing to anything
         // else would leave `refresh_from_global` seeing a difference every frame.
         self.last_synced_cfg = config::get_config();
+        // A refused passive range goes back to what was stored, now that the
+        // save went through -- left as typed, the editor would read as unsaved
+        // for ever and stop picking up changes made from the other surfaces.
+        self.cfg.ftp_passive_ports = self.last_synced_cfg.ftp_passive_ports.clone();
         if username_refused.is_some() {
             self.cfg.username = self.last_synced_cfg.username.clone();
         }

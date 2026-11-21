@@ -18266,3 +18266,76 @@ async fn test_the_serial_gateway_picker_fits_a_c64_drawn() {
     }
 }
 
+
+/// The body of the function named `sig` in `src`, to its closing brace at
+/// the same indent.
+fn fn_body<'a>(src: &'a str, sig: &str, indent: &str) -> &'a str {
+    let start = src.find(sig).unwrap_or_else(|| panic!("{sig} moved or was renamed"));
+    let rest = &src[start..];
+    let end = rest.find(&format!("\n{indent}}}\n")).expect("its end");
+    &rest[..end]
+}
+
+/// **Every way the telnet side deletes or renames a file asks the CP/M guard
+/// first.**  The File Transfer menu's Delete and the Kermit server's REMOTE
+/// DELETE / RENAME can all browse into the emulator's folders (`remote cd
+/// CPM/images`), so each must ask `outside_change_refusal` before it acts.
+/// Bounded to each function, so a guard elsewhere can't satisfy it.
+#[test]
+fn test_every_delete_and_rename_asks_the_cpm_guard() {
+    let transfer = include_str!("transfer.rs").replace('\r', "");
+    let menu = fn_body(&transfer, "async fn file_transfer_delete(", "    ");
+    let guard = menu.find("outside_change_refusal(").expect("the menu Delete does not ask the guard");
+    assert!(guard < menu.find("remove_file(").expect("the delete"), "asked after deleting");
+
+    let kermit = include_str!("../kermit.rs").replace('\r', "");
+    for (sig, act) in [("async fn delete(&mut self, seq: u8", "remove_file("), ("async fn rename(&mut self, seq: u8", "tokio::fs::rename(")] {
+        let body = fn_body(&kermit, sig, "    ");
+        let guard = body.find("outside_change_refusal(").unwrap_or_else(|| panic!("{sig} does not ask the guard"));
+        assert!(guard < body.find(act).expect("the act"), "{sig} asks after acting");
+    }
+}
+
+/// **The master refuses `ftp-store` before accepting the channel**, for every
+/// reason: not logged in, not a master accepting relays, an unknown protocol
+/// version, no session slot.  A refusal after `channel_success` would tell
+/// the slave its FTP channel was up (the `allow_relay_kermit` lesson).  Real
+/// SSH channels can't be built in a unit test, so this pins the order in the
+/// function itself.
+#[test]
+fn test_the_master_refuses_ftp_store_before_accepting() {
+    let ssh = include_str!("../ssh.rs").replace('\r', "");
+    let body = fn_body(&ssh, "async fn ftp_store_request(", "    ");
+    let accept = body.find("session.channel_success(channel)").expect("the accept");
+    for gate in ["if !self.counted", "cfg.gateway_role != \"master\" || !cfg.master_accept_relays", "if version != \"1\"", "try_claim_slot(&self.session_count, self.max_sessions)"] {
+        let at = body.find(gate).unwrap_or_else(|| panic!("the gate {gate:?} is gone"));
+        assert!(at < accept, "{gate:?} is checked after the channel is accepted");
+    }
+    assert_eq!(body.matches("session.channel_failure(channel)?").count(), 4, "every gate refuses with channel_failure");
+    // And the slot it claims is released however the task ends.
+    assert!(body.find("SlotGuard(session_count)").expect("released by a guard") > accept);
+}
+
+/// **A Kermit resume does not replace a disk the CP/M emulator is using.**
+/// Resume renames the received file over the "partial" it found under the
+/// same name -- which `remote cd CPM/images` can make a booted disk.  Refused
+/// while the boot holds it; the same resume goes through once it is released,
+/// so the refusal is the claim's and nothing else's.
+#[test]
+fn test_a_kermit_resume_spares_a_disk_in_use() {
+    let _reg = crate::cpm::image::registry::tests_lock();
+    let dir = std::env::temp_dir().join(format!("egw_resume_inuse_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let disk = dir.join("GAME.DSK");
+    std::fs::write(&disk, b"the guest's disk").unwrap();
+    let key = crate::cpm::image::registry::claim_booted_image(&disk).expect("claim");
+    let r = TelnetSession::save_received_file_collision_safe(&dir, "GAME.DSK", b"resumed", None, true);
+    assert!(matches!(r, Err(SaveError::WriteFailed)), "a booted disk was replaced by a resume: {r:?}");
+    assert_eq!(std::fs::read(&disk).unwrap(), b"the guest's disk");
+    crate::cpm::image::registry::release_booted_image(&key);
+    let r = TelnetSession::save_received_file_collision_safe(&dir, "GAME.DSK", b"resumed", None, true);
+    assert_eq!(r.ok().as_deref(), Some("GAME.DSK"), "a free file resumes");
+    assert_eq!(std::fs::read(&disk).unwrap(), b"resumed");
+    let _ = std::fs::remove_dir_all(&dir);
+}

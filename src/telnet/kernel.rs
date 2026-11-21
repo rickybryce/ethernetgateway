@@ -1223,12 +1223,14 @@ impl TelnetSession {
                     erased += 1;
                 }
             }
+            // Amber, not green, when something was kept: the command did not
+            // do everything it was asked.
             let summary = if in_use > 0 {
-                format!("{} erased, {} in use.", erased, in_use)
+                self.amber(&format!("{} erased, {} in use.", erased, in_use))
             } else {
-                format!("{} erased.", erased)
+                self.green(&format!("{} erased.", erased))
             };
-            return self.send_line(&format!("  {}", self.green(&summary))).await;
+            return self.send_line(&format!("  {}", summary)).await;
         }
 
         // Single named file.

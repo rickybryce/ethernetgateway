@@ -4188,20 +4188,24 @@ with a TCP/IP stack. Turn it on with <strong>FTP Server</strong> under
 <em>Server &rarr; More&hellip;</em> in the desktop window or the web page, or
 with <code>X</code> on the telnet <em>Server Configuration</em> screen. The
 default port is <strong>2121</strong> (change it there, or with
-<code>Y</code>); a change takes effect on restart.
+<code>Y</code>, which then asks for the passive range); a change of port
+takes effect on restart.
 </p>
 
 <ul>
   <li><strong>Logging in.</strong> With <em>Require Login</em> on, FTP asks for
   the gateway&rsquo;s username and password, and three wrong passwords lock the
   address out of every login surface for five minutes (telnet, SSH, the web
-  page and FTP share one lockout). <code>anonymous</code> is refused without
-  counting against you. With login off, any username and password are accepted
+  page and FTP share one lockout), with a one-second pause after each wrong
+  password. <code>anonymous</code> is refused without counting against you. With login off, any username and password are accepted
   and only private addresses may connect, exactly as on telnet &mdash; <em>IP
   safety</em> and <em>Block gateway connections</em> apply the same way.</li>
   <li><strong>What you can do.</strong> Download, upload (an upload replaces a
   file of the same name), resume either direction, append, rename, delete, and
-  make or remove folders. Everything stays inside the transfer directory.</li>
+  make or remove folders. Wildcards work, so <code>mget&nbsp;*.prg</code> and
+  <code>mdelete</code> behave as they do on any FTP server. Everything stays
+  inside the transfer directory. While one session uploads a file, another
+  session cannot replace, delete or rename it.</li>
   <li><strong>On a slave</strong>, every file you see and every change you make
   is on the <em>master&rsquo;s</em> transfer directory: the slave runs FTP for
   its clients and carries each file operation to the master over its SSH link
@@ -4224,12 +4228,15 @@ default port is <strong>2121</strong> (change it there, or with
   binaries intact.</li>
   <li><strong>Disks in use.</strong> A disk image that is mounted on a CP/M
   drive or running in a booted machine, or a file a CP/M program is writing,
-  can be downloaded but not replaced, renamed or deleted until it is free.</li>
+  can be downloaded but not replaced, renamed or deleted until it is free. The
+  emulator&rsquo;s own <code>CPM</code> folder and the folders in it cannot be
+  renamed or removed.</li>
   <li><strong>Firewalls.</strong> FTP uses a second connection for each listing
   and file. In passive mode (what most clients use) the gateway opens a port for
   it; set <em>Passive</em> (<code>ftp_passive_ports</code>, e.g.
-  <code>50000-50100</code>) and open that range on your firewall or router as
-  well as the FTP port. Active mode (<code>PORT</code>) is accepted only to the
+  <code>50000-50100</code>, or a single port) and open that range on your
+  firewall or router as well as the FTP port. A range that takes in another
+  listener&rsquo;s port is refused. Active mode (<code>PORT</code>) is accepted only to the
   client&rsquo;s own address.</li>
   <li><strong>Security.</strong> FTP sends the password in clear text, as
   telnet does. There is no FTPS: keep FTP on a trusted network, or use SSH
@@ -4237,7 +4244,9 @@ default port is <strong>2121</strong> (change it there, or with
 </ul>
 
 <p>
-The server follows RFC 959 with the extensions modern clients use:
+The full command list, the reply codes and the standards it meets are in the
+standalone reference page <code>ftpreference.html</code>. In short, the server
+follows RFC 959 with the extensions modern clients use:
 <code>FEAT</code>, <code>EPSV</code>/<code>EPRT</code>, <code>MLSD</code>/<code>MLST</code>,
 <code>SIZE</code>, <code>MDTM</code>, <code>REST</code>, UTF-8 names and the
 <code>X</code>-prefixed commands old DOS clients send. Block and compressed

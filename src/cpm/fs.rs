@@ -65,8 +65,10 @@ fn cpm_writers() -> &'static Mutex<HashMap<PathBuf, u64>> {
 pub(crate) fn host_file_being_written(path: &Path) -> bool {
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let key = canon(path);
-    let held = cpm_writers().lock().unwrap_or_else(|e| e.into_inner());
-    held.keys().any(|k| canon(k) == key)
+    // Copied out first: the emulator takes this lock on every record it
+    // writes, and canonicalising is filesystem work that must not hold it.
+    let held: Vec<PathBuf> = cpm_writers().lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+    held.iter().any(|k| canon(k) == key)
 }
 
 /// Why a host file must not be deleted, renamed or rewritten from outside the

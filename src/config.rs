@@ -3714,7 +3714,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
 ");
     write_kv(&mut content, "ftp_enabled", cfg.ftp_enabled);
     write_kv(&mut content, "ftp_port", cfg.ftp_port);
-    write_kv(&mut content, "ftp_passive_ports", &cfg.ftp_passive_ports);
+    write_kv_str(&mut content, "ftp_passive_ports", &cfg.ftp_passive_ports);
     content.push('\n');
 
     content.push_str("\
@@ -5762,6 +5762,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// **An FTP passive range may not take in a listener's port** -- the FTP
+    /// control port included -- but only while FTP is on, and a clash names
+    /// the listener inside the range, so every surface can say which.
+    #[test]
+    fn test_the_passive_range_may_not_cover_a_listener() {
+        let cfg = Config {
+            telnet_enabled: true,
+            telnet_port: 2323,
+            ftp_enabled: true,
+            ftp_port: 2121,
+            ..Config::default()
+        };
+        let c = port_clash_after(&cfg, &[("ftp_passive_ports", "2300-2400")]).expect("telnet is inside");
+        assert_eq!((c.port, c.a, c.b), (2323, FTP_PASSIVE_RANGE, "telnet"));
+        let c = port_clash_after(&cfg, &[("ftp_passive_ports", "2100-2200")]).expect("FTP's own port");
+        assert_eq!((c.port, c.b), (2121, "FTP"));
+        assert_eq!(port_clash_after(&cfg, &[("ftp_passive_ports", "50000-50100")]), None);
+        let off = Config { ftp_enabled: false, ..cfg.clone() };
+        assert_eq!(port_clash_after(&off, &[("ftp_passive_ports", "2300-2400")]), None, "FTP off binds no range");
+        // Turning FTP on with such a range already saved is the same clash.
+        let saved = Config { ftp_passive_ports: "2300-2400".into(), ..off };
+        assert_eq!(port_clash_after(&saved, &[("ftp_enabled", "true")]).map(|c| c.b), Some("telnet"));
+    }
+
     /// **Two listeners on one port is refused as a new change, not as an old
     /// one.**  The editors save through this; a clash already in the file
     /// must not block saving something else.
@@ -7495,8 +7519,9 @@ mod tests {
             lower
         }
 
-        let pages: [(&str, &str); 8] = [
+        let pages: [(&str, &str); 9] = [
             ("web/cpmreference.html", include_str!("../web/cpmreference.html")),
+            ("web/ftpreference.html", include_str!("../web/ftpreference.html")),
             ("web/kermit.html", include_str!("../web/kermit.html")),
             ("web/kermitreference.html", include_str!("../web/kermitreference.html")),
             ("web/punterreference.html", include_str!("../web/punterreference.html")),

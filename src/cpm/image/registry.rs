@@ -465,10 +465,13 @@ pub fn image_in_use(path: &Path) -> bool {
     if lock!(booted_images()).contains(&key) {
         return true;
     }
-    let t = table().read().unwrap_or_else(|e| e.into_inner());
-    t.iter()
-        .flatten()
-        .any(|m| m.path.canonicalize().unwrap_or_else(|_| m.path.clone()) == key)
+    // Copied out before the filesystem work, so the table's lock is held
+    // for a copy of at most sixteen paths, not for their canonicalisation.
+    let paths: Vec<PathBuf> = {
+        let t = table().read().unwrap_or_else(|e| e.into_inner());
+        t.iter().flatten().map(|m| m.path.clone()).collect()
+    };
+    paths.iter().any(|p| p.canonicalize().unwrap_or_else(|_| p.clone()) == key)
 }
 
 /// Drives lent to a booted session, as `drive -> filename`.

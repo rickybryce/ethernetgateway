@@ -97,9 +97,15 @@ impl LineReader {
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            // UTF-8 per RFC 2640; anything else is read lossily rather than
-            // refused, so a Latin-1 client still gets an answer.
-            return Fed::Line(String::from_utf8_lossy(&line).into_owned());
+            // UTF-8 per RFC 2640.  A line that isn't UTF-8 is read as Latin-1
+            // (each byte its own character) rather than with replacement
+            // characters, so its bytes survive: a Windows ftp sends the
+            // console code page, and a name or password arrives as the same
+            // characters telnet would have read from those bytes.
+            return Fed::Line(match String::from_utf8(line) {
+                Ok(text) => text,
+                Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+            });
         }
         if self.overflow {
             return Fed::Nothing;
@@ -115,14 +121,17 @@ impl LineReader {
 }
 
 /// Split a command line into an upper-cased verb and its argument.  The
-/// argument keeps its own spacing (a path may contain spaces) but loses the
-/// one separating it from the verb.
+/// argument keeps the spaces inside it (a path may contain them) but loses
+/// any before it: RFC 959 says one space, and a doubled one -- a common slip
+/// typing into telnet -- would otherwise make the name start with a space.
 pub fn split_command(line: &str) -> (String, String) {
     // Trailing blanks are never part of an argument: no name we create can
     // end in one, and a stray space after a bare verb must not become one.
-    let line = line.trim();
+    // ASCII blanks only: `trim()` would also strip U+0085 and U+00A0, which a
+    // Latin-1-read line holds for the code-page letters `à` and `á`.
+    let line = line.trim_matches(|c: char| c.is_ascii_whitespace());
     match line.split_once(' ') {
-        Some((verb, arg)) => (verb.to_ascii_uppercase(), arg.to_string()),
+        Some((verb, arg)) => (verb.to_ascii_uppercase(), arg.trim_start_matches(' ').to_string()),
         None => (line.trim_end().to_ascii_uppercase(), String::new()),
     }
 }
@@ -326,9 +335,9 @@ pub struct Entry {
     pub len: u64,
     /// Seconds since the Unix epoch, UTC.
     pub mtime: i64,
-    /// Whether a write/delete/rename of it would be refused (an image the
-    /// CP/M emulator is using, or a file a CP/M program is writing).  Shown
-    /// in MLSD `perm`.
+    /// Whether a write/delete/rename of it would be refused: for a file, an
+    /// image the CP/M emulator is using or a file a CP/M program is writing;
+    /// for a folder, one of the emulator's own.  Shown in MLSD `perm`.
     pub locked: bool,
 }
 
@@ -360,11 +369,15 @@ pub fn time_val(mtime: i64) -> String {
 /// The MLSD/MLST facts for one entry (RFC 3659 §7): `type`, `size`, `modify`,
 /// `perm`.  `perm` says what this session may do: `r` retrieve, `w` store,
 /// `a` append, `d` delete, `f` rename for a file; `e` enter, `l` list, `c`
-/// create, `m` make directory, `p` purge (remove) for a directory.  A locked
-/// file loses everything but `r`.
+/// create files in, `m` make directories in, `p` delete files in, `d` remove
+/// (when empty) and `f` rename for a directory.  A locked file keeps only
+/// `r`; a locked folder -- one of the CP/M emulator's own -- loses `d` and `f`.
 pub fn mlsx_facts(e: &Entry) -> String {
     if e.is_dir {
-        format!("type=dir;modify={};perm=elcmpf;", time_val(e.mtime))
+        // A locked folder is one of the CP/M emulator's own: entered, listed
+        // and written into, never renamed or removed.
+        let perm = if e.locked { "elcmp" } else { "elcmpdf" };
+        format!("type=dir;modify={};perm={perm};", time_val(e.mtime))
     } else {
         let perm = if e.locked { "r" } else { "rwadf" };
         format!("type=file;size={};modify={};perm={perm};", e.len, time_val(e.mtime))
@@ -375,4 +388,29 @@ pub fn mlsx_facts(e: &Entry) -> String {
 /// line early and forge another entry.
 pub fn listable(name: &str) -> bool {
     !name.contains('\r') && !name.contains('\n')
+}
+
+/// Match an FTP wildcard: `*` any run of characters, `?` exactly one.  Case
+/// is significant, as on the Unix servers clients expect.
+pub fn glob_match(pattern: &str, name: &str) -> bool {
+    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), name.chars().collect());
+    let (mut pi, mut ni, mut star, mut mark) = (0, 0, None::<usize>, 0);
+    while ni < n.len() {
+        // A `*` is always a wildcard, even facing a literal `*` in the name.
+        if pi < p.len() && p[pi] != '*' && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ni;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ni = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
 }
