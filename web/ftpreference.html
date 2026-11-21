@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTP Reference &mdash; Ethernet Gateway v1.0.8</title>
+    <meta name="description" content="Reference for the Ethernet Gateway FTP server: RFC 959 and its extensions, logins and the gateway&rsquo;s security rules, the commands and replies it answers, what it does with files (the jail, the name rule, disks the CP/M emulator is using), passive and active data connections, and how a slave serves its master&rsquo;s files.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+            /* Let wide reference tables wrap rather than widening the page. */
+            overflow-wrap: anywhere;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+            /* Long unbreakable tokens (config keys, command lines) otherwise set
+               the page's minimum width, and the WHOLE page scrolls sideways on a
+               narrow screen — which breaks reading the prose, not just the token.
+               Measured: every one of these 12 pages overflowed at 390px. */
+            overflow-wrap: anywhere;
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            /* The two header images sit side by side in one bordered banner.  At
+               120px tall the pair is still ~420px wide, so on a phone it pushed
+               the page ~50px past the viewport.  `max-width` lets them scale down
+               together (the flex row needs `min-width: 0` to shrink an image below
+               its intrinsic width), and `height: auto` with a `max-height` cap
+               keeps the aspect ratio instead of squashing them. */
+            .header-photos { max-width: 100%; }
+            /* Prose can carry an unbreakable token too (a long URL, a wide
+               identifier).  Those live in bare text nodes, so no element's box
+               grows and the page just scrolls sideways with nothing to blame —
+               which is exactly how this one hid.  Tables shed some padding here
+               as well: three columns of 14px each is 84px of a phone's width. */
+            .body-content { overflow-wrap: anywhere; }
+            .data-table th,
+            .data-table td { padding: 6px 8px; }
+            .data-table { font-size: 0.8em; }
+            .logo-photo,
+            .sysop-photo {
+                height: auto;
+                max-height: 120px;
+                max-width: 100%;
+                min-width: 0;
+            }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">FTP Reference</p>
+            <div class="hdr-version">v1.0.8</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">FTP</span>
+                <span class="hdr-badge">RFC 959</span>
+                <span class="hdr-badge">EPSV / EPRT</span>
+                <span class="hdr-badge">MLSD</span>
+                <span class="hdr-badge">Server</span>
+                <span class="hdr-badge">Master / Slave</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#enabling">Enabling</a>
+            <a href="#login">Logging In</a>
+            <a href="#files">Files</a>
+            <a href="#data">Data Connections</a>
+            <a href="#slave">On a Slave</a>
+            <a href="#commands">Commands</a>
+            <a href="#clients">Clients</a>
+            <a href="#compliance">Compliance</a>
+            <a href="#config">Config</a>
+            <a href="#references">References</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">The gateway can serve its transfer directory over FTP, to any FTP client &mdash; a modern PC, a DOS machine with a packet driver, or a vintage computer with a TCP/IP stack.</p>
+
+                <p>
+                    The server is written for the gateway rather than taken from a library
+                    (the leading Rust FTP library has no protection against the FTP
+                    &ldquo;bounce&rdquo; attack and can&rsquo;t be extended), and it uses
+                    the gateway&rsquo;s own security: the same login, lockout and
+                    private-address rules as <a href="telnetreference.html">telnet</a>. It
+                    lives in <code>src/ftp/</code>: <code>proto.rs</code> (the protocol
+                    pieces), <code>session.rs</code> (one control connection),
+                    <code>store.rs</code> (every file operation, behind the jail) and
+                    <code>remote.rs</code> (a slave&rsquo;s operations, carried to its
+                    master).
+                </p>
+
+                <div class="callout callout-info">
+                    <strong>Files are sent exactly as stored.</strong> The transfer directory
+                    is a byte-exact store for vintage machines: a CP/M text file needs its
+                    CR&nbsp;LF line endings and a Commodore file its bare CRs. So ASCII mode
+                    (<code>TYPE A</code>) is accepted but translates nothing &mdash; clients
+                    such as Windows <code>ftp</code> that start in ASCII mode transfer
+                    binaries intact. The same choice vsftpd ships with.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- ENABLING                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="enabling">
+                <div class="section-title">Enabling the Server</div>
+                <p class="intro">Off by default, on port 2121; set from any of the three configuration screens.</p>
+                <table class="data-table">
+                    <tr><th>Where</th><th>How</th></tr>
+                    <tr><td>Desktop window</td><td><em>Server &rarr; More&hellip;</em>: the <strong>FTP Server</strong> checkbox, its <strong>Port</strong>, and <strong>Passive</strong>.</td></tr>
+                    <tr><td>Web page</td><td><em>Server &rarr; More&hellip;</em>: the same three fields, under <em>FTP Server</em>.</td></tr>
+                    <tr><td>Telnet</td><td><em>Configuration &rarr; Server Configuration</em>: <code>X</code> turns FTP on or off; <code>Y</code> sets the port, then the passive range.</td></tr>
+                    <tr><td><code>egateway.conf</code></td><td><code>ftp_enabled</code>, <code>ftp_port</code>, <code>ftp_passive_ports</code> (see <a href="#config">Config</a>).</td></tr>
+                </table>
+                <p class="dim-text">
+                    Turning the server on or off, or changing its port, takes effect on
+                    restart, like every listener. The passive range is read on every
+                    passive connection, so it applies at once. A port that clashes with the
+                    telnet, SSH, web or Kermit listener is refused, and so is a passive
+                    range that takes in any listener&rsquo;s port.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- LOGIN                                          -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="login">
+                <div class="section-title">Logging In &amp; Security</div>
+                <p class="intro">FTP follows <em>Require Login</em>, exactly as telnet does.</p>
+                <table class="data-table">
+                    <tr><th>Setting</th><th>Who may connect</th><th>Login</th></tr>
+                    <tr><td>Require Login <strong>off</strong></td><td>Private addresses only (RFC&nbsp;1918, loopback, link-local, ULA) &mdash; unless <em>IP Safety</em> is disabled. <em>Block gateway connections</em> refuses this network&rsquo;s router.</td><td>Anonymous: any username, any password.</td></tr>
+                    <tr><td>Require Login <strong>on</strong></td><td>Any address (the login is the gate).</td><td>The gateway&rsquo;s username and password. <code>anonymous</code> / <code>ftp</code> are refused at once, and that refusal is <em>not</em> counted against you &mdash; browsers and clients try it on their own.</td></tr>
+                </table>
+                <ul class="dim-text">
+                    <li><strong>One lockout for every surface.</strong> Three wrong passwords lock the address out of telnet, SSH, the web page and FTP for five minutes. An FTP client with a saved wrong password that retries on its own can therefore lock that PC out of the web page too.</li>
+                    <li><strong>One connection budget.</strong> The per-IP connection rate (<code>conn_rate_max</code> / <code>conn_rate_window_secs</code>) counts FTP control connections together with telnet and SSH; over the limit, a connection is dropped silently. FTP sessions are capped at <code>max_sessions</code>, counted separately from telnet&rsquo;s and SSH&rsquo;s.</li>
+                    <li><strong>No user enumeration.</strong> Every <code>USER</code> gets <code>331</code>, and a wrong username or password gets the same <code>530</code> in the same time. There is a one-second pause after each failed login, as on telnet.</li>
+                    <li><strong>Passwords are never logged</strong>, not even with verbose logging on (the line reads <code>PASS ****</code>).</li>
+                    <li><strong>Clear text.</strong> FTP sends the password unencrypted, as telnet does. There is no FTPS: <code>AUTH</code> answers <code>502</code>, so modern clients fall back to plain FTP. Keep FTP on a trusted network.</li>
+                </ul>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- FILES                                          -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="files">
+                <div class="section-title">What FTP Does With Files</div>
+                <p class="intro">Everything happens inside the transfer directory, under the same rules as the gateway&rsquo;s other ways of moving files.</p>
+                <table class="data-table">
+                    <tr><th>Rule</th><th>Detail</th></tr>
+                    <tr><td>The jail</td><td><code>/</code> is <code>transfer_dir</code>. <code>..</code> never climbs above it, and every existing file is checked by its real path, so a symlink can&rsquo;t lead out.</td></tr>
+                    <tr><td>New names</td><td>A file or folder FTP creates must use letters, digits, <code>.</code>, <code>-</code> and <code>_</code>, up to 64 characters &mdash; the rule every other upload follows, so the name still works in the Gateway Shell and on CP/M and Commodore machines. Anything else is refused with <code>553</code> and the reason; the name is never quietly changed. Existing files with other names (spaces included) can still be listed, downloaded, renamed and deleted.</td></tr>
+                    <tr><td>Uploads</td><td><code>STOR</code> writes beside the target and renames over it when complete, so a broken upload never leaves half a file under the real name. <code>APPE</code> and a resumed upload (<code>REST</code> + <code>STOR</code>) write in place. An upload is refused (<code>452</code>) when the disk is over 90% full.</td></tr>
+                    <tr><td>One writer per file</td><td>While one session uploads a file, another session&rsquo;s upload, delete or rename of it is told the file is busy (<code>450</code>).</td></tr>
+                    <tr><td>Disks in use</td><td>A disk image mounted on a CP/M drive or running in a booted machine, or a file a CP/M program is writing, can be downloaded but not replaced, appended to, renamed or deleted (<code>550 In use by the CP/M emulator.</code>). The emulator&rsquo;s own <code>CPM</code> folder and the folders in it can&rsquo;t be renamed or removed.</td></tr>
+                    <tr><td>Rename</td><td>A file may replace a file, as clients expect; nothing replaces a folder, and a folder can&rsquo;t be moved inside itself.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- DATA CONNECTIONS                               -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="data">
+                <div class="section-title">Data Connections &amp; Firewalls</div>
+                <p class="intro">FTP opens a second connection for every listing and every file.</p>
+                <table class="data-table">
+                    <tr><th>Mode</th><th>Commands</th><th>How it is protected</th></tr>
+                    <tr><td>Passive (most clients)</td><td><code>PASV</code>, <code>EPSV</code></td><td>The gateway opens a port and accepts one connection, from the control connection&rsquo;s own address only, within 30&nbsp;s. Anyone else connecting to it is dropped (RFC&nbsp;2577 &ldquo;port theft&rdquo;).</td></tr>
+                    <tr><td>Active (Windows <code>ftp</code>, DOS clients)</td><td><code>PORT</code>, <code>EPRT</code></td><td>The gateway connects back only to the client&rsquo;s own address, on port 1024 or above. Any other target is refused &mdash; the FTP &ldquo;bounce&rdquo; attack (RFC&nbsp;2577).</td></tr>
+                </table>
+                <div class="callout callout-tip">
+                    <strong>Behind a firewall or router:</strong> set <code>ftp_passive_ports</code>
+                    (e.g. <code>50000-50100</code>, or a single port) and open that range as
+                    well as the FTP port. Without it the operating system picks a random
+                    port that no firewall rule can anticipate. The passive reply names the
+                    address the client reached the gateway on; behind NAT that is a private
+                    address, which curl and FileZilla already replace with the address they
+                    connected to.
+                </div>
+                <p class="dim-text">
+                    IPv4 only, as every gateway listener is today: <code>EPRT</code> for IPv6
+                    answers <code>522</code>. A data connection that moves nothing for
+                    120&nbsp;s is given up.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SLAVE                                          -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="slave">
+                <div class="section-title">FTP on a Slave</div>
+                <p class="intro">On a slave, every file you see and every change you make is on the <em>master&rsquo;s</em> transfer directory.</p>
+                <p>
+                    The slave runs the FTP protocol for its own clients &mdash; its login,
+                    address rules and data connections are all its own &mdash; and carries
+                    each file operation to the master over the SSH link it already has. The
+                    master carries it out with the same jail and the same CP/M checks it
+                    applies to its own FTP clients, and re-checks every path the slave sends.
+                </p>
+                <ul class="dim-text">
+                    <li><strong>One connection, a channel per session.</strong> The slave opens one SSH connection for FTP (on the first login) and gives each FTP session its own channel on it; the connection closes a minute after the last session ends. A new connection per login would trip the master&rsquo;s per-IP connection rate, which the slave&rsquo;s serial relays share.</li>
+                    <li><strong>Downloads are paced.</strong> The master sends a few blocks ahead and waits for the slave to take them, so one slow client can&rsquo;t hold up the other FTP sessions sharing the connection.</li>
+                    <li><strong>Uploads are confirmed.</strong> The slave reports a file saved only once the master has written it to disk.</li>
+                    <li><strong>No fallback.</strong> If the master can&rsquo;t be reached, the login is refused (<code>421</code>) with the reason; a slave never serves its own transfer directory over FTP.</li>
+                    <li><strong>What the master needs.</strong> SSH on, <em>accept relays</em> on, and this slave&rsquo;s login (its enrolled key, or the master password). No separate FTP switch on the master. Master and slave must run the same version.</li>
+                </ul>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- COMMANDS                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="commands">
+                <div class="section-title">Commands &amp; Replies</div>
+                <p class="intro">Every command of RFC&nbsp;959, and the extensions modern clients use.</p>
+                <table class="data-table">
+                    <tr><th>Group</th><th>Commands</th><th>Notes</th></tr>
+                    <tr><td>Login</td><td><code>USER PASS ACCT REIN QUIT HOST</code></td><td><code>ACCT</code> is <code>202</code> (not needed). <code>REIN</code> logs out and keeps the connection. <code>HOST</code> (RFC&nbsp;7151) is accepted before <code>USER</code>; one virtual host.</td></tr>
+                    <tr><td>Navigation</td><td><code>PWD CWD CDUP</code> and <code>XPWD XCWD XCUP</code></td><td>The <code>X</code> forms (RFC&nbsp;775) are what old DOS and Windows clients send.</td></tr>
+                    <tr><td>Listing</td><td><code>LIST NLST MLSD MLST STAT</code></td><td><code>LIST</code> is <code>ls -l</code> style; <code>-la</code> style options are accepted and ignored. Wildcards (<code>*</code>, <code>?</code>) in the last part of a path are expanded, which is how <code>mget</code> and <code>mdelete</code> work; <code>NLST</code> keeps the folder prefix you gave. <code>MLSD</code>/<code>MLST</code> give <code>type</code>, <code>size</code>, <code>modify</code> and <code>perm</code>; <code>perm</code> shows what is locked.</td></tr>
+                    <tr><td>Transfer</td><td><code>RETR STOR STOU APPE REST ABOR</code></td><td><code>REST</code> resumes either direction. <code>STOU</code> names a fresh file (<code>150 FILE: name</code>). <code>ABOR</code> works mid-transfer, including the old out-of-band form.</td></tr>
+                    <tr><td>Files</td><td><code>DELE RNFR RNTO MKD RMD SIZE MDTM</code> and <code>XMKD XRMD</code></td><td><code>RMD</code> removes empty folders only. <code>MDTM</code> is UTC.</td></tr>
+                    <tr><td>Connection</td><td><code>PASV EPSV PORT EPRT</code></td><td><code>EPSV ALL</code> is honoured.</td></tr>
+                    <tr><td>Parameters</td><td><code>TYPE MODE STRU</code></td><td><code>TYPE A</code> / <code>I</code> / <code>L 8</code>; <code>MODE S</code>; <code>STRU F</code> / <code>R</code>. EBCDIC, block and compressed modes, and page structure answer <code>504</code>, as the standard allows.</td></tr>
+                    <tr><td>Information</td><td><code>FEAT OPTS SYST HELP NOOP SITE ALLO</code></td><td><code>OPTS UTF8</code> and <code>OPTS MLST</code>; <code>SYST</code> is <code>UNIX Type: L8</code>; <code>SITE HELP</code> only.</td></tr>
+                    <tr><td>Refused</td><td><code>AUTH PBSZ PROT CCC ADAT MIC CONF ENC LPRT LPSV SMNT</code></td><td><code>502</code>: no FTPS, and the historic long-address forms.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CLIENTS                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="clients">
+                <div class="section-title">Client Notes</div>
+                <p class="intro">Tested live with curl and Python&rsquo;s ftplib, in passive and active mode, directly and through a slave.</p>
+                <table class="data-table">
+                    <tr><th>Client</th><th>Notes</th></tr>
+                    <tr><td>Windows <code>ftp</code></td><td>Active mode only, and starts in ASCII mode &mdash; both fine here. A password typed in the console&rsquo;s code page (not UTF-8) is read byte for byte.</td></tr>
+                    <tr><td>FileZilla</td><td>Uses <code>MLSD</code> and <code>EPSV</code>, and reads <code>perm</code> to decide which actions to offer. If it asks about TLS, choose plain FTP.</td></tr>
+                    <tr><td>curl / wget</td><td><code>curl ftp://host:2121/FTP/</code> lists; <code>-T file</code> uploads; <code>--ftp-create-dirs</code> makes folders.</td></tr>
+                    <tr><td>Vintage machines</td><td>Point the client at the gateway&rsquo;s address and port 2121. With Require Login off, log in as <code>anonymous</code> with any password.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- COMPLIANCE                                     -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="compliance">
+                <div class="section-title">Standards Compliance</div>
+                <p class="intro">FTP is not one document; these are the ones a modern server is measured against.</p>
+                <table class="data-table">
+                    <tr><th>RFC</th><th>Subject</th><th>Status</th></tr>
+                    <tr><td>959</td><td>File Transfer Protocol</td><td>Implemented; unsupported types, modes and structures refused as it allows.</td></tr>
+                    <tr><td>1123 &sect;4.1</td><td>Host requirements for FTP</td><td>Implemented.</td></tr>
+                    <tr><td>775</td><td>Directory-oriented commands (<code>X</code> forms)</td><td>Implemented.</td></tr>
+                    <tr><td>2389</td><td><code>FEAT</code> / <code>OPTS</code></td><td>Implemented.</td></tr>
+                    <tr><td>2428</td><td><code>EPRT</code> / <code>EPSV</code></td><td>Implemented for IPv4.</td></tr>
+                    <tr><td>2577</td><td>FTP security considerations</td><td>Bounce and port-theft protection, brute-force lockout, no user enumeration.</td></tr>
+                    <tr><td>2640</td><td>Internationalisation</td><td>UTF-8 names; <code>LANG</code> offers English.</td></tr>
+                    <tr><td>3659</td><td><code>SIZE</code>, <code>MDTM</code>, <code>REST</code>, <code>MLST</code>/<code>MLSD</code>, TVFS</td><td>Implemented.</td></tr>
+                    <tr><td>7151</td><td><code>HOST</code></td><td>Implemented, one host.</td></tr>
+                    <tr><td>2228 / 4217</td><td>Security extensions / FTP over TLS</td><td>Not offered (<code>502</code>): FTP here is for vintage machines on a trusted network, as telnet is.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CONFIG                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="config">
+                <div class="section-title">Configuration Keys</div>
+                <p class="intro">Editable from the telnet Configuration menu, the GUI, the web UI, or egateway.conf directly.</p>
+                <table class="data-table">
+                    <tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+                    <tr><td><code>ftp_enabled</code></td><td>false</td><td>Run the FTP server. Takes effect on restart.</td></tr>
+                    <tr><td><code>ftp_port</code></td><td>2121</td><td>The FTP control port. Takes effect on restart.</td></tr>
+                    <tr><td><code>ftp_passive_ports</code></td><td>(empty)</td><td>Passive data ports as <code>low-high</code> (low at least 1024) or one port; empty lets the operating system choose. Read on every passive connection.</td></tr>
+                </table>
+                <div class="callout callout-tip">
+                    <strong>Shared with other surfaces:</strong> <code>security_enabled</code>,
+                    <code>username</code> / <code>password</code>, <code>disable_ip_safety</code>,
+                    <code>disable_gateway_connections</code>, <code>conn_rate_max</code> /
+                    <code>conn_rate_window_secs</code>, <code>max_sessions</code>,
+                    <code>idle_timeout_secs</code> and <code>transfer_dir</code> all apply to
+                    FTP as described above.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- REFERENCES                                     -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="references">
+                <div class="section-title">References</div>
+                <p class="intro">Deep-dive reference pages for every protocol and interface, plus the character-set tables and ANSI escape-sequence reference.</p>
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3><a href="cpmreference.html">CP/M Emulator</a></h3>
+                        <p>UART profiles, EGT8080, HBIOS calls, BDOS/BIOS coverage.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="xmodemreference.html">XMODEM</a></h3>
+                        <p>128-byte blocks; CRC-16 / checksum negotiation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="ymodemreference.html">YMODEM</a></h3>
+                        <p>Block-0 metadata, batch, exact size truncation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="zmodemreference.html">ZMODEM</a></h3>
+                        <p>Streaming; ZDLE, CRC-32, autostart, resume.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermitreference.html">Kermit</a></h3>
+                        <p>Send-Init negotiation; F / A / D / Z / B transfer.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="punterreference.html">Punter</a></h3>
+                        <p>C1 dual checksum, two-phase, GOO/BAD/ACK.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="atcommandreference.html">AT Commands</a></h3>
+                        <p>Hayes command set, S-registers, +++ escape.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="telnetreference.html">Telnet</a></h3>
+                        <p>IAC negotiation, every option, the NVT data phase.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="sshreference.html">SSH</a></h3>
+                        <p>Server, gateway, host keys, TOFU, auth modes.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3 style="color: var(--yellow);">FTP <span class="dim-text" style="font-size:0.78em;">(this page)</span></h3>
+                        <p>The FTP server: logins, files, passive ports, slaves.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="gopherreference.html">Gopher</a></h3>
+                        <p>Menus, every item type, Gopher+ attributes and forms.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html">Character Code Tables</a></h3>
+                        <p>Hex tables for every encoding: ASCII, ANSI, PETSCII, ATASCII, Baudot/ITA2, ZX Spectrum, TRS-80.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html#ansi-table">ANSI Escape Sequences</a></h3>
+                        <p>Cursor, colour/SGR, erase, and screen-mode escape codes, with the raw hex bytes.</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v1.0.8 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>
