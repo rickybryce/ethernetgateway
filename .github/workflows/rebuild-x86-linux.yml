@@ -1,0 +1,163 @@
+name: Rebuild v1.0.8 x86_64 Linux (glibc 2.35)
+
+# One-off, on this branch only (v1.0.8's source plus this file).
+#
+# release.yml built x86_64 Linux on `ubuntu-latest`, which GitHub moved to an
+# Ubuntu with glibc 2.43 between 1.0.6 and 1.0.7; the binary then asked for
+# 2.43's coshf/sinhf/acosf/asinf/atan2f/acoshf and would not start on Debian 13
+# (2.41) or Ubuntu 24.04 (2.39).  The aarch64 build was already on
+# ubuntu-22.04-arm (2.35).  This rebuilds the two x86_64 Linux assets of v1.0.8
+# on ubuntu-22.04 with release.yml's own steps, refuses a binary that needs more
+# than 2.35, and signs them.  Uploading them to the release is done by hand,
+# after they have been checked.
+on:
+  push:
+    branches: [rebuild-v108-x86]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: v1.0.8
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write  # sigstore/cosign keyless signing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            pkg-config \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libwayland-dev \
+            libfontconfig1-dev
+
+      - name: cargo build --release
+        run: cargo build --release --locked --target ${{ env.TARGET }} --verbose
+
+      - name: glibc floor (refuse anything newer than 2.35)
+        shell: bash
+        run: |
+          B="target/${TARGET}/release/ethernetgateway"
+          MAX=$(objdump -T "$B" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "highest glibc symbol version: ${MAX}"
+          [ "$(printf '%s\n' "$MAX" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35 ] || {
+            echo "FATAL: needs ${MAX}, more than GLIBC_2.35" >&2; exit 1; }
+
+      - name: Package (tar.gz)
+        shell: bash
+        run: |
+          NAME="ethernetgateway-${TAG}-${TARGET}"
+          mkdir -p "dist/${NAME}"
+          cp "target/${TARGET}/release/ethernetgateway" "dist/${NAME}/"
+          cp README.md LICENSE "dist/${NAME}/" 2>/dev/null || true
+          cp EGT8080/EGT8080.COM "dist/${NAME}/" 2>/dev/null || true
+          cp EGT8080/EGT80.COM   "dist/${NAME}/" 2>/dev/null || true
+          tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
+          echo "ARTIFACT=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Build AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCH=x86_64
+          APPIMAGETOOL_SHA256=b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2
+          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${ARCH}.AppImage" -O appimagetool
+          echo "${APPIMAGETOOL_SHA256}  appimagetool" | sha256sum -c - || {
+              echo "FATAL: appimagetool for ${ARCH} does not match the recorded hash." >&2
+              exit 1
+          }
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract >/dev/null
+          mkdir -p AppDir/usr/bin
+          cp target/${TARGET}/release/ethernetgateway AppDir/usr/bin/
+          cp web/ethernetgatewaylogo.png AppDir/ethernetgateway.png
+          cat > AppDir/ethernetgateway.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Ethernet Gateway
+          Comment=Telnet/SSH gateway and Hayes AT modem emulator for retro terminals
+          Exec=ethernetgateway
+          Icon=ethernetgateway
+          Categories=Network;Utility;
+          Terminal=false
+          EOF
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          # Everything the gateway creates lives in `ethernetgateway-data`
+          # BELOW THE WORKING DIRECTORY, and a desktop launch does not define
+          # one: the desktop-entry spec leaves it undefined when `Path=` is
+          # absent (and `Path=` takes a literal, so it cannot say "$HOME").
+          # Left alone, the same AppImage double-clicked from a file manager and
+          # started from an application menu can land on two different data
+          # directories -- two configs, two SSH host keys, two transfer trees,
+          # and two per-directory locks that know nothing about each other.
+          #
+          # So pin it, but only when there is no shell behind us: a launch from
+          # a terminal names its own working directory deliberately (the repo's
+          # own harnesses do exactly that) and must keep it.
+          #
+          # And never move away from a data directory that is already here. The
+          # tty test alone was too blunt: `nohup ./Ethernet_Gateway.AppImage
+          # >log 2>&1 &` from /srv/gateway has no terminal on any stream either,
+          # and relocating a deliberate launch's data to $HOME would be exactly
+          # the split this pin exists to prevent. An existing folder is the
+          # operator's answer to the question, so it wins.
+          if [ ! -t 0 ] && [ ! -t 1 ] && [ ! -t 2 ] \
+             && [ ! -d ethernetgateway-data ] && [ -d "${HOME}" ]; then
+            cd "${HOME}" || exit 1
+          fi
+          exec "${HERE}/usr/bin/ethernetgateway" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          ARCH="${ARCH}" ./squashfs-root/AppRun AppDir "dist/Ethernet_Gateway-${ARCH}.AppImage"
+          echo "APPIMAGE=dist/Ethernet_Gateway-${ARCH}.AppImage" >> "$GITHUB_ENV"
+
+      - name: SHA-256 checksum
+        shell: bash
+        run: |
+          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          sha256sum "${APPIMAGE}" > "${APPIMAGE}.sha256"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Sigstore-sign artifacts
+        run: |
+          cd dist
+          for f in ethernetgateway-*.tar.gz Ethernet_Gateway-*.AppImage; do
+            cosign sign-blob --yes --bundle "${f}.sigstore.json" "$f"
+          done
+          ls -la
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rebuild-x86_64-linux
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.tar.gz.sigstore.json
+            dist/*.AppImage
+            dist/*.AppImage.sha256
+            dist/*.AppImage.sigstore.json
+          if-no-files-found: error
