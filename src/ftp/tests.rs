@@ -755,7 +755,22 @@ async fn test_the_emulator_folders_cannot_be_moved() {
     let (_, mlsd) = c.get("MLSD").await;
     assert!(String::from_utf8(mlsd).unwrap().contains("perm=elcmp; CPM"));
     let (code, body) = c.get("RETR CPM/A/X.COM").await;
-    assert_eq!((code, body.as_slice()), (226, &b"x"[..]));
+    // Said with what the server was looking at, if not: the configured
+    // transfer folder and what is really in it.
+    let seen = || {
+        let walk = |d: &std::path::Path| -> Vec<String> {
+            std::fs::read_dir(d).map(|r| r.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default()
+        };
+        format!(
+            "transfer_dir {:?} (scratch {:?}); top {:?}; CPM {:?}; CPM/A {:?}",
+            config::get_config().transfer_dir,
+            s.dir,
+            walk(&s.dir),
+            walk(&s.dir.join("CPM")),
+            walk(&s.dir.join("CPM").join("A"))
+        )
+    };
+    assert_eq!((code, body.as_slice()), (226, &b"x"[..]), "{}", seen());
     assert_eq!(c.cmd("RNFR CPM/A/X.COM").await.0, 350, "files inside are guarded one by one");
 }
 
@@ -1067,6 +1082,14 @@ async fn test_the_cpm_guard_covers_rnto_and_a_late_boot() {
     let store = super::store::LocalStore;
     let mut up = store.begin_write("/GAME.DSK", super::store::WriteMode::Replace).await.unwrap();
     let key = crate::cpm::image::registry::claim_booted_image(&disk).unwrap();
+    // The guard must see the claim under the store's own spelling of the
+    // path before `finish` is asked -- said with both spellings if not.
+    let store_path = std::fs::canonicalize(&s.dir).unwrap().join("GAME.DSK");
+    assert!(
+        crate::cpm::outside_change_refusal(&store_path).is_some(),
+        "the guard does not see the claim: key {key:?}, store path {store_path:?}, canonical {:?}",
+        std::fs::canonicalize(&store_path)
+    );
     tokio::io::AsyncWriteExt::write_all(&mut up.file, b"replacement").await.unwrap();
     let e = up.finish().await.expect_err("an upload replaced a disk booted while it ran");
     assert!(matches!(e, super::store::StoreError::Locked(_)), "{e:?}");
