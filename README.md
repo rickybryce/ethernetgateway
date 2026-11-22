@@ -3,9 +3,10 @@
 Ethernet Gateway puts vintage computers on the network. Plug a Commodore 64,
 an Altair 8800 clone, an RC2014 or any machine with an RS-232 serial port into
 it, and that machine gets a **Hayes-compatible modem** that can dial telnet BBSes
-and SSH hosts, a file server it can download from with **XMODEM, YMODEM, ZMODEM,
+(or the gateway itself, and from there SSH hosts), a file server it can download from with **XMODEM, YMODEM, ZMODEM,
 Kermit or Punter**, and a **CP/M emulator** that runs real `.COM` software. It is
-written in Rust and runs on Linux (a Raspberry Pi is plenty), macOS and Windows.
+written in Rust and runs on Linux (a Raspberry Pi 4 or later is plenty), macOS
+and Windows.
 
 The same gateway answers modern machines too: over telnet and SSH, from a
 desktop window, a web page, or an **FTP server** that serves the same folder the
@@ -32,9 +33,10 @@ to transfer files to a CP/M machine or a Commodore 64 without swapping floppies
 or SD cards, this is the job it was built for. Put the files in one folder on
 the gateway and download them from the old machine over a serial cable or a
 telnet connection, with XMODEM-CRC and XMODEM-1K, YMODEM batch, ZMODEM, Kermit
-(sliding windows, and an always-on Kermit server) or Punter C1, the Commodore
-protocol CCGMS and Novaterm use. Uploads are recognised automatically, and from
-a PC you can drop files into the same folder by FTP.
+(sliding windows, and an always-on Kermit server) or Punter C1, the C64 BBS
+protocol that CCGMS and Novaterm use. On upload the gateway works out which
+XMODEM variant the sender is using, and from a PC you can drop files into the
+same folder by FTP.
 
 **A modem emulator for retro computers.** Each of two serial ports can act as a
 Hayes modem with the usual AT command set, S-registers, stored numbers and
@@ -43,20 +45,20 @@ bbs.example.com:23` and reaches a telnet BBS the way it once reached a phone
 line. It does the job of a WiFi modem or a serial-to-telnet bridge, and a USB
 serial adapter on a Raspberry Pi is all the hardware it needs.
 
-**Calling BBSes from a Commodore 64.** ANSI colour and cursor control from a
-remote telnet or SSH host are translated to PETSCII on the way to a C64, and
+**Calling BBSes from a Commodore 64.** ANSI colour, clear-screen and cursor
+movement from a remote telnet or SSH host are translated to PETSCII on the way to a C64, and
 every screen the gateway draws itself fits 40 columns.
 
-**Running CP/M and booting Altair, IMSAI and Cromemco disks.** The CP/M 2.2
-emulator runs WordStar, MBASIC, PIP, ED and ASM on an emulated Z80
-or 8080, with folders or `.dsk` disk images as drives. Booting a disk image goes
+**Running CP/M and booting Altair and Cromemco disks.** The CP/M 2.2 emulator
+runs the CP/M programs you give it, such as WordStar, MBASIC, PIP and ASM, on an
+emulated Z80 or 8080, with folders or `.dsk` disk images as drives. Booting a disk image goes
 further: the machine is emulated down to its disk controller, so CP/M 3, Altair
 DOS and Altair Disk Extended BASIC boot from their own disks, and a VDM-1 or
 Dazzler display is shown in a web browser.
 
 **A serial console server.** A port set to console mode is a telnet-to-serial
 bridge, handy for an RC2014, SC126 or any board with only a serial console. A
-Kermit-mode port serves files to whatever is on the other end.
+Kermit-mode port serves files to a Kermit program on the other end.
 
 **The modern web on an 8-bit screen.** A text-mode web browser (HTTP, HTTPS and
 Gopher), current weather anywhere in the world, and AI chat, all sized for a 40-
@@ -115,7 +117,7 @@ options, and the full AT command set.
 - **Gateway Shell** — a CP/M-inspired `A>` file manager over the transfer
   directory (DIR, TYPE, COPY, MOVE, ERA, REN, MKDIR, …). No Z80 emulation.
 - **CP/M 2.2 emulator** — a separate thing from the shell above. It runs real
-  `.COM` software (WordStar, MBASIC, PIP, ED, ASM…) on an emulated Z80 or 8080.
+  `.COM` software you supply (WordStar, MBASIC, PIP, ASM…) on an emulated Z80 or 8080.
   Drives A:–P: are folders under the transfer directory, or mounted **`.dsk`
   disk images**. Ships this project's own CP/M terminal program, plus a virtual
   modem so guest software can dial out. On by default, and bounded: guest file
@@ -141,8 +143,8 @@ options, and the full AT command set.
   disconnect.
 - **Master/slave relay** — extend a slave gateway's serial ports to a master
   over SSH; files always land on the master.
-- **FTP server** — serves the transfer directory to FTP clients (FileZilla,
-  curl, Windows `ftp`, or a vintage machine's own client) with the gateway's
+- **FTP server** — serves the transfer directory to standard FTP clients
+  (tested with curl and Python's ftplib, in passive and active mode) with the gateway's
   login, lockout and address rules. On a slave, every file operation happens
   on the master. Off by default.
 - **Web browser** — text-mode HTTP/HTTPS/Gopher browsing with numbered links,
