@@ -2548,6 +2548,14 @@ impl TelnetSession {
                                 {
                                     self.send_line("").await?;
                                     let path = self.transfer_path().join(filename);
+                                    // Asked again after the answer: the
+                                    // prompt can wait as long as the user
+                                    // does, and another session may have
+                                    // mounted or booted the disk meanwhile.
+                                    if let Some(why) = crate::cpm::outside_change_refusal(&path) {
+                                        self.show_error(why).await?;
+                                        continue;
+                                    }
                                     match tokio::fs::remove_file(&path).await {
                                         Ok(()) => {
                                             self.send_line(&format!(

@@ -30,9 +30,15 @@ use crate::telnet::LockoutMap;
 const DATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// A data connection that moves no bytes for this long is given up.  Not the
 /// idle timeout: that is for an idle *session*, and may be off.
-const DATA_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const DATA_STALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// A reply the client won't read for this long ends the session.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+/// A connection must log in within this long of arriving (or of REIN, or of a
+/// USER that ended its login).  Commands do not extend it: before login, NOOP
+/// would otherwise hold a `max_sessions` slot for ever, and fifty such
+/// connections would shut every real client out.  Long enough for someone
+/// typing USER and PASS by hand into a telnet window.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Names that are anonymous logins.  With security on they are refused at
 /// once and *not* counted against the address: browsers, curl and FileZilla
@@ -81,6 +87,11 @@ struct Transfer {
     handle: tokio::task::JoinHandle<Done>,
     bytes: Arc<AtomicU64>,
     what: String,
+    /// An upload's data has all arrived and it is being saved.  ABOR then
+    /// waits for the save instead of cancelling it: a rename (or, on a slave,
+    /// the master's commit) already under way finishes regardless, and the
+    /// client must not be told `426` about a file that was saved.
+    committing: Arc<AtomicBool>,
 }
 
 /// A finished transfer's reply and log line.
@@ -109,6 +120,10 @@ pub(super) struct Session {
     reader: LineReader,
     user: Option<String>,
     logged_in: bool,
+    /// When the current wait for a login began, and how long it may last:
+    /// see [`LOGIN_TIMEOUT`] (shortened by tests).
+    login_started: tokio::time::Instant,
+    pub(super) login_timeout: Duration,
     cwd: String,
     rest: u64,
     rnfr: Option<String>,
@@ -142,6 +157,8 @@ impl Session {
             reader: LineReader::default(),
             user: None,
             logged_in: false,
+            login_started: tokio::time::Instant::now(),
+            login_timeout: LOGIN_TIMEOUT,
             cwd: "/".into(),
             rest: 0,
             rnfr: None,
@@ -216,11 +233,13 @@ impl Session {
             let idle = config::get_config().idle_timeout_secs;
             let idle_deadline = (idle > 0 && self.transfer.is_none())
                 .then(|| last_activity + Duration::from_secs(idle));
+            let login_deadline = (!self.logged_in).then(|| self.login_started + self.login_timeout);
 
             enum Event {
                 Read(std::io::Result<usize>),
                 TransferDone(Done),
                 Idle,
+                LoginTimeout,
                 Tick,
             }
             let event = {
@@ -245,6 +264,12 @@ impl Session {
                             None => std::future::pending().await,
                         }
                     } => Event::Idle,
+                    _ = async {
+                        match login_deadline {
+                            Some(d) => tokio::time::sleep_until(d).await,
+                            None => std::future::pending().await,
+                        }
+                    } => Event::LoginTimeout,
                     _ = notify.notified() => Event::Tick,
                     _ = tokio::time::sleep(Duration::from_secs(5)) => Event::Tick,
                 }
@@ -290,6 +315,11 @@ impl Session {
                     let _ = self.reply(421, "Idle timeout; closing control connection.").await;
                     return;
                 }
+                Event::LoginTimeout => {
+                    glog!("FTP: {} did not log in within {}s", self.peer, self.login_timeout.as_secs());
+                    let _ = self.reply(421, "Login timed out; closing control connection.").await;
+                    return;
+                }
                 Event::Tick => {}
             }
         }
@@ -322,7 +352,14 @@ impl Session {
         if line == TOO_LONG {
             return Self::flow(self.reply(500, "Command line too long.").await);
         }
-        let (verb, arg) = proto::split_command(line);
+        let (verb, mut arg) = proto::split_command(line);
+        if verb == "PASS" {
+            // The password exactly as sent: a space at either end is part of
+            // it (telnet and SSH take it that way), and trimming it here
+            // would make such a password fail -- counting toward the lockout
+            // shared with telnet, SSH and the web page.
+            arg = proto::raw_argument(line).to_string();
+        }
         if verb.is_empty() {
             // Someone pressing Enter in a telnet window: say so rather than
             // leave them waiting for a reply that never comes.
@@ -361,6 +398,7 @@ impl Session {
                 self.abort_transfer();
                 self.user = None;
                 self.logged_in = false;
+                self.login_started = tokio::time::Instant::now();
                 self.cwd = "/".into();
                 self.data = None;
                 self.epsv_all = false;
@@ -485,6 +523,9 @@ impl Session {
             return Self::flow(self.reply(501, "USER needs a name.").await);
         }
         // A new USER starts the login over (RFC 959 allows changing user).
+        if self.logged_in {
+            self.login_started = tokio::time::Instant::now();
+        }
         self.logged_in = false;
         let cfg = config::get_config();
         if cfg.security_enabled
@@ -516,6 +557,18 @@ impl Session {
         let cfg = config::get_config();
 
         if !cfg.security_enabled {
+            // The address rule is applied at accept only while security is
+            // off.  A connection accepted while it was on, and kept open
+            // until it was switched off, must meet it now -- or an outside
+            // address would get in anonymously.
+            if !cfg.disable_ip_safety
+                && let Some(reason) =
+                    crate::telnet::reject_insecure_ip(self.peer.ip(), cfg.disable_gateway_connections)
+            {
+                glog!("FTP: {} refused at login ({})", self.peer, reason);
+                let _ = self.reply(421, &reason).await;
+                return Flow::Close;
+            }
             if !self.attach_store().await {
                 return Flow::Close;
             }
@@ -784,8 +837,10 @@ impl Session {
         let counter = bytes.clone();
         let peer_ip = self.peer.ip();
         let label = what.clone();
-        let handle = tokio::spawn(async move { run_job(plan, peer_ip, job, counter, label).await });
-        self.transfer = Some(Transfer { handle, bytes, what });
+        let committing = Arc::new(AtomicBool::new(false));
+        let flag = committing.clone();
+        let handle = tokio::spawn(async move { run_job(plan, peer_ip, job, counter, label, flag).await });
+        self.transfer = Some(Transfer { handle, bytes, what, committing });
         true
     }
 
@@ -1028,11 +1083,22 @@ impl Session {
 
     async fn cmd_abor(&mut self) -> bool {
         match self.transfer.take() {
-            // Already done -- it finished in the same instant the ABOR arrived.
-            // RFC 959: a completed transfer gets its own 226, not a 426; the
-            // client must not be told an upload that was saved was not.
-            Some(t) if t.handle.is_finished() => {
-                let done = t.handle.await.unwrap_or(Done { code: 451, text: "Transfer failed.".into(), log: None });
+            // Already done -- it finished in the same instant the ABOR arrived
+            // -- or an upload whose data is all in and is being saved, which
+            // is waited for.  RFC 959: a completed transfer gets its own 226,
+            // not a 426; the client must not be told an upload that was saved
+            // was not.
+            Some(mut t) if t.handle.is_finished() || t.committing.load(Ordering::SeqCst) => {
+                // Bounded: on a slave the save is the master's, and a master
+                // that never answers must not hold the control loop for ever.
+                let failed = || Done { code: 451, text: "Transfer failed.".into(), log: None };
+                let done = match tokio::time::timeout(DATA_STALL_TIMEOUT, &mut t.handle).await {
+                    Ok(r) => r.unwrap_or_else(|_| failed()),
+                    Err(_) => {
+                        t.handle.abort();
+                        failed()
+                    }
+                };
                 if let Some(l) = &done.log {
                     glog!("FTP: {} {}", self.peer, l);
                 }
@@ -1082,6 +1148,27 @@ async fn open_data(plan: DataPlan, peer_ip: IpAddr) -> std::io::Result<TcpStream
     Ok(stream)
 }
 
+/// Write all of `data`, giving up only when no byte has moved for
+/// [`DATA_STALL_TIMEOUT`].  Not one timeout around `write_all`: that is a
+/// deadline for the whole buffer, and a client slower than about 270 bytes a
+/// second -- a C64 behind a 2400-baud WiFi modem -- needs longer than that
+/// for 32 KiB while its data is still flowing.
+pub(super) async fn write_progressing<W>(w: &mut W, mut data: &[u8]) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    while !data.is_empty() {
+        let n = tokio::time::timeout(DATA_STALL_TIMEOUT, w.write(data))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "data connection stalled"))??;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        data = &data[n..];
+    }
+    Ok(())
+}
+
 /// Copy until EOF, counting bytes, giving up on a stall.
 async fn pump<R, W>(mut r: R, mut w: W, counter: &AtomicU64) -> std::io::Result<u64>
 where
@@ -1096,7 +1183,7 @@ where
         if n == 0 {
             break;
         }
-        tokio::time::timeout(DATA_STALL_TIMEOUT, w.write_all(&buf[..n])).await.map_err(|_| stalled())??;
+        write_progressing(&mut w, &buf[..n]).await?;
         total += n as u64;
         counter.store(total, Ordering::Relaxed);
     }
@@ -1114,7 +1201,7 @@ async fn send_source(mut src: Source, w: &mut TcpStream, counter: &AtomicU64) ->
         if n == 0 {
             break;
         }
-        tokio::time::timeout(DATA_STALL_TIMEOUT, w.write_all(&buf[..n])).await.map_err(|_| stalled())??;
+        write_progressing(w, &buf[..n]).await?;
         total += n as u64;
         counter.store(total, Ordering::Relaxed);
     }
@@ -1132,6 +1219,8 @@ async fn receive_sink(r: &mut TcpStream, sink: &mut Sink, counter: &AtomicU64) -
         if n == 0 {
             break;
         }
+        // To a file or the master's channel, never a slow client: one
+        // deadline for the chunk is right here.
         tokio::time::timeout(DATA_STALL_TIMEOUT, sink.write_all(&buf[..n])).await.map_err(|_| stalled())??;
         total += n as u64;
         counter.store(total, Ordering::Relaxed);
@@ -1140,7 +1229,14 @@ async fn receive_sink(r: &mut TcpStream, sink: &mut Sink, counter: &AtomicU64) -
 }
 
 /// One transfer, from opening the data connection to the final reply.
-async fn run_job(plan: DataPlan, peer_ip: IpAddr, job: Job, counter: Arc<AtomicU64>, what: String) -> Done {
+async fn run_job(
+    plan: DataPlan,
+    peer_ip: IpAddr,
+    job: Job,
+    counter: Arc<AtomicU64>,
+    what: String,
+    committing: Arc<AtomicBool>,
+) -> Done {
     let started = std::time::Instant::now();
     let mut stream = match open_data(plan, peer_ip).await {
         Ok(s) => s,
@@ -1176,6 +1272,9 @@ async fn run_job(plan: DataPlan, peer_ip: IpAddr, job: Job, counter: Arc<AtomicU
         }
         Job::Stor(mut upload) => {
             let r = receive_sink(&mut stream, &mut upload, &counter).await;
+            if r.is_ok() {
+                committing.store(true, Ordering::SeqCst);
+            }
             match r {
                 Ok(n) => match upload.finish().await {
                     Ok(()) => Done {

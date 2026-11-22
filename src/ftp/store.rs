@@ -66,7 +66,7 @@ impl StoreError {
     }
 }
 
-fn io_err(e: std::io::Error) -> StoreError {
+pub(super) fn io_err(e: std::io::Error) -> StoreError {
     use std::io::ErrorKind as K;
     match e.kind() {
         K::NotFound => StoreError::NotFound,
@@ -111,9 +111,11 @@ fn writing() -> &'static Mutex<HashSet<PathBuf>> {
     W.get_or_init(Default::default)
 }
 
+/// By identity (`same_host_file`), so a session spelling the file in another
+/// case on a case-insensitive disk still sees the claim.
 fn is_being_written(p: &Path) -> bool {
-    let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    writing().lock().unwrap_or_else(|e| e.into_inner()).contains(&key)
+    let held: Vec<PathBuf> = writing().lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+    held.iter().any(|k| crate::cpm::same_host_file(k, p))
 }
 
 /// A claim in [`writing`], released when dropped -- however the upload ends.
@@ -121,8 +123,10 @@ struct WriteClaim(PathBuf);
 
 impl WriteClaim {
     fn take(p: &Path) -> Result<WriteClaim> {
+        // Compared under the lock, so two claims can't both pass; the set
+        // holds a handful of paths.
         let mut w = writing().lock().unwrap_or_else(|e| e.into_inner());
-        if !w.insert(p.to_path_buf()) {
+        if w.iter().any(|k| crate::cpm::same_host_file(k, p)) || !w.insert(p.to_path_buf()) {
             return Err(StoreError::Busy);
         }
         Ok(WriteClaim(p.to_path_buf()))
@@ -142,6 +146,10 @@ impl Drop for WriteClaim {
 pub struct Upload {
     pub file: tokio::fs::File,
     temp: Option<PathBuf>,
+    /// STOR after REST, written in place: the file ends where the upload
+    /// ends.  A restart says "the file continues from here"; a shorter upload
+    /// from below the old end must not leave the old file's tail behind it.
+    ends_here: bool,
     target: PathBuf,
     _claim: WriteClaim,
 }
@@ -151,8 +159,12 @@ impl Upload {
     /// guard is asked again here: a disk can be mounted or booted while the
     /// bytes were arriving.
     pub async fn finish(mut self) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
         self.file.flush().await.map_err(io_err)?;
+        if self.ends_here {
+            let end = self.file.stream_position().await.map_err(io_err)?;
+            self.file.set_len(end).await.map_err(io_err)?;
+        }
         self.file.sync_all().await.map_err(io_err)?;
         if let Some(temp) = self.temp.take() {
             if let Some(why) = crate::cpm::outside_change_refusal(&self.target) {
@@ -478,7 +490,49 @@ impl LocalStore {
             Ok((file, temp, target, claim))
         })
         .await?;
-        Ok(Upload { file: tokio::fs::File::from_std(file), temp, target, _claim: claim })
+        let ends_here = matches!(mode, WriteMode::At(_));
+        Ok(Upload { file: tokio::fs::File::from_std(file), temp, target, ends_here, _claim: claim })
+    }
+
+    /// The symlink a path names, if its last component is one: the link
+    /// itself, in its canonical (jailed) parent.  Asked before `existing`,
+    /// which follows the link -- DELE or RMD of a link would otherwise remove
+    /// the file or folder it points at and leave the link dangling, where
+    /// nothing could name it again.
+    fn link_named(base: &Path, vpath: &str) -> Result<Option<PathBuf>> {
+        Self::clean(vpath)?;
+        let (dir, leaf) = super::proto::split_leaf(vpath);
+        let Some(leaf) = leaf else { return Ok(None) };
+        let link = Self::existing(base, &dir)?.join(leaf);
+        match std::fs::symlink_metadata(&link) {
+            Ok(m) if m.file_type().is_symlink() => Ok(Some(link)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Remove a link, never what it points at.  Not one of the emulator's own
+    /// folders, though: a `CPM` or `CPM/images` that is a symlink is a
+    /// supported layout, and removing the link takes every disk with it.
+    ///
+    /// Nor a link to a disk the emulator is using or a file being written:
+    /// `CPM/images/GAME.DSK` may itself be a link to the image, and its name is
+    /// the one the mount records -- removing it loses the mount at the next
+    /// restart.  The guard follows the link, so it matches either name.
+    fn remove_link(base: &Path, link: &Path) -> Result<()> {
+        if Self::is_structural_dir(base, link) {
+            return Err(StoreError::Locked(Cow::Borrowed("Used by the CP/M emulator.")));
+        }
+        if is_being_written(link) {
+            return Err(StoreError::Busy);
+        }
+        if let Some(why) = crate::cpm::outside_change_refusal(link) {
+            return Err(StoreError::Locked(Cow::Borrowed(why)));
+        }
+        match std::fs::remove_file(link) {
+            // Windows removes a directory link with `remove_dir`.
+            Err(_) if cfg!(windows) => std::fs::remove_dir(link).map_err(io_err),
+            r => r.map_err(io_err),
+        }
     }
 
     /// DELE: remove a file.
@@ -486,6 +540,9 @@ impl LocalStore {
         let vpath = vpath.to_string();
         Self::blocking(move || {
             let base = Self::base()?;
+            if let Some(link) = Self::link_named(&base, &vpath)? {
+                return Self::remove_link(&base, &link);
+            }
             let p = Self::existing(&base, &vpath)?;
             if p.is_dir() {
                 return Err(StoreError::NotAFile);
@@ -517,6 +574,9 @@ impl LocalStore {
         let vpath = vpath.to_string();
         Self::blocking(move || {
             let base = Self::base()?;
+            if let Some(link) = Self::link_named(&base, &vpath)? {
+                return Self::remove_link(&base, &link);
+            }
             let p = Self::existing(&base, &vpath)?;
             if !p.is_dir() {
                 return Err(StoreError::NotADirectory);

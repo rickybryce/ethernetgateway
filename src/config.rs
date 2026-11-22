@@ -1068,7 +1068,7 @@ pub struct Config {
     pub gui_zoom: String,
     pub max_sessions: usize,
     pub idle_timeout_secs: u64,
-    /// Per-IP connection rate limit for telnet and SSH: at most
+    /// Per-IP connection rate limit for telnet, SSH and FTP: at most
     /// `conn_rate_max` connections from one address inside
     /// `conn_rate_window_secs`.  `0` disables it.
     ///
@@ -3502,7 +3502,7 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     // not.  A comment in this file is the only explanation an operator editing
     // `egateway.conf` by hand ever sees.
     content.push_str(
-        "# Per-IP connection rate limit for telnet and SSH: at most\n         # conn_rate_max connections from one address inside\n         # conn_rate_window_secs seconds. 0 disables it. Not applied to the\n         # web server, whose own pages poll several times a second.\n",
+        "# Per-IP connection rate limit for telnet, SSH and FTP: at most\n         # conn_rate_max connections from one address inside\n         # conn_rate_window_secs seconds. 0 disables it. Not applied to the\n         # web server, whose own pages poll several times a second.\n",
     );
     write_kv(&mut content, "conn_rate_max", cfg.conn_rate_max);
     write_kv(&mut content, "conn_rate_window_secs", cfg.conn_rate_window_secs);

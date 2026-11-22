@@ -313,6 +313,27 @@ async fn connect(lockouts: crate::telnet::LockoutMap) -> Client {
     c
 }
 
+/// As [`connect`], with the session's shutdown flag and login deadline in the
+/// test's hands.
+async fn connect_with(
+    shutdown: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+    login_timeout: std::time::Duration,
+) -> Client {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        let mut s = session::Session::new(stream, peer, no_lockouts(), shutdown, notify).unwrap();
+        s.login_timeout = login_timeout;
+        s.run().await;
+    });
+    let (r, w) = TcpStream::connect(addr).await.unwrap().into_split();
+    let mut c = Client { r: BufReader::new(r), w };
+    assert_eq!(c.reply().await.0, 220);
+    c
+}
+
 /// Point `transfer_dir` (and security) at a scratch folder for one test.
 struct Scratch {
     dir: std::path::PathBuf,
@@ -857,6 +878,305 @@ async fn test_an_idle_session_is_closed() {
     assert_eq!(code, 421, "{text}");
 }
 
+/// **A connection must log in in time, and commands don't buy more.**
+/// NOOP is allowed before login and reset the idle timer, so fifty idle
+/// connections sending one now and then held every `max_sessions` slot for
+/// ever.  NOOPs are answered and the deadline still falls; a session that
+/// logged in is not held to it.
+#[tokio::test]
+async fn test_a_login_must_finish_in_time() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let _s = Scratch::new("logindeadline", false);
+    let quick = std::time::Duration::from_millis(1200);
+    let flags = || (Arc::new(AtomicBool::new(false)), Arc::new(tokio::sync::Notify::new()));
+    let (sd, n) = flags();
+    let mut c = connect_with(sd, n, quick).await;
+    let start = std::time::Instant::now();
+    for _ in 0..3 {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(c.cmd("NOOP").await.0, 200);
+    }
+    let (code, text) = tokio::time::timeout(std::time::Duration::from_secs(10), c.reply()).await.expect("never closed");
+    assert_eq!(code, 421, "{text}");
+    assert!(text.contains("Login timed out"), "{text}");
+    assert!(start.elapsed() >= quick, "closed before the deadline");
+
+    // The positive control: logged in, the deadline no longer applies.
+    let (sd, n) = flags();
+    let mut c = connect_with(sd, n, quick).await;
+    c.cmd("USER x").await;
+    assert_eq!(c.cmd("PASS y").await.0, 230);
+    tokio::time::sleep(quick * 2).await;
+    assert_eq!(c.cmd("NOOP").await.0, 200, "a logged-in session was cut off");
+    // REIN starts a fresh wait for a login -- not the one from the accept,
+    // long past by now, which would close the connection at once.
+    assert_eq!(c.cmd("REIN").await.0, 220);
+    let after_rein = std::time::Instant::now();
+    assert_eq!(c.cmd("NOOP").await.0, 200, "REIN was held to the old deadline");
+    let (code, _) = tokio::time::timeout(std::time::Duration::from_secs(10), c.reply()).await.expect("REIN left no deadline");
+    assert_eq!(code, 421);
+    assert!(after_rein.elapsed() >= quick, "closed before a fresh deadline had run");
+}
+
+/// **A password is taken exactly as sent.**  Spaces at either end are part
+/// of it (telnet and SSH read it that way); trimmed, such a password never
+/// logged in over FTP and each try counted toward the shared lockout.
+#[tokio::test]
+async fn test_a_password_keeps_its_spaces() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let _s = Scratch::new("pwspaces", true);
+    config::update_config_value("password", &crate::credential::hash_for_test(" sec ret "));
+    let lockouts = no_lockouts();
+    let mut c = connect(lockouts.clone()).await;
+    assert_eq!(c.cmd("USER admin").await.0, 331);
+    assert_eq!(c.cmd("PASS sec ret").await.0, 530, "the trimmed form is not the password");
+    assert_eq!(c.cmd("USER admin").await.0, 331);
+    assert_eq!(c.cmd("PASS  sec ret ").await.0, 230, "the password as sent");
+    assert_eq!(proto::raw_argument("PASS  a b \r\n"), " a b ");
+    assert_eq!(proto::raw_argument("PASS"), "");
+}
+
+/// **A slow client is not cut off while its data still moves.**  The stall
+/// limit was one deadline around a whole 32 KiB write, so a client slower than
+/// about 270 bytes a second -- a C64 behind a 2400-baud WiFi modem -- got 426
+/// mid-download.  Here a reader takes 64 bytes a minute (virtual time): 32 KiB
+/// takes hours, and must arrive.  A reader that stops altogether is still
+/// given up on.
+#[tokio::test(start_paused = true)]
+async fn test_a_slow_reader_is_not_a_stall() {
+    let (mut w, mut r) = tokio::io::duplex(64);
+    let reader = tokio::spawn(async move {
+        let mut got = 0usize;
+        let mut buf = [0u8; 64];
+        while got < 32 * 1024 {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            got += r.read(&mut buf).await.unwrap();
+        }
+        got
+    });
+    let data = vec![7u8; 32 * 1024];
+    session::write_progressing(&mut w, &data).await.expect("a moving transfer was called stalled");
+    assert_eq!(reader.await.unwrap(), 32 * 1024);
+
+    let (mut w, _r) = tokio::io::duplex(64);
+    let e = session::write_progressing(&mut w, &data).await.expect_err("a reader that stopped was waited on for ever");
+    assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+}
+
+/// **A restarted upload ends the file where it ends.**  REST 4 + STOR of two
+/// bytes over a ten-byte file leaves six bytes, not the old tail after the
+/// new data.  Through the master's store too, which runs the same `Upload`.
+#[tokio::test]
+async fn test_a_restarted_upload_ends_the_file() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let s = Scratch::new("restend", false);
+    std::fs::write(s.dir.join("R.TXT"), b"0123456789").unwrap();
+    let mut c = connect(no_lockouts()).await;
+    c.cmd("USER x").await;
+    c.cmd("PASS y").await;
+    assert_eq!(c.cmd("REST 4").await.0, 350);
+    assert_eq!(c.put("STOR R.TXT", b"ab").await.0, 226);
+    assert_eq!(std::fs::read(s.dir.join("R.TXT")).unwrap(), b"0123ab");
+    // APPE is untouched by it.
+    assert_eq!(c.put("APPE R.TXT", b"!").await.0, 226);
+    assert_eq!(std::fs::read(s.dir.join("R.TXT")).unwrap(), b"0123ab!");
+}
+
+/// **DELE and RMD of a link remove the link, never what it points at.**  A
+/// file link, a folder link and a dangling one each go, their targets stay;
+/// a link that *is* the emulator's `CPM` folder is refused.
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // test serializers, held for the whole test
+async fn test_deleting_a_link_removes_only_the_link() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let s = Scratch::new("dellink", false);
+    std::fs::write(s.dir.join("REAL.TXT"), b"keep").unwrap();
+    std::fs::create_dir_all(s.dir.join("REALDIR")).unwrap();
+    std::fs::create_dir_all(s.dir.join("CPM").join("A")).unwrap();
+    let link = |to: &str, name: &str| std::os::unix::fs::symlink(s.dir.join(to), s.dir.join(name)).unwrap();
+    link("REAL.TXT", "FILELINK");
+    link("REALDIR", "DIRLINK");
+    link("GONE.TXT", "DANGLING");
+    link("CPM", "CPMLINK");
+    let mut c = connect(no_lockouts()).await;
+    c.cmd("USER x").await;
+    c.cmd("PASS y").await;
+    assert_eq!(c.cmd("DELE FILELINK").await.0, 250);
+    assert_eq!(c.cmd("RMD DIRLINK").await.0, 250);
+    assert_eq!(c.cmd("DELE DANGLING").await.0, 250, "a dangling link can be deleted");
+    let gone = |n: &str| std::fs::symlink_metadata(s.dir.join(n)).is_err();
+    assert!(gone("FILELINK") && gone("DIRLINK") && gone("DANGLING"), "a link survived its delete");
+    assert_eq!(std::fs::read(s.dir.join("REAL.TXT")).unwrap(), b"keep", "the file a link named was deleted");
+    assert!(s.dir.join("REALDIR").is_dir(), "the folder a link named was removed");
+    let (code, text) = c.cmd("DELE CPMLINK").await;
+    assert_eq!(code, 550, "{text}");
+    assert!(!gone("CPMLINK") && s.dir.join("CPM").join("A").is_dir());
+
+    // A link that is a disk in use (the name a mount may record) stays.
+    std::fs::write(s.dir.join("GAME.DSK"), b"guest").unwrap();
+    link("GAME.DSK", "DISKLINK");
+    let _reg = crate::cpm::image::registry::tests_lock();
+    let key = crate::cpm::image::registry::claim_booted_image(&s.dir.join("GAME.DSK")).unwrap();
+    let (code, text) = c.cmd("DELE DISKLINK").await;
+    crate::cpm::image::registry::release_booted_image(&key);
+    assert_eq!(code, 550, "{text}");
+    assert!(!gone("DISKLINK"), "the link to a disk in use was removed");
+}
+
+/// **A folder link out of the jail can't be written through.**  STOR, MKD and
+/// RNTO into a folder whose link leads outside are refused, and nothing
+/// appears there; the file-link case is the older test above.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_a_folder_link_out_of_the_jail_cannot_be_written_through() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let s = Scratch::new("dirjail", false);
+    let outside = std::env::temp_dir().join(format!("egw_ftp_outdir_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, s.dir.join("OUTDIR")).unwrap();
+    std::fs::write(s.dir.join("IN.TXT"), b"x").unwrap();
+    let mut c = connect(no_lockouts()).await;
+    c.cmd("USER x").await;
+    c.cmd("PASS y").await;
+    let _ = c.pasv().await;
+    assert_eq!(c.cmd("STOR OUTDIR/X.TXT").await.0, 550);
+    assert_eq!(c.cmd("MKD OUTDIR/Y").await.0, 550);
+    assert_eq!(c.cmd("RNFR IN.TXT").await.0, 350);
+    assert_eq!(c.cmd("RNTO OUTDIR/Z.TXT").await.0, 550);
+    let left: Vec<_> = std::fs::read_dir(&outside).unwrap().collect();
+    let _ = std::fs::remove_dir_all(&outside);
+    assert!(left.is_empty(), "something was written outside: {left:?}");
+}
+
+/// **The CP/M guard covers a rename onto a disk and a disk taken mid-upload.**
+/// RNTO over a booted image is refused (a rename replaces its target), and an
+/// upload that began before the disk was booted is refused at the end -- the
+/// guard is asked again in `finish` -- leaving the disk and no temp file.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // test serializers, held for the whole test
+async fn test_the_cpm_guard_covers_rnto_and_a_late_boot() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let _reg = crate::cpm::image::registry::tests_lock();
+    let s = Scratch::new("inuse2", false);
+    let disk = s.dir.join("GAME.DSK");
+    std::fs::write(&disk, b"guest").unwrap();
+    std::fs::write(s.dir.join("OTHER.DSK"), b"other").unwrap();
+
+    let store = super::store::LocalStore;
+    let mut up = store.begin_write("/GAME.DSK", super::store::WriteMode::Replace).await.unwrap();
+    let key = crate::cpm::image::registry::claim_booted_image(&disk).unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut up.file, b"replacement").await.unwrap();
+    let e = up.finish().await.expect_err("an upload replaced a disk booted while it ran");
+    assert!(matches!(e, super::store::StoreError::Locked(_)), "{e:?}");
+    assert_eq!(std::fs::read(&disk).unwrap(), b"guest");
+
+    let mut c = connect(no_lockouts()).await;
+    c.cmd("USER x").await;
+    c.cmd("PASS y").await;
+    assert_eq!(c.cmd("RNFR OTHER.DSK").await.0, 350);
+    let (code, text) = c.cmd("RNTO GAME.DSK").await;
+    assert_eq!(code, 550, "{text}");
+    assert!(text.contains("In use by the CP/M emulator."), "{text}");
+    assert_eq!(std::fs::read(&disk).unwrap(), b"guest");
+    let names: Vec<String> =
+        std::fs::read_dir(&s.dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(!names.iter().any(|n| n.starts_with(super::store::TEMP_PREFIX)), "{names:?}");
+    crate::cpm::image::registry::release_booted_image(&key);
+    assert_eq!(c.cmd("RNFR OTHER.DSK").await.0, 350);
+    assert_eq!(c.cmd("RNTO GAME.DSK").await.0, 250, "free once the boot ends");
+}
+
+/// **A hard link is the same file to the busy set and the CP/M guard.**  On a
+/// case-insensitive disk `game.dsk` opens `GAME.DSK`; a hard link is the same
+/// test on any Linux filesystem: compared by path, each looked like another
+/// file and walked past the guard.
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // test serializers, held for the whole test
+async fn test_another_name_for_a_file_is_still_that_file() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let _reg = crate::cpm::image::registry::tests_lock();
+    let s = Scratch::new("hardlink", false);
+    let disk = s.dir.join("GAME.DSK");
+    std::fs::write(&disk, b"guest").unwrap();
+    std::fs::hard_link(&disk, s.dir.join("ALIAS.DSK")).unwrap();
+    std::fs::write(s.dir.join("UP.TXT"), b"old").unwrap();
+    std::fs::hard_link(s.dir.join("UP.TXT"), s.dir.join("UPALIAS.TXT")).unwrap();
+
+    let key = crate::cpm::image::registry::claim_booted_image(&disk).unwrap();
+    let mut c = connect(no_lockouts()).await;
+    c.cmd("USER x").await;
+    c.cmd("PASS y").await;
+    let (code, text) = c.cmd("DELE ALIAS.DSK").await;
+    assert_eq!(code, 550, "{text}");
+    crate::cpm::image::registry::release_booted_image(&key);
+    assert_eq!(c.cmd("DELE ALIAS.DSK").await.0, 250, "free once the boot ends");
+
+    let store = super::store::LocalStore;
+    let up = store.begin_write("/UP.TXT", super::store::WriteMode::Append).await.unwrap();
+    assert_eq!(c.cmd("DELE UPALIAS.TXT").await.0, 450, "the other name of a file being written");
+    drop(up);
+    assert_eq!(c.cmd("DELE UPALIAS.TXT").await.0, 250);
+}
+
+/// **A slave never falls back to its own folder.**  With no master to reach,
+/// the login is refused (421) and the connection closed; nothing it could
+/// send lands in the slave's own transfer directory.
+#[tokio::test]
+async fn test_a_slave_without_a_master_refuses_the_login() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let s = Scratch::new("slavenomaster", false);
+    let host = config::get_config().slave_master_host;
+    config::update_config_value("gateway_role", "slave");
+    config::update_config_value("slave_master_host", "");
+    let mut c = connect(no_lockouts()).await;
+    c.cmd("USER x").await;
+    let (code, text) = c.cmd("PASS y").await;
+    config::update_config_value("slave_master_host", &host);
+    assert_eq!(code, 421, "{text}");
+    let mut rest = String::new();
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), c.r.read_line(&mut rest)).await.unwrap().unwrap();
+    assert_eq!(n, 0, "the connection stayed open: {rest:?}");
+    assert_eq!(std::fs::read_dir(&s.dir).unwrap().count(), 0);
+}
+
+/// **Shutting down says so.**  A session told the server is stopping answers
+/// 421 and closes, rather than vanishing mid-command.
+#[tokio::test]
+async fn test_shutdown_closes_with_421() {
+    let _lock = config::CONFIG_TEST_LOCK.lock().await;
+    let _s = Scratch::new("shutdown", false);
+    let (sd, n) = (Arc::new(AtomicBool::new(false)), Arc::new(tokio::sync::Notify::new()));
+    let mut c = connect_with(sd.clone(), n.clone(), std::time::Duration::from_secs(120)).await;
+    c.cmd("USER x").await;
+    assert_eq!(c.cmd("PASS y").await.0, 230);
+    sd.store(true, std::sync::atomic::Ordering::SeqCst);
+    n.notify_waiters();
+    let (code, text) = tokio::time::timeout(std::time::Duration::from_secs(10), c.reply()).await.expect("no 421");
+    assert_eq!(code, 421, "{text}");
+    assert!(text.contains("closing"), "{text}");
+}
+
+/// **With security off, the address rule is met at login too.**  The accept
+/// gate skips it while security is on; a connection accepted then, and still
+/// open when security is turned off, must not log in anonymously from an
+/// outside address.  Loopback can't be an outside address, so this pins the
+/// check inside the security-off branch, before the store is attached.
+#[test]
+fn test_an_insecure_login_meets_the_address_rule() {
+    let src = include_str!("session.rs").replace('\r', "");
+    let from = src.find("async fn cmd_pass(").expect("cmd_pass");
+    let body = &src[from..from + src[from..].find("\n    }\n").expect("its end")];
+    let branch = &body[body.find("if !cfg.security_enabled {").expect("the security-off branch")..];
+    let branch = &branch[..branch.find("let ip = self.peer.ip();").expect("the branch's end")];
+    let check = branch.find("reject_insecure_ip(").expect("the security-off login does not check the address");
+    assert!(check < branch.find("attach_store()").expect("the attach"), "checked after attaching the store");
+    assert!(branch[..check].contains("!cfg.disable_ip_safety"), "IP safety off must still let it through");
+    assert!(branch[check..].contains("return Flow::Close;"), "a refused address is not closed");
+}
+
 // ─── the slave -> master store protocol ─────────────────────
 
 mod store_wire {
@@ -1034,6 +1354,42 @@ mod store_wire {
         write_frame(&mut ch, 0x84, &[]).await.unwrap();
         write_frame(&mut ch, 0x84, &[]).await.unwrap();
         assert_eq!(call(&mut ch, 1, Enc::default().str("/BIG.BIN").0).await.0, 0x80);
+    }
+
+    /// **Every write mode, error and lock flag crosses intact.**  APPE sent
+    /// as Replace would overwrite on the master; a lost `locked` hides an
+    /// in-use disk from a slave's MLSD; and each refusal must keep its reply
+    /// code.
+    #[test]
+    fn test_modes_errors_and_locks_round_trip() {
+        use super::super::store::WriteMode;
+        for m in [WriteMode::Replace, WriteMode::Append, WriteMode::At(12345), WriteMode::New] {
+            let e = remote::encode_mode(Enc::default(), m);
+            assert_eq!(remote::decode_mode(&mut Dec::new(&e.0)).unwrap(), m);
+        }
+        for e in [
+            StoreError::NotFound,
+            StoreError::NotADirectory,
+            StoreError::NotAFile,
+            StoreError::Busy,
+            StoreError::Exists,
+            StoreError::NotEmpty,
+            StoreError::DiskFull,
+            StoreError::BadOffset,
+            StoreError::BadName("bad".into()),
+            StoreError::Locked("In use by the CP/M emulator.".into()),
+            StoreError::Denied("no".into()),
+            StoreError::Io("eio".into()),
+        ] {
+            let back = remote::decode_error(&remote::encode_error(&e));
+            assert_eq!(back, e);
+            assert_eq!(back.reply(), e.reply());
+        }
+        for locked in [true, false] {
+            let entry = Entry { name: "GAME.DSK".into(), is_dir: false, len: 5, mtime: 9, locked };
+            let enc = remote::encode_entry(Enc::default(), &entry);
+            assert_eq!(remote::decode_entry(&mut Dec::new(&enc.0)).unwrap().locked, locked);
+        }
     }
 
     /// A frame claiming more than the cap is refused before anything is

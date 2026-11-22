@@ -374,6 +374,14 @@ impl Wizard {
         if cfg.ftp_enabled && cfg.ftp_port == port {
             return Err(collision_msg(port, "the FTP server"));
         }
+        // And its passive data ports: a listener inside that range would make
+        // the save at Finish refuse, with the answers left unsaved.
+        if cfg.ftp_enabled
+            && let Some(Some(range)) = crate::config::parse_passive_ports(&cfg.ftp_passive_ports)
+            && range.contains(&port)
+        {
+            return Err(collision_msg(port, "the FTP passive port range"));
+        }
         Ok(())
     }
 
@@ -1230,6 +1238,11 @@ impl Wizard {
             for (port, what) in &inbound {
                 connect_line(ui, &format!("TCP {}   — {}", port, what));
             }
+            // The passive data ports are inbound too; a client's PASV
+            // connection fails without them.
+            if let Some(line) = passive_firewall_line(cfg) {
+                connect_line(ui, &line);
+            }
             indent(
                 ui,
                 "All of them are TCP; the gateway listens on no UDP ports. Serial-port \
@@ -1324,6 +1337,16 @@ fn master_password_note(state: crate::relay::MasterPasswordState) -> Option<&'st
         S::UsingKey => Some("Not needed: this slave already logs in to the master with its key."),
         S::Missing => None,
     }
+}
+
+/// The firewall line for the FTP passive data ports, when the server is on and
+/// a range is set (with none, the system picks a port and no rule can name it).
+fn passive_firewall_line(cfg: &Config) -> Option<String> {
+    if !cfg.ftp_enabled {
+        return None;
+    }
+    let range = crate::config::parse_passive_ports(&cfg.ftp_passive_ports)??;
+    Some(format!("TCP {}-{}   — FTP passive data ports", range.start(), range.end()))
 }
 
 fn collision_msg(port: u16, other: &str) -> String {
@@ -1838,6 +1861,33 @@ mod tests {
         assert!(w.inbound_ports(&Config::default()).is_empty());
         w.ssh_enabled = true;
         assert!(!w.inbound_ports(&Config::default()).is_empty());
+    }
+
+    /// **The FTP passive range is a wizard port too.**  A listener chosen
+    /// inside it is refused at its step (Finish would otherwise refuse the
+    /// save and leave the answers unsaved), and the final screen's firewall
+    /// list names the range -- a PASV connection fails without it.  Neither
+    /// applies with FTP off or no range set.
+    #[test]
+    fn test_the_ftp_passive_range_is_checked_and_listed() {
+        let mut cfg = Config { ftp_enabled: true, ftp_passive_ports: "50000-50100".into(), ..Config::default() };
+        let mut w = wiz();
+        w.telnet_enabled = true;
+        w.telnet_port = "50050".into();
+        let err = w.check_port(Listener::Telnet, &cfg).expect_err("a port inside the passive range passed");
+        assert!(err.contains("FTP passive"), "{err}");
+        w.telnet_port = "50101".into();
+        assert!(w.check_port(Listener::Telnet, &cfg).is_ok(), "just outside the range is fine");
+        w.telnet_port = "50000".into();
+        assert!(w.check_port(Listener::Telnet, &cfg).is_err(), "the range's own ends count");
+        assert_eq!(passive_firewall_line(&cfg).as_deref(), Some("TCP 50000-50100   — FTP passive data ports"));
+
+        cfg.ftp_enabled = false;
+        assert!(w.check_port(Listener::Telnet, &cfg).is_ok(), "FTP off: no range to clash with");
+        assert_eq!(passive_firewall_line(&cfg), None);
+        cfg.ftp_enabled = true;
+        cfg.ftp_passive_ports = String::new();
+        assert_eq!(passive_firewall_line(&cfg), None, "no range, no rule to name");
     }
 
     #[test]

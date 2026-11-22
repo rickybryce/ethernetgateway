@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a channel per FTP session), so files always land on, and come from, the
   master's transfer directory.  An unreachable master refuses the login rather
   than falling back to the slave's folder.  Master and slave must both be on
-  this version.
+  this version.  A connection must log in within two minutes; a slow client
+  (a C64 on a 2400-baud WiFi modem) is never cut off while its data still
+  moves; and the master's `ftp-store` channels have their own cap, so a busy
+  slave can't use up the SSH sessions that relays and logins need.
 
 ### Fixed
 
@@ -47,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The File Transfer menu's Delete, and the Kermit server's REMOTE DELETE,
   REMOTE RENAME and resume, leave a disk in use alone too.**  Both can reach
   the emulator's folders (`remote cd CPM/images`), and deleted, renamed or
-  replaced a mounted or booted image without asking.
+  replaced a mounted or booted image without asking.  The menu asks again
+  after you answer Y, since another session may have mounted the disk while
+  the question waited.
 
 ## [1.0.7] - 2026-11-11
 

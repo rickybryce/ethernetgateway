@@ -120,6 +120,14 @@ impl LineReader {
     }
 }
 
+/// The argument exactly as sent: everything after the first space, with only
+/// the line ending removed.  For PASS, whose argument is a secret that may
+/// begin or end with a space.
+pub fn raw_argument(line: &str) -> &str {
+    let line = line.trim_end_matches(['\r', '\n']);
+    line.split_once(' ').map_or("", |(_, arg)| arg)
+}
+
 /// Split a command line into an upper-cased verb and its argument.  The
 /// argument keeps the spaces inside it (a path may contain them) but loses
 /// any before it: RFC 959 says one space, and a doubled one -- a common slip

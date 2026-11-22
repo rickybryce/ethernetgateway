@@ -63,12 +63,27 @@ fn cpm_writers() -> &'static Mutex<HashMap<PathBuf, u64>> {
 /// canonicalise to a real file, so they can't match one -- that case is
 /// [`super::image::registry::image_in_use`]'s.
 pub(crate) fn host_file_being_written(path: &Path) -> bool {
-    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let key = canon(path);
     // Copied out first: the emulator takes this lock on every record it
-    // writes, and canonicalising is filesystem work that must not hold it.
+    // writes, and comparing is filesystem work that must not hold it.
     let held: Vec<PathBuf> = cpm_writers().lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
-    held.iter().any(|k| canon(k) == key)
+    held.iter().any(|k| same_host_file(k, path))
+}
+
+/// Whether two host paths name the same file.  On Unix by device and inode
+/// when both exist, so neither the case of a name (a FAT or exFAT stick, a
+/// CIFS share, a casefold folder, where `game.dsk` opens `GAME.DSK`) nor a
+/// hard link makes one file look like two; otherwise -- and on Windows, whose
+/// canonical form already carries the on-disk case -- canonically.
+pub(crate) fn same_host_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return x.dev() == y.dev() && x.ino() == y.ino();
+        }
+    }
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
 }
 
 /// Why a host file must not be deleted, renamed or rewritten from outside the

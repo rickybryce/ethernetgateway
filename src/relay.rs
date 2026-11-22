@@ -1992,12 +1992,34 @@ pub(crate) async fn open_exec_channel(
     command: &str,
     wait: std::time::Duration,
 ) -> Result<russh::ChannelStream<russh::client::Msg>, RelayConnectError> {
-    let mut channel = session
-        .channel_open_session()
+    // One deadline for the whole of it, the open included, so the caller's
+    // outer bound is only a backstop.
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut channel = tokio::time::timeout_at(deadline, session.channel_open_session())
         .await
+        .map_err(|_| RelayConnectError::Network("the master did not open a channel".into()))?
         .map_err(|e| RelayConnectError::Network(format!("channel open failed: {}", e)))?;
-    channel.exec(true, command.as_bytes()).await.map_err(exec_send_failed)?;
-    await_exec_reply(&mut channel, tokio::time::Instant::now() + wait).await?;
+    // Closed on every failure: a plain `Channel` sends no CLOSE when dropped
+    // (only the stream `into_stream` makes does), so a refused or timed-out
+    // request stayed in both ends' tables -- and one the master accepted late
+    // held a session slot there until the whole connection closed.  The close
+    // runs in its own task, so neither a full send queue nor the caller giving
+    // up can skip it.  (An open that itself times out leaves no `Channel` to
+    // close; a master confirming it later keeps it until the connection ends.)
+    let opened = async {
+        tokio::time::timeout_at(deadline, channel.exec(true, command.as_bytes()))
+            .await
+            .map_err(|_| RelayConnectError::Network("the master did not take the request".into()))?
+            .map_err(exec_send_failed)?;
+        await_exec_reply(&mut channel, deadline).await
+    }
+    .await;
+    if let Err(e) = opened {
+        tokio::spawn(async move {
+            let _ = channel.close().await;
+        });
+        return Err(e);
+    }
     Ok(channel.into_stream())
 }
 

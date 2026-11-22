@@ -18307,13 +18307,13 @@ fn test_the_master_refuses_ftp_store_before_accepting() {
     let ssh = include_str!("../ssh.rs").replace('\r', "");
     let body = fn_body(&ssh, "async fn ftp_store_request(", "    ");
     let accept = body.find("session.channel_success(channel)").expect("the accept");
-    for gate in ["if !self.counted", "cfg.gateway_role != \"master\" || !cfg.master_accept_relays", "if version != \"1\"", "try_claim_slot(&self.session_count, self.max_sessions)"] {
+    for gate in ["if !self.counted", "cfg.gateway_role != \"master\" || !cfg.master_accept_relays", "if version != \"1\"", "try_claim_slot(&store_count, self.max_sessions)"] {
         let at = body.find(gate).unwrap_or_else(|| panic!("the gate {gate:?} is gone"));
         assert!(at < accept, "{gate:?} is checked after the channel is accepted");
     }
     assert_eq!(body.matches("session.channel_failure(channel)?").count(), 4, "every gate refuses with channel_failure");
     // And the slot it claims is released however the task ends.
-    assert!(body.find("SlotGuard(session_count)").expect("released by a guard") > accept);
+    assert!(body.find("SlotGuard(store_count)").expect("released by a guard") > accept);
 }
 
 /// **A Kermit resume does not replace a disk the CP/M emulator is using.**

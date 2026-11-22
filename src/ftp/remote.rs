@@ -211,7 +211,7 @@ pub fn decode_error(payload: &[u8]) -> StoreError {
     }
 }
 
-fn encode_mode(e: Enc, mode: WriteMode) -> Enc {
+pub(super) fn encode_mode(e: Enc, mode: WriteMode) -> Enc {
     match mode {
         WriteMode::Replace => e.u8(0).u64(0),
         WriteMode::Append => e.u8(1).u64(0),
@@ -220,7 +220,7 @@ fn encode_mode(e: Enc, mode: WriteMode) -> Enc {
     }
 }
 
-fn decode_mode(d: &mut Dec) -> std::io::Result<WriteMode> {
+pub(super) fn decode_mode(d: &mut Dec) -> std::io::Result<WriteMode> {
     let (m, n) = (d.u8()?, d.u64()?);
     Ok(match m {
         0 => WriteMode::Replace,
@@ -359,6 +359,11 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
             };
             write_frame(s, TAG_OK, &[]).await?;
             let mut got = 0u64;
+            // A write that fails here (disk full, a bad card) is kept and the
+            // rest of the upload read and discarded, so the slave hears why at
+            // END.  Ending the channel instead left the slave writing into a
+            // window nobody read until its 120 s stall timer said `426`.
+            let mut failed: Option<StoreError> = None;
             loop {
                 // A stalled or vanished slave ends the upload here; dropping
                 // `upload` removes a Replace upload's temporary file.
@@ -367,12 +372,21 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
                     .map_err(|_| bad("upload stalled"))??;
                 match tag {
                     TAG_DATA => {
-                        upload.file.write_all(&data).await?;
+                        if failed.is_none()
+                            && let Err(e) = upload.file.write_all(&data).await
+                        {
+                            failed = Some(super::store::io_err(e));
+                        }
                         got += data.len() as u64;
                     }
                     TAG_END => break,
                     _ => return Err(bad("unexpected frame in an upload")),
                 }
+            }
+            if let Some(e) = failed {
+                glog!("FTP (for slave {}): {} not saved ({:?})", slave, path, e);
+                drop(upload);
+                return reply(s, Err(e)).await;
             }
             // Flushed, synced and renamed before the answer: the slave says
             // 226 only once the bytes are on this disk.
@@ -390,9 +404,32 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
 
 type Chan = russh::ChannelStream<russh::client::Msg>;
 
+/// A session's channel and the connection it runs on.  The connection is kept
+/// beside it so the session can tell when that connection has died or been
+/// replaced -- and so a replaced connection is closed once no channel holds it
+/// any more, not while transfers are still running on it.
+struct Link {
+    ch: Chan,
+    session: Arc<crate::relay::RelaySession>,
+}
+
 struct Shared {
     key: (String, u16, String),
     session: Arc<crate::relay::RelaySession>,
+}
+
+/// The live shared connection, for [`is_current`] -- kept apart from
+/// [`shared`], which is held through a whole reconnect (up to a minute), so
+/// that a session asking "is my channel still good?" never waits on someone
+/// else's reconnect.
+fn current() -> &'static std::sync::Mutex<std::sync::Weak<crate::relay::RelaySession>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::sync::Weak<crate::relay::RelaySession>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+fn set_current(session: Option<&Arc<crate::relay::RelaySession>>) {
+    *current().lock().unwrap_or_else(|e| e.into_inner()) = session.map(Arc::downgrade).unwrap_or_default();
 }
 
 fn shared() -> &'static tokio::sync::Mutex<Option<Shared>> {
@@ -414,7 +451,7 @@ const CHANNEL_WAIT: Duration = Duration::from_secs(15);
 
 /// Open a store channel to the master, connecting first if need be.  The text
 /// of an error is what the FTP client is told.
-async fn open_channel() -> Result<Chan, String> {
+async fn open_channel() -> Result<Link, String> {
     let cfg = config::get_config();
     if cfg.slave_master_host.trim().is_empty() {
         return Err("no master gateway is configured".into());
@@ -426,7 +463,7 @@ async fn open_channel() -> Result<Chan, String> {
         && !sh.session.is_closed()
     {
         match open_store_channel(&sh.session).await {
-            Ok(c) => return Ok(c),
+            Ok(ch) => return Ok(Link { ch, session: sh.session.clone() }),
             // The connection died under us: reconnect below.
             Err(crate::relay::RelayConnectError::Network(_)) => {}
             Err(e) => return Err(describe(e)),
@@ -446,16 +483,42 @@ async fn open_channel() -> Result<Chan, String> {
     // A connection being replaced is closed, not just dropped: dropping a
     // russh handle closes nothing, and the old one would stay authenticated
     // on the master -- holding its slots -- for as long as keepalives last.
-    // Not at once, though: a connection replaced because one channel open
-    // was slow may still be carrying other sessions' transfers.  Once the
-    // stall limit has passed, anything still on it is stuck anyway.
+    // Not while anything still uses it, though: a connection replaced because
+    // one channel open was slow may be carrying other sessions' healthy
+    // transfers.  Each session's `Link` holds the connection, and moves to the
+    // new one at its next operation; the old one is closed when the last lets
+    // go.
+    set_current(Some(&session));
     if let Some(old) = guard.replace(Shared { key, session: session.clone() }) {
-        tokio::spawn(async move {
-            tokio::time::sleep(WRITE_STALL).await;
-            let _ = old.session.disconnect(russh::Disconnect::ByApplication, "FTP reconnect", "").await;
-        });
+        tokio::spawn(retire(old.session));
     }
-    open_store_channel(&session).await.map_err(describe)
+    let ch = open_store_channel(&session).await.map_err(describe)?;
+    Ok(Link { ch, session })
+}
+
+/// Close a replaced connection once no session's channel is on it -- or after
+/// an hour regardless: a session's `Link` lets go only at its next operation,
+/// and with the idle timeout off an idle client would otherwise keep the old
+/// connection (a login and an `ftp-store` slot on the master) for ever.
+async fn retire(old: Arc<crate::relay::RelaySession>) {
+    let give_up = tokio::time::Instant::now() + Duration::from_secs(3600);
+    while Arc::strong_count(&old) > 1 && !old.is_closed() && tokio::time::Instant::now() < give_up {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    let _ = old.disconnect(russh::Disconnect::ByApplication, "FTP reconnect", "").await;
+}
+
+/// Whether a session's channel is still on the live shared connection.  Not
+/// when that connection has closed (a master restart while the client sat
+/// idle) or been replaced: the operation about to run would fail -- or, for
+/// one that changes something, fail without a retry -- so a fresh channel is
+/// opened first.
+fn is_current(link: &Link) -> bool {
+    if link.session.is_closed() {
+        return false;
+    }
+    let live = current().lock().unwrap_or_else(|e| e.into_inner()).upgrade();
+    live.is_some_and(|live| Arc::ptr_eq(&live, &link.session))
 }
 
 /// `open_exec_channel` with a bound on the whole of it: opening the channel
@@ -490,6 +553,7 @@ fn release() {
             let idle = {
                 let mut guard = shared().lock().await;
                 if LIVE.load(Ordering::SeqCst) == 0 && EPOCH.load(Ordering::SeqCst) == epoch {
+                    set_current(None);
                     guard.take()
                 } else {
                     None
@@ -514,14 +578,14 @@ fn describe(e: crate::relay::RelayConnectError) -> String {
         }
         crate::relay::RelayConnectError::Refused(m) => {
             glog!("FTP (slave): master declined the FTP channel: {}", m);
-            "the master is not accepting relays, or is too old for FTP".into()
+            "the master refused: relays off, at capacity, or too old for FTP".into()
         }
     }
 }
 
 /// One FTP session's view of the master.
 pub struct RemoteStore {
-    chan: Arc<tokio::sync::Mutex<Option<Chan>>>,
+    chan: Arc<tokio::sync::Mutex<Option<Link>>>,
 }
 
 impl Drop for RemoteStore {
@@ -530,7 +594,12 @@ impl Drop for RemoteStore {
     }
 }
 
-type Guard = tokio::sync::OwnedMutexGuard<Option<Chan>>;
+type Guard = tokio::sync::OwnedMutexGuard<Option<Link>>;
+
+/// The channel in a session's guard, if it has one.
+fn chan_of(g: &mut Guard) -> Option<&mut Chan> {
+    g.as_mut().map(|l| &mut l.ch)
+}
 
 fn lost(e: std::io::Error) -> StoreError {
     StoreError::Io(format!("lost the master ({})", e.kind()))
@@ -560,6 +629,11 @@ impl RemoteStore {
 
     async fn channel(&self) -> Result<Guard, StoreError> {
         let mut g = self.chan.clone().lock_owned().await;
+        if let Some(link) = g.as_ref()
+            && !is_current(link)
+        {
+            *g = None;
+        }
         if g.is_none() {
             *g = Some(open_channel().await.map_err(StoreError::Io)?);
         }
@@ -573,7 +647,7 @@ impl RemoteStore {
     /// operation" means that operation, not the one after it.
     async fn call(&self, op: u8, payload: Vec<u8>) -> Result<Vec<u8>, StoreError> {
         let first = self.call_once(op, payload.clone()).await;
-        let idempotent = matches!(op, OP_STAT | OP_LIST | OP_RENAME_CHECK);
+        let idempotent = matches!(op, OP_STAT | OP_LIST | OP_RENAME_CHECK | OP_UNIQUE);
         match first {
             Err(StoreError::Io(ref m)) if idempotent && m.starts_with("lost the master") => self.call_once(op, payload).await,
             other => other,
@@ -584,7 +658,7 @@ impl RemoteStore {
     /// operation reopens it.
     async fn call_once(&self, op: u8, payload: Vec<u8>) -> Result<Vec<u8>, StoreError> {
         let mut g = self.channel().await?;
-        let Some(ch) = g.as_mut() else { return Err(StoreError::Io("no channel".into())) };
+        let Some(ch) = chan_of(&mut g) else { return Err(StoreError::Io("no channel".into())) };
         let r = async {
             write_frame(ch, op, &payload).await?;
             read_frame(ch, MAX_REPLY).await
@@ -647,7 +721,7 @@ impl RemoteStore {
     /// Start a download: the master opens the file and the bytes follow.
     pub async fn open_read(&self, path: &str, offset: u64) -> Result<RemoteRead, StoreError> {
         let mut g = self.channel().await?;
-        let Some(ch) = g.as_mut() else { return Err(StoreError::Io("no channel".into())) };
+        let Some(ch) = chan_of(&mut g) else { return Err(StoreError::Io("no channel".into())) };
         let r = async {
             write_frame(ch, OP_READ, &Enc::default().str(path).u64(offset).0).await?;
             read_frame(ch, MAX_REPLY).await
@@ -671,7 +745,7 @@ impl RemoteStore {
     /// there) before the client is told to send.
     pub async fn begin_write(&self, path: &str, mode: WriteMode) -> Result<RemoteWrite, StoreError> {
         let mut g = self.channel().await?;
-        let Some(ch) = g.as_mut() else { return Err(StoreError::Io("no channel".into())) };
+        let Some(ch) = chan_of(&mut g) else { return Err(StoreError::Io("no channel".into())) };
         let r = async {
             write_frame(ch, OP_WRITE, &encode_mode(Enc::default().str(path), mode).0).await?;
             read_frame(ch, MAX_REPLY).await
@@ -714,7 +788,7 @@ impl RemoteRead {
             if self.done {
                 return Ok(0);
             }
-            let Some(ch) = self.guard.as_mut().and_then(|g| g.as_mut()) else {
+            let Some(ch) = self.guard.as_mut().and_then(chan_of) else {
                 return Err(bad("no channel"));
             };
             let (tag, data) = read_frame(ch, MAX_CHUNK).await?;
@@ -766,7 +840,7 @@ pub struct RemoteWrite {
 
 impl RemoteWrite {
     pub async fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
-        let Some(ch) = self.guard.as_mut().and_then(|g| g.as_mut()) else {
+        let Some(ch) = self.guard.as_mut().and_then(chan_of) else {
             return Err(bad("no channel"));
         };
         for chunk in data.chunks(MAX_CHUNK) {
@@ -777,7 +851,7 @@ impl RemoteWrite {
 
     /// End the upload; the master flushes, syncs and renames before answering.
     pub async fn finish(mut self) -> Result<(), StoreError> {
-        let Some(ch) = self.guard.as_mut().and_then(|g| g.as_mut()) else {
+        let Some(ch) = self.guard.as_mut().and_then(chan_of) else {
             return Err(StoreError::Io("no channel".into()));
         };
         let r = async {

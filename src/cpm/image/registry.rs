@@ -461,17 +461,16 @@ pub fn is_image_booted(path: &Path) -> bool {
 /// included, is claimed booted.  An *unrestored* drive is not in use: the
 /// session that held it has ended.
 pub fn image_in_use(path: &Path) -> bool {
-    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if lock!(booted_images()).contains(&key) {
-        return true;
-    }
-    // Copied out before the filesystem work, so the table's lock is held
-    // for a copy of at most sixteen paths, not for their canonicalisation.
-    let paths: Vec<PathBuf> = {
+    // Both copied out before the filesystem work, so neither lock is held for
+    // more than a copy of a few paths.  Compared by identity
+    // (`same_host_file`): on a case-insensitive disk `game.dsk` *is* a
+    // mounted `GAME.DSK`, and a hard link is the same image too.
+    let mut paths: Vec<PathBuf> = lock!(booted_images()).iter().cloned().collect();
+    {
         let t = table().read().unwrap_or_else(|e| e.into_inner());
-        t.iter().flatten().map(|m| m.path.clone()).collect()
-    };
-    paths.iter().any(|p| p.canonicalize().unwrap_or_else(|_| p.clone()) == key)
+        paths.extend(t.iter().flatten().map(|m| m.path.clone()));
+    }
+    paths.iter().any(|p| crate::cpm::fs::same_host_file(p, path))
 }
 
 /// Drives lent to a booted session, as `drive -> filename`.

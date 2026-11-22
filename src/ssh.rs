@@ -633,6 +633,12 @@ fn try_claim_slot(count: &AtomicUsize, max: usize) -> bool {
 /// by a branch added later.
 struct SlotGuard(Arc<AtomicUsize>);
 
+/// Live `ftp-store` channels on this master, from every slave together.
+fn ftp_store_count() -> Arc<AtomicUsize> {
+    static C: std::sync::OnceLock<Arc<AtomicUsize>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default).clone()
+}
+
 impl Drop for SlotGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
@@ -1266,35 +1272,44 @@ impl SshHandler {
         if !self.counted {
             refuse("not authenticated");
             session.channel_failure(channel)?;
+            let _ = session.close(channel);
             return Ok(());
         }
         if cfg.gateway_role != "master" || !cfg.master_accept_relays {
             refuse(&format!("role={}, accept_relays={}", cfg.gateway_role, cfg.master_accept_relays));
             session.channel_failure(channel)?;
+            let _ = session.close(channel);
             return Ok(());
         }
         if version != "1" {
             refuse(&format!("unknown store protocol version {version:?}"));
             session.channel_failure(channel)?;
+            let _ = session.close(channel);
             return Ok(());
         }
-        if !try_claim_slot(&self.session_count, self.max_sessions) {
-            refuse(&format!("server at capacity {}", self.max_sessions));
+        // Counted on their own, not in `session_count`: every FTP session
+        // logged in on a slave holds one of these for its whole life, idle or
+        // not, and one busy slave would otherwise fill the master's SSH slots
+        // and turn away other slaves' relays and ordinary SSH logins.  The
+        // same number caps them.
+        let store_count = ftp_store_count();
+        if !try_claim_slot(&store_count, self.max_sessions) {
+            refuse(&format!("ftp-store channels at capacity {}", self.max_sessions));
             session.channel_failure(channel)?;
+            let _ = session.close(channel);
             return Ok(());
         }
         if let Err(e) = session.channel_success(channel) {
-            self.session_count.fetch_sub(1, Ordering::SeqCst);
+            store_count.fetch_sub(1, Ordering::SeqCst);
             return Err(e);
         }
         glog!("SSH: accepted ftp-store from {:?}", self.peer_addr);
         let (gateway_stream, handler_stream) = tokio::io::duplex(256 * 1024);
         let (handler_read, handler_write) = tokio::io::split(handler_stream);
         self.relay_inputs.insert(channel, spawn_input_pump(handler_write));
-        let session_count = self.session_count.clone();
         let slave = self.peer_addr.map(|a| a.to_string()).unwrap_or_else(|| "?".into());
         tokio::spawn(async move {
-            let _slot = SlotGuard(session_count);
+            let _slot = SlotGuard(store_count);
             let _live = telnet::LiveConnection::new();
             crate::ftp::remote::serve(gateway_stream, slave).await;
         });
@@ -2978,6 +2993,109 @@ mod tests {
 
         drop(session);
         server.abort();
+    }
+
+    /// **The master's `ftp-store` gates, over a real connection.**  Each
+    /// refusal is a `channel_failure` followed by a close (a refused channel
+    /// left open sat in both ends' tables), and none of them is reached with a
+    /// slot taken: not a master, relays off, an unknown version.  Then the
+    /// open itself -- which must succeed with every SSH slot already in use,
+    /// since `ftp-store` channels are counted on their own (one busy slave
+    /// filled `max_sessions` and turned away relays and SSH logins) -- and
+    /// their own cap, which refuses one more and frees its place on close.
+    /// (`!self.counted` can't be reached by a real client: russh opens no
+    /// channel before login.  The source scan in telnet/tests.rs pins it.)
+    #[tokio::test]
+    async fn test_the_ftp_store_gates_over_a_real_connection() {
+        struct Client;
+        impl russh::client::Handler for Client {
+            type Error = russh::Error;
+            async fn check_server_key(
+                &mut self,
+                _key: &russh::keys::PublicKeyOrCertificate,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+        /// Every message on a fresh channel after `exec`, until it closes or
+        /// a second passes quietly after the answer.
+        async fn ask(
+            session: &russh::client::Handle<Client>,
+            command: &str,
+        ) -> (Vec<String>, russh::Channel<russh::client::Msg>) {
+            let mut channel = session.channel_open_session().await.unwrap();
+            channel.exec(true, command.as_bytes()).await.unwrap();
+            let mut seen = Vec::new();
+            loop {
+                let wait = if seen.is_empty() { 5 } else { 1 };
+                match tokio::time::timeout(std::time::Duration::from_secs(wait), channel.wait()).await {
+                    Ok(Some(msg)) => {
+                        let close = matches!(msg, russh::ChannelMsg::Close);
+                        seen.push(format!("{msg:?}").split(['(', ' ', '{']).next().unwrap_or("").to_string());
+                        if close {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            (seen, channel)
+        }
+        let _cfg = crate::config::CONFIG_TEST_LOCK.lock().await;
+        let old = crate::config::get_config();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let session_count = Arc::new(AtomicUsize::new(0));
+        let count = session_count.clone();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut handler = loopback_handler(addr, None);
+            // One SSH slot, which the login itself takes.
+            handler.max_sessions = 1;
+            handler.session_count = count;
+            if let Ok(s) = russh::server::run_stream(loopback_config(), tcp, handler).await {
+                let _ = s.await;
+            }
+        });
+        let mut session =
+            russh::client::connect(Arc::new(russh::client::Config::default()), addr, Client).await.unwrap();
+        assert!(session.authenticate_password("admin", "secret").await.unwrap().success());
+        assert_eq!(session_count.load(Ordering::SeqCst), 1, "the login holds the only SSH slot");
+
+        let refused = |seen: &[String], why: &str| {
+            let failure = seen.iter().position(|m| m == "Failure").unwrap_or_else(|| panic!("{why}: not refused: {seen:?}"));
+            let close = seen.iter().position(|m| m == "Close").unwrap_or_else(|| panic!("{why}: refused but left open: {seen:?}"));
+            assert!(failure < close, "{why}: closed before it answered: {seen:?}");
+            assert!(!seen.iter().any(|m| m == "Success"), "{why}: accepted: {seen:?}");
+        };
+        crate::config::update_config_value("gateway_role", "standalone");
+        crate::config::update_config_value("master_accept_relays", "true");
+        refused(&ask(&session, "ftp-store 1").await.0, "not a master");
+        crate::config::update_config_value("gateway_role", "master");
+        crate::config::update_config_value("master_accept_relays", "false");
+        refused(&ask(&session, "ftp-store 1").await.0, "relays off");
+        crate::config::update_config_value("master_accept_relays", "true");
+        refused(&ask(&session, "ftp-store 2").await.0, "an unknown version");
+        assert_eq!(ftp_store_count().load(Ordering::SeqCst), 0, "a refusal took a store slot");
+
+        let (seen, first) = ask(&session, "ftp-store 1").await;
+        assert!(seen.iter().any(|m| m == "Success"), "refused with every SSH slot in use: {seen:?}");
+        assert_eq!(ftp_store_count().load(Ordering::SeqCst), 1);
+        assert_eq!(session_count.load(Ordering::SeqCst), 1, "an ftp-store channel took an SSH slot");
+        refused(&ask(&session, "ftp-store 1").await.0, "past its own cap");
+        first.close().await.unwrap();
+        drop(first);
+        let freed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while ftp_store_count().load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        crate::config::update_config_value("gateway_role", &old.gateway_role);
+        crate::config::update_config_value("master_accept_relays", &old.master_accept_relays.to_string());
+        drop(session);
+        server.abort();
+        assert!(freed.is_ok(), "a closed ftp-store channel kept its slot");
     }
 
     /// **An `enroll-key` channel is closed once it is answered.**  It is one

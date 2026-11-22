@@ -1739,6 +1739,17 @@ fn collect_form_updates(
                 warning = format!("{why} The username was not changed. {warning}").trim_end().to_string();
                 continue;
             }
+            // Said, not dropped in silence: the config layer refuses a bad
+            // range without a word, and an operator would then open their
+            // firewall for ports the server isn't using.
+            if *key == "ftp_passive_ports" && crate::config::parse_passive_ports(v).is_none() {
+                warning = format!(
+                    "Passive ports not saved: use low-high, both 1024-65535, or leave empty. {warning}"
+                )
+                .trim_end()
+                .to_string();
+                continue;
+            }
             // Judged trimmed, so stored trimmed.
             if *key == "username" {
                 updates.push(((*key).to_string(), v.trim().to_string()));
@@ -6011,6 +6022,28 @@ mod tests {
         }
     }
 
+    /// **A passive range the server can't use is said, not dropped.**  The
+    /// config layer refuses it silently; the page must not write it and must
+    /// say so in the notice, while a good range (or an empty one) is written.
+    #[test]
+    fn test_a_bad_passive_range_is_refused_aloud() {
+        let stored = Config::default();
+        for bad in ["50000:50100", "80-90", "60000-50000"] {
+            let mut form = empty_form();
+            form.insert("ftp_passive_ports".into(), bad.into());
+            let (updates, notice) = collect_form_updates(&form, &stored);
+            assert!(!updates.iter().any(|(k, _)| k == "ftp_passive_ports"), "{bad:?} was written");
+            assert!(notice.contains("Passive ports not saved"), "{bad:?}: {notice}");
+        }
+        for good in ["50000-50100", ""] {
+            let mut form = empty_form();
+            form.insert("ftp_passive_ports".into(), good.into());
+            let (updates, notice) = collect_form_updates(&form, &stored);
+            assert!(updates.iter().any(|(k, v)| k == "ftp_passive_ports" && v == good), "{good:?} was not written");
+            assert!(!notice.contains("Passive ports"), "{good:?}: {notice}");
+        }
+    }
+
     /// Raw-TCP mode greys the TTYPE/NAWS negotiate box, so saving in raw mode must
     /// PRESERVE that setting rather than store `false` over it.
     ///
@@ -9325,6 +9358,11 @@ mod tests {
         }
         // A master with relays armed, so nothing is skipped as inert.
         form.insert("gateway_role".to_string(), "master".to_string());
+        // The passive range is checked on the page (a bad one is refused aloud
+        // rather than dropped by the config layer), so it is probed with a
+        // range the server can use.
+        const PASSIVE: &str = "50000-50100";
+        form.insert("ftp_passive_ports".to_string(), PASSIVE.to_string());
         let (updates, _) = collect_form_updates(&form, &cfg);
 
         for name in &controls {
@@ -9339,6 +9377,10 @@ mod tests {
                 continue;
             }
             let got = updates.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+            if name == "ftp_passive_ports" {
+                assert_eq!(got, Some(PASSIVE), "a usable passive range did not arrive verbatim");
+                continue;
+            }
             // The password is the one value that may not arrive verbatim: a
             // typed one is stored hashed (`credential::store_typed`), so it must
             // arrive as a hash of exactly what was typed.

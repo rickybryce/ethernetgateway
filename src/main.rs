@@ -606,7 +606,7 @@ fn main() {
             let serial_handles = runtime.rt().block_on(async move {
                 let session_writers: telnet::SessionWriters =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
-                // One shared lockout map across telnet + SSH so an
+                // One shared lockout map across telnet + SSH + FTP so an
                 // attacker can't bounce between protocols to reset their
                 // attempt counter.
                 let lockouts: telnet::LockoutMap = Arc::new(
