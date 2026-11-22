@@ -236,7 +236,7 @@
             margin: 10px 0 16px;
             font-size: 0.9em;
             /* Let wide reference tables wrap rather than widening the page. */
-            overflow-wrap: anywhere;
+            overflow-wrap: break-word;
         }
 
         .data-table th {
@@ -310,7 +310,7 @@
                the page's minimum width, and the WHOLE page scrolls sideways on a
                narrow screen — which breaks reading the prose, not just the token.
                Measured: every one of these 12 pages overflowed at 390px. */
-            overflow-wrap: anywhere;
+            overflow-wrap: break-word;
         }
 
         pre {
@@ -440,6 +440,10 @@
                which is exactly how this one hid.  Tables shed some padding here
                as well: three columns of 14px each is 84px of a phone's width. */
             .body-content { overflow-wrap: anywhere; }
+            /* Under 900px only.  Wider, tables and code use `break-word` (split a
+               word only when it alone is too wide): `anywhere` let a long cell squeeze
+               its neighbours to a letter's width there ("RF|C", "seria|l_"). */
+            code, .data-table { overflow-wrap: anywhere; }
             .data-table th,
             .data-table td { padding: 6px 8px; }
             .data-table { font-size: 0.8em; }
