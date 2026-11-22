@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The setup wizard's welcome screen lists the FTP server** among what the
+  gateway offers, and says it stays off until turned on in Server -> More...
+
+### Fixed
+
+- **The x86_64 Linux tarball and AppImage start on Debian 13 and Ubuntu 24.04
+  again.**  Since 1.0.7 they were built on a runner with glibc 2.43 and asked
+  for it, so they would not start on Debian 13 (2.41), Ubuntu 24.04 (2.39) or
+  older.  Releases build them on Ubuntu 22.04 (glibc 2.35) now, as the arm64
+  build already was, and a release whose Linux binary needs a newer glibc
+  fails before it is published.  The x86_64 Linux downloads of 1.0.7 and
+  1.0.8 were rebuilt this way and replaced.
+
 ## [1.0.8] - 2026-11-22
 
 ### Added

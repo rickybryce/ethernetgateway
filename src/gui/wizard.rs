@@ -696,6 +696,8 @@ impl Wizard {
             "CP/M emulator — runs real Z80 or 8080 .COM software, and ships with our \
              own EGT8080 terminal program, which runs on either.",
             "Gateway Shell — a CP/M-style file manager over the transfer directory.",
+            "FTP server — the same transfer directory for any FTP client; off until you \
+             turn it on in the Server \"More...\" window.",
             "Extras — a text-mode web browser, a weather service and an AI chat client.",
         ] {
             bullet(ui, line);
