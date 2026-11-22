@@ -33,7 +33,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # **Pinned, not `ubuntu-latest`.**  A Linux binary needs the glibc
+          # of the machine that built it, or newer.  `ubuntu-latest` moved to
+          # an Ubuntu with glibc 2.43 between 1.0.6 and 1.0.7, and the x86_64
+          # tarball and AppImage of 1.0.7 and 1.0.8 then asked for 2.43's
+          # coshf/sinhf/acosf/... and would not start on Debian 13 (2.41) or
+          # Ubuntu 24.04 (2.39) -- most x86 Linux desktops.  Nothing failed:
+          # the build was green and the AppImage ran on the runner.  22.04
+          # (glibc 2.35) matches the arm64 build below, and the "glibc floor"
+          # step refuses a binary that needs more.  Both releases' x86_64
+          # Linux assets were rebuilt this way and replaced (2026-11-22).
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
             appimage_arch: x86_64
@@ -76,6 +86,19 @@ jobs:
 
       - name: cargo build --release
         run: cargo build --release --target ${{ matrix.target }} --verbose
+
+      # Debian 13 has glibc 2.41 and Ubuntu 24.04 2.39; this keeps the Linux
+      # builds runnable on both (and on 22.04) by refusing any binary that
+      # asks for a glibc newer than 2.35.  See the runner pin above.
+      - name: glibc floor (refuse anything newer than 2.35)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          B="target/${{ matrix.target }}/release/ethernetgateway"
+          MAX=$(objdump -T "$B" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "highest glibc symbol version: ${MAX}"
+          [ "$(printf '%s\n' "$MAX" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35 ] || {
+            echo "FATAL: needs ${MAX}, more than GLIBC_2.35" >&2; exit 1; }
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
