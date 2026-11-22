@@ -53,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaced a mounted or booted image without asking.  The menu asks again
   after you answer Y, since another session may have mounted the disk while
   the question waited.
+- **A TAB from a host reaches a Commodore 64 as spaces.**  The C64 has no
+  TAB, so a tab-aligned listing such as `ls` ran its columns together; a TAB
+  now becomes spaces to the next column of eight (never past the 40th)
+  wherever PETSCII translation is on.
+- **Two listeners can no longer be given the same port.**  Telnet, SSH, the
+  web page, the Kermit server and FTP (with its passive range) each need their
+  own; a change from the telnet menu, the web page or the desktop window that
+  would put two on one port is refused, naming the listener that has it,
+  before anything restarts.  A clash typed into `egateway.conf` by hand is
+  named at startup as the gateway's own two listeners, rather than blamed on
+  another program.
 
 ## [1.0.7] - 2026-11-11
 

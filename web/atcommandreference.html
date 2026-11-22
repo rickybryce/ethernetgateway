@@ -615,7 +615,7 @@
                     independent AT / S-register state and its own <code>AT&amp;W</code>
                     profile (<code>serial_a_*</code> / <code>serial_b_*</code>). For the
                     hardware-setup and menu walkthrough, see the
-                    <a href="index.html#serial-modem">Serial Modem section of the User Manual</a>.
+                    Serial / Hayes AT Modem chapter (9) of the <a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">User Manual</a>.
                 </div>
             </div>
 
@@ -827,7 +827,7 @@
                     <tr><td><code>ATD <em>host:port</em></code></td><td>Generic dial (no <code>T</code>/<code>P</code> selector).</td></tr>
                     <tr><td><code>ATDT ethernetgateway</code></td><td>Built-in shortcut &mdash; &ldquo;dial&rdquo; this gateway's own main menu, so the serial device gets file transfer, browser, AI chat, etc. with no network detour.</td></tr>
                     <tr><td><code>ATDT KERMIT</code></td><td>Drop straight into Kermit server mode (aliases: <code>kermit</code>, <code>kermit-server</code>, <code>kermit server</code>). Requires <code>allow_atdt_kermit = true</code>; off by default. See the <a href="kermit.html">Kermit Reference</a>.</td></tr>
-                    <tr><td><code>ATD <em>&lt;Port&gt;</em>@<em>&lt;IP&gt;</em></code></td><td>Peer-dial &mdash; call another serial port directly (e.g. <code>ATD B@192.168.1.50</code>) and bridge to the device on it: a modem port rings (answers per its own <code>S0</code>/<code>ATA</code>), a console port connects directly. Requires <code>allow_peer_dial = true</code>; off by default. Same-gateway, or (over the master/slave relay) a slave device to a port on its master. See <a href="index.html#peer-dial">Peer-Dial</a> and user manual &sect;9.2.3.</td></tr>
+                    <tr><td><code>ATD <em>&lt;Port&gt;</em>@<em>&lt;IP&gt;</em></code></td><td>Peer-dial &mdash; call another serial port directly (e.g. <code>ATD B@192.168.1.50</code>) and bridge to the device on it: a modem port rings (answers per its own <code>S0</code>/<code>ATA</code>), a console port connects directly. Requires <code>allow_peer_dial = true</code>; off by default. Same-gateway, or (over the master/slave relay) a slave device to a port on its master. See &sect;9.2.3, Peer-Dial, in the <a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">User Manual</a>.</td></tr>
                     <tr><td><code>ATDL</code></td><td>Redial the last number.</td></tr>
                     <tr><td><code>ATDS</code> / <code>ATDS<em>n</em></code></td><td>Dial the stored number in slot <em>n</em> (0&ndash;3; bare <code>ATDS</code> = slot 0).</td></tr>
                     <tr><td><code>AT&amp;Z<em>n</em>=<em>s</em></code></td><td>Store phone number or <code>host:port</code> string <em>s</em> in slot <em>n</em> (0&ndash;3). Hostname case is preserved. Persisted with <code>AT&amp;W</code>.</td></tr>
@@ -1038,7 +1038,7 @@ A/                       <span class="output-text">(repeats the dial, no AT/Ente
             <div class="section">
                 <div class="section-title">See Also</div>
                 <div class="callout callout-info">
-                    The <a href="index.html#serial-modem">Serial Modem section of the User
+                    Chapter 9, Serial / Hayes AT Modem, of the <a href="https://github.com/rickybryce/ethernetgateway/blob/master/usermanual.pdf">User
                     Manual</a> covers port setup, modes, the Ring Emulator, and Console Mode.
                     For file transfers over a dialed connection, see the
                     <a href="xmodemreference.html">XMODEM</a>,

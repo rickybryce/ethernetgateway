@@ -749,12 +749,12 @@
                         <tr>
                             <td><code>remote delete &lt;file&gt;</code><br><span class="dim-text">aka <code>remote era</code>, <code>rdel</code></span></td>
                             <td>G E</td>
-                            <td>Delete a file in the gateway's current effective directory. Filename is path-traversal-validated; missing or unsafe names return an E-packet. Wildcards are <em>not</em> expanded — operate on one filename per call.</td>
+                            <td>Delete a file in the gateway's current effective directory. Filename is path-traversal-validated; missing or unsafe names return an E-packet. Wildcards are <em>not</em> expanded — operate on one filename per call. A disk image the CP/M emulator is using (mounted or booted), or a file a CP/M program is writing, is refused with an E-packet saying so.</td>
                         </tr>
                         <tr>
                             <td><code>remote rename &lt;old&gt; &lt;new&gt;</code><br><span class="dim-text">aka <code>rrename</code></span></td>
                             <td>G R</td>
-                            <td>Rename a file in place. Both names are field-encoded per spec §6.7 and validated separately; if the destination already exists the server refuses with an E-packet rather than silently clobbering it.</td>
+                            <td>Rename a file in place. Both names are field-encoded per spec §6.7 and validated separately; if the destination already exists the server refuses with an E-packet rather than silently clobbering it. A disk image the CP/M emulator is using is not renamed.</td>
                         </tr>
                         <tr>
                             <td><code>remote type &lt;file&gt;</code><br><span class="dim-text">aka <code>rtype</code></span></td>

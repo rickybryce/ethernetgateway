@@ -648,7 +648,7 @@
                 <ul class="dim-text">
                     <li><strong>One lockout for every surface.</strong> Three wrong passwords lock the address out of telnet, SSH, the web page and FTP for five minutes. An FTP client with a saved wrong password that retries on its own can therefore lock that PC out of the web page too.</li>
                     <li><strong>One connection budget.</strong> The per-IP connection rate (<code>conn_rate_max</code> / <code>conn_rate_window_secs</code>) counts FTP control connections together with telnet and SSH; over the limit, a connection is dropped silently. FTP sessions are capped at <code>max_sessions</code>, counted separately from telnet&rsquo;s and SSH&rsquo;s.</li>
-                    <li><strong>No user enumeration.</strong> Every <code>USER</code> gets <code>331</code>, and a wrong username or password gets the same <code>530</code> in the same time. There is a one-second pause after each failed login, as on telnet.</li>
+                    <li><strong>No user enumeration.</strong> Every <code>USER</code> except the refused anonymous names gets <code>331</code>, and a wrong username or password gets the same <code>530</code> in the same time. There is a one-second pause after each failed login, as on telnet.</li>
                     <li><strong>Passwords are never logged</strong>, not even with verbose logging on (the line reads <code>PASS ****</code>).</li>
                     <li><strong>Clear text.</strong> FTP sends the password unencrypted, as telnet does. There is no FTPS: <code>AUTH</code> answers <code>502</code>, so modern clients fall back to plain FTP. Keep FTP on a trusted network.</li>
                 </ul>
