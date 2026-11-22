@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-11-22
+
 ### Added
 
 - **An FTP server.**  Off by default; turn it on under Server -> More... in the
@@ -8718,7 +8720,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.7...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.8...HEAD
+[1.0.8]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.8
 [1.0.7]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.7
 [1.0.6]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.6
 [1.0.5]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.5
