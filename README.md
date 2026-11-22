@@ -1,16 +1,17 @@
 # Ethernet Gateway
 
-A telnet/SSH file-transfer gateway for retro and modern terminals, written in
-Rust. It speaks **a range of file-transfer protocols**, tested against real
-vintage hardware, and emulates a **Hayes AT modem** on two independent serial
-ports. It bridges out to remote **telnet and SSH** hosts, and runs real
-**CP/M 2.2** software on an emulated Z80 or 8080. Alongside those sit a
-CP/M-inspired **Gateway Shell** (an `A>` file manager over the transfer
-directory), a text-mode **web browser**, **AI chat**, and a **weather** service.
+Ethernet Gateway puts vintage computers on the network. Plug a Commodore 64,
+an Altair 8800 clone, an RC2014 or any machine with an RS-232 serial port into
+it, and that machine gets a **Hayes-compatible modem** that can dial telnet BBSes
+and SSH hosts, a file server it can download from with **XMODEM, YMODEM, ZMODEM,
+Kermit or Punter**, and a **CP/M emulator** that runs real `.COM` software. It is
+written in Rust and runs on Linux (a Raspberry Pi is plenty), macOS and Windows.
 
-PETSCII (Commodore 64), ANSI and ASCII terminals are all supported. The gateway
-is designed for local-network use. An optional **master/slave** mode extends one
-gateway's serial ports to another over SSH.
+The same gateway answers modern machines too: over telnet and SSH, from a
+desktop window, a web page, or an **FTP server** that serves the same folder the
+old machines see. PETSCII (Commodore 64), ANSI and ASCII terminals are all
+supported, and an optional **master/slave** mode extends one gateway's serial
+ports to another over SSH. It is designed for a local network.
 
 ![Ethernet Gateway](web/screenshot.png)
 
@@ -23,6 +24,43 @@ Author: Ricky Bryce. Licensed **GPL-3.0-or-later** (see [License](#license)).
 > **This README is a quick start and feature overview.** Everything else lives
 > at [ethernetgateway.com](http://ethernetgateway.com/index.html) — see
 > [Documentation](#documentation).
+
+## What People Use It For
+
+**Getting files onto a vintage computer.** If you have been looking for a way
+to transfer files to a CP/M machine or a Commodore 64 without swapping floppies
+or SD cards, this is the job it was built for. Put the files in one folder on
+the gateway and download them from the old machine over a serial cable or a
+telnet connection, with XMODEM-CRC and XMODEM-1K, YMODEM batch, ZMODEM, Kermit
+(sliding windows, and an always-on Kermit server) or Punter C1, the Commodore
+protocol CCGMS and Novaterm use. Uploads are recognised automatically, and from
+a PC you can drop files into the same folder by FTP.
+
+**A modem emulator for retro computers.** Each of two serial ports can act as a
+Hayes modem with the usual AT command set, S-registers, stored numbers and
+DCD/DTR handling, so terminal software from the 1980s dials `ATDT
+bbs.example.com:23` and reaches a telnet BBS the way it once reached a phone
+line. It does the job of a WiFi modem or a serial-to-telnet bridge, and a USB
+serial adapter on a Raspberry Pi is all the hardware it needs.
+
+**Calling BBSes from a Commodore 64.** ANSI colour and cursor control from a
+remote telnet or SSH host are translated to PETSCII on the way to a C64, and
+every screen the gateway draws itself fits 40 columns.
+
+**Running CP/M and booting Altair, IMSAI and Cromemco disks.** The CP/M 2.2
+emulator runs WordStar, MBASIC, PIP, ED and ASM on an emulated Z80
+or 8080, with folders or `.dsk` disk images as drives. Booting a disk image goes
+further: the machine is emulated down to its disk controller, so CP/M 3, Altair
+DOS and Altair Disk Extended BASIC boot from their own disks, and a VDM-1 or
+Dazzler display is shown in a web browser.
+
+**A serial console server.** A port set to console mode is a telnet-to-serial
+bridge, handy for an RC2014, SC126 or any board with only a serial console. A
+Kermit-mode port serves files to whatever is on the other end.
+
+**The modern web on an 8-bit screen.** A text-mode web browser (HTTP, HTTPS and
+Gopher), current weather anywhere in the world, and AI chat, all sized for a 40-
+or 80-column terminal.
 
 ## Quick Start
 
@@ -103,6 +141,10 @@ options, and the full AT command set.
   disconnect.
 - **Master/slave relay** — extend a slave gateway's serial ports to a master
   over SSH; files always land on the master.
+- **FTP server** — serves the transfer directory to FTP clients (FileZilla,
+  curl, Windows `ftp`, or a vintage machine's own client) with the gateway's
+  login, lockout and address rules. On a slave, every file operation happens
+  on the master. Off by default.
 - **Web browser** — text-mode HTTP/HTTPS/Gopher browsing with numbered links,
   forms, and bookmarks. Rendered for 40-column PETSCII up to modern terminals.
   The Gopher client is compliant with RFC 1436, RFC 4266 and Gopher+ (tn3270
@@ -195,8 +237,8 @@ even that as a trusted-environment tool.
   connections only from private, loopback and link-local addresses. To accept
   any source you must set `security_enabled = true` with a strong `username` /
   `password` (still not recommended on public networks — telnet is cleartext).
-- **Authentication:** one `username` / `password` pair covers telnet, SSH, and
-  the web UI. Three failed logins from an IP trip a shared 5-minute lockout.
+- **Authentication:** one `username` / `password` pair covers telnet, SSH,
+  FTP and the web UI. Three failed logins from an IP trip a shared 5-minute lockout.
   The password is stored as a PBKDF2 hash in `egateway.conf` (a cleartext one
   from an older release is rewritten on the next start, and cannot be read back
   out afterwards); the Groq API key and `slave_master_password` in that file are
@@ -225,6 +267,9 @@ Everything below the quick start is covered in depth online:
 - **[CP/M Reference](http://ethernetgateway.com/cpmreference.html)** — the
   emulator: `cpm_emu_*` settings, the CCP built-ins, every virtual-modem port
   profile, the bundled EGT8080 terminal, and BDOS/BIOS coverage.
+- **[FTP Reference](http://ethernetgateway.com/ftpreference.html)** — the FTP
+  server's settings, commands, client notes, and how a slave serves the
+  master's files.
 
 ## Disclaimer
 
