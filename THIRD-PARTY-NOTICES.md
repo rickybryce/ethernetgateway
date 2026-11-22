@@ -1314,7 +1314,7 @@ Used by:
 - [aws-lc-sys 0.45.0](https://github.com/aws/aws-lc-rs)
 - [gl_generator 0.14.0](https://github.com/brendanzab/gl-rs/)
 - [khronos_api 3.1.0](https://github.com/brendanzab/gl-rs/)
-- [pageant 0.2.3](https://github.com/warp-tech/russh)
+- [pageant 0.2.5](https://github.com/warp-tech/russh)
 - [russh-cryptovec 0.62.0](https://github.com/warp-tech/russh)
 - [russh-util 0.52.0](https://github.com/warp-tech/russh)
 - [russh 0.65.1](https://github.com/warp-tech/russh)
