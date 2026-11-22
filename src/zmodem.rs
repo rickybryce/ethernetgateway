@@ -515,6 +515,33 @@ async fn read_header(
     state: &mut ReadState,
     verbose: bool,
 ) -> Result<ZHeader, String> {
+    read_header_or_cancel(reader, is_tcp, state, verbose, None).await
+}
+
+/// How long an ESC (or a Commodore's back-arrow) must stand alone before the
+/// handshake reads it as the user giving up -- the rule Punter uses
+/// (`punter::ESC_ALONE_MS`).  A key pressed at a terminal arrives by itself; a
+/// 0x1B inside a burst of line noise or a stale frame does not.
+const ESC_ALONE_MS: u64 = 300;
+
+/// The error a user's ESC during the handshake ends the transfer with, the
+/// same words XMODEM, Kermit and Punter use.
+pub(crate) const USER_CANCEL_ERR: &str = "Transfer cancelled";
+
+/// [`read_header`], and with `cancel_key = Some(is_petscii)` an ESC (or `<-`
+/// on PETSCII) that stands alone for [`ESC_ALONE_MS`] ends it with
+/// [`USER_CANCEL_ERR`].  **Only for the handshake** -- once a file is moving,
+/// ZMODEM data can carry a raw 0x1B -- which is where the transfer screens'
+/// "ESC to cancel" is true for the other protocols, and was not for this one:
+/// an ESC was scanned past as junk and the session ran on to its 45 s
+/// negotiation timeout, frames landing on the user's screen meanwhile.
+async fn read_header_or_cancel(
+    reader: &mut (impl AsyncRead + Unpin),
+    is_tcp: bool,
+    state: &mut ReadState,
+    verbose: bool,
+    cancel_key: Option<bool>,
+) -> Result<ZHeader, String> {
     // Scan for the ZPAD + ZDLE + frame-type prologue.  We may encounter
     // extra ZPADs or stray bytes (XON/XOFF, leftover CR/LF from a
     // previous hex header) — discard those until we lock on.
@@ -532,13 +559,19 @@ async fn read_header(
     // until the budget runs out.  CAN is the same byte as ZDLE, but a
     // bare ZDLE outside a ZPAD prologue is never valid framing here.
     let mut can_run: u32 = 0;
+    // A byte read while deciding whether an ESC stood alone, handled on the
+    // next turn exactly as if it had just arrived.
+    let mut carried: Option<u8> = None;
     loop {
         if junk_budget == 0 {
             return Err("ZMODEM: header sync lost".into());
         }
         junk_budget -= 1;
 
-        let b = nvt_read_byte(reader, is_tcp, state).await?;
+        let b = match carried.take() {
+            Some(b) => b,
+            None => nvt_read_byte(reader, is_tcp, state).await?,
+        };
         if b == ZDLE {
             can_run += 1;
             if can_run >= CANCEL_CAN_RUN {
@@ -546,6 +579,19 @@ async fn read_header(
             }
         } else {
             can_run = 0;
+        }
+        if let Some(petscii) = cancel_key
+            && crate::telnet::is_esc_key(b, petscii)
+        {
+            let alone = tokio::time::Duration::from_millis(ESC_ALONE_MS);
+            match tokio::time::timeout(alone, nvt_read_byte(reader, is_tcp, state)).await {
+                Err(_) => return Err(USER_CANCEL_ERR.into()),
+                Ok(Ok(next)) => {
+                    carried = Some(next);
+                    continue;
+                }
+                Ok(Err(e)) => return Err(e),
+            }
         }
         if b != ZPAD {
             continue;
@@ -1004,7 +1050,7 @@ pub(crate) async fn zmodem_receive<F>(
 where
     F: FnMut(usize, &str, Option<u64>) -> bool,
 {
-    let got = zmodem_receive_keeping(reader, writer, is_tcp, verbose, decide).await;
+    let got = zmodem_receive_keeping(reader, writer, is_tcp, verbose, None, decide).await;
     match got.error {
         Some(e) => Err(e),
         None => Ok(got.files),
@@ -1014,18 +1060,24 @@ where
 /// `zmodem_receive`, keeping every file confirmed before a failure -- a
 /// file is confirmed when its ZEOF is answered with ZRINIT, after which the
 /// sender counts it delivered.  See [`crate::xmodem::BatchReceipt`].
+///
+/// `cancel_key`: `Some(is_petscii)` where the screen said "ESC to cancel" --
+/// a lone ESC (or `<-`) before the first ZFILE then ends the session, see
+/// [`read_header_or_cancel`].  `None` for the terminal-started autostart,
+/// which made no such promise.
 pub(crate) async fn zmodem_receive_keeping<F>(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     is_tcp: bool,
     verbose: bool,
+    cancel_key: Option<bool>,
     decide: F,
 ) -> crate::xmodem::BatchReceipt<ZmodemReceive>
 where
     F: FnMut(usize, &str, Option<u64>) -> bool,
 {
     let mut files = Vec::new();
-    let error = receive_into(reader, writer, is_tcp, verbose, decide, &mut files)
+    let error = receive_into(reader, writer, is_tcp, verbose, cancel_key, decide, &mut files)
         .await
         .err();
     crate::xmodem::BatchReceipt { files, error }
@@ -1038,6 +1090,7 @@ async fn receive_into<F>(
     writer: &mut (impl AsyncWrite + Unpin),
     is_tcp: bool,
     verbose: bool,
+    cancel_key: Option<bool>,
     mut decide: F,
     files: &mut Vec<ZmodemReceive>,
 ) -> Result<(), String>
@@ -1107,7 +1160,9 @@ where
                 // tuned-up slow-link `zmodem_frame_timeout`).
                 cfg.zmodem_frame_timeout
             }),
-            read_header(reader, is_tcp, &mut state, verbose),
+            // The user's ESC counts only before the first ZFILE: after it,
+            // what arrives between headers can be a file's data.
+            read_header_or_cancel(reader, is_tcp, &mut state, verbose, cancel_key.filter(|_| deadline_active)),
         )
         .await;
 
@@ -1115,6 +1170,13 @@ where
             Ok(Ok(h)) => {
                 inter_file_header_errors = 0;
                 h
+            }
+            Ok(Err(e)) if e == USER_CANCEL_ERR => {
+                if verbose {
+                    glog!("ZMODEM recv: cancelled by the user (ESC)");
+                }
+                send_cancel(writer, is_tcp).await.ok();
+                return Err(e);
             }
             Ok(Err(e)) => {
                 if is_peer_cancel(&e) {
@@ -1962,6 +2024,7 @@ fn parse_zfile_info(data: &[u8]) -> Result<ZfileInfo, String> {
 ///   → ZFIN
 ///   ← ZFIN
 ///   → "OO"
+#[cfg(test)]
 pub(crate) async fn zmodem_send(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -1969,12 +2032,42 @@ pub(crate) async fn zmodem_send(
     is_tcp: bool,
     verbose: bool,
 ) -> Result<(), String> {
+    let files: Vec<ZmodemSendFile> = files
+        .iter()
+        .map(|&(name, data)| ZmodemSendFile { name, data, modtime: None, mode: None })
+        .collect();
+    zmodem_send_with(reader, writer, &files, is_tcp, verbose, None).await
+}
+
+/// One file for [`zmodem_send_with`]: its name and bytes, and -- when the
+/// host knows them -- its modification time (Unix seconds) and mode, which go
+/// out in ZFILE's file information as YMODEM's block 0 carries them.
+pub(crate) struct ZmodemSendFile<'a> {
+    pub name: &'a str,
+    pub data: &'a [u8],
+    pub modtime: Option<u64>,
+    pub mode: Option<u32>,
+}
+
+/// [`zmodem_send`], with each file's metadata, and with `cancel_key =
+/// Some(is_petscii)` where the screen said "ESC to cancel": a lone ESC (or
+/// `<-`) while waiting for the receiver's ZRINIT ends the session -- see
+/// [`read_header_or_cancel`].
+pub(crate) async fn zmodem_send_with(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    files: &[ZmodemSendFile<'_>],
+    is_tcp: bool,
+    verbose: bool,
+    cancel_key: Option<bool>,
+) -> Result<(), String> {
     // Enforce the u32 position-field bound once, up front, for every
     // file in the batch.  The gateway caller's MAX_FILE_SIZE is 8 MB,
     // well under 4 GiB, but documenting the invariant here means
     // later `as u32` casts can't silently truncate if that limit is
     // ever raised.
-    for (fname, data) in files {
+    for f in files {
+        let (fname, data) = (f.name, f.data);
         if data.len() > u32::MAX as usize {
             return Err(format!(
                 "ZMODEM: file '{}' larger than 4 GiB, not supported",
@@ -2025,10 +2118,17 @@ pub(crate) async fn zmodem_send(
 
         match tokio::time::timeout(
             tokio::time::Duration::from_secs(negotiation_retry_interval),
-            read_header(reader, is_tcp, &mut state, verbose),
+            read_header_or_cancel(reader, is_tcp, &mut state, verbose, cancel_key),
         )
         .await
         {
+            Ok(Err(e)) if e == USER_CANCEL_ERR => {
+                if verbose {
+                    glog!("ZMODEM send: cancelled by the user (ESC)");
+                }
+                send_cancel(writer, is_tcp).await.ok();
+                return Err(e);
+            }
             Ok(Ok(h)) if h.frame == ZRINIT => {
                 // Honor any extra escaping the receiver requests in its
                 // ZRINIT ZF0 (ESCCTL/ESC8) for the rest of the session.
@@ -2112,7 +2212,8 @@ pub(crate) async fn zmodem_send(
     //     ZFILE + subpacket → ZRPOS (accept) or ZSKIP (skip)
     //     if accepted: ZDATA + subpackets → ZEOF → ZRINIT
     //   after last file: ZFIN → ZFIN → "OO"
-    for (filename, data) in files {
+    for f in files {
+        let (filename, data) = (f.name, f.data);
         if verbose {
             glog!(
                 "ZMODEM send: file '{}' ({} bytes)",
@@ -2123,7 +2224,18 @@ pub(crate) async fn zmodem_send(
         let mut info = Vec::<u8>::new();
         info.extend_from_slice(filename.as_bytes());
         info.push(0);
-        let tail = format!("{} 0 0 0 0 {}", data.len(), data.len());
+        // Forsberg's file information: length, modification time and mode in
+        // octal, serial, files and bytes left.  Time and mode were always 0,
+        // so a ZMODEM download lost the timestamp a YMODEM or Kermit one of
+        // the same file kept.  Mode is masked to the permission bits, as the
+        // YMODEM sender masks it; 0 still means "not known".
+        let tail = format!(
+            "{} {:o} {:o} 0 0 {}",
+            data.len(),
+            f.modtime.unwrap_or(0),
+            f.mode.unwrap_or(0) & 0o7777,
+            data.len()
+        );
         info.extend_from_slice(tail.as_bytes());
         info.push(0);
 
@@ -2271,11 +2383,15 @@ pub(crate) async fn zmodem_send(
         // zero-length files (or start_pos already at EOF) it sends no ZDATA
         // and returns immediately — jumping straight to ZEOF — since an
         // orphan ZDATA header with no subpacket desyncs the receiver.
-        send_zdata_run(
+        if send_zdata_run(
             reader, writer, &mut state, data, start_pos, is_tcp, esc,
             rx_window, frame_timeout, max_retries, verbose,
         )
-        .await?;
+        .await?
+            == DataRun::Skipped
+        {
+            continue;
+        }
 
         // ─── Phase 4: ZEOF → ZRINIT ──────────────────────────
         //
@@ -2304,7 +2420,8 @@ pub(crate) async fn zmodem_send(
             )
             .await
             {
-                Ok(Ok(h)) if h.frame == ZRINIT => break,
+                // ZSKIP after ZEOF: the receiver is finished with it too.
+                Ok(Ok(h)) if h.frame == ZRINIT || h.frame == ZSKIP => break,
                 Ok(Ok(h)) if h.frame == ZRPOS => {
                     // Data got lost — resend from the requested (absolute)
                     // position via the shared data-send helper, then loop to
@@ -2312,11 +2429,15 @@ pub(crate) async fn zmodem_send(
                     // recovery the same ACK-gating and retry discipline as the
                     // initial data phase instead of a divergent inline copy.
                     let resume = (h.position() as usize).min(data.len());
-                    send_zdata_run(
+                    if send_zdata_run(
                         reader, writer, &mut state, data, resume, is_tcp, esc,
                         rx_window, frame_timeout, max_retries, verbose,
                     )
-                    .await?;
+                    .await?
+                        == DataRun::Skipped
+                    {
+                        break;
+                    }
                     continue;
                 }
                 Ok(Err(ref e)) if is_peer_cancel(e) => {
@@ -2462,7 +2583,7 @@ async fn send_zdata_run(
     frame_timeout: u64,
     max_retries: u32,
     verbose: bool,
-) -> Result<(), String> {
+) -> Result<DataRun, String> {
     let mut pos = start;
     let mut zdata_attempts: u32 = 0;
     let mut subpackets_sent: u32 = 0;
@@ -2568,6 +2689,21 @@ async fn send_zdata_run(
                     Ok(Ok(h)) if h.frame == ZNAK => {
                         continue 'send_loop;
                     }
+                    // **The receiver is done with this file.**  ZSKIP is a
+                    // user's "skip file" at the far end, ZRINIT a receiver that
+                    // already has it -- lrzsz's `getinsync` moves on to the
+                    // next file for both.  Retransmitting instead ran the retry
+                    // budget out and reported "too many retransmissions".
+                    Ok(Ok(h)) if h.frame == ZSKIP || h.frame == ZRINIT => {
+                        if verbose {
+                            glog!("ZMODEM send: receiver skipped the file (frame 0x{:02X})", h.frame);
+                        }
+                        return Ok(DataRun::Skipped);
+                    }
+                    // And ZFIN ends the session, as ZABORT does.
+                    Ok(Ok(h)) if h.frame == ZFIN => {
+                        return Err("ZMODEM: receiver ended the session".into());
+                    }
                     _ => {
                         continue 'send_loop;
                     }
@@ -2577,7 +2713,15 @@ async fn send_zdata_run(
 
         break;
     }
-    Ok(())
+    Ok(DataRun::Sent)
+}
+
+/// How a file's data phase ended: all of it sent (ZEOF follows), or the
+/// receiver said it is finished with the file -- no ZEOF, on to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataRun {
+    Sent,
+    Skipped,
 }
 
 async fn send_zeof(
@@ -3310,6 +3454,186 @@ mod tests {
         files.remove(0)
     }
 
+    /// **A receiver's ZSKIP mid-file moves the sender on**, as lrzsz's
+    /// `getinsync` does, rather than being retransmitted at until the retry
+    /// budget ran out ("too many retransmissions").  The scripted receiver
+    /// takes the ZFILE, lets the first subpacket arrive, answers ZSKIP, and
+    /// then expects the session to end: one ZDATA, then ZFIN.
+    #[tokio::test]
+    async fn test_a_zskip_mid_file_moves_the_sender_on() {
+        let (ours, theirs) = tokio::io::duplex(1 << 20);
+        let (mut s_read, mut s_write) = tokio::io::split(ours);
+        let (mut p_read, mut p_write) = tokio::io::split(theirs);
+        let data = vec![0x55u8; SUBPACKET_DATA_SIZE * 3];
+        let sender = async {
+            let files = [ZmodemSendFile { name: "big.bin", data: &data, modtime: None, mode: None }];
+            zmodem_send_with(&mut s_read, &mut s_write, &files, false, false, None).await
+        };
+        let peer = async {
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 4096];
+            let wait_for = |seen: &[u8], pat: &[u8]| seen.windows(pat.len()).any(|w| w == pat);
+            // ZRQINIT -> ZRINIT
+            p_write.write_all(&build_hex_header(ZRINIT, [0, 0, 0, 0x01])).await.unwrap();
+            // ZFILE (binary header, frame 04) -> ZRPOS(0)
+            while !wait_for(&seen, b"*\x18A\x04") {
+                let n = p_read.read(&mut buf).await.unwrap();
+                seen.extend_from_slice(&buf[..n]);
+            }
+            p_write.write_all(&build_hex_header(ZRPOS, [0; 4])).await.unwrap();
+            // The first ZDATA and a little of its data, then ZSKIP.
+            while !wait_for(&seen, b"*\x18A\x0a") {
+                let n = p_read.read(&mut buf).await.unwrap();
+                seen.extend_from_slice(&buf[..n]);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            p_write.write_all(&build_hex_header(ZSKIP, [0; 4])).await.unwrap();
+            // The sender should now finish: ZFIN (hex, frame 08).
+            let zfin = b"**\x18B08";
+            while !wait_for(&seen, zfin) {
+                let n = p_read.read(&mut buf).await.unwrap();
+                if n == 0 { break; }
+                seen.extend_from_slice(&buf[..n]);
+            }
+            p_write.write_all(&build_hex_header(ZFIN, [0; 4])).await.unwrap();
+            seen
+        };
+        let (sent, seen) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::join!(sender, peer)
+        })
+        .await
+        .expect("the sender kept retransmitting after ZSKIP");
+        assert!(sent.is_ok(), "{sent:?}");
+        let zdata = seen.windows(4).filter(|w| *w == b"*\x18A\x0a").count();
+        assert_eq!(zdata, 1, "ZDATA was sent again after ZSKIP");
+    }
+
+    /// **A ZMODEM download carries the file's time and mode**, as YMODEM's
+    /// block 0 and Kermit's attributes do.  The ZFILE information always said
+    /// `0 0` for them, so the same file kept its timestamp by YMODEM and lost
+    /// it by ZMODEM.  The mode goes out as permission bits only.
+    #[tokio::test]
+    async fn test_a_download_carries_its_time_and_mode() {
+        let (sender_half, receiver_half) = tokio::io::duplex(1 << 18);
+        let (mut s_read, mut s_write) = tokio::io::split(sender_half);
+        let (mut r_read, mut r_write) = tokio::io::split(receiver_half);
+        let send_task = tokio::spawn(async move {
+            let data = b"dated file".to_vec();
+            let files = [ZmodemSendFile {
+                name: "dated.txt",
+                data: &data,
+                modtime: Some(1_700_000_000),
+                mode: Some(0o100644),
+            }];
+            zmodem_send_with(&mut s_read, &mut s_write, &files, false, false, None).await.unwrap();
+        });
+        let recv_task = tokio::spawn(async move {
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| true).await.unwrap()
+        });
+        send_task.await.unwrap();
+        let got = recv_task.await.unwrap();
+        assert_eq!(got[0].data, b"dated file");
+        assert_eq!(got[0].modtime, Some(1_700_000_000), "the time was not sent");
+        assert_eq!(got[0].mode, Some(0o644), "the mode was not sent, or not as permission bits");
+    }
+
+    /// **ESC cancels a ZMODEM transfer before it starts**, as the transfer
+    /// screens say and as XMODEM, Kermit and Punter already did.  It was
+    /// scanned past as junk, and the session ran on to its 45 s negotiation
+    /// timeout.  Both directions: the Upload's receiver and the Download's
+    /// sender, each waiting for the other end to begin.
+    #[tokio::test]
+    async fn test_a_lone_esc_cancels_the_handshake() {
+        for petscii in [false, true] {
+            let key = if petscii { 0x5F } else { 0x1B };
+            // Receiver (Upload).
+            let (mut peer, mut ours) = tokio::io::duplex(1 << 16);
+            let (mut r_read, mut r_write) = tokio::io::split(&mut ours);
+            let started = std::time::Instant::now();
+            let ((), got) = tokio::join!(
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    peer.write_all(&[key]).await.unwrap();
+                },
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    zmodem_receive_keeping(&mut r_read, &mut r_write, false, false, Some(petscii), |_, _, _| true),
+                ),
+            );
+            let got = got.expect("ESC did not end the receive");
+            assert_eq!(got.error.as_deref(), Some(USER_CANCEL_ERR), "petscii={petscii}");
+            drop(r_write);
+            drop(r_read);
+            drop(ours);
+            let mut heard = Vec::new();
+            peer.read_to_end(&mut heard).await.unwrap();
+            assert!(heard.windows(8).any(|w| w == [0x18; 8]), "the sender was not told: no CAN sequence");
+            assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+            // Sender (Download).
+            let (mut peer, mut ours) = tokio::io::duplex(1 << 16);
+            let (mut s_read, mut s_write) = tokio::io::split(&mut ours);
+            let files = [ZmodemSendFile { name: "a.txt", data: b"x", modtime: None, mode: None }];
+            let ((), sent) = tokio::join!(
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    peer.write_all(&[key]).await.unwrap();
+                },
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    zmodem_send_with(&mut s_read, &mut s_write, &files, false, false, Some(petscii)),
+                ),
+            );
+            assert_eq!(sent.expect("ESC did not end the send").err().as_deref(), Some(USER_CANCEL_ERR));
+            drop(s_write);
+            drop(s_read);
+            drop(ours);
+            let mut heard = Vec::new();
+            peer.read_to_end(&mut heard).await.unwrap();
+            assert!(heard.windows(8).any(|w| w == [0x18; 8]), "the receiver was not told: no CAN sequence");
+        }
+    }
+
+    /// **The byte behind a not-alone ESC is kept**, and goes on into the
+    /// header scan: a binary header starts with a single ZPAD, so losing the
+    /// byte read while judging the ESC would lose the header.
+    #[tokio::test]
+    async fn test_the_byte_behind_an_esc_reaches_the_header_scan() {
+        let (mut tx, mut rx) = tokio::io::duplex(4096);
+        let mut bytes = vec![0x1B];
+        bytes.extend(build_bin16_header_mode(ZRINIT, [1, 2, 3, 4], EscapeMode::default()));
+        tx.write_all(&bytes).await.unwrap();
+        let mut state = ReadState::default();
+        let h = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_header_or_cancel(&mut rx, false, &mut state, false, Some(false)),
+        )
+        .await
+        .expect("the header was lost")
+        .expect("read");
+        assert_eq!((h.frame, h.data), (ZRINIT, [1, 2, 3, 4]));
+    }
+
+    /// An ESC with more bytes hard behind it is not a keypress -- the
+    /// handshake goes on (the tail of line noise, or of a frame).
+    #[tokio::test]
+    async fn test_an_esc_inside_a_burst_does_not_cancel() {
+        let (mut peer, mut ours) = tokio::io::duplex(1 << 16);
+        let (mut r_read, mut r_write) = tokio::io::split(&mut ours);
+        let (_, got) = tokio::join!(
+            async {
+                peer.write_all(b"\x1bxyz").await.unwrap();
+                // Keep the line open past ESC_ALONE_MS.
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                peer
+            },
+            tokio::time::timeout(
+                std::time::Duration::from_millis(1200),
+                zmodem_receive_keeping(&mut r_read, &mut r_write, false, false, Some(false), |_, _, _| true),
+            ),
+        );
+        assert!(got.is_err(), "the burst ended the handshake: {:?}", got.map(|g| g.error));
+    }
+
     /// **A streaming transfer through a bridge smaller than its subpackets.**
     ///
     /// A dialled-in session's bridge is now sized in wire time (~960 bytes at
@@ -3794,7 +4118,7 @@ mod tests {
             while discard_reader.read(&mut buf).await.unwrap_or(0) > 0 {}
         });
         let got = zmodem_receive_keeping(
-            &mut inbound_reader, &mut outbound_writer, false, false, |_, _, _| true,
+            &mut inbound_reader, &mut outbound_writer, false, false, None, |_, _, _| true,
         )
         .await;
 
@@ -3849,7 +4173,7 @@ mod tests {
         inbound_writer.write_all(&wire).await.unwrap();
         drop(inbound_writer);
         let got = zmodem_receive_keeping(
-            &mut inbound_reader, &mut FailsOnZfin, false, false, |_, _, _| true,
+            &mut inbound_reader, &mut FailsOnZfin, false, false, None, |_, _, _| true,
         )
         .await;
         assert!(got.error.is_none(), "a finished batch is not stopped: {:?}", got.error);

@@ -782,7 +782,7 @@
                     <h3>Step by step</h3>
                     <ol>
                         <li>From the File Transfer menu press <strong>D</strong>, pick the file, and choose <strong>Z</strong>. The gateway opens with <code>ZRQINIT</code> (most terminals also auto-receive the moment they see it).</li>
-                        <li>The terminal answers <code>ZRINIT</code>, advertising its capabilities; the gateway notes whether CRC-32 is available.</li>
+                        <li>The terminal answers <code>ZRINIT</code>, advertising its capabilities; the gateway honours its buffer size and any extra escaping it asks for. The gateway&rsquo;s own frames use CRC-16.</li>
                         <li>The gateway sends a <code>ZFILE</code> header followed by a subpacket carrying the <strong>filename and exact size</strong> (and mtime / mode when known), terminated with <code>ZCRCW</code>.</li>
                         <li>The receiver replies <code>ZRPOS(0)</code> to accept and start at byte 0 &mdash; or <code>ZSKIP</code> to decline this file, or a non-zero <code>ZRPOS</code> to <strong>resume</strong> a partial file.</li>
                         <li>The gateway sends a <code>ZDATA</code> header at that offset, then streams 1024-byte data subpackets, each non-final one <code>ZCRCQ</code>-terminated and waiting for the receiver's <code>ZACK</code> before the next (the last closes the frame with <code>ZCRCE</code>) &mdash; the stop-and-wait cadence.</li>
@@ -903,7 +903,7 @@
                     <tr><td><code>zmodem_negotiation_timeout</code></td><td>45 s</td><td>Time to complete the <code>ZRQINIT</code> / <code>ZRINIT</code> handshake.</td></tr>
                     <tr><td><code>zmodem_negotiation_retry_interval</code></td><td>5 s</td><td>Gap between <code>ZRINIT</code> / <code>ZRQINIT</code> re-sends during the handshake.</td></tr>
                     <tr><td><code>zmodem_frame_timeout</code></td><td>30 s</td><td>Per-frame read timeout once the transfer is live (headers and subpackets).</td></tr>
-                    <tr><td><code>zmodem_max_retries</code></td><td>10</td><td>Retry cap for <code>ZRQINIT</code> / <code>ZRPOS</code> / <code>ZDATA</code> frames before a <code>ZABORT</code>.</td></tr>
+                    <tr><td><code>zmodem_max_retries</code></td><td>10</td><td>Retry cap for <code>ZRQINIT</code> / <code>ZRPOS</code> / <code>ZDATA</code> frames before the session is cancelled with the <code>CAN</code> sequence.</td></tr>
                 </table>
 
                 <div class="callout callout-info">

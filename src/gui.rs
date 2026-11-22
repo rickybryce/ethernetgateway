@@ -1477,6 +1477,36 @@ impl App {
         if let Ok(v) = self.punter_max_retries_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_retries = v; }
         if let Ok(v) = self.punter_max_bad_rounds_buf.parse::<u32>() && v >= 1 { self.cfg.punter_max_bad_rounds = v; }
         if let Ok(v) = self.punter_negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.punter_negotiation_retry_interval = v; }
+        // The transfer limits are clamped by the writer and the reader
+        // (`Config::clamp_transfer_limits`), so clamp here too and show it in
+        // the box -- the `cpm_emu_max_minstr` rule below: a box left at 1000
+        // over a saved 300 differs from the config for ever, and the window
+        // then never stops reporting unsaved edits.  Only a box *above* its
+        // range is rewritten; one being typed into, or blank, is left alone.
+        self.cfg.clamp_transfer_limits();
+        let c = &self.cfg;
+        for (buf, now) in [
+            (&mut self.negotiation_timeout_buf, c.xmodem_negotiation_timeout),
+            (&mut self.block_timeout_buf, c.xmodem_block_timeout),
+            (&mut self.max_retries_buf, c.xmodem_max_retries as u64),
+            (&mut self.negotiation_retry_interval_buf, c.xmodem_negotiation_retry_interval),
+            (&mut self.zmodem_negotiation_timeout_buf, c.zmodem_negotiation_timeout),
+            (&mut self.zmodem_frame_timeout_buf, c.zmodem_frame_timeout),
+            (&mut self.zmodem_max_retries_buf, c.zmodem_max_retries as u64),
+            (&mut self.zmodem_negotiation_retry_interval_buf, c.zmodem_negotiation_retry_interval),
+            (&mut self.kermit_negotiation_timeout_buf, c.kermit_negotiation_timeout),
+            (&mut self.kermit_packet_timeout_buf, c.kermit_packet_timeout),
+            (&mut self.kermit_idle_timeout_buf, c.kermit_idle_timeout),
+            (&mut self.kermit_max_retries_buf, c.kermit_max_retries as u64),
+            (&mut self.punter_negotiation_timeout_buf, c.punter_negotiation_timeout),
+            (&mut self.punter_block_timeout_buf, c.punter_block_timeout),
+            (&mut self.punter_max_retries_buf, c.punter_max_retries as u64),
+            (&mut self.punter_negotiation_retry_interval_buf, c.punter_negotiation_retry_interval),
+        ] {
+            if buf.parse::<u64>().is_ok_and(|typed| typed > now) {
+                *buf = now.to_string();
+            }
+        }
         // Clamped rather than range-guarded, unlike its neighbours above: the
         // config loader and `apply_config_key` both clamp this one (see
         // `config::MAX_CPM_EMU_MAX_MINSTR`), so refusing the value here would
@@ -8676,6 +8706,30 @@ mod tests {
         );
         assert_eq!(app.serial_baud_buf[0], app.cfg.serial_a.baud.to_string());
         assert_eq!(app.serial_baud_buf[1], app.cfg.serial_b.baud.to_string());
+    }
+
+    /// **A transfer limit above its range is clamped in the window too**, and
+    /// the box shows the value kept.  The writer clamps it (see
+    /// `config::Config::clamp_transfer_limits`); a box left showing 1000 over a
+    /// saved 300 differed from the config for ever, so the window reported
+    /// unsaved edits it could never save away.  `0` stays `0` for the Kermit
+    /// idle timeout, and a blank box is left alone while it is being typed.
+    #[test]
+    fn test_a_clamped_transfer_limit_is_shown_as_kept() {
+        let mut app = test_app();
+        app.negotiation_timeout_buf = "1000".into();
+        app.zmodem_frame_timeout_buf = "18446744073709551615".into();
+        app.kermit_max_retries_buf = "99".into();
+        app.kermit_idle_timeout_buf = "0".into();
+        app.punter_block_timeout_buf = "".into();
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.xmodem_negotiation_timeout, crate::config::TRANSFER_NEGOTIATION_TIMEOUT_MAX);
+        assert_eq!(app.negotiation_timeout_buf, crate::config::TRANSFER_NEGOTIATION_TIMEOUT_MAX.to_string());
+        assert_eq!(app.zmodem_frame_timeout_buf, crate::config::TRANSFER_BLOCK_TIMEOUT_MAX.to_string());
+        assert_eq!(app.kermit_max_retries_buf, crate::config::KERMIT_MAX_RETRIES_MAX.to_string());
+        assert_eq!(app.cfg.kermit_idle_timeout, 0, "the deliberate no-timeout moved");
+        assert_eq!(app.kermit_idle_timeout_buf, "0");
+        assert_eq!(app.punter_block_timeout_buf, "", "a blank box was filled in");
     }
 
     /// The two on-disk-log limits round-trip through their text buffers, and —

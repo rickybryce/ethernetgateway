@@ -637,6 +637,11 @@ impl super::controller::Controller for Dcdd {
         (0x08..=0x0A).contains(&port)
     }
 
+    /// Status (08h) and sector position (09h) are polls; 0Ah is the data.
+    fn is_status_poll(&self, port: u8) -> bool {
+        matches!(port & 0x0F, 0x08 | 0x09)
+    }
+
     fn port_in(&mut self, port: u8) -> (u8, super::controller::HostRequest) {
         let (v, req) = Dcdd::port_in(self, port);
         (v, self.to_host(req))

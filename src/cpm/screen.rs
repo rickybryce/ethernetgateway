@@ -108,23 +108,30 @@ struct Live {
     /// key down while the guest is busy reading a track must not be able to
     /// grow this without limit, and a real keyboard's buffer overflows too.
     keys: Mutex<std::collections::VecDeque<u8>>,
-    /// What the viewer is holding on the joystick, as a mask of
-    /// [`crate::cpm::d7a::bit`] flags.
+    /// Everything any viewer is holding, OR-ed: the fast path's summary, so a
+    /// seam with nothing held costs one atomic load and no lock.  Kept equal
+    /// to the OR of `viewers`' masks by whoever changes `viewers`, under its
+    /// lock.
     ///
     /// **A level, not a queue, and that is the whole distinction.** A keystroke
     /// is an event and is delivered once; a joystick is a position that persists
-    /// until the hand moves. So this is stored rather than drained, and it is an
-    /// atomic rather than a mutex because the session reads it at every seam
-    /// while a viewer writes it only when a key goes down or up.
+    /// until the hand moves. So this is stored rather than drained.
     joystick: AtomicU16,
-    /// When the page last said anything about the joystick, in
-    /// [`crate::cpm::speed::now_ms`] milliseconds.
+    /// What each watching page is holding, and when it last said so (in
+    /// [`crate::cpm::speed::now_ms`] milliseconds).
     ///
-    /// A page that has stopped talking — closed, navigated away, or its network
-    /// gone — must not leave a stick held. Without this a lost key-up is
-    /// permanent, and "the ship spins for ever" is the failure a level-based
-    /// input has that a queue does not.
-    joystick_at: AtomicU64,
+    /// **Per page, because two browsers are two players.** One shared mask,
+    /// replaced by every report, meant the last page to post won: player 1's
+    /// stick centred whenever player 2's page reported, and the reverse, so
+    /// neither held steady.  Each page names itself (`v` on `/vdm/joy`) and the
+    /// guest sees every live page's mask together.
+    ///
+    /// A page that has stopped talking -- closed, navigated away, or its
+    /// network gone -- must not leave a stick held: its entry goes after
+    /// [`JOYSTICK_IDLE_MS`].  Without that a lost key-up is permanent, and "the
+    /// ship spins for ever" is the failure a level-based input has that a queue
+    /// does not.  Bounded by [`MAX_JOYSTICK_VIEWERS`].
+    viewers: Mutex<Vec<JoyViewer>>,
     /// Whether this screen's machine has the joystick board at all.  The key
     /// can be on while a machine has none -- z80pack never gets one -- and a
     /// page told so hands its ten letters back to the keyboard.
@@ -183,7 +190,7 @@ pub fn register(label: impl Into<String>) -> Screen {
         frame: Mutex::new(None),
         keys: Mutex::new(std::collections::VecDeque::new()),
         joystick: AtomicU16::new(0),
-        joystick_at: AtomicU64::new(0),
+        viewers: Mutex::new(Vec::new()),
         board: AtomicBool::new(false),
     });
     if let Ok(mut list) = screens().lock() {
@@ -231,8 +238,8 @@ impl Screen {
         // **Nothing held is one atomic load and no clock.** The session pump
         // calls this at every seam, and reading a wall clock to find out that a
         // stick nobody is touching is still centred is a cost with no purchase.
-        // The mask is checked again inside, which is cheaper than the
-        // `Instant::elapsed` this avoids.
+        // Only when something is held does it read the clock and take the
+        // pages' lock (see `joystick_at`).
         if self.live.joystick.load(Ordering::Acquire) == 0 {
             return crate::cpm::d7a::Held::none();
         }
@@ -248,30 +255,14 @@ impl Screen {
     /// the clock tests the rule without a one-second sleep, the same choice the
     /// printer's idle close made.
     fn joystick_at(&self, now: u64) -> crate::cpm::d7a::Held {
-        // `Acquire`, paired with the writer's `Release` on this same field: it
-        // is what makes the timestamp read below certain to be the one that
-        // belongs to this mask. See `set_joystick` for the race that needs it.
-        let mask = self.live.joystick.load(Ordering::Acquire);
-        if mask == 0 {
-            return crate::cpm::d7a::Held::none();
-        }
-        let at = self.live.joystick_at.load(Ordering::Acquire);
-        if now.saturating_sub(at) > JOYSTICK_IDLE_MS {
-            // Latch it off, so this costs one comparison rather than a clock
-            // read on every seam thereafter.
-            //
-            // **Conditionally**, not a plain store: between the decision above
-            // and this line a viewer can press a key, and a blind `store(0)`
-            // would throw that press away. Zero it only if it is still the mask
-            // we judged.
-            let _ = self.live.joystick.compare_exchange(
-                mask,
-                0,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            );
-            return crate::cpm::d7a::Held::none();
-        }
+        // Under the viewers' lock, which is also what a report takes: a page
+        // that goes quiet is dropped here, and the summary is restated from
+        // what remains, so the fast path's next read is already right.  A press
+        // arriving meanwhile waits for the lock rather than being lost.
+        let mut viewers = self.live.viewers.lock().unwrap_or_else(|e| e.into_inner());
+        viewers.retain(|v| now.saturating_sub(v.at) <= JOYSTICK_IDLE_MS);
+        let mask = viewers.iter().fold(0, |m, v| m | v.mask);
+        self.live.joystick.store(mask, Ordering::Release);
         crate::cpm::d7a::Held::from_mask(mask)
     }
 
@@ -324,6 +315,19 @@ pub fn push_keys(id: u64, bytes: &[u8]) -> bool {
     true
 }
 
+/// One watching page's joystick: who, what it holds, when it last said so.
+#[derive(Debug, Clone, Copy)]
+struct JoyViewer {
+    viewer: u64,
+    mask: u16,
+    at: u64,
+}
+
+/// How many pages may hold a stick on one screen at once.  Two players is
+/// the board; a few more is somebody with tabs open.  A report from one more
+/// replaces the page heard from longest ago, so the list cannot grow.
+pub const MAX_JOYSTICK_VIEWERS: usize = 8;
+
 /// How long a joystick report stands before everything centres.
 ///
 /// Comfortably longer than the page's own report interval, so an ordinary late
@@ -346,7 +350,24 @@ pub fn has_board(id: u64) -> Option<bool> {
 ///
 /// Returns false when the screen has gone, like [`push_keys`], so a page left
 /// open across the end of a session is told.
+///
+/// One page's report -- [`set_joystick_from`] with page `0`.  For the tests;
+/// the route names its page.
+#[cfg(test)]
 pub fn set_joystick(id: u64, mask: u16) -> bool {
+    set_joystick_from(id, 0, mask)
+}
+
+/// What page `viewer` is holding on screen `id`.  Each page's mask stands for
+/// itself: the guest sees every live page's together, so two browsers are two
+/// players (see `Live::viewers`).
+pub fn set_joystick_from(id: u64, viewer: u64, mask: u16) -> bool {
+    set_joystick_from_at(id, viewer, mask, crate::cpm::speed::now_ms())
+}
+
+/// [`set_joystick_from`] with the clock supplied, for the same reason the
+/// reader takes one (see [`Screen::joystick_at`]).
+fn set_joystick_from_at(id: u64, viewer: u64, mask: u16, now: u64) -> bool {
     let live = {
         let Ok(list) = screens().lock() else { return false };
         match list.iter().find(|(sid, _)| *sid == id) {
@@ -354,21 +375,27 @@ pub fn set_joystick(id: u64, mask: u16) -> bool {
             None => return false,
         }
     };
-    // **The timestamp goes first, and the orderings are not decoration.**
-    // These are two atomics holding one fact, and the reader checks the mask
-    // before the time. Written the other way round -- mask first -- a reader
-    // could see a *fresh* mask beside a *stale* timestamp, decide the page had
-    // gone quiet, and throw the keypress away; with `Relaxed` on both, the
-    // compiler and the processor are free to produce exactly that even from
-    // source in this order. Storing the time first and releasing the mask means
-    // a reader that has acquired this mask has necessarily also seen its time.
-    //
-    // It matters most at the moment it is least forgivable: a page that has been
-    // open and idle carries an old timestamp, so the *first* key of a game is
-    // the one at risk, and the symptom would be a press that does nothing until
-    // the next heartbeat.
-    live.joystick_at.store(crate::cpm::speed::now_ms(), Ordering::Release);
-    live.joystick.store(mask & crate::cpm::d7a::bit::ALL, Ordering::Release);
+    let mask = mask & crate::cpm::d7a::bit::ALL;
+    let mut viewers = live.viewers.lock().unwrap_or_else(|e| e.into_inner());
+    match viewers.iter().position(|v| v.viewer == viewer) {
+        // A release removes the page: nothing held needs no entry, and it
+        // keeps the list to the pages actually holding something.
+        Some(i) if mask == 0 => {
+            viewers.swap_remove(i);
+        }
+        Some(i) => viewers[i] = JoyViewer { viewer, mask, at: now },
+        None if mask == 0 => {}
+        None => {
+            if viewers.len() >= MAX_JOYSTICK_VIEWERS
+                && let Some(oldest) = (0..viewers.len()).min_by_key(|&i| viewers[i].at)
+            {
+                viewers.swap_remove(oldest);
+            }
+            viewers.push(JoyViewer { viewer, mask, at: now });
+        }
+    }
+    let all = viewers.iter().fold(0, |m, v| m | v.mask);
+    live.joystick.store(all, Ordering::Release);
     true
 }
 
@@ -643,15 +670,9 @@ mod tests {
 
     /// **A press after the idle release is honoured.**
     ///
-    /// Note what this does *not* cover, because the first version of this
-    /// comment claimed it did: the race is a press landing *between* the
-    /// judgement and the latch, and no single-threaded test can produce that
-    /// interleaving. Replacing the conditional latch with a blind
-    /// `store(0)` leaves this test passing — measured, not assumed — so the
-    /// conditional store is pinned from the source in
-    /// `test_the_joystick_timestamp_is_published_before_the_mask` instead. What
-    /// this test does hold is the part a caller can see: the latch is not
-    /// sticky, and a report after it works.
+    /// The release is not sticky: a report after it works.  (A press landing
+    /// while the reader prunes waits for the pages' lock rather than racing
+    /// it, so there is no window in which it can be thrown away.)
     #[test]
     fn test_a_press_after_the_idle_release_is_honoured() {
         use crate::cpm::d7a::bit;
@@ -667,69 +688,59 @@ mod tests {
         assert!(!held.left[0], "and it is the new direction, not the old one");
     }
 
-    /// The two atomics hold one fact, so the writer must publish the time
-    /// *before* the mask — a reader checks the mask first, and a fresh mask
-    /// beside a stale time reads as silence. Pinned from the source because the
-    /// consequence is a dropped keypress that no single-threaded test can see.
+    /// **Two browsers are two players.**  One shared mask, replaced by every
+    /// report, meant the last page to post won: each page's heartbeat centred
+    /// the other player's stick, so neither held steady, and one page letting
+    /// go released the other's.  Each page's mask now stands for itself.
     #[test]
-    fn test_the_joystick_timestamp_is_published_before_the_mask() {
-        // **`\r` stripped first, because this scan runs on Windows too.**
-        // A pattern with only a *leading* newline survives CRLF -- the `\r`
-        // sits before the `\n`, so `"\n    /// x"` still matches, which is why
-        // every older scan in this project gets away with it. A pattern with a
-        // *trailing* newline does not: `"\n}\n"` needs the brace followed
-        // immediately by `\n`, and under CRLF it is followed by `\r`. Both of
-        // these tests passed on Linux and macOS and failed on Windows for
-        // exactly that reason.
-        let src = include_str!("screen.rs").replace('\r', "");
-        let src = src.as_str();
-        let start = src.find("pub fn set_joystick(id: u64, mask: u16)").expect("the fn");
-        let body = &src[start..];
-        let end = body.find("\n}\n").expect("the end") + start;
-        let code: String = src[start..end]
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let at = code.find("joystick_at.store").expect("the timestamp store");
-        let mask = code.find("joystick.store").expect("the mask store");
-        assert!(
-            at < mask,
-            "the mask is published before its timestamp, so a reader can see a fresh press \
-             beside a stale time and discard it",
-        );
-        // Each store on its own line: a whole-body `contains` passed with one
-        // of the two relaxed.  The mask's is the one the reader's Acquire
-        // pairs with.
-        for store in ["joystick_at.store(", "joystick.store("] {
-            let line = code
-                .lines()
-                .find(|l| l.contains(store) && !l.contains(&format!("_{store}")))
-                .unwrap_or_else(|| panic!("no {store}"));
-            assert!(line.contains("Ordering::Release"), "{store} must release: {line}");
-        }
+    fn test_two_pages_are_two_players() {
+        use crate::cpm::d7a::bit;
+        let screen = register("TEST.DSK");
+        assert!(set_joystick_from(screen.id(), 11, bit::P1_UP));
+        assert!(set_joystick_from(screen.id(), 22, bit::P2_LEFT));
+        let both = screen.joystick();
+        assert!(both.up[0] && both.left[1], "one page's report replaced the other's: {both:?}");
+        // Player 1's heartbeat restates their own stick, not the board.
+        assert!(set_joystick_from(screen.id(), 11, bit::P1_UP));
+        assert!(screen.joystick().left[1], "a heartbeat centred the other player");
+        // Player 2 lets go; player 1 is still holding.
+        assert!(set_joystick_from(screen.id(), 22, 0));
+        let after = screen.joystick();
+        assert!(after.up[0] && !after.left[1], "a release reached the wrong player: {after:?}");
+    }
 
-        // The other half of the same race, and pinned here for the same reason:
-        // a blind `store(0)` in the idle latch discards a press that arrives
-        // while the reader is deciding, and every behavioural test still passes
-        // with one -- which was checked by putting one back.
-        let start = src.find("fn joystick_at(&self, now: u64)").expect("the reader");
-        let body = &src[start..];
-        let end = body.find("\n    }\n").expect("the end") + start;
-        let reader: String = src[start..end]
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            reader.contains("compare_exchange"),
-            "the idle latch must zero the mask only if it is still the one it judged; an \
-             unconditional store throws away a press that landed in between",
-        );
-        assert!(
-            !reader.contains("joystick.store("),
-            "an unconditional store to the mask is exactly what must not be here",
-        );
+    /// A page that goes quiet lets go of *its* stick, and only its own.
+    #[test]
+    fn test_a_silent_page_lets_go_of_its_own_stick_only() {
+        use crate::cpm::d7a::bit;
+        let screen = register("TEST.DSK");
+        let t0 = crate::cpm::speed::now_ms();
+        assert!(set_joystick_from_at(screen.id(), 1, bit::P1_RIGHT, t0));
+        assert!(set_joystick_from_at(screen.id(), 2, bit::P2_DOWN, t0 + 800));
+        let held = screen.joystick_at(t0 + JOYSTICK_IDLE_MS + 200);
+        assert!(!held.right[0], "the silent page still holds its stick");
+        assert!(held.down[1], "the page still talking was released with it");
+    }
+
+    /// The pages are bounded: one more than [`MAX_JOYSTICK_VIEWERS`] replaces
+    /// the page heard from longest ago, and the newcomer is held.
+    #[test]
+    fn test_joystick_pages_are_bounded() {
+        use crate::cpm::d7a::bit;
+        let screen = register("TEST.DSK");
+        let t0 = crate::cpm::speed::now_ms();
+        for v in 0..MAX_JOYSTICK_VIEWERS as u64 {
+            assert!(set_joystick_from_at(screen.id(), v, bit::P1_FIRE, t0 + v));
+        }
+        assert!(set_joystick_from_at(screen.id(), 99, bit::P2_FIRE, t0 + 50));
+        let live = {
+            let list = screens().lock().unwrap();
+            list.iter().find(|(id, _)| *id == screen.id()).map(|(_, l)| l.clone()).unwrap()
+        };
+        let viewers = live.viewers.lock().unwrap();
+        assert_eq!(viewers.len(), MAX_JOYSTICK_VIEWERS);
+        assert!(!viewers.iter().any(|v| v.viewer == 0), "the oldest page was kept");
+        assert!(viewers.iter().any(|v| v.viewer == 99), "the newcomer was refused");
     }
 
     /// A page left open across the end of a session is told, like typing is.

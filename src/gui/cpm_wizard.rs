@@ -112,8 +112,14 @@ impl CpmWizard {
     /// on whatever step [`Step::first`] now names.
     pub(super) fn fetched(&mut self, note: &str) {
         if std::mem::take(&mut self.slot_wait) {
-            self.msg.clear();
-            self.loading = Some(Self::read_disks(&self.transfer_dir));
+            // Only while the operator is still at the download offer.  The
+            // offer stays usable after a refusal (Not now goes on), and a
+            // re-read that landed later restarted the wizard from its first
+            // step under whatever they were answering by then.
+            if self.step == Step::Fetch {
+                self.msg.clear();
+                self.loading = Some(Self::read_disks(&self.transfer_dir));
+            }
             return;
         }
         self.fetching = false;
@@ -133,6 +139,23 @@ impl CpmWizard {
 
     fn disk(&self, name: &str) -> Option<&DiskFacts> {
         self.disks.as_ref()?.iter().find(|d| d.name == name)
+    }
+
+    /// The disks have been read: start from the plan they suggest.  After
+    /// this wizard's own download it goes on from the download step; otherwise
+    /// it starts over at the first step, **with an empty trail** -- Back must
+    /// not lead to steps answered for the plan that was just replaced.
+    fn on_loaded(&mut self, d: Vec<DiskFacts>, offer: Option<SampleOffer>) {
+        self.plan = Plan::opening(&d);
+        self.offer = offer;
+        self.disks = Some(d);
+        self.loading = None;
+        if std::mem::take(&mut self.after_fetch) {
+            self.go_on();
+        } else {
+            self.step = Step::first(self.offer.as_ref());
+            self.trail.clear();
+        }
     }
 
     /// On to the step after this one.
@@ -170,17 +193,7 @@ impl CpmWizard {
     pub(super) fn draw(&mut self, ui: &mut egui::Ui) -> Outcome {
         if let Some(rx) = &self.loading {
             match rx.try_recv() {
-                Ok((d, offer)) => {
-                    self.plan = Plan::opening(&d);
-                    self.offer = offer;
-                    self.disks = Some(d);
-                    self.loading = None;
-                    if std::mem::take(&mut self.after_fetch) {
-                        self.go_on();
-                    } else {
-                        self.step = Step::first(self.offer.as_ref());
-                    }
-                }
+                Ok((d, offer)) => self.on_loaded(d, offer),
                 Err(TryRecvError::Empty) => {
                     ui.label("Reading the disk images…");
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
@@ -579,6 +592,39 @@ mod tests {
         assert!(refused.contains("self.slot_wait = true;"), "a refused Download never looks again");
         let host = &gui[gui.find("if let Some(mut w) = self.cpm_wizard.take()").unwrap()..];
         assert!(host[..host.find("let mut open = true;").unwrap()].contains("if w.waiting() {"), "the slot is not watched after a refusal");
+    }
+
+    /// **A refused Download does not restart the wizard later.**  The offer
+    /// stays usable after a refusal, so the operator can press Not now and
+    /// answer the next steps; when the host's slot then freed, the wizard
+    /// read the disks again and started over from its first step mid-answer,
+    /// with Back still pointing at the old steps.  Now it only reads again
+    /// while still at the download step, and a restart empties the trail.
+    #[test]
+    fn test_a_refused_download_does_not_restart_the_wizard_later() {
+        let dir = std::env::temp_dir().join(format!("egw_wizslot_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut w = CpmWizard::new(dir.to_str().unwrap());
+        w.loading = None;
+        // Refused, then moved on past the offer.
+        w.step = Step::Fetch;
+        w.fetch_refused();
+        w.step = Step::Machine;
+        w.trail = vec![Step::Runs, Step::BootDisk];
+        w.fetched("");
+        assert!(w.loading.is_none(), "the disks were read again away from the offer");
+        assert_eq!(w.step, Step::Machine, "the wizard moved");
+        assert!(!w.waiting(), "still waiting on the slot");
+        // Still at the offer: reading again is what it is for.
+        w.step = Step::Fetch;
+        w.fetch_refused();
+        w.fetched("");
+        assert!(w.loading.is_some(), "at the offer, the disks are read again");
+        // And a restart from the first step leaves no trail behind.
+        w.trail = vec![Step::Runs, Step::BootDisk];
+        w.on_loaded(Vec::new(), None);
+        assert!(w.trail.is_empty(), "Back still leads to the replaced plan's steps");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The desktop takes every key the wizard writes back from the global

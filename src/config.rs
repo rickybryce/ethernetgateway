@@ -1805,6 +1805,54 @@ impl Config {
 /// runtime (e.g. when `update_config_value` persists a changed setting).
 static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
 
+/// Upper bounds of the transfer protocols' timeout and retry keys -- the
+/// ranges the telnet Configuration menu offers.  Only that menu bounded them:
+/// the web page, the desktop window and a hand-edited `egateway.conf` took any
+/// value of 1 or more, and a deadline computed as `Instant::now() +
+/// Duration::from_secs(n)` **panics** for an absurd `n`, ending the session
+/// (at the start of every ZMODEM transfer for its negotiation timeout).  All
+/// three now agree because the writer and the reader clamp, not the editors.
+pub const TRANSFER_NEGOTIATION_TIMEOUT_MAX: u64 = 300;
+/// See [`TRANSFER_NEGOTIATION_TIMEOUT_MAX`].
+pub const TRANSFER_RETRY_INTERVAL_MAX: u64 = 60;
+/// See [`TRANSFER_NEGOTIATION_TIMEOUT_MAX`].  Block, frame and packet timeouts.
+pub const TRANSFER_BLOCK_TIMEOUT_MAX: u64 = 120;
+/// See [`TRANSFER_NEGOTIATION_TIMEOUT_MAX`].  XMODEM, ZMODEM and Punter retries.
+pub const TRANSFER_MAX_RETRIES_MAX: u32 = 100;
+/// See [`TRANSFER_NEGOTIATION_TIMEOUT_MAX`].  Kermit's own retry ceiling.
+pub const KERMIT_MAX_RETRIES_MAX: u32 = 20;
+/// See [`TRANSFER_NEGOTIATION_TIMEOUT_MAX`].  The Kermit server's idle wait,
+/// re-armed at every command as a deadline the same way.  `0` stays `0`: it
+/// is the deliberate "no idle timeout", and is not raised to a minimum.
+pub const KERMIT_IDLE_TIMEOUT_MAX: u64 = 86_400;
+
+impl Config {
+    /// Hold every transfer timeout and retry key inside the telnet menu's
+    /// range (each is already at least 1 by the time it gets here; `max(1)`
+    /// keeps that true for a struct built by hand).  Called by the reader, by
+    /// [`save_config`] (the desktop) and by [`update_config_values`] (telnet,
+    /// web) -- see [`TRANSFER_NEGOTIATION_TIMEOUT_MAX`].
+    pub fn clamp_transfer_limits(&mut self) {
+        let secs = |v: &mut u64, max: u64| *v = (*v).clamp(1, max);
+        secs(&mut self.xmodem_negotiation_timeout, TRANSFER_NEGOTIATION_TIMEOUT_MAX);
+        secs(&mut self.zmodem_negotiation_timeout, TRANSFER_NEGOTIATION_TIMEOUT_MAX);
+        secs(&mut self.punter_negotiation_timeout, TRANSFER_NEGOTIATION_TIMEOUT_MAX);
+        secs(&mut self.kermit_negotiation_timeout, TRANSFER_NEGOTIATION_TIMEOUT_MAX);
+        secs(&mut self.xmodem_negotiation_retry_interval, TRANSFER_RETRY_INTERVAL_MAX);
+        secs(&mut self.zmodem_negotiation_retry_interval, TRANSFER_RETRY_INTERVAL_MAX);
+        secs(&mut self.punter_negotiation_retry_interval, TRANSFER_RETRY_INTERVAL_MAX);
+        secs(&mut self.xmodem_block_timeout, TRANSFER_BLOCK_TIMEOUT_MAX);
+        secs(&mut self.zmodem_frame_timeout, TRANSFER_BLOCK_TIMEOUT_MAX);
+        secs(&mut self.punter_block_timeout, TRANSFER_BLOCK_TIMEOUT_MAX);
+        secs(&mut self.kermit_packet_timeout, TRANSFER_BLOCK_TIMEOUT_MAX);
+        self.xmodem_max_retries = self.xmodem_max_retries.clamp(1, TRANSFER_MAX_RETRIES_MAX as usize);
+        self.zmodem_max_retries = self.zmodem_max_retries.clamp(1, TRANSFER_MAX_RETRIES_MAX);
+        self.punter_max_retries = self.punter_max_retries.clamp(1, TRANSFER_MAX_RETRIES_MAX);
+        self.kermit_max_retries = self.kermit_max_retries.clamp(1, KERMIT_MAX_RETRIES_MAX);
+        self.kermit_idle_timeout = self.kermit_idle_timeout.min(KERMIT_IDLE_TIMEOUT_MAX);
+    }
+}
+
 /// Get a clone of the current configuration.
 pub fn get_config() -> Config {
     let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
@@ -2958,6 +3006,7 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
         );
         cfg.password = legacy.clone();
     }
+    cfg.clamp_transfer_limits();
     Ok(cfg)
 }
 
@@ -3172,6 +3221,7 @@ pub fn save_config(cfg: &Config) -> Result<(), SaveError> {
     // already-hashed value neither double-hashes it nor re-salts it.
     let mut cfg = cfg.clone();
     crate::credential::hash_if_cleartext(&mut cfg.password);
+    cfg.clamp_transfer_limits();
     let cfg = &cfg;
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     // Refused whole, under the lock: this is the desktop editor's save, and
@@ -4400,6 +4450,7 @@ pub fn update_config_values(pairs: &[(&str, &str)]) -> Option<PortClash> {
     // some unrelated screen is just as capable of persisting a cleartext
     // value it read a moment ago.
     crate::credential::hash_if_cleartext(&mut cfg.password);
+    cfg.clamp_transfer_limits();
     // Turning the emulator on lays out its folders straight away, so an
     // operator can put software in CPM/A and a disk image in CPM/images
     // without first having to start a session.  Only on the transition: doing
@@ -6244,6 +6295,78 @@ mod tests {
         assert_eq!(cfg.log_max_files, MAX_LOG_MAX_FILES);
         apply_config_key(&mut cfg, "log_max_files", &MAX_LOG_MAX_FILES.to_string());
         assert_eq!(cfg.log_max_files, MAX_LOG_MAX_FILES);
+    }
+
+    /// **A transfer timeout or retry count beyond the telnet menu's range is
+    /// held to it, whichever surface set it.**  An absurd value panicked the
+    /// session at `Instant::now() + Duration::from_secs(n)`; only the telnet
+    /// menu bounded these keys.  The file read clamps; the two writers clamp
+    /// before they write -- `save_config` is the desktop's, and
+    /// `update_config_values` the web page's and telnet's.
+    #[test]
+    fn test_transfer_limits_are_clamped_on_load_and_on_every_write() {
+        let dir = std::env::temp_dir().join(format!("egw_xferlimits_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("egateway.conf");
+        let huge = "18446744073709551615";
+        let mut text = String::new();
+        for key in [
+            "xmodem_negotiation_timeout", "zmodem_negotiation_timeout", "punter_negotiation_timeout",
+            "kermit_negotiation_timeout", "xmodem_negotiation_retry_interval",
+            "zmodem_negotiation_retry_interval", "punter_negotiation_retry_interval",
+            "xmodem_block_timeout", "zmodem_frame_timeout", "punter_block_timeout", "kermit_packet_timeout",
+        ] {
+            text.push_str(&format!("{key} = {huge}\n"));
+        }
+        for key in ["xmodem_max_retries", "zmodem_max_retries", "punter_max_retries", "kermit_max_retries"] {
+            text.push_str(&format!("{key} = 4000000000\n"));
+        }
+        text.push_str(&format!("kermit_idle_timeout = {huge}\n"));
+        std::fs::write(&path, text).expect("write");
+        let c = read_config_file_checked(path.to_str().unwrap()).expect("read");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            [c.xmodem_negotiation_timeout, c.zmodem_negotiation_timeout,
+             c.punter_negotiation_timeout, c.kermit_negotiation_timeout],
+            [TRANSFER_NEGOTIATION_TIMEOUT_MAX; 4]
+        );
+        assert_eq!(
+            [c.xmodem_negotiation_retry_interval, c.zmodem_negotiation_retry_interval,
+             c.punter_negotiation_retry_interval],
+            [TRANSFER_RETRY_INTERVAL_MAX; 3]
+        );
+        assert_eq!(
+            [c.xmodem_block_timeout, c.zmodem_frame_timeout, c.punter_block_timeout, c.kermit_packet_timeout],
+            [TRANSFER_BLOCK_TIMEOUT_MAX; 4]
+        );
+        assert_eq!(c.xmodem_max_retries, TRANSFER_MAX_RETRIES_MAX as usize);
+        assert_eq!([c.zmodem_max_retries, c.punter_max_retries], [TRANSFER_MAX_RETRIES_MAX; 2]);
+        assert_eq!(c.kermit_max_retries, KERMIT_MAX_RETRIES_MAX);
+        assert_eq!(c.kermit_idle_timeout, KERMIT_IDLE_TIMEOUT_MAX);
+        // And `0`, "no idle timeout", is left alone -- see
+        // `KERMIT_IDLE_TIMEOUT_MAX`.
+        let mut z = Config { kermit_idle_timeout: 0, ..Config::default() };
+        z.clamp_transfer_limits();
+        assert_eq!(z.kermit_idle_timeout, 0, "the deliberate no-timeout was raised");
+        // Every default is inside its own range, so the clamp changes nothing
+        // for an untouched config.
+        let mut d = Config::default();
+        d.clamp_transfer_limits();
+        assert_eq!(format!("{d:?}"), format!("{:?}", Config::default()), "a default moved");
+
+        // Both writers clamp before they write.
+        let src = include_str!("config.rs").replace('\r', "");
+        for (start, write) in [
+            ("pub fn update_config_values(", "write_config_file(&path, &cfg)"),
+            ("pub fn save_config(", "write_config_file(&config_file_path(), cfg)"),
+        ] {
+            let body = &src[src.find(start).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            let clamp = body.find("clamp_transfer_limits()").unwrap_or_else(|| panic!("{start}: no clamp"));
+            let w = body.find(write).unwrap_or_else(|| panic!("{start}: no write"));
+            assert!(clamp < w, "{start}: the clamp must come before the write");
+        }
     }
 
     /// And a file that already holds a huge `log_max_files` is capped on load.

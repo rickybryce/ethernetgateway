@@ -157,6 +157,17 @@ pub trait Controller: Send {
     /// Write one of its ports.
     fn port_out(&mut self, port: u8, value: u8) -> HostRequest;
 
+    /// Whether *reading* `port` only asks the board how it is -- a status or
+    /// position poll -- rather than moving data.  The boot loop counts every
+    /// other access as disk activity, which holds off the idle nap and the
+    /// session idle timeout; a poll must not, or a guest spinning on a drive
+    /// with no disk in it is never idle and never times out.  `false` (count
+    /// it) unless a board says otherwise.
+    fn is_status_poll(&self, port: u8) -> bool {
+        let _ = port;
+        false
+    }
+
     /// What this board calls slot `slot`, in its own documentation.
     ///
     /// A floppy controller has *drives*; the 88-HDSK has *platters*, four to a

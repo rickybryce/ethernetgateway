@@ -64,6 +64,19 @@ use super::cpm_modem::CpmModem;
 use super::cpm_term::{self, Adm3a};
 use crate::cpm::{parse_afn, parse_command_fcb, parse_dir_operand, split_8_3, Cpm, CpmFs, Fcb, Stop, FCB_SIZE, TPA_BASE, TPA_BYTES, TPA_TOP};
 use std::collections::VecDeque;
+
+/// What the CCP found in `A:$$$.SUB` at a prompt -- see
+/// `TelnetSession::cpmemu_take_submit_line`.
+#[derive(Debug)]
+enum SubmitTake {
+    /// The next batch command, already consumed.
+    Line(String),
+    /// No batch, or nothing usable in it this time.
+    Nothing,
+    /// A batch whose next record could not be consumed (a read-only drive or
+    /// file, another session writing it): held, not run.
+    Stuck,
+}
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -1090,6 +1103,10 @@ impl TelnetSession {
         // but because `get_line_input` reports ESC and a dropped session with
         // the same `None` and the call site below read it as the disconnect.
         let mut esc_armed = false;
+        // Said once per stall: a `$$$.SUB` that cannot be updated is held
+        // (see `cpmemu_take_submit_line`), and it would otherwise be reported
+        // again at every prompt.
+        let mut submit_stuck_said = false;
         loop {
             // Re-establish the CCP default each cycle, undoing any drive a
             // just-finished transient selected for its own use.
@@ -1103,7 +1120,32 @@ impl TelnetSession {
             // `PMSG` after the read).  `submitted` is remembered because an
             // unrecognised command has to abort the batch, as it does on real
             // CP/M ("if an error is encountered, the $$$.SUB file is erased").
-            let submitted_line = Self::cpmemu_next_submit_line(fs);
+            let submitted_line = match Self::cpmemu_take_submit_line(fs) {
+                SubmitTake::Line(s) => {
+                    submit_stuck_said = false;
+                    Some(s)
+                }
+                SubmitTake::Nothing => {
+                    // The held batch has gone (or there never was one), so a
+                    // later stall is a new one and is said again.
+                    submit_stuck_said = false;
+                    None
+                }
+                SubmitTake::Stuck => {
+                    // Once per stall, not at every prompt.  "Held", not "not
+                    // run": a guest that lifts the drive's write protection
+                    // (BDOS 13 / 37) lets it go on.
+                    if !submit_stuck_said {
+                        submit_stuck_said = true;
+                        glog!("CP/M: A:$$$.SUB could not be updated; the batch is held");
+                        self.send_line("").await?;
+                        self.send_line(&format!("  {}", self.amber("$$$.SUB can't be updated: batch held."))).await?;
+                        self.send(&prompt).await?;
+                        self.flush().await?;
+                    }
+                    None
+                }
+            };
             let submitted = submitted_line.is_some();
             let line = match submitted_line {
                 Some(s) => {
@@ -1282,34 +1324,55 @@ impl TelnetSession {
     /// and deleted once empty), matching the CCP's decrement-and-close. That
     /// ordering is what stops a command which crashes or aborts from being
     /// re-read forever.
+    #[cfg(test)]
     fn cpmemu_next_submit_line(fs: &mut CpmFs) -> Option<String> {
+        match Self::cpmemu_take_submit_line(fs) {
+            SubmitTake::Line(s) => Some(s),
+            SubmitTake::Nothing | SubmitTake::Stuck => None,
+        }
+    }
+
+    /// [`Self::cpmemu_next_submit_line`], saying *why* there is no line: no
+    /// batch (or an unreadable or corrupt record, which the CCP skips), or a
+    /// batch whose record could not be consumed -- only that one is worth
+    /// telling the user about.
+    fn cpmemu_take_submit_line(fs: &mut CpmFs) -> SubmitTake {
         let fcb = Self::cpmemu_sub_fcb();
-        let records = fs.file_size_records(&fcb)?;
+        let Some(records) = fs.file_size_records(&fcb) else { return SubmitTake::Nothing };
         if records == 0 {
             // An empty batch file is a finished one.
             fs.delete(&fcb);
-            return None;
+            return SubmitTake::Nothing;
         }
         let last = records - 1;
-        let rec = fs.read_record(&fcb, last).ok().flatten()?;
-        // Consume first, then interpret.
-        if last == 0 {
-            fs.delete(&fcb);
+        let Some(rec) = fs.read_record(&fcb, last).ok().flatten() else { return SubmitTake::Nothing };
+        // Consume first, then interpret -- and **a record that cannot be
+        // consumed is not run**.  Otherwise the same last record came back at
+        // every prompt: a `$$$.SUB` on a read-only drive (BDOS 28, a read-only
+        // image, a damaged directory), marked R/O itself, or a read-only host
+        // file reran its command for ever.  It cannot be erased either (that
+        // is the trouble), so it is held, and the prompt says so once.
+        let consumed = if last == 0 {
+            fs.delete(&fcb) > 0
         } else {
-            fs.truncate_to_records(&fcb, last);
+            fs.truncate_to_records(&fcb, last).is_some()
+        };
+        if !consumed {
+            // Said by the prompt loop, which can tell the user.
+            return SubmitTake::Stuck;
         }
         // A count of 0 is a blank line; anything past the record is junk, so a
         // count that cannot fit is treated as a corrupt record rather than
         // trusted (it would otherwise read uninitialised bytes as a command).
         let len = rec[0] as usize;
         if len > 127 {
-            return None;
+            return SubmitTake::Nothing;
         }
         let text: String = rec[1..1 + len]
             .iter()
             .map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { ' ' })
             .collect();
-        Some(text.trim().to_string())
+        SubmitTake::Line(text.trim().to_string())
     }
 
     /// Abandon any running batch: erase `A:$$$.SUB`.  The CCP's `EXITSB` does
@@ -3084,6 +3147,36 @@ mod repl_tests {
         std::fs::write(dir.join("$$$.SUB"), data).unwrap();
     }
 
+    /// **A batch that cannot be consumed is not run.**  The record is consumed
+    /// before it is returned; when that fails the same last record used to
+    /// come back at every prompt, so a `$$$.SUB` on a write-protected drive
+    /// reran its command for ever.  Both consuming paths: truncating a
+    /// longer file, and erasing a one-record one.
+    #[test]
+    fn test_a_batch_on_a_read_only_drive_is_not_run() {
+        let _g = crate::cpm::image::registry::tests_lock();
+        // And empty: a test before this one can leave images mounted on
+        // every drive (the mount screens' fit tests), A: included, and this
+        // drive A: must be its folder.
+        crate::cpm::image::registry::tests_reset();
+        for lines in [&["VER", "HELLO"][..], &["VER"][..]] {
+            let (base, mut fs) = scratch_fs("subro");
+            write_sub_file(&base.join("A"), lines);
+            let path = base.join("A").join("$$$.SUB");
+            let before = std::fs::metadata(&path).unwrap().len();
+            fs.set_drive_ro();
+            let took = TelnetSession::cpmemu_take_submit_line(&mut fs);
+            assert!(
+                matches!(took, SubmitTake::Stuck),
+                "{lines:?}: a batch that cannot be consumed is not reported as held: {took:?}"
+            );
+            assert_eq!(TelnetSession::cpmemu_next_submit_line(&mut fs), None, "{lines:?}: ran anyway");
+            assert_eq!(TelnetSession::cpmemu_next_submit_line(&mut fs), None, "{lines:?}: and again");
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), before, "{lines:?}: the file was changed");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+    }
+
     /// The CCP consumes `A:$$$.SUB` last-record-first, so commands come out in
     /// the order the `.SUB` file listed them, and the file shrinks by a record
     /// each time until it is deleted.
@@ -3098,6 +3191,10 @@ mod repl_tests {
         // registry and moves it between drives, which makes a drive look busy
         // to every other test.  Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
+        // And empty: a test before this one can leave images mounted on
+        // every drive (the mount screens' fit tests), A: included, and this
+        // drive A: must be its folder.
+        crate::cpm::image::registry::tests_reset();
         let (base, mut fs) = scratch_fs("sub");
         write_sub_file(&base.join("A"), &["VER", "DIR *.COM", "HELLO"]);
         let path = base.join("A").join("$$$.SUB");
@@ -3145,6 +3242,10 @@ mod repl_tests {
         // registry and moves it between drives, which makes a drive look busy
         // to every other test.  Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
+        // And empty: a test before this one can leave images mounted on
+        // every drive (the mount screens' fit tests), A: included, and this
+        // drive A: must be its folder.
+        crate::cpm::image::registry::tests_reset();
         let (base, mut fs) = scratch_fs("subdrive");
         std::fs::create_dir_all(base.join("B")).unwrap();
         write_sub_file(&base.join("B"), &["VER"]);
@@ -3182,9 +3283,25 @@ mod repl_tests {
         // registry and moves it between drives, which makes a drive look busy
         // to every other test.  Serialise with the registry tests.
         let _g = crate::cpm::image::registry::tests_lock();
+        // And empty: a test before this one can leave images mounted on
+        // every drive (the mount screens' fit tests), A: included, and this
+        // drive A: must be its folder.
+        crate::cpm::image::registry::tests_reset();
         let (base, mut fs) = scratch_fs("subbad");
         let mut rec = [b'X'; 128];
         rec[0] = 200; // impossible: a record holds at most 127 text bytes
+        std::fs::write(base.join("A").join("$$$.SUB"), [rec, rec].concat()).unwrap();
+        // On a writable drive a corrupt record is skipped, not "held": the
+        // prompt must not claim the batch is stuck when the next one runs.
+        assert!(
+            matches!(TelnetSession::cpmemu_take_submit_line(&mut fs), SubmitTake::Nothing),
+            "a corrupt record was reported as a held batch"
+        );
+        assert_eq!(
+            std::fs::metadata(base.join("A").join("$$$.SUB")).unwrap().len(),
+            128,
+            "the corrupt record must still be consumed before it is judged"
+        );
         std::fs::write(base.join("A").join("$$$.SUB"), rec).unwrap();
         assert_eq!(
             TelnetSession::cpmemu_next_submit_line(&mut fs),

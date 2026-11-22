@@ -557,7 +557,10 @@ async fn handle_connection(
             let form = parse_form(&text);
             let id = form.get("id").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             let mask = form.get("m").and_then(|s| s.parse::<u16>().ok());
-            let body = joystick_reply(config::get_config().cpm_joystick, id, mask);
+            // Which page is holding it: each page's stick is its own, so two
+            // browsers are two players.  A page from before this asks as page 0.
+            let viewer = form.get("v").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let body = joystick_reply(config::get_config().cpm_joystick, id, viewer, mask);
             write_response(
                 &mut stream,
                 200,
@@ -2273,7 +2276,7 @@ const VDM_POLL_MS: u32 = 150;
 const VDM_LIST_MS: u32 = 2000;
 
 /// The answer to a `/vdm/joy` post, with `cpm_joystick` passed in.
-fn joystick_reply(enabled: bool, id: u64, mask: Option<u16>) -> String {
+fn joystick_reply(enabled: bool, id: u64, viewer: u64, mask: Option<u16>) -> String {
     // Off too for a machine with no board (z80pack never has one, key or no
     // key): the letters would otherwise go to nothing.
     let board = crate::cpm::screen::has_board(id) != Some(false);
@@ -2285,7 +2288,7 @@ fn joystick_reply(enabled: bool, id: u64, mask: Option<u16>) -> String {
     match mask {
         // `0` is a real and important report -- it is the release, and
         // dropping it as "nothing" would leave the stick over.
-        Some(m) if crate::cpm::screen::set_joystick(id, m) => "{\"held\":true}".to_string(),
+        Some(m) if crate::cpm::screen::set_joystick_from(id, viewer, m) => "{\"held\":true}".to_string(),
         Some(_) => "{\"held\":false,\"why\":\"gone\"}".to_string(),
         None => "{\"held\":false,\"why\":\"nothing\"}".to_string(),
     }
@@ -2499,6 +2502,10 @@ function vdmSendKeys(bytes) {
    not heard for VDM_JOY_IDLE_MS -- which is what makes a closed tab let go of
    the helm. */
 var JOY_MASK = 0;
+/* This page's name on the joystick: the gateway keeps each page's stick apart,
+   so two browsers are two players and one page's report never centres the
+   other's.  Random per page load; below 2^53 so it is an exact integer. */
+var JOY_VIEWER = Math.floor(Math.random() * 9007199254740991) + 1;
 /* Whether the stick is live.  Seeded from the checkbox rather than written here,
    which is what keeps the two from disagreeing: the panel renders pre-ticked
    when the gateway has the board enabled -- an operator who switched the board
@@ -2520,7 +2527,7 @@ function joySend() {
   fetch('/vdm/joy', {
     method: 'POST',
     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: 'id=' + vdmCurrent + '&m=' + JOY_MASK
+    body: 'id=' + vdmCurrent + '&m=' + JOY_MASK + '&v=' + JOY_VIEWER
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (!d.held && d.why === 'off') {
       /* The operator turned the board off while this page was open. */
@@ -8144,6 +8151,27 @@ mod tests {
         assert!(!render_header(&Config::default()).contains("/vdm"));
     }
 
+    /// **Each page names itself on `/vdm/joy`**, and the route passes the name
+    /// on -- the half of "two browsers are two players" the screen cannot see.
+    /// Without it every page is page 0 and the last one to post wins again.
+    #[test]
+    fn test_each_page_names_itself_on_the_joystick() {
+        assert!(VDM_SCRIPT.contains("var JOY_VIEWER = "), "the page has no name");
+        assert!(VDM_SCRIPT.contains("'&v=' + JOY_VIEWER"), "the page does not send its name");
+        let src = include_str!("webserver.rs").replace('\r', "");
+        let arm = &src[src.find("(\"POST\", \"/vdm/joy\") => {").expect("the route")..];
+        let arm = &arm[..arm.find("\n        }\n").expect("its end")];
+        assert!(arm.contains("form.get(\"v\")"), "the route ignores the page's name");
+        assert!(arm.contains("id, viewer, mask"), "the route does not pass the name on");
+        // And the reply hands it to the screen.
+        let screen = crate::cpm::screen::register("joy-viewer-test");
+        screen.set_board(true);
+        assert_eq!(joystick_reply(true, screen.id(), 7, Some(crate::cpm::d7a::bit::P1_UP)), "{\"held\":true}");
+        assert_eq!(joystick_reply(true, screen.id(), 8, Some(crate::cpm::d7a::bit::P2_UP)), "{\"held\":true}");
+        let held = screen.joystick();
+        assert!(held.up[0] && held.up[1], "page 8 replaced page 7: {held:?}");
+    }
+
     /// A machine without the board is refused like a key that is off, so the
     /// page hands its ten letters back: z80pack never gets one, and with the
     /// key on its screen took W/A/S/Z/X/I/J/K/M/N into nothing.
@@ -8151,13 +8179,13 @@ mod tests {
     fn test_joystick_is_refused_for_a_machine_without_the_board() {
         let screen = crate::cpm::screen::register("joy-board-test");
         let off = "{\"held\":false,\"why\":\"off\"}";
-        assert_eq!(joystick_reply(true, screen.id(), Some(1)), off, "no board fitted");
+        assert_eq!(joystick_reply(true, screen.id(), 0, Some(1)), off, "no board fitted");
         screen.set_board(true);
-        assert_eq!(joystick_reply(true, screen.id(), Some(0)), "{\"held\":true}");
-        assert_eq!(joystick_reply(false, screen.id(), Some(0)), off, "the key off");
+        assert_eq!(joystick_reply(true, screen.id(), 0, Some(0)), "{\"held\":true}");
+        assert_eq!(joystick_reply(false, screen.id(), 0, Some(0)), off, "the key off");
         let id = screen.id();
         drop(screen);
-        assert!(joystick_reply(true, id, Some(0)).contains("gone"), "a gone screen is not 'off'");
+        assert!(joystick_reply(true, id, 0, Some(0)).contains("gone"), "a gone screen is not 'off'");
     }
 
     /// The manual link the desktop GUI has, and this page used to lack.

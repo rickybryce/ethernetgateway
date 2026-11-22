@@ -130,8 +130,12 @@ pub const ROM_CHOICES: &[RomChoice] = &[
         short: "CUTER",
         rom: Some(RomFile {
             file: "vdmcuter.hex",
-            // `C000`-`C7FC`, contiguous, from the file itself.
-            span: (0xC000, 0xC7FC),
+            // The 2 KB socket at `C000`, not the file's own last byte: the
+            // pinned HEX fills `C000`-`C7FC`, but a raw dump of the same EPROM
+            // is 2048 bytes and ends at `C7FF`, and it was refused as "wrong
+            // ROM" when this said `C7FC`.  The window exists to catch a monitor
+            // assembled for another *address*, which this still does.
+            span: (0xC000, 0xC7FF),
             bytes: 5784,
             sha256: "864152aaf90a9605b43ecff3218326bc773f4cf09fd536e0638bbc33ce7b7413",
             url: "https://raw.githubusercontent.com/dhansel/VDM1/\
@@ -551,16 +555,16 @@ mod tests {
         let f = file_for("cuter_vdm").expect("catalogue has it");
         let inside = format!("{}\n{}\n", record(0xC000, 0, &[0x7F]), eof());
         assert!(image_from_bytes(f, inside.as_bytes()).is_ok());
-        for (addr, what) in [(0x0000u16, "page zero"), (0xBFFF, "just below"), (0xC7FC, "the end")]
+        for (addr, what) in [(0x0000u16, "page zero"), (0xBFFF, "just below"), (0xC7FF, "the end")]
         {
             let text = format!("{}\n{}\n", record(addr, 0, &[0x11, 0x22]), eof());
-            // At 0xC7FC: two bytes at the last address run one past it.
+            // At 0xC7FF: two bytes at the socket's last address run one past it.
             let got = image_from_bytes(f, text.as_bytes());
             let why = got.expect_err(what);
             assert!(why.starts_with("wrong ROM:"), "{what}: refused for another reason: {why}");
         }
         // And the honest edge: the last byte exactly at the top is fine.
-        let text = format!("{}\n{}\n", record(0xC7FC, 0, &[0x11]), eof());
+        let text = format!("{}\n{}\n", record(0xC7FF, 0, &[0x11]), eof());
         assert!(image_from_bytes(f, text.as_bytes()).is_ok(), "the top byte is inside");
     }
 
@@ -647,15 +651,27 @@ mod tests {
     }
 
     /// The signature byte the disks check is the first byte of the file, so a
-    /// catalogue entry whose window starts elsewhere would place it wrong.
+    /// catalogue entry whose window starts elsewhere would place it wrong; and
+    /// the window is the whole 2 KB socket.
     #[test]
     fn test_the_cuter_window_starts_where_the_disks_look() {
         let f = file_for("cuter_vdm").unwrap();
         assert_eq!(f.span.0, 0xC000, "DISK11 reads C000 for the 7F signature");
-        assert_eq!(
-            f.span.1 - f.span.0 + 1,
-            0x7FD,
-            "the real file is 2045 contiguous bytes, C000-C7FC"
-        );
+        assert_eq!(f.span.1 - f.span.0 + 1, 0x800, "the 2 KB EPROM socket, C000-C7FF");
+    }
+
+    /// **A raw 2 KB dump of CUTER loads.**  The window used to end at the
+    /// pinned HEX file's last byte, `C7FC`, so the full 2048-byte EPROM image
+    /// -- the form every other copy circulates in -- was refused as the wrong
+    /// ROM.  The pinned file's own extent still fits, and a dump one byte past
+    /// the socket is still refused.
+    #[test]
+    fn test_a_raw_2k_cuter_dump_loads() {
+        let f = file_for("cuter_vdm").unwrap();
+        let img = image_from_bytes(f, &[0xA5; 0x800]).expect("a 2048-byte raw dump");
+        assert_eq!(img.chunks.iter().map(|(_, b)| b.len()).sum::<usize>(), 0x800);
+        assert!(image_from_bytes(f, &[0xA5; 0x7FD]).is_ok(), "the pinned file's 2045 bytes");
+        let err = image_from_bytes(f, &[0xA5; 0x801]).unwrap_err();
+        assert!(err.contains("wrong ROM"), "{err}");
     }
 }

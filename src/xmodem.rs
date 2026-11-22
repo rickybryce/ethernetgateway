@@ -435,13 +435,16 @@ async fn receive_batch_into(
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
                             read_ymodem_block_zero_body(
-                                // YMODEM block 0 is always CRC-16; never let
-                                // the negotiation's CRC→checksum fallback flip
-                                // its validation.  If block 0 took enough
-                                // retries to cross the fallback point, reading
-                                // a CRC retransmit as a 1-byte checksum would
-                                // mismatch and NAK-loop to exhaustion.
-                                reader, block_size, TransferMode::Crc16, is_tcp, verbose, state,
+                                // Validated in the mode negotiated so far.
+                                // After the fallback to NAK, lrzsz's `sb`
+                                // sends block 0 with a 1-byte checksum
+                                // (measured: 132 bytes after NAK, 133 after
+                                // 'C'), and pinning CRC here failed every
+                                // upload whose sender was started more than
+                                // ~28 s late.  A sender that kept to CRC
+                                // regardless is still accepted -- see the
+                                // function.
+                                reader, block_size, mode, is_tcp, verbose, state,
                             ),
                         )
                         .await
@@ -1138,10 +1141,44 @@ async fn read_ymodem_block_zero_body(
             let recv = ((hi as u16) << 8) | lo as u16;
             recv == crc16_xmodem(&payload)
         }
+        // We have NAKed, so a checksum is what lrzsz sends; but a sender that
+        // started on our earlier 'C' (or ignores NAK) still sends CRC.  One
+        // trailer byte, then -- only if it is not the checksum -- a second
+        // under the same short grace the first data block's auto-detect
+        // uses, so a lock-step checksum sender that sent a bad byte is NAKed
+        // promptly rather than after the 60 s body timeout.
+        //
+        // **A matching checksum is not proof by itself**: a CRC block 0 whose
+        // high CRC byte equals the checksum (one payload in 256, and then
+        // every time for that name and size -- our own sender's block 0 is
+        // always CRC) would leave its low byte in the stream, read next as a
+        // block header; an EOT there saved the file empty and called it a
+        // success.  So the second byte is always waited for: a valid CRC means
+        // a CRC sender, and anything else is pushed back for the next read, as
+        // `receive_block_body`'s lock to checksum does.  Silence is a lock-step
+        // checksum sender (lrzsz's `sb`), waiting for our answer.
         TransferMode::Checksum => {
-            let recv = nvt_read_byte(reader, is_tcp, state).await?;
+            let first = nvt_read_byte(reader, is_tcp, state).await?;
             let calc = payload.iter().fold(0u8, |a, &b| a.wrapping_add(b));
-            recv == calc
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(AUTO_DETECT_TRAILER_TIMEOUT_SECS),
+                nvt_read_byte(reader, is_tcp, state),
+            )
+            .await
+            {
+                Ok(lo) => {
+                    let lo = lo?;
+                    if (((first as u16) << 8) | lo as u16) == crc16_xmodem(&payload) {
+                        true
+                    } else if first == calc {
+                        state.pushback = Some(lo);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(_) => first == calc,
+            }
         }
     };
     if !valid {
@@ -1482,7 +1519,7 @@ pub(crate) async fn xmodem_send(
         is_tcp, is_petscii, data.len()); }
 
     // Wait for receiver's mode request (C = CRC, NAK = checksum)
-    let mode = loop {
+    let mut mode = loop {
         let remaining = negotiation_deadline.duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Err("Negotiation timeout: start your XMODEM receiver".into());
@@ -1605,6 +1642,14 @@ pub(crate) async fn xmodem_send(
             match tokio::time::timeout(remaining, nvt_read_byte(reader, is_tcp, state)).await {
                 Ok(Ok(b)) if b == CRC_REQUEST => {
                     if verbose { glog!("XMODEM send: got second 'C' after block 0"); }
+                    // **The data phase is CRC, whatever opened the session**,
+                    // as lrzsz's `getnak` sets `Crcflg` on this 'C'.  A
+                    // session that opened on NAK kept sending checksum blocks,
+                    // and a receiver that pins CRC after block 0 -- ours does
+                    // -- waited for a second trailer byte on every one: a
+                    // late-started gateway-to-gateway YMODEM failed after
+                    // ten minutes of block errors.
+                    mode = TransferMode::Crc16;
                     break;
                 }
                 Ok(Ok(b)) => {
@@ -3223,6 +3268,79 @@ mod tests {
         assert_eq!(&got[..original.len()], &original[..], "payload must arrive intact");
     }
 
+    /// **Block 0 is read in the mode negotiated so far.**  After the receiver
+    /// has fallen back to NAK, lrzsz's `sb` sends block 0 with a 1-byte
+    /// checksum (measured: 132 bytes, against 133 after 'C'); block 0 was
+    /// always checked as CRC, so an upload whose sender started ~28 s late
+    /// never got past it.  Under NAK a CRC block 0 is still accepted -- a
+    /// sender that began on our earlier 'C' -- and a bad lone trailer is
+    /// refused after the short grace, not the 60 s body timeout.
+    #[tokio::test]
+    async fn test_block_zero_follows_the_negotiated_trailer() {
+        let mut payload = [0u8; XMODEM_BLOCK_SIZE];
+        payload[..9].copy_from_slice(b"late.bin\0");
+        payload[9..13].copy_from_slice(b"1775");
+        let sum = payload.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        let crc = crc16_xmodem(&payload);
+        async fn read(bytes: Vec<u8>, mode: TransferMode) -> bool {
+            let (mut tx, mut rx) = tokio::io::duplex(4096);
+            tx.write_all(&bytes).await.unwrap();
+            let mut state = ReadState::default();
+            read_ymodem_block_zero_body(&mut rx, XMODEM_BLOCK_SIZE, mode, false, false, &mut state)
+                .await
+                .unwrap()
+                .0
+        }
+        let with = |t: &[u8]| [&payload[..], t].concat();
+        assert!(read(with(&[sum]), TransferMode::Checksum).await, "sb after NAK: a checksum block 0");
+        // **A CRC block 0 whose high byte equals the checksum** is read as CRC,
+        // both bytes -- a lone checksum match left the low byte in the stream.
+        let mut clash = payload;
+        let mut found = false;
+        for n in 0..=u16::MAX {
+            clash[20..22].copy_from_slice(&n.to_be_bytes());
+            let s = clash.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+            if (crc16_xmodem(&clash) >> 8) as u8 == s {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "no colliding payload found");
+        let ccrc = crc16_xmodem(&clash).to_be_bytes();
+        let (mut tx, mut rx) = tokio::io::duplex(4096);
+        tx.write_all(&[&clash[..], &ccrc[..], &[EOT]].concat()).await.unwrap();
+        let mut state = ReadState::default();
+        assert!(read_ymodem_block_zero_body(&mut rx, XMODEM_BLOCK_SIZE, TransferMode::Checksum, false, false, &mut state)
+            .await.unwrap().0);
+        assert_eq!(state.pushback, None, "the CRC's low byte was left behind");
+        assert_eq!(nvt_read_byte(&mut rx, false, &mut state).await.unwrap(), EOT, "the next byte is the next frame's");
+        // A checksum block 0 with the next frame's first byte already behind it
+        // keeps that byte for the next read.
+        let (mut tx, mut rx) = tokio::io::duplex(4096);
+        let next = if (((sum as u16) << 8) | SOH as u16) == crc { STX } else { SOH };
+        tx.write_all(&with(&[sum, next])).await.unwrap();
+        let mut state = ReadState::default();
+        assert!(read_ymodem_block_zero_body(&mut rx, XMODEM_BLOCK_SIZE, TransferMode::Checksum, false, false, &mut state)
+            .await.unwrap().0);
+        assert_eq!(state.pushback, Some(next), "the next frame's byte was swallowed");
+        assert!(read(with(&crc.to_be_bytes()), TransferMode::Checksum).await, "a CRC block 0 under NAK");
+        assert!(read(with(&crc.to_be_bytes()), TransferMode::Crc16).await, "a CRC block 0 under 'C'");
+        let started = std::time::Instant::now();
+        assert!(!read(with(&[sum.wrapping_add(1)]), TransferMode::Checksum).await, "a bad checksum");
+        assert!(started.elapsed() < std::time::Duration::from_secs(AUTO_DETECT_TRAILER_TIMEOUT_SECS + 2));
+        // And the negotiation hands it the negotiated mode, not a pinned CRC --
+        // the caller is where the bug lived, and the reads above cannot see it.
+        let src = include_str!("xmodem.rs").replace('\r', "");
+        // The argument line itself, not "up to the first `),`": a comment
+        // inside the call can hold one.
+        let call = &src[src.find("read_ymodem_block_zero_body(\n").expect("the call")..];
+        let args = call
+            .lines()
+            .find(|l| l.trim_start().starts_with("reader, "))
+            .expect("the argument line");
+        assert!(args.contains("block_size, mode,"), "block 0 is not read in the negotiated mode: {args}");
+    }
+
     /// Receiver must recover from a CRC-bad YMODEM block 0 by NAKing
     /// and successfully reading the sender's retransmit, rather than
     /// falling out of negotiation and NAK-looping the retransmit as a
@@ -4553,6 +4671,68 @@ mod tests {
             result.unwrap_err().to_lowercase().contains("sequence"),
             "error should name the sequence failure",
         );
+    }
+
+    /// **A YMODEM session that opened on NAK sends CRC data blocks once the
+    /// receiver asks with its second 'C'** -- lrzsz's `getnak` sets `Crcflg`
+    /// there.  The sender's mode was fixed by the opening byte, so after a NAK
+    /// it sent checksum blocks for ever, and a receiver that pins CRC after
+    /// block 0 (ours) waited for a second trailer byte on each: a late-started
+    /// gateway-to-gateway transfer failed after ten minutes of block errors.
+    #[tokio::test]
+    async fn test_ymodem_send_uses_crc_after_the_data_phase_c() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let original: Vec<u8> = (0..1024u16).map(|i| (i as u8).wrapping_mul(7)).collect();
+        let orig_clone = original.clone();
+        let hdr = YmodemHeader { filename: "late.bin".to_string(), size: 1024, modtime: None, mode: None };
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &orig_clone,
+                false, false, false, true /* use_1k */, Some(hdr),
+            ).await
+        });
+        let recv = async {
+            // A receiver that had already fallen back to NAK.
+            raw_write_byte(&mut recv_write, NAK, false).await.unwrap();
+            // Block 0 (always CRC from our sender), then ACK + the data-phase 'C'.
+            for _ in 0..(3 + XMODEM_BLOCK_SIZE + 2) {
+                raw_read_byte(&mut recv_read, false).await.unwrap();
+            }
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+            // The data block must carry a CRC: STX, number, complement, 1024
+            // bytes, two CRC bytes -- a checksum block is one byte short and
+            // the sender then waits, which the timeout below turns into a fail.
+            assert_eq!(raw_read_byte(&mut recv_read, false).await.unwrap(), STX);
+            let mut block = Vec::new();
+            for _ in 0..(2 + XMODEM_1K_BLOCK_SIZE + 2) {
+                block.push(raw_read_byte(&mut recv_read, false).await.unwrap());
+            }
+            let payload = &block[2..2 + XMODEM_1K_BLOCK_SIZE];
+            let crc = u16::from_be_bytes([block[2 + XMODEM_1K_BLOCK_SIZE], block[3 + XMODEM_1K_BLOCK_SIZE]]);
+            assert_eq!(payload, &original[..], "payload");
+            assert_eq!(crc, crc16_xmodem(payload), "the data block's trailer is not its CRC");
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            assert_eq!(raw_read_byte(&mut recv_read, false).await.unwrap(), EOT);
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            // End of batch: one more 'C', the empty block 0, its ACK.
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+            assert_eq!(raw_read_byte(&mut recv_read, false).await.unwrap(), SOH);
+            for _ in 0..(2 + XMODEM_BLOCK_SIZE + 2) {
+                raw_read_byte(&mut recv_read, false).await.unwrap();
+            }
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(15), recv)
+            .await
+            .expect("the data block was not a CRC block (the sender waited for an answer)");
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(5), send_task)
+            .await
+            .expect("the sender did not finish")
+            .unwrap();
+        assert!(sent.is_ok(), "{sent:?}");
     }
 
     /// Test 9: YMODEM sender must retry block 0 (the filename header)

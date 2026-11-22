@@ -1156,7 +1156,11 @@ impl BootMachine {
         screen.publish(vdm, dazzler, self.joystick_addressed());
     }
 
-    /// Accesses to the disk controller's ports since the machine was made.
+    /// Accesses to the disk controllers' ports since the machine was made --
+    /// commands and data, not status or position polls (see
+    /// `Controller::is_status_poll`).  The boot loop reads a change in this as
+    /// "the guest is working", so a poll that counted kept a guest spinning
+    /// on an empty drive from ever looking idle.
     pub fn disk_accesses(&self) -> u64 {
         self.disk_accesses
     }
@@ -1511,7 +1515,11 @@ impl Machine for BootMachine {
             p if self.has_mmu && super::mmu::Mmu::owns_port(p) => self.mmu.port_in(p),
             p if self.controller_for(p).is_some() => {
                 let ctrl = self.controller_for(port).expect("just matched");
-                self.disk_accesses = self.disk_accesses.saturating_add(1);
+                // A status or position poll is not activity -- see
+                // `Controller::is_status_poll`.
+                if !self.controllers[ctrl].is_status_poll(port) {
+                    self.disk_accesses = self.disk_accesses.saturating_add(1);
+                }
                 let (v, req) = self.controllers[ctrl].port_in(port);
                 let was_fill = matches!(req, HostRequest::Read { .. });
                 self.service(req, ctrl);
@@ -2464,6 +2472,36 @@ pub(crate) mod tests {
                 "{key}: suggested {hint}, which this machine then refuses"
             );
         }
+    }
+
+    /// **Polling an empty drive is not disk activity.**  The boot loop holds
+    /// off the idle nap and the session idle timeout while the disk count
+    /// moves, and every port access counted -- so a guest spinning on the
+    /// status and sector ports of a drive with no disk in it never looked
+    /// idle, and an abandoned session was never closed.  Commands and data
+    /// still count, and a board that names no polls counts everything.
+    #[test]
+    fn test_polling_an_empty_drive_is_not_disk_activity() {
+        let mut m = BootMachine::new();
+        m.port_out(0x08, 0x00); // select drive 0: a command, counted
+        assert_eq!(m.disk_accesses(), 1, "a command is activity");
+        let base = m.disk_accesses();
+        for _ in 0..10_000 {
+            m.port_in(0x08);
+            m.port_in(0x09);
+        }
+        assert_eq!(m.disk_accesses(), base, "status/position polls counted as activity");
+        m.port_in(0x0A);
+        assert_eq!(m.disk_accesses(), base + 1, "the data port is activity");
+        // Another board, naming no polls, counts every access as before.
+        m.controllers.push(Box::new(FakeBoard {
+            last_write: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            buf: Vec::new(),
+            inserted: None,
+            next_request: None,
+        }));
+        m.port_in(0xB5);
+        assert_eq!(m.disk_accesses(), base + 2, "a board without polls stopped counting");
     }
 
     #[test]

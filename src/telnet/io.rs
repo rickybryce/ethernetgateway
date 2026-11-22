@@ -1407,6 +1407,8 @@ impl TelnetSession {
                 &mut *writer_guard,
                 self.xmodem_iac,
                 verbose,
+                // Started by the terminal: nothing promised ESC here.
+                None,
                 decide,
             )
             .await

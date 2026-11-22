@@ -1662,8 +1662,10 @@ impl TelnetSession {
                 // with no speed limit an idle booted session costs a large
                 // fraction of a core — the same trap the emulator fell into at
                 // 161% CPU.  Only demonstrably idle seams are napped: a
-                // keystroke, a printed byte, a modem byte or any disk access
-                // resets the count.
+                // keystroke, a printed byte, a modem byte or a disk command or
+                // data byte resets the count -- not a status or position poll,
+                // or a guest spinning on an empty drive never looked idle (see
+                // `Controller::is_status_poll`).
                 //
                 // **Never under a speed limit.**  "Idle" here means no console,
                 // printer, modem or disk traffic -- which is also every Dazzler

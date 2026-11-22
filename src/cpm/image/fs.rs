@@ -1271,7 +1271,11 @@ impl ImageFs {
         // a panic in the shipped build, under the image's lock, from `STAT`.
         let al = (0xFFFF_u32 << (16 - dir_blocks)) as u16;
         let spt = self.fmt.sectrk;
-        let off = (self.fmt.reserved_records / (spt as u32).max(1)) as u16;
+        // Rounded **up**: the Cromemco double-density disks reserve a
+        // single-density track 0 (26 records) plus double-density records, so
+        // their reserved area is not whole tracks of `sectrk` and a floor
+        // reported OFF 1 / 0 where the disks' own DPBs say 2 / 1.
+        let off = self.fmt.reserved_records.div_ceil((spt as u32).max(1)) as u16;
         let mut d = [0u8; 15];
         d[0..2].copy_from_slice(&spt.to_le_bytes());
         d[2] = bsh;
@@ -2124,6 +2128,24 @@ mod tests {
         assert_eq!((d[2], d[3], d[4]), (5, 31, 1), "4 KB blocks, EXM 1");
         assert_eq!(u16::from_le_bytes([d[5], d[6]]), p.max_block, "DSM");
         assert_eq!(u16::from_le_bytes([d[7], d[8]]), hd_fmt.maxdir - 1, "DRM");
+    }
+
+    /// **OFF is each format's measured reserved-track count.**  The values are
+    /// the disks' own DPBs, recorded beside each format in `format.rs`; a
+    /// floor division reported 1 and 0 for the two Cromemco double-density
+    /// formats, whose track 0 is single density.
+    #[test]
+    fn test_every_format_reports_its_measured_off() {
+        let want = [
+            ("ibm3740", 2), ("altair8", 2), ("altairhd", 2),
+            ("cromemcodd", 2), ("cromemcodsdd", 1), ("z80packhd", 0),
+        ];
+        assert_eq!(want.len(), super::super::format::FORMATS.len(), "a format without a measured OFF here");
+        for (token, off) in want {
+            let fmt = by_token(token).unwrap();
+            let d = mount(blank(fmt), fmt).dpb().expect("fits");
+            assert_eq!(u16::from_le_bytes([d[13], d[14]]), off, "{token}: OFF");
+        }
     }
 
     /// Every format the catalogue knows reports a DPB without panicking, and

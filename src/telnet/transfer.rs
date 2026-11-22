@@ -1357,6 +1357,8 @@ impl TelnetSession {
                 &mut *writer_guard,
                 self.xmodem_iac,
                 verbose,
+                // The screen above said "ESC to cancel".
+                Some(self.terminal_type == TerminalType::Petscii),
                 decide,
             )
             .await
@@ -1981,13 +1983,20 @@ impl TelnetSession {
         let result = if matches!(protocol, DownloadProtocol::Zmodem) {
             // zmodem_send is batch-capable; download always sends
             // exactly one file, so we pass a single-element slice.
-            let batch: [(&str, &[u8]); 1] = [(filename, &data)];
-            crate::zmodem::zmodem_send(
+            let batch = [crate::zmodem::ZmodemSendFile {
+                name: filename,
+                data: &data,
+                modtime: file_modtime,
+                mode: file_mode,
+            }];
+            crate::zmodem::zmodem_send_with(
                 &mut self.reader,
                 &mut *writer_guard,
                 &batch,
                 self.xmodem_iac,
                 verbose,
+                // The screen above said "ESC to cancel".
+                Some(self.terminal_type == TerminalType::Petscii),
             )
             .await
         } else if matches!(protocol, DownloadProtocol::Kermit) {

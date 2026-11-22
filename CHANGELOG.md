@@ -21,6 +21,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build already was, and a release whose Linux binary needs a newer glibc
   fails before it is published.  The x86_64 Linux downloads of 1.0.7 and
   1.0.8 were rebuilt this way and replaced.
+- **A YMODEM upload started late works.**  After about 28 s of asking for
+  CRC the gateway falls back to NAK, and lrzsz's `sb` then sends its first
+  block with a one-byte checksum; that block was always checked as CRC, so
+  the upload failed with "Negotiation failed".  It is now read in the mode
+  negotiated, and a CRC one is still accepted.
+- **A late-started YMODEM transfer between two gateways completes.**  A
+  sending gateway that the receiver had answered with NAK kept sending
+  checksum blocks after the receiver asked for CRC, and every block failed
+  until the transfer gave up; it now switches to CRC there, as lrzsz does.
+- **ESC cancels a ZMODEM transfer before it starts**, as the transfer screen
+  says and as XMODEM, Kermit and Punter already did; it used to run on to the
+  45 s negotiation timeout.
+- **A receiver that skips a file mid-download moves the ZMODEM sender on**
+  to the next file, instead of being retransmitted at until "too many
+  retransmissions".
+- **ZMODEM downloads carry the file's date and permissions**, as YMODEM and
+  Kermit downloads do and as the manual said they did.
+- **The CP/M emulator no longer reruns a batch command for ever** when its
+  `$$$.SUB` cannot be updated (a read-only drive or file); the batch is held,
+  and the prompt says so once.
+- **An abandoned booted Altair session times out again** even while its guest
+  polls an empty floppy drive: status polls no longer count as disk activity.
+- **The desktop CP/M setup wizard no longer jumps back to its first step**
+  after a refused sample-disk download, and Back no longer leads to steps
+  from the plan it replaced.
+- **Two browsers are two joystick players.**  Each page's stick is its own;
+  before, the last page to report replaced the other's, so neither held
+  steady.
+- **Transfer timeouts and retry counts are held to the telnet menu's range on
+  every surface.**  The web page, the desktop and a hand-edited config took
+  any value, and an absurd timeout ended the session with a panic.
+- **A raw 2 KB CUTER ROM dump loads**; it was refused as the wrong ROM.
+- **`STAT` reports the Cromemco double-density disks' reserved tracks
+  correctly** (2 and 1, not 1 and 0).
 
 ## [1.0.8] - 2026-11-22
 
