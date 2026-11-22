@@ -7547,7 +7547,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License (MIT)
 
 Used by:
-- [ureq 3.5.1](https://github.com/algesten/ureq)
+- [ureq 3.5.2](https://github.com/algesten/ureq)
 
 ```
 MIT License
