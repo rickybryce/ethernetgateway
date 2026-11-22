@@ -4003,7 +4003,7 @@ fn render_more_popups(cfg: &Config) -> String {
     let zsel = |target: f32| -> &'static str {
         if zf.is_some_and(|z| (z - target).abs() < 0.01) { "selected" } else { "" }
     };
-    // Server More — session cap, idle timeout, GUI scale, gateway advanced.
+    // Server More — session cap, idle timeout, gateway advanced.
     out.push_str(&format!(
         "<div class=\"modal\" id=\"more-server\"><div class=\"modal-body wide\">\
          <div class=\"modal-head\"><span class=\"title\">Server \u{2014} More</span>\
@@ -4025,15 +4025,6 @@ fn render_more_popups(cfg: &Config) -> String {
          with the same login and IP rules as telnet. Passive ports are low-high (low at \
          least 1024) so a firewall can be opened for them; empty lets the system choose. \
          The server and its port take effect on restart.</div>\
-         <div class=\"row\"><span class=\"label\">GUI display scale:</span>\
-         <select name=\"gui_zoom\">\
-         <option value=\"auto\" {z_auto}>Auto</option>\
-         <option value=\"0.75\" {z75}>75%</option>\
-         <option value=\"1.0\" {z100}>100%</option>\
-         <option value=\"1.25\" {z125}>125%</option>\
-         <option value=\"1.5\" {z150}>150%</option>\
-         <option value=\"2.0\" {z200}>200%</option>\
-         </select></div>\
          <h3>Telnet Gateway</h3>\
          <div class=\"row\">{tneg} {traw}</div>\
          <h3>SSH Gateway</h3>\
@@ -4074,12 +4065,6 @@ fn render_more_popups(cfg: &Config) -> String {
         idle = numfield("idle_timeout_secs", "Idle (s)", cfg.idle_timeout_secs),
         rate_max = numfield("conn_rate_max", "Conn/IP", cfg.conn_rate_max),
         rate_win = numfield("conn_rate_window_secs", "Per (s)", cfg.conn_rate_window_secs),
-        z_auto = if zf.is_none() { "selected" } else { "" },
-        z75 = zsel(0.75),
-        z100 = zsel(1.0),
-        z125 = zsel(1.25),
-        z150 = zsel(1.5),
-        z200 = zsel(2.0),
         // Raw TCP has no IAC layer, so TTYPE/NAWS negotiation is meaningless
         // there — greyed, matching the GUI's `add_enabled_ui(!raw)`.  Being a
         // checkbox, this also needs the save to skip it (see
@@ -4193,6 +4178,16 @@ fn render_more_popups(cfg: &Config) -> String {
         "<div class=\"modal\" id=\"more-general\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">General \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-general\">\u{00d7}</button></div>\
+         <h3>Desktop Window</h3>\
+         <div class=\"row\"><span class=\"label\">Display scale:</span>\
+         <select name=\"gui_zoom\">\
+         <option value=\"auto\" {z_auto}>Auto</option>\
+         <option value=\"0.75\" {z75}>75%</option>\
+         <option value=\"1.0\" {z100}>100%</option>\
+         <option value=\"1.25\" {z125}>125%</option>\
+         <option value=\"1.5\" {z150}>150%</option>\
+         <option value=\"2.0\" {z200}>200%</option>\
+         </select></div>\
          <h3>Log File</h3>\
          <div class=\"row\">{logfile}</div>\
          <div class=\"row\">{logpath}</div>\
@@ -4203,6 +4198,12 @@ fn render_more_popups(cfg: &Config) -> String {
         // The worst-case disk figure comes from logger::max_disk_kb so this page
         // doesn't re-derive the bound (the GUI, telnet and the startup banner all
         // read it from the same place).
+        z_auto = if zf.is_none() { "selected" } else { "" },
+        z75 = zsel(0.75),
+        z100 = zsel(1.0),
+        z125 = zsel(1.25),
+        z150 = zsel(1.5),
+        z200 = zsel(2.0),
         logfile = checkbox("log_to_file", "Write the log to a file", cfg.log_to_file),
         logpath = textfield_attr("log_file", "Log file", &cfg.log_file, false, 28, dis_log),
         logsize = numfield_attr("log_max_size_kb", "Rotate at (KB)", cfg.log_max_size_kb, dis_log),
@@ -7511,6 +7512,22 @@ mod tests {
     /// save silently drops it.  So this asserts both halves together — the
     /// input exists in the Server "More" popup, and a submitted value comes back
     /// out of `collect_form_updates`.
+    /// **The display scale is a General setting**, under its own heading.  In
+    /// the Server popup it sat straight after the FTP block and read as an FTP
+    /// option.  Sliced per popup, so it cannot pass by being in some other.
+    #[test]
+    fn test_the_display_scale_lives_in_the_general_popup() {
+        let html = render_more_popups(&Config::default());
+        let popup = |id: &str| {
+            let start = html.find(&format!("id=\"{id}\"")).expect(id);
+            let end = html[start + 1..].find("class=\"modal\"").map(|e| start + 1 + e).unwrap_or(html.len());
+            html[start..end].to_string()
+        };
+        assert!(popup("more-general").contains("name=\"gui_zoom\""), "not in the General popup");
+        assert!(popup("more-general").contains("<h3>Desktop Window</h3>"), "no heading of its own");
+        assert!(!popup("more-server").contains("name=\"gui_zoom\""), "still in the Server popup");
+    }
+
     #[test]
     fn test_log_keys_are_rendered_and_saved() {
         let cfg = Config::default();

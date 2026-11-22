@@ -1889,7 +1889,25 @@ impl App {
             .small()
             .color(AMBER_DIM),
         );
-        ui.add_space(4.0);
+    }
+
+    /// Contents of the "General — More" popup: the whole General group.
+    ///
+    /// Re-shows the frame's own three toggles so the popup reads as the complete
+    /// group rather than a fragment (the same thing the AI/Browser popup does
+    /// with the API key and homepage).  The web cannot do this — its page is a
+    /// single form, so a duplicated field name would submit twice — which is why
+    /// the web's General popup carries only the display scale and the log
+    /// settings.
+    fn draw_general_more(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
+        ui.checkbox(&mut self.cfg.gateway_debug, "Gateway Debug Trace");
+        ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
+        // The desktop window's own setting, beside "Show GUI on Startup", with
+        // a heading of its own: it used to sit in the Server popup straight
+        // after the FTP block, where it read as an FTP option.
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Desktop Window").color(AMBER));
         // Display scale for THIS console window. "Auto" follows the monitor's
         // reported DPI; a fixed percentage pins the size so a display that
         // over-reports its scale factor doesn't blow the window up.
@@ -1915,19 +1933,6 @@ impl App {
                     }
                 });
         });
-    }
-
-    /// Contents of the "General — More" popup: the whole General group.
-    ///
-    /// Re-shows the frame's own three toggles so the popup reads as the complete
-    /// group rather than a fragment (the same thing the AI/Browser popup does
-    /// with the API key and homepage).  The web cannot do this — its page is a
-    /// single form, so a duplicated field name would submit twice — which is why
-    /// the web's General popup carries only the log settings.
-    fn draw_general_more(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
-        ui.checkbox(&mut self.cfg.gateway_debug, "Gateway Debug Trace");
-        ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
         ui.add_space(6.0);
         ui.separator();
         ui.add_space(2.0);
@@ -8706,6 +8711,23 @@ mod tests {
         );
         assert_eq!(app.serial_baud_buf[0], app.cfg.serial_a.baud.to_string());
         assert_eq!(app.serial_baud_buf[1], app.cfg.serial_b.baud.to_string());
+    }
+
+    /// **The display scale is drawn in the General popup**, under its own
+    /// heading, and no longer in the Server popup, where it sat after the FTP
+    /// block and read as an FTP option.
+    #[test]
+    fn test_the_display_scale_lives_in_the_general_popup() {
+        let src = include_str!("gui.rs").replace('\r', "");
+        let body = |start: &str| {
+            let s = &src[src.find(start).expect(start)..];
+            s[..s.find("\n    }\n").expect("its end")].to_string()
+        };
+        let general = body("    fn draw_general_more(&mut self, ui: &mut egui::Ui) {");
+        let server = body("    fn draw_server_more_only(&mut self, ui: &mut egui::Ui) {");
+        assert!(general.contains("gui_zoom_combo"), "not in the General popup");
+        assert!(general.contains("\"Desktop Window\""), "no heading of its own");
+        assert!(!server.contains("gui_zoom_combo"), "still in the Server popup");
     }
 
     /// **A transfer limit above its range is clamped in the window too**, and
