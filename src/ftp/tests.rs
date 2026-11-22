@@ -1091,6 +1091,15 @@ async fn test_the_cpm_guard_covers_rnto_and_a_late_boot() {
         std::fs::canonicalize(&store_path)
     );
     tokio::io::AsyncWriteExt::write_all(&mut up.file, b"replacement").await.unwrap();
+    {
+        let (target, beside) = up.target_for_test();
+        assert!(beside, "a Replace upload is not writing beside its target");
+        assert!(
+            crate::cpm::outside_change_refusal(target).is_some(),
+            "the guard does not see the claim under the upload's own target {target:?} (key {key:?}, canonical {:?})",
+            std::fs::canonicalize(target)
+        );
+    }
     let e = up.finish().await.expect_err("an upload replaced a disk booted while it ran");
     assert!(matches!(e, super::store::StoreError::Locked(_)), "{e:?}");
     assert_eq!(std::fs::read(&disk).unwrap(), b"guest");

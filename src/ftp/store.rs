@@ -155,6 +155,13 @@ pub struct Upload {
 }
 
 impl Upload {
+    /// For tests: where this upload will land, and whether it is writing
+    /// beside it (a `Replace`).
+    #[cfg(test)]
+    pub fn target_for_test(&self) -> (&Path, bool) {
+        (&self.target, self.temp.is_some())
+    }
+
     /// Flush, sync, and (for `Replace`) rename over the target.  The CP/M
     /// guard is asked again here: a disk can be mounted or booted while the
     /// bytes were arriving.
