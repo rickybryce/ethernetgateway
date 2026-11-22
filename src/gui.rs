@@ -8328,6 +8328,14 @@ mod tests {
         // exactly that way on the Windows job of a release cut, on a commit
         // that had passed the same job minutes earlier, which is what a race
         // in a global looks like from the outside.
+        //
+        // **And the config lock, taken first.**  `save_and_restart_all` really
+        // saves: it wrote this app's default config over the process-wide one
+        // -- and the test config file -- in the middle of whichever test held
+        // `CONFIG_TEST_LOCK`.  Measured on macOS CI: an FTP test's
+        // `transfer_dir` turned into the default between two commands.  The
+        // app is also given the current config, so its save changes nothing.
+        let _cfg = crate::config::CONFIG_TEST_LOCK.blocking_lock();
         let _guard = LOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut app = test_app();
         app.quit();
@@ -8340,6 +8348,7 @@ mod tests {
         // The positive control: the restart path sets the same shutdown flag,
         // so shutdown alone cannot tell the two apart.
         let mut app = test_app();
+        app.cfg = crate::config::get_config();
         app.save_and_restart_all();
         assert!(app.shutdown.load(Ordering::SeqCst));
         assert!(

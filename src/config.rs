@@ -1936,8 +1936,6 @@ pub fn load_or_create_config() -> Config {
     };
 
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    #[cfg(test)]
-    trace_transfer_dir(guard.as_ref(), Some(&cfg), "load_or_create");
     *guard = Some(cfg.clone());
     cfg
 }
@@ -1982,8 +1980,6 @@ pub fn load_config_read_only() -> Config {
         Err(e) => refuse_unreadable_config(&path, &e),
     };
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    #[cfg(test)]
-    trace_transfer_dir(guard.as_ref(), Some(&cfg), "load_read_only");
     *guard = Some(cfg.clone());
     cfg
 }
@@ -2008,32 +2004,9 @@ fn read_config_without_writing(path: &str) -> std::io::Result<Config> {
 /// The caller must hold [`CONFIG_TEST_LOCK`] and put the old value back, for
 /// the reason that lock exists: this state is process-wide and any test that
 /// reads the config races one that changes it.
-/// TEMPORARY (CI diagnosis, 2026-11-22): name whoever moves `transfer_dir`
-/// away from an FTP test's scratch folder.  Raw stderr, so libtest does not
-/// capture it; the thread name is the test's name.
-#[cfg(test)]
-fn trace_transfer_dir(old: Option<&Config>, new: Option<&Config>, via: &str) {
-    use std::io::Write;
-    let (Some(old), Some(new)) = (old, new) else { return };
-    if old.transfer_dir == new.transfer_dir || !old.transfer_dir.contains("egw_ftp_") {
-        return;
-    }
-    let bt = std::backtrace::Backtrace::force_capture().to_string();
-    let ours: Vec<&str> = bt.lines().filter(|l| l.contains("ethernetgateway::")).take(8).collect();
-    let _ = writeln!(
-        std::io::stderr(),
-        "TRANSFER_DIR_TRACE {via} thread={:?} {:?} -> {:?}\n  {}",
-        std::thread::current().name(),
-        old.transfer_dir,
-        new.transfer_dir,
-        ours.join("\n  ")
-    );
-}
-
 #[cfg(test)]
 pub(crate) fn swap_config_for_test(cfg: Option<Config>) -> Option<Config> {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    trace_transfer_dir(guard.as_ref(), cfg.as_ref(), "swap");
     std::mem::replace(&mut *guard, cfg)
 }
 
@@ -3222,8 +3195,6 @@ pub fn save_config(cfg: &Config) -> Result<(), SaveError> {
     if was_cpm_enabled && !cfg.cpm_emu_enabled {
         crate::cpm::image::registry::clear_all();
     }
-    #[cfg(test)]
-    trace_transfer_dir(guard.as_ref(), Some(cfg), "save_config");
     *guard = Some(cfg.clone());
     result
 }
@@ -4448,8 +4419,6 @@ pub fn update_config_values(pairs: &[(&str, &str)]) -> Option<PortClash> {
     if let Err(e) = write_config_file(&path, &cfg) {
         glog!("Warning: {}", e);
     }
-    #[cfg(test)]
-    trace_transfer_dir(guard.as_ref(), Some(&cfg), "update");
     *guard = Some(cfg);
     refused
 }
