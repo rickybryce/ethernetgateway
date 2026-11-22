@@ -169,6 +169,15 @@ td code, th code { background: none; padding: 0; overflow-wrap: anywhere; }
 table.keytable th:first-child,
 table.keytable td:first-child { width: 24ch; }
 
+/* Screenshots.  Captured from the real program (manual-images/): the desktop
+   window and web page at full text width; terminal screens narrower, so their
+   text comes out near the body text's size.  A figure never splits a page. */
+figure.shot { margin: 10px 0 14px; text-align: center; page-break-inside: avoid; }
+figure.shot img { max-width: 100%; border: 1px solid #999; }
+figure.shot.term img { width: 68%; }
+figure.shot.panel img { width: 58%; }
+figure.shot figcaption { font-size: 8.5pt; color: #555; margin-top: 4px; }
+
 aside.note, aside.warn, aside.tip {
     border-left: 4px solid #888;
     background: #f7f7f7;
@@ -663,6 +672,8 @@ connect and which ports to open. It is the fastest path from a first launch to a
 working gateway, and it is entirely optional: <em>Skip setup — use defaults</em>
 on the first screen leaves every default in place.
 </p>
+<figure class="shot"><img src="manual-images/gui-setup-wizard.png" alt="The setup wizard welcome screen"><figcaption>The setup wizard&rsquo;s first screen on a new installation.</figcaption></figure>
+
 
 <aside class="note">
 <span class="label">GUI only — by design</span>
@@ -981,6 +992,8 @@ a GUI configuration window opens automatically when the gateway starts. It is
 backed by eframe/egui and provides live configuration editing plus a console
 that streams the server log in real time.
 </p>
+<figure class="shot"><img src="manual-images/gui-main-window.png" alt="The desktop configuration window"><figcaption>The desktop window: configuration frames above, the live server log below.</figcaption></figure>
+
 
 <aside class="note">
 <span class="label">Headless mode</span>
@@ -1043,6 +1056,8 @@ automatically.
 Advanced settings that are rarely changed live in popup windows opened from
 their frame's <em>More&#8230;</em> button.
 </p>
+<figure class="shot"><img src="manual-images/gui-server-more.png" alt="The Server More popup"><figcaption><em>Server &mdash; More&hellip;</em>: ports, the FTP server, session limits, the outbound gateways and master/slave.</figcaption></figure>
+
 
 <h3>4.2.1 Server — More</h3>
 
@@ -1282,6 +1297,8 @@ feels like a modem, and landed at a menu. It also points at the Telnet and SSH
 Gateways as the way <em>out</em> to a real board. Any key continues to the menu
 below.
 </p>
+<figure class="shot term"><img src="manual-images/telnet-main-menu.png" alt="The main menu in a telnet session"><figcaption>The main menu, in a colour ANSI terminal (80 columns).</figcaption></figure>
+
 
 <p>
 The page appears on every connection for <strong>seven days</strong> and then
@@ -1766,6 +1783,8 @@ Kermit Server) or via the telnet menu's
 <strong>Configuration &gt; Server Configuration &gt; W</strong> key.
 The default port is <strong>8080</strong>.
 </p>
+<figure class="shot"><img src="manual-images/web-config.png" alt="The web configuration page"><figcaption>The web configuration page: the same frames as the desktop window, and the live log.</figcaption></figure>
+
 
 <pre><code>web_enabled = true
 web_port    = 8080</code></pre>
@@ -2395,6 +2414,8 @@ From the main menu press <span class="kbd">F</span>:
   K  Kermit server mode (idle and wait for client commands)
   S  Gateway Shell     (A&gt; file-manager prompt — see §8.10)
   I  Toggle IAC escaping (for binary files with 0xFF bytes)</code></pre>
+
+<figure class="shot term"><img src="manual-images/telnet-file-transfer.png" alt="The File Transfer menu"><figcaption>The same menu in a colour ANSI terminal.</figcaption></figure>
 
 <p>
 <span class="kbd">X</span> Delete leaves alone a disk image the CP/M emulator
@@ -3073,6 +3094,8 @@ simply presents the configured <code>transfer_dir</code> as drive
 <strong>A:</strong> and lets you list, view, copy, rename, move, erase, and
 organise files. It works identically over telnet and SSH.
 </p>
+<figure class="shot term"><img src="manual-images/telnet-gateway-shell.png" alt="The Gateway Shell listing the transfer directory"><figcaption>The Gateway Shell: <code>DIR</code> on drive A:, the transfer directory.</figcaption></figure>
+
 
 <p>
 Open it from the <strong>File Transfer</strong> menu with
@@ -3234,6 +3257,8 @@ like CP/M &mdash; this feature actually <strong>runs user-supplied
 rest. The two features are independent and have separate sandboxes; don&rsquo;t
 confuse them.
 </p>
+<figure class="shot term"><img src="manual-images/telnet-cpm.png" alt="The CP/M emulator listing drive B"><figcaption>The CP/M emulator, with a Tarbell disk image mounted on B: and listed with <code>DIR B:</code>.</figcaption></figure>
+
 
 <aside class="note">
 <span class="label">On by default &mdash; runs arbitrary Z80 code</span>
@@ -3363,6 +3388,8 @@ over telnet/SSH, or from <strong>Mount CP/M Drives</strong> in the web and
 desktop interfaces. Mounting <em>hides</em> the drive folder; it does not touch
 it, and the folder&rsquo;s files return the moment you unmount.
 </p>
+<figure class="shot panel"><img src="manual-images/web-mount-cpm-drives.png" alt="The Mount CP/M Drives panel"><figcaption><em>Mount CP/M Drives</em> on the web page: an image chosen for each drive, and a new blank disk.</figcaption></figure>
+
 
 <p>
 Name an image <code>&lt;format&gt;_&lt;anything&gt;.dsk</code> &mdash;
@@ -5631,6 +5658,8 @@ telnet session.  There is no layout, no images on the page and no scripts,
 so it suits a 40-column C64 or an 80-column terminal as well as anything on
 the internet can.  Hobbyists still run hundreds of servers.
 </p>
+<figure class="shot term"><img src="manual-images/telnet-gopher.png" alt="A Gopher menu in the text browser"><figcaption>The browser showing a Gopher menu (gopher.floodgap.com); numbered items are links.</figcaption></figure>
+
 
 <p>
 <strong>Compliance.</strong>  The browser's Gopher client is compliant with
@@ -5774,6 +5803,8 @@ Open-Meteo (<code>https://open-meteo.com</code>), which is free and requires no
 API key, with MET Norway (<code>https://api.met.no</code>) as an automatic
 fallback forecast provider.
 </p>
+<figure class="shot term"><img src="manual-images/telnet-weather.png" alt="A weather report"><figcaption>A weather report: current conditions and the three-day forecast.</figcaption></figure>
+
 
 <ol>
     <li>From the main menu, press <span class="kbd">W</span>.</li>
