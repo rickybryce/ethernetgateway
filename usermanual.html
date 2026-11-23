@@ -322,7 +322,13 @@ principally Claude Code (Anthropic) with ChatGPT (OpenAI) alongside it.
             <li><a href="#ch4-save">Saving and Restarting</a></li>
         </ol>
     </li>
-    <li><span class="num">5.</span> <a href="#ch5">Telnet Access</a></li>
+    <li><span class="num">5.</span> <a href="#ch5">Telnet Access</a>
+        <ol>
+            <li><a href="#ch5-menu">The Main Menu</a></li>
+            <li><a href="#ch5-config">The Configuration Menu</a></li>
+            <li><a href="#ch5-addons">Add-Ons</a></li>
+        </ol>
+    </li>
     <li><span class="num">6.</span> <a href="#ch6">SSH Access</a></li>
     <li><span class="num">7.</span> <a href="#ch7">Security</a>
         <ol>
@@ -367,6 +373,7 @@ principally Claude Code (Anthropic) with ChatGPT (OpenAI) alongside it.
     <li><span class="num">16.</span> <a href="#ch16">Troubleshooting</a></li>
     <li><span class="num">A.</span> <a href="#appA">Appendix A — Configuration Key Reference</a></li>
     <li><span class="num">B.</span> <a href="#appB">Appendix B — AT Command Reference</a></li>
+    <li><span class="num">C.</span> <a href="#appC">Appendix C — Writing an Add-On</a></li>
 </ol>
 </div>
 
@@ -1324,7 +1331,7 @@ that lifts it. So to reach the web UI from a non-private address you must set
 <code>disable_ip_safety</code> — enabling security alone is not enough.
 </p>
 
-<h2>5.5 The Main Menu</h2>
+<h2 id="ch5-menu">5.5 The Main Menu</h2>
 
 <p>
 <strong>On a new installation a welcome page comes first.</strong> It says, in
@@ -1372,7 +1379,10 @@ rather than a setting, so no configuration screen shows it.
 <strong>2&nbsp;&nbsp;Second&nbsp;Menu</strong> opens a second page of the main
 menu, carrying the entries that do not fit on the first.  It is a digit, and
 it sits below the lettered entries rather than among them, because it is
-navigation rather than one more thing the gateway does.  Today that is
+navigation rather than one more thing the gateway does.  It carries
+<span class="kbd">A</span>&nbsp;Add-Ons whenever any are installed (see
+<a href="#ch5-addons">&sect;5.7</a>; every platform), and, on Linux, macOS and
+the BSDs,
 <span class="kbd">R</span>&nbsp;Restart&nbsp;the&nbsp;computer and
 <span class="kbd">S</span>&nbsp;Shut&nbsp;down&nbsp;the&nbsp;computer &mdash;
 the computer the gateway runs on, <em>not</em> the gateway process.  (To
@@ -1383,14 +1393,16 @@ machine will say what it is called &mdash; then ask for a password if it wants
 one; the password is the one that answers
 <code>sudo</code> for the account the gateway runs as, and it is checked on its
 own before anything is done, so a wrong one costs a message and nothing else.
-The gateway itself is never run elevated.  The item appears on Linux, macOS and
-the BSDs; it is absent from Windows builds.
+The gateway itself is never run elevated.  Restart and Shutdown appear on
+Linux, macOS and the BSDs; they are absent from Windows builds, where the
+second page carries Add-Ons alone.
 </p>
 
 <p>
 <strong>Under the shipped <code>systemd</code> unit these two items do not
-appear at all</strong>, and neither does the <code>2</code> entry that reaches
-them &mdash; exactly as on Windows.  That unit sets
+appear at all</strong> &mdash; exactly as on Windows &mdash; and the
+<code>2</code> entry that reaches them appears only if there are add-ons to
+show.  That unit sets
 <code>NoNewPrivileges=yes</code>, a kernel flag that stops any child process
 gaining privilege, and <code>sudo</code> is a setuid binary, so it cannot
 elevate however correct the password is.  The gateway reads the flag from
@@ -1402,9 +1414,8 @@ process needs no <code>sudo</code> and the flag does not bear on it.)
 </p>
 
 <p>
-The second page itself survives an empty power section: it is where future
-items that do not fit the main menu will live, and the <code>2</code> entry
-appears whenever the page has anything on it.
+The second page is where items that do not fit the main menu go (Add-Ons was
+the first); <code>2</code> appears whenever it has something on it.
 </p>
 
 <h3 id="ch5-power-enable">5.5.1 Enabling Restart and Shutdown</h3>
@@ -1723,6 +1734,86 @@ session into the gateway, or any other no-display setup still has a way to
 edit settings without dropping out to a shell to hand-edit
 <code>egateway.conf</code>.
 </aside>
+
+
+<h2 id="ch5-addons">5.7 Add-Ons</h2>
+
+<p>
+An <strong>add-on</strong> is a program the operator installs for callers to
+run from the gateway &mdash; the way a bulletin board offered
+<em>doors</em>: a game, a quiz, a little database, a front end to some other
+service.  Callers find them on the second page of the main menu:
+<span class="kbd">2</span> then <span class="kbd">A</span>&nbsp;Add-Ons, which
+lists every add-on installed, numbered.  Type a number to start one.
+</p>
+
+<h3>Running one</h3>
+
+<p>
+The add-on takes over the screen, exactly as the SSH and Telnet Gateways hand
+it to a remote host.  <strong>Press ESC twice quickly to leave</strong> (on a
+Commodore 64, the back-arrow <span class="kbd">&larr;</span> twice).  When the
+add-on ends &mdash; because it finished, because you left, or because it was
+idle or ran out of time &mdash; one line says which, and any key returns to the
+list.  An add-on that ended with an error says so ("Hello ended with error
+2."), so a crashed one does not look like nothing happened.  Its description,
+if it has one, is shown under "Starting &hellip;" as it begins.
+</p>
+
+<p>
+A <strong>dim entry</strong> cannot run on this terminal: it does not support
+your terminal type, or it needs more columns than you have (an 80-column
+program on a 40-column Commodore).  Choose it to see why.
+</p>
+
+<h3>Installing</h3>
+
+<p>
+Each add-on is a folder inside <code>ethernetgateway-data/AddOns/</code>,
+holding its program, a manifest called <code>addon.conf</code>, and anything
+else it needs.  Copy a folder in and it is in the list the next time the list
+is opened &mdash; no restart.  Delete it and it is gone.  The gateway creates
+the <code>AddOns</code> folder, with a short <code>README.txt</code>, the first
+time it starts.
+</p>
+
+<p>
+<strong>Ready-made add-ons</strong> are kept at
+<a href="https://github.com/rickybryce/ethernetgateway-addons">github.com/rickybryce/ethernetgateway-addons</a>.
+The desktop setup wizard's last screen offers to download them
+(<em>Download the Ethernet Gateway add-ons</em>, ticked by default); the telnet
+and web interfaces have no download, so on a headless gateway copy the folders
+in by hand.  It fetches the exact
+versions this release of the gateway was built with and checks every file
+against the SHA-256 recorded in the gateway, so a change to that repository
+reaches your gateway only through a gateway release.  An add-on already in the
+folder &mdash; including one you edited &mdash; is left exactly as it is.  To
+install one by hand, copy its folder in; on Linux, macOS and the BSDs make its
+program executable (<code>chmod +x</code>).
+</p>
+
+<p>
+<strong>A folder that cannot be used is left out of the list</strong>, and the
+reason is written once to the gateway's log: no <code>addon.conf</code>, a
+manifest that does not parse, or a program that is missing, is not executable,
+or lies outside the add-on's own folder.  If an add-on you installed does not
+appear, look in the log.
+</p>
+
+<aside class="warn">
+<strong>An add-on runs as the same user as the gateway, with its rights.</strong>
+It can read and write whatever the gateway can.  Install only programs you
+trust.  The gateway does keep some things back: it runs no shell to start one
+(except <code>cmd.exe</code> for a Windows batch file), it refuses a program
+that leads outside the add-on's folder, and it passes on none of its own
+environment beyond <code>PATH</code>, <code>HOME</code> and a few like them
+(<a href="#appC">Appendix&nbsp;C.3</a>) &mdash; the Groq key and every password
+stay with the gateway.  Leaving an add-on ends it and everything it started.
+</aside>
+
+<p>
+Writing your own: see <a href="#appC">Appendix&nbsp;C</a>.
+</p>
 
 <!-- ═══════════════════ 6. SSH ═══════════════════ -->
 <h1 id="ch6">6. SSH Access</h1>
@@ -6774,6 +6865,184 @@ covers commands the emulator has no hardware to implement: <code>ATB</code>,
 <code>AT&amp;J</code>, <code>AT&amp;S</code>, <code>AT&amp;T</code>,
 <code>AT&amp;Y</code>, and others. The intent is to let legacy init strings
 run to completion rather than halt mid-setup with <code>ERROR</code>.
+</p>
+
+<!-- ═══════════════════ Appendix C ═══════════════════ -->
+<h1 id="appC">Appendix C — Writing an Add-On</h1>
+
+<p>
+An add-on can be written in anything that runs on the gateway's machine and
+reads its standard input and writes its standard output: a shell script, a
+Windows batch file, Python, a compiled program.  The gateway starts it, pipes
+the caller's keys to it and its output to the caller, and ends it when the
+caller leaves.  This appendix is everything an add-on can rely on.  The two in
+<a href="https://github.com/rickybryce/ethernetgateway-addons">the add-ons
+repository</a> are complete working examples: <code>hello</code> shows every
+value the gateway passes, and <code>guess</code> is a small game.
+</p>
+
+<h2>C.1 The folder</h2>
+
+<pre><code>ethernetgateway-data/AddOns/
+  hello/                 &lt;- the folder's name is the add-on's id
+    addon.conf           &lt;- the manifest (required)
+    hello.sh             &lt;- the program it names
+    hello.cmd            &lt;- the Windows version
+    ...                  &lt;- anything else it needs</code></pre>
+
+<p>
+The program must be <strong>inside the add-on's own folder</strong>: a
+<code>command</code> that is an absolute path, contains <code>..</code>, or is a
+symbolic link leading out is refused.  The add-on runs with its own folder as
+the working directory, so it can open its other files by plain name.  On Linux,
+macOS and the BSDs the program must be executable.  Folders whose names start with a dot
+are ignored.
+</p>
+
+<h2>C.2 The manifest: <code>addon.conf</code></h2>
+
+<p>
+The same <code>key = value</code> lines as <code>egateway.conf</code>.  A line
+starting with <code>#</code> is a comment (a <code>#</code> later in a line is
+part of the value).  A key given twice keeps the last; an empty value counts as
+not set; yes/no keys also take <code>true</code>/<code>false</code>,
+<code>on</code>/<code>off</code> and <code>1</code>/<code>0</code>.  Only
+<code>command</code> is required.  Unknown keys are ignored, so a manifest
+written for a later gateway still loads.
+</p>
+
+<pre><code>name = Hello
+description = Shows what the gateway tells an add-on, then asks your name
+version = 1.0
+author = Your Name
+command = hello.sh
+command_windows = hello.cmd</code></pre>
+
+<table>
+<tr><th><code>addon.conf</code> key</th><th>Meaning</th><th>Default</th></tr>
+<tr><td><code>name</code></td><td>Shown in the list (cut to fit the screen)</td><td>the folder's name</td></tr>
+<tr><td><code>description</code></td><td>One line about it, shown under "Starting &hellip;" when it begins</td><td>empty</td></tr>
+<tr><td><code>version</code>, <code>author</code></td><td>For your own records</td><td>empty</td></tr>
+<tr><td><code>command</code></td><td>The program, relative to the folder</td><td>required</td></tr>
+<tr><td><code>args</code></td><td>Arguments, split into words like a shell would but without one: <code>'single'</code> and <code>"double"</code> quotes group words; no variables, no wildcards</td><td>none</td></tr>
+<tr><td><code>command_linux</code>, <code>command_macos</code>, <code>command_windows</code></td><td>This platform's program, used instead of <code>command</code> (and <code>args_linux</code> &hellip; the same way).  <code>linux</code> covers the BSDs too</td><td>&mdash;</td></tr>
+<tr><td><code>input</code></td><td><code>line</code>: the gateway echoes what the caller types, handles Backspace, and sends the line when Enter is pressed. <code>raw</code>: every key is sent as it is pressed, and the add-on draws its own echo</td><td><code>line</code></td></tr>
+<tr><td><code>terminals</code></td><td>The terminal types it supports: any of <code>ansi</code>, <code>ascii</code>, <code>petscii</code>, comma-separated</td><td>all three</td></tr>
+<tr><td><code>min_columns</code></td><td>Refused on a narrower screen</td><td><code>0</code></td></tr>
+<tr><td><code>petscii</code></td><td><code>translate</code>: the add-on writes ANSI and the gateway converts it for a Commodore. <code>native</code>: the add-on writes PETSCII itself and gets the Commodore's bytes untouched</td><td><code>translate</code></td></tr>
+<tr><td><code>idle_minutes</code></td><td>Ended after this long with nothing sent either way. <code>0</code> keeps the gateway's own session idle timeout</td><td><code>0</code></td></tr>
+<tr><td><code>max_minutes</code></td><td>Ended after this long in all</td><td><code>0</code> (no limit)</td></tr>
+<tr><td><code>single_instance</code></td><td><code>yes</code>: only one caller at a time; a second is told it is in use</td><td><code>no</code></td></tr>
+<tr><td><code>mode</code></td><td>Leave it out (<code>terminal</code>).  <code>gui</code> and <code>both</code> are for add-ons that open a window on the gateway's screen, which is not finished: they need a <code>gui_command</code> or the folder is skipped, a <code>gui</code> add-on is listed dim with a <code>[GUI]</code> mark and refused, and a <code>both</code> add-on runs only its terminal side</td><td><code>terminal</code></td></tr>
+</table>
+
+<h2>C.3 What the add-on is told</h2>
+
+<p>
+The add-on starts with a <strong>clean environment</strong>: none of the
+gateway's own variables reach it except <code>PATH</code>, <code>HOME</code>,
+<code>USER</code>, <code>LOGNAME</code>, <code>LANG</code>,
+<code>LC_ALL</code>, <code>LC_CTYPE</code>, <code>TZ</code>,
+<code>TMPDIR</code> (and on Windows <code>SYSTEMROOT</code>,
+<code>SYSTEMDRIVE</code>, <code>WINDIR</code>, <code>COMSPEC</code>,
+<code>PATHEXT</code>, <code>USERPROFILE</code>, <code>TEMP</code>,
+<code>TMP</code>).  The gateway adds these:
+</p>
+
+<table>
+<tr><th>Variable</th><th>Value</th></tr>
+<tr><td><code>EG_TERMINAL</code></td><td><code>ansi</code>, <code>ascii</code> or <code>petscii</code>: the caller's terminal</td></tr>
+<tr><td><code>EG_COLUMNS</code>, <code>EG_ROWS</code></td><td>The caller's screen size &mdash; the same answer the SSH and Telnet Gateways give a remote host (40&times;25 for a Commodore, 80&times;24 otherwise, unless the terminal reported its own or the operator set one)</td></tr>
+<tr><td><code>EG_COLOR</code></td><td><code>1</code> if the caller accepted colour, else <code>0</code></td></tr>
+<tr><td><code>EG_PETSCII</code></td><td><code>native</code> when a Commodore caller meets <code>petscii = native</code>; otherwise <code>translate</code> (an ANSI or ASCII caller always gets ANSI handling)</td></tr>
+<tr><td><code>EG_INPUT</code></td><td><code>line</code> or <code>raw</code></td></tr>
+<tr><td><code>EG_USER</code></td><td>The gateway login name, when login is enabled; empty otherwise.  Never a password</td></tr>
+<tr><td><code>EG_REMOTE_ADDR</code></td><td>The caller's IP address; empty for a local session</td></tr>
+<tr><td><code>EG_CONNECTION</code></td><td><code>telnet</code>, <code>ssh</code>, <code>serial</code> or <code>relay</code></td></tr>
+<tr><td><code>EG_ADDON_DIR</code></td><td>The add-on's own folder (absolute)</td></tr>
+<tr><td><code>EG_DATA_DIR</code></td><td>The gateway's data folder (absolute)</td></tr>
+<tr><td><code>EG_TRANSFER_DIR</code></td><td>The gateway's transfer directory (absolute) &mdash; where callers' uploads land</td></tr>
+<tr><td><code>EG_GATEWAY_VERSION</code></td><td>The gateway's version, e.g. <code>1.1.0</code></td></tr>
+<tr><td><code>TERM</code></td><td><code>ansi</code> when the add-on should write ANSI (ANSI callers, and Commodores with <code>petscii = translate</code>); <code>dumb</code> otherwise</td></tr>
+</table>
+
+<h2>C.4 Input and output</h2>
+
+<ul>
+  <li><strong>Write ANSI, and plain newlines.</strong> A lone <code>\n</code>
+  reaches the caller as a new line; the gateway adds the carriage return a
+  terminal needs.  Escape sequences reach an ANSI caller unchanged and are
+  removed entirely for an ASCII caller.  For a Commodore the gateway translates
+  colours (foreground), clear screen, home and the relative cursor moves (up,
+  down, left, right); anything else &mdash; positioning to a row and column
+  (<code>ESC[r;cH</code>), erasing a line, background colours &mdash; is
+  dropped, so draw a Commodore screen line by line.  Check
+  <code>EG_COLOR</code> before using colour.</li>
+  <li><strong>Keep to the width you are told.</strong> A Commodore has 40
+  columns; a line that fills the last one wraps.  Lines under 39 characters are
+  safe everywhere.</li>
+  <li><strong>Line input</strong> (the default) arrives as one line per Enter,
+  ending in <code>\n</code> &mdash; what <code>read</code> in a shell or
+  <code>input()</code> in Python expects.  A line holds at most 1024 bytes;
+  keys past that are ignored.  Arrow keys and other special keys are not passed
+  on in this mode.  A Commodore's letters arrive in ordinary ASCII case.</li>
+  <li><strong>Raw input</strong> sends each key as pressed: Enter arrives as
+  <code>\r</code> and Backspace as DEL (<code>0x7F</code>); a Commodore's
+  cursor keys arrive as ANSI sequences, a single back-arrow as ESC, and its
+  letters in ordinary ASCII case.  The add-on echoes what it wants shown.  Over a pipe there is no terminal on the add-on's
+  side, so a program that needs one (<code>curses</code>, full-screen editors)
+  will not work yet.</li>
+  <li><strong>Output is not buffered by the gateway</strong>, but your language
+  may buffer it when writing to a pipe.  Flush after a prompt that does not end
+  in a newline (Python: <code>print(..., flush=True)</code>; C:
+  <code>fflush(stdout)</code>), or the caller sees nothing until later.</li>
+  <li><strong>Standard error goes to the gateway's log</strong>, prefixed with
+  the add-on's id: the first 200 lines of each run, each cut to 200
+  characters.  Use it for diagnostics.</li>
+  <li><strong>Keys typed ahead</strong> of an add-on that is not reading are
+  held for it, up to 64&nbsp;KB; beyond that they are dropped.</li>
+  <li><strong>With <code>petscii = native</code></strong> a Commodore caller's
+  bytes reach the add-on untouched and its output reaches the Commodore
+  untouched: nothing is translated and a <code>\n</code> is <em>not</em>
+  turned into a new line, so end lines with <code>\r</code>.  Enter arrives as
+  <code>\r</code>.  Check <code>EG_PETSCII</code>, since an ANSI or ASCII caller
+  still gets the usual handling.</li>
+</ul>
+
+<h2>C.5 Ending</h2>
+
+<p>
+Exit when you are done; the gateway says "&lt;name&gt; ended." and returns the
+caller to the list.  A non-zero exit status is shown ("&lt;name&gt; ended with
+error 2.").  <strong>The run ends when the add-on closes its standard
+output</strong>, normally by exiting; the gateway then waits up to two seconds
+for its exit status.  Whether it ended by itself, the caller left (ESC twice)
+or disconnected, or a time limit ran out, the gateway then ends the add-on
+<strong>and every process it started</strong> &mdash; its whole process group
+on Linux, macOS and the BSDs, its job object on Windows &mdash; so nothing is
+left running: a background program started with <code>&amp;</code> does not
+outlive it.  Do not rely on a signal
+to clean up: write anything that matters as you go.
+</p>
+
+<h2>C.6 Windows notes</h2>
+
+<p>
+Windows runs a <code>.cmd</code> or <code>.bat</code> file through
+<code>cmd.exe</code>, so for those the <code>args</code> do pass through it:
+the gateway's runtime escapes them and refuses any it cannot escape safely, but
+an argument containing <code>%</code> or <code>^</code> may arrive
+altered.  A batch file should be saved with Windows line endings (CRLF).
+The add-on's window is never shown on the gateway's screen.
+</p>
+
+<h2>C.7 Sharing one</h2>
+
+<p>
+To have an add-on included in the downloadable set, offer it to
+<a href="https://github.com/rickybryce/ethernetgateway-addons">the add-ons
+repository</a>.  An add-on there reaches the setup wizard's download with the
+next release of the gateway, which records each of its files' SHA-256.
 </p>
 
 <hr>

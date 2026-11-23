@@ -309,6 +309,15 @@ impl TelnetSession {
 
         let esc_label = if self.terminal_type == TerminalType::Petscii { "<-" } else { "ESC" };
         self.send_line(&format!("  {}", self.green(&format!("Starting {name}.")))).await?;
+        // The manifest's one line about it, the only place a caller sees it:
+        // two rows at most, wrapped to the screen.
+        if !m.description.trim().is_empty() {
+            let width = if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH } else { 80 } - 3;
+            let desc = self.remote_text(m.description.trim());
+            for row in crate::aichat::wrap_line(&desc, width).into_iter().take(2) {
+                self.send_line(&format!("  {}", self.dim(&row))).await?;
+            }
+        }
         self.send_line(&format!("  Press {} twice quickly to leave.", self.cyan(esc_label))).await?;
         self.send_line("").await?;
         self.flush().await?;

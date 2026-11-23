@@ -152,6 +152,12 @@ options, and the full AT command set.
   forms, and bookmarks. Rendered for 40-column PETSCII up to modern terminals.
   The Gopher client is compliant with RFC 1436, RFC 4266 and Gopher+ (tn3270
   items are connected over plain telnet, without 3270 emulation).
+- **Add-Ons** — programs you install for callers to run, like BBS doors: a
+  game, a quiz, a front end to another service. Drop a folder with an
+  `addon.conf` into `ethernetgateway-data/AddOns/` and it is on the Second
+  Menu (`2`, then `A`). The setup wizard can download
+  [ready-made ones](https://github.com/rickybryce/ethernetgateway-addons);
+  the user manual's Appendix C is the guide to writing your own.
 - **AI chat** — Q&A powered by the Groq API (free key required).
 - **Weather** — current conditions + 3-day forecast for any city/postal code
   worldwide (Open-Meteo, no key required).

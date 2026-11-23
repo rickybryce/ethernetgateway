@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input edited by the gateway (`input = line`) or passed key by key
   (`input = raw`).  It is told the caller's terminal and size through `EG_*`
   variables and gets nothing else of the gateway's environment; its program
-  must stay inside its own folder, no shell runs it, and leaving ends it and
+  must stay inside its own folder, no shell runs it (except `cmd.exe` for a
+  Windows batch file), and leaving ends it and
   everything it started.  Idle and time limits, one-copy-only, and a line
   saying how it ended.
 - **The setup wizard can download the Ethernet Gateway add-ons** from

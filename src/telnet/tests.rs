@@ -18424,7 +18424,7 @@ async fn test_leaving_an_add_on_ends_it_and_its_children() {
 #[tokio::test]
 async fn test_an_add_ons_error_exit_is_said() {
     use tokio::io::AsyncWriteExt;
-    let (dir, a) = scratch_addon("fail", "#!/bin/sh\necho oops\nexit 3\n");
+    let (dir, a) = scratch_addon_with("fail", "#!/bin/sh\necho oops\nexit 3\n", "description = Says oops and fails\n");
     let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
     let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
     let mut seen = Vec::new();
@@ -18432,6 +18432,10 @@ async fn test_an_add_ons_error_exit_is_said() {
         read_addon_until(&mut peer, &mut seen, b"Probe ended with error 3.").await,
         "{}",
         String::from_utf8_lossy(&seen)
+    );
+    assert!(
+        String::from_utf8_lossy(&seen).contains("Says oops and fails"),
+        "the description is shown nowhere else, so it must be shown as it starts"
     );
     peer.write_all(b" ").await.unwrap();
     run.await.unwrap().unwrap();
