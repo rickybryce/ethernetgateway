@@ -108,6 +108,11 @@ mod transfer;
 // key handler and its half of the valid-key hint are gated to match.
 #[cfg(unix)]
 mod power;
+// The second page itself, on every platform: Add-Ons, plus the power items
+// above on Unix.
+mod second_menu;
+// The Add-Ons list page (`crate::addons` is the shared core).
+mod addons_ui;
 // Pure seams, referenced only from tests: the confirmation body, the sudo
 // error reducer and the three-way elevation answer.
 #[cfg(all(unix, test))]
@@ -1429,9 +1434,9 @@ pub(crate) struct TelnetSession {
     /// reconnect than the one they are already on, and three per connection
     /// is what every session had before.
     ///
-    /// Read only under `#[cfg(unix)]`, like `MenuItems::second_page` and for
-    /// the same reason: the page and everything on it are Unix-only, so off
-    /// Unix this field has no reader and `-D warnings` calls it dead.  The
+    /// Read only under `#[cfg(unix)]`: the power items it guards are
+    /// Unix-only, so off Unix this field has no reader and `-D warnings` calls
+    /// it dead.  The
     /// attribute sits on the field rather than `cfg`-ing it away, because the
     /// last field here that carried a `cfg` orphaned it onto its neighbour
     /// when it was removed and failed the Windows build.
@@ -2214,15 +2219,15 @@ impl TelnetSession {
             ]);
             // Listed last because the menu draws it last -- a help screen in a
             // different order from the screen it explains is a help screen the
-            // reader has to search.  `cfg` *and* the flag, exactly as
-            // `main_menu_rows` pushes the row, so no Windows build can grow it
-            // however the flag is set.
-            #[cfg(unix)]
+            // reader has to search.  The flag, exactly as `main_menu_rows`
+            // pushes the row; every platform since Add-Ons.  Worded for what
+            // the page can hold here: power items exist only on Unix.
             if items.second_page {
-                v.extend([
-                    "  2  Second Menu: restart or shut",
-                    "     down the whole computer",
-                ]);
+                v.extend(if cfg!(unix) {
+                    ["  2  Second Menu: add-ons, and", "     restart/shutdown where allowed"]
+                } else {
+                    ["  2  Second Menu: add-ons installed", "     on this gateway"]
+                });
             }
             v
         })
@@ -2266,34 +2271,57 @@ impl TelnetSession {
         ]
     }
 
-    /// MORE page help.  Unix only, for the same reason the page is -- see
-    /// `telnet/power.rs`.
-    #[cfg(unix)]
-    fn more_help_lines() -> &'static [&'static str] {
+    /// Second Menu help, for exactly what the page is showing.
+    ///
+    /// **Built from the same two flags as the page** (`more_menu_rows`): since
+    /// Add-Ons the page opens with add-ons alone, so a fixed text explained R
+    /// and S on a gateway whose page offered only A -- the item-an-operator-
+    /// cannot-use defect `power.rs` exists to avoid -- and A on one with none.
+    /// `OnceLock` cells per combination, as `main_help_lines` does, because
+    /// callers want `&'static`.  The widest shape is 15 lines, the most one
+    /// help page holds (`HELP_MAX_CONTENT_LINES`).
+    fn more_help_lines(powered: bool, addons: bool) -> &'static [&'static str] {
+        type Cell = std::sync::OnceLock<Vec<&'static str>>;
+        static CELLS: [Cell; 4] = [Cell::new(), Cell::new(), Cell::new(), Cell::new()];
+        CELLS[usize::from(powered) * 2 + usize::from(addons)].get_or_init(|| {
+            let mut v = vec!["  Reached with 2 on the main menu.", ""];
+            if addons {
+                v.extend(["  A  Add-Ons: programs installed", "     on this gateway.", ""]);
+            }
+            // Unix only, as the rows are (`more_menu_rows`).
+            if powered && cfg!(unix) {
+                v.extend([
+                    "  R  Restart the computer the",
+                    "     gateway runs on -- not just",
+                    "     the gateway itself.",
+                    "  S  Shut down that computer. It",
+                    "     will need switching on by hand.",
+                    "",
+                    // "if needed": a root gateway or a NOPASSWD rule asks for
+                    // none, and the manual (5.5) has always said so.
+                    "  R and S confirm, then ask for a",
+                    "  password if needed. GATEWAY restart",
+                    "  only: Configuration > Server > R.",
+                ]);
+            }
+            v.push("  Q  Back to the main menu.");
+            v
+        })
+    }
+
+    /// Add-Ons list help (Second Menu > A).
+    fn addons_help_lines() -> &'static [&'static str] {
         &[
-            "  The second menu, reached with 2",
-            "  from the main menu.",
+            "  Programs the operator installed on",
+            "  this gateway. Type a number to",
+            "  start one; press ESC twice quickly",
+            "  (<- on a C64) to leave it.",
             "",
-            "  R  Restart the computer the",
-            "     gateway runs on -- not just",
-            "     the gateway itself.",
+            "  A dim entry cannot run on this",
+            "  terminal: choose it to see why.",
             "",
-            "  S  Shut down that computer. It",
-            "     will need switching on by hand.",
-            "",
-            "  Q  Back to the main menu.",
-            "",
-            // Three lines, not five: adding the `Q` entry took this table to
-            // 17 and `HELP_MAX_CONTENT_LINES` is 15, so the screen split into
-            // two pages and the reader had to press a key to finish a short
-            // explanation.  Measured on the live gateway, which said
-            // "Page 1/2".
-            // "if needed": a root gateway or a NOPASSWD rule asks for none,
-            // and the manual (5.5) has always said so.  This said "then for
-            // a password" unconditionally.
-            "  Each confirms, then asks for a",
-            "  password if needed. GATEWAY restart",
-            "  only: Configuration > Server > R.",
+            "  N/P  Next or previous page.",
+            "  Q    Back to the Second Menu.",
         ]
     }
 

@@ -3290,7 +3290,7 @@ fn test_main_menu_row_count() {
         let mut session = make_test_session(term);
         session.color_enabled = false;
         // The worst case the renderer can draw: a slave, emulator on.
-        let worst = session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, Some("gateway.example.org"));
+        let worst = session.main_menu_rows(MenuItems { cpm: true, second_page: true }, Some("gateway.example.org"));
         let drawn = worst.len() + 1; // the prompt line
         assert!(
             drawn <= 22,
@@ -3317,10 +3317,10 @@ fn test_main_menu_row_count() {
         );
         // The ordinary case must leave the slave notice out, or the three
         // rows it costs are not conditional at all.
-        let plain = session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, None);
+        let plain = session.main_menu_rows(MenuItems { cpm: true, second_page: true }, None);
         assert_eq!(plain.len() + 3, worst.len(), "the slave notice is not 3 rows");
         // Turning the emulator off drops exactly the CP/M item.
-        let no_cpm = session.main_menu_rows(MenuItems { cpm: false, second_page: cfg!(unix) }, None);
+        let no_cpm = session.main_menu_rows(MenuItems { cpm: false, second_page: true }, None);
         assert_eq!(plain.len(), no_cpm.len() + 1, "the CP/M item is not one row");
         assert!(
             !no_cpm.iter().any(|r| r.contains("CP/M")),
@@ -3372,7 +3372,7 @@ fn test_main_menu_item_count() {
 #[test]
 fn test_main_menu_error_hint() {
     for cpm in [false, true] {
-        let hint = main_menu_key_hint(MenuItems { cpm, second_page: cfg!(unix) });
+        let hint = main_menu_key_hint(MenuItems { cpm, second_page: true });
         // **Measured as it is printed.**  `show_error` puts a two-space indent
         // in front of it, so the budget is 38 -- asserting against 40 is how
         // the literal this replaced overflowed a C64 row unnoticed on the
@@ -3429,8 +3429,8 @@ fn test_main_help_content_line_count() {
     for cpm in [false, true] {
         for second in [false, true] {
             let items = MenuItems { cpm, second_page: second };
-            // The second page is compiled out off Unix, so its lines are too.
-            let second_shown = second && cfg!(unix);
+            // Every platform since Add-Ons, like the row it explains.
+            let second_shown = second;
             let expected = BASE + 2 * usize::from(cpm) + 2 * usize::from(second_shown);
             let lines = TelnetSession::main_help_lines(items);
             assert_eq!(
@@ -5165,9 +5165,9 @@ fn test_every_help_screen_fits_its_terminal() {
         ),
     ];
 
-    // The MORE page is Unix-only; it is width-checked where it exists.
-    #[cfg(unix)]
-    screens.push(("more", TelnetSession::more_help_lines(), PETSCII_WIDTH));
+    // The Second Menu and its Add-Ons list, on every platform.
+    screens.push(("more", TelnetSession::more_help_lines(true, true), PETSCII_WIDTH));
+    screens.push(("addons", TelnetSession::addons_help_lines(), PETSCII_WIDTH));
 
     // Flagged: a narrow text and a wide one, each held to its own width.
     for (name, narrow, wide) in [
@@ -6262,7 +6262,6 @@ fn test_relay_session_identity() {
 /// new help screen is only width-checked once added below.  Single-width
 /// tables ignore `petscii` (they fit 40).
 fn all_help_line_groups(petscii: bool) -> Vec<&'static [&'static str]> {
-    #[allow(unused_mut)]
     let mut groups: Vec<&'static [&'static str]> = vec![
         // One entry per table, which `test_every_help_table_is_width_checked`
         // counts: the optional items only ever remove lines, so the full page
@@ -6302,11 +6301,10 @@ fn all_help_line_groups(petscii: bool) -> Vec<&'static [&'static str]> {
         TelnetSession::cpmemu_help_lines(petscii),
         TelnetSession::CPM_ENTRY_TIPS,
     ];
-    // The MORE page is Unix-only, so it joins the list only where it exists.
-    // A `Vec` rather than the fixed-size array this used to be: a length that
-    // changes with the platform is a number to keep in step twice.
-    #[cfg(unix)]
-    groups.push(TelnetSession::more_help_lines());
+    // The Second Menu is on every platform since Add-Ons; its help has a
+    // Unix and a Windows shape, and this checks whichever is compiled.
+    groups.push(TelnetSession::more_help_lines(true, true));
+    groups.push(TelnetSession::addons_help_lines());
     groups
 }
 
@@ -12464,7 +12462,7 @@ fn test_the_power_page_reports_sudo_errors_through_one_helper() {
 #[cfg(unix)]
 #[test]
 fn test_more_help_does_not_promise_a_password() {
-    let text = TelnetSession::more_help_lines().join(" ");
+    let text = TelnetSession::more_help_lines(true, true).join(" ");
     assert!(text.contains("password if needed"), "{text}");
 }
 
@@ -12516,13 +12514,15 @@ async fn test_run_elevated_feeds_the_password_and_closes_stdin() {
 /// wrong.  What is left is exactly what a terminal draws.  On PETSCII the
 /// budget is 39, the same one `separator()` uses: a row that exactly fills 40
 /// auto-wraps and then takes the trailing CR/LF, costing two rows.
-#[cfg(unix)]
 #[test]
 fn test_more_menu_rows_fit_the_screen() {
     // **Both shapes of the page.**  Where the computer cannot be restarted the
     // two power rows are not drawn, and that page -- which is what a packaged
     // installation shows -- was measured nowhere: it must still fit, still
     // carry its way out, and still not offer what it cannot do.
+    // And with Add-Ons on or off, on every platform: since Add-Ons the page
+    // exists on Windows too, where the power rows are never drawn.
+    for addons in [false, true] {
     for powered in [false, true] {
     for (term, width) in [
         (TerminalType::Petscii, PETSCII_WIDTH - 1),
@@ -12531,7 +12531,7 @@ fn test_more_menu_rows_fit_the_screen() {
     ] {
         let mut session = make_test_session(term);
         session.color_enabled = false;
-        let rows = session.more_menu_rows(powered);
+        let rows = session.more_menu_rows(powered, addons);
         // Plus one for the prompt line the loop writes under them.
         let drawn = rows.len() + 1;
         assert!(
@@ -12550,10 +12550,11 @@ fn test_more_menu_rows_fit_the_screen() {
         for want in ["Restart the computer", "Shut down the computer"] {
             assert_eq!(
                 text.contains(want),
-                powered,
+                powered && cfg!(unix),
                 "{want:?} is on the page exactly when it can be done ({powered}) on {term:?}",
             );
         }
+        assert_eq!(text.contains("Add-Ons"), addons, "Add-Ons is listed exactly when there are any");
         for row in &rows {
             assert!(
                 row.chars().count() <= width,
@@ -12568,8 +12569,8 @@ fn test_more_menu_rows_fit_the_screen() {
         // helper that returned an empty string would leave a page of codes.
         // (Asserting the row *count* here would not fail -- `more_menu_rows`
         // pushes a fixed set and colour never varies it.)
-        if powered {
-            let coloured = make_test_session(term).more_menu_rows(true).join("\n");
+        if powered && cfg!(unix) {
+            let coloured = make_test_session(term).more_menu_rows(true, addons).join("\n");
             for want in ["Restart the computer", "Shut down the computer"] {
                 assert!(
                     coloured.contains(want),
@@ -12581,11 +12582,11 @@ fn test_more_menu_rows_fit_the_screen() {
         }
     }
     }
+    }
 }
 
 /// The MORE page's error hint — the real one — names exactly the keys it takes
 /// and fits the row it is printed on.
-#[cfg(unix)]
 #[test]
 fn test_more_menu_error_hint_fits_and_is_complete() {
     // `show_error` adds the two-space indent; see `main_menu_key_hint`.
@@ -12598,8 +12599,9 @@ fn test_more_menu_error_hint_fits_and_is_complete() {
     // `available()` and asserted the hint agreed with it, which on any one
     // machine exercises one of the two strings and never measures the other --
     // and the one it skips here is the one a packaged installation shows.
+    for addons in [false, true] {
     for powered in [false, true] {
-        let hint = crate::telnet::power::more_menu_hint(powered);
+        let hint = crate::telnet::second_menu::more_menu_hint(powered, addons);
         let printed = format!("  {hint}");
         assert!(
             printed.chars().count() <= PETSCII_WIDTH,
@@ -12617,6 +12619,8 @@ fn test_more_menu_error_hint_fits_and_is_complete() {
                 "the hint names {key} exactly when the page offers it: {hint:?}",
             );
         }
+        assert_eq!(hint.contains('A'), addons, "the hint names A exactly with add-ons: {hint:?}");
+    }
     }
 }
 
@@ -13870,7 +13874,7 @@ fn test_the_second_menus_help_is_one_screen() {
     // "Page 1/2" -- because `paginate_help` also split at the last blank line,
     // so 15 lines against a budget of 15 still became two pages.  A count is a
     // proxy; the number of pages is the claim.
-    let lines = TelnetSession::more_help_lines();
+    let lines = TelnetSession::more_help_lines(true, true);
     let pages = TelnetSession::paginate_help(lines, crate::telnet::HELP_MAX_CONTENT_LINES);
     assert_eq!(
         pages.len(),
@@ -13911,7 +13915,7 @@ fn test_paginate_help_does_not_split_content_that_fits() {
 #[cfg(unix)]
 #[test]
 fn test_more_help_distinguishes_the_two_restarts() {
-    let text = TelnetSession::more_help_lines().join(" ");
+    let text = TelnetSession::more_help_lines(true, true).join(" ");
     assert!(
         text.contains("Configuration > Server > R"),
         "the MORE help does not say where restarting the gateway alone lives: {}",
@@ -14367,15 +14371,6 @@ fn test_every_help_table_is_width_checked() {
     }
     defined.sort();
     defined.dedup();
-    // `more_help_lines` is `#[cfg(unix)]` in mod.rs and a source scan cannot
-    // see a cfg, so off Unix this census was comparing a Unix source file
-    // against a Windows binary's list: 29 defined, 28 listed.  Red on the
-    // windows job and nowhere else, from `85193af` until now -- CI does not
-    // run on dev pushes, so a day of dev commits went by without anyone
-    // seeing it.  Dropped here rather than removing power.rs from `SOURCES`,
-    // because the strings are still worth width-checking wherever this runs.
-    #[cfg(not(unix))]
-    defined.retain(|n| n != "more_help_lines");
 
     let listed = all_help_line_groups(true).len();
     assert_eq!(
@@ -14488,16 +14483,11 @@ fn test_every_menu_key_is_explained_in_that_pages_help() {
     let mut session = make_test_session(TerminalType::Ansi);
     session.color_enabled = false; // read the keys, not the colour codes
 
-    // Only the `#[cfg(unix)]` push below mutates this, exactly as in
-    // `all_help_line_groups`, which carries the same attribute for the same
-    // reason: on Windows there is no second page and `-D warnings` would
-    // otherwise fail the build on an unused `mut`.
-    #[allow(unused_mut)]
     let mut pages: Vec<(&str, Vec<String>, &'static [&'static str])> = vec![
         (
             "main menu",
-            session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, None),
-            TelnetSession::main_help_lines(MenuItems { cpm: true, second_page: cfg!(unix) }),
+            session.main_menu_rows(MenuItems { cpm: true, second_page: true }, None),
+            TelnetSession::main_help_lines(MenuItems { cpm: true, second_page: true }),
         ),
         // The same page with both optional items off: the help must still
         // explain every key that is left.
@@ -14507,11 +14497,10 @@ fn test_every_menu_key_is_explained_in_that_pages_help() {
             TelnetSession::main_help_lines(MenuItems { cpm: false, second_page: false }),
         ),
     ];
-    #[cfg(unix)]
     pages.push((
         "second menu",
-        session.more_menu_rows(true),
-        TelnetSession::more_help_lines(),
+        session.more_menu_rows(true, true),
+        TelnetSession::more_help_lines(true, true),
     ));
 
     for (page, rows, help) in pages {
@@ -14734,7 +14723,7 @@ fn test_the_manual_main_menu_matches_the_real_one() {
     let documented = items(&manual[open..close]);
     let mut session = make_test_session(TerminalType::Ansi);
     session.color_enabled = false;
-    let drawn = items(&session.main_menu_rows(MenuItems { cpm: true, second_page: cfg!(unix) }, None).join("\n"));
+    let drawn = items(&session.main_menu_rows(MenuItems { cpm: true, second_page: true }, None).join("\n"));
 
     // Positive control: an extractor that matched nothing would make the
     // comparison below trivially true on two empty lists.
@@ -14928,7 +14917,6 @@ fn test_the_blocked_screen_names_the_setting_and_fits() {
 /// `no_new_privs` and cannot be set for a test, which is why the flags are
 /// parameters now: `MenuItems` and `more_menu_rows` take them, so both states
 /// are exercised wherever the suite runs.
-#[cfg(unix)]
 #[test]
 fn test_the_second_page_is_offered_and_drawn_as_one_decision() {
     use crate::telnet::MenuItems;
@@ -14952,11 +14940,11 @@ fn test_the_second_page_is_offered_and_drawn_as_one_decision() {
     }
 
     for powered in [true, false] {
-        let page = session.more_menu_rows(powered).join("\n");
+        let page = session.more_menu_rows(powered, true).join("\n");
         for (key, label) in [("R", "Restart the computer"), ("S", "Shut down the computer")] {
             assert_eq!(
                 page.contains(label),
-                powered,
+                powered && cfg!(unix),
                 "powered={powered}: the page draws {key} when it should not, \
                  or not when it should.\n{page}",
             );
@@ -18337,5 +18325,271 @@ fn test_a_kermit_resume_spares_a_disk_in_use() {
     let r = TelnetSession::save_received_file_collision_safe(&dir, "GAME.DSK", b"resumed", None, true);
     assert_eq!(r.ok().as_deref(), Some("GAME.DSK"), "a free file resumes");
     assert_eq!(std::fs::read(&disk).unwrap(), b"resumed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Read from the caller's end until `want` has arrived (or 10 s pass).
+#[cfg(unix)]
+async fn read_addon_until(peer: &mut tokio::io::DuplexStream, seen: &mut Vec<u8>, want: &[u8]) -> bool {
+    use tokio::io::AsyncReadExt;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut buf = [0u8; 512];
+    while !seen.windows(want.len()).any(|w| w == want) {
+        match tokio::time::timeout_at(deadline, peer.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => seen.extend_from_slice(&buf[..n]),
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// A temporary add-on folder holding one executable script.
+#[cfg(unix)]
+fn scratch_addon(tag: &str, script: &str) -> (std::path::PathBuf, crate::addons::AddOn) {
+    scratch_addon_with(tag, script, "")
+}
+
+/// `scratch_addon` with extra `addon.conf` lines.
+#[cfg(unix)]
+fn scratch_addon_with(tag: &str, script: &str, conf: &str) -> (std::path::PathBuf, crate::addons::AddOn) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("egw-bridge-{}-{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("addon.conf"), format!("name = Probe\ncommand = run.sh\n{conf}")).unwrap();
+    std::fs::write(dir.join("run.sh"), script).unwrap();
+    std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let a = crate::addons::load(&dir).unwrap();
+    (dir, a)
+}
+
+/// **A line-mode add-on gets the line the caller typed, edited**, sees it
+/// echoed as typed, writes lines that reach the terminal as CRLF, and its
+/// exit is said.  A pipe has no terminal, so without the gateway's echo a
+/// shell `read` would take a name nobody saw.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_a_line_mode_add_on_gets_the_edited_line() {
+    use tokio::io::AsyncWriteExt;
+    let (dir, a) = scratch_addon("line", "#!/bin/sh\nprintf 'name? '\nread -r n\necho \"got [$n]\"\n");
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
+    let mut seen = Vec::new();
+    assert!(read_addon_until(&mut peer, &mut seen, b"name? ").await, "{}", String::from_utf8_lossy(&seen));
+    peer.write_all(b"Rickx\x7fy\r\n").await.unwrap();
+    assert!(read_addon_until(&mut peer, &mut seen, b"Press any key").await, "{}", String::from_utf8_lossy(&seen));
+    let text = String::from_utf8_lossy(&seen).into_owned();
+    assert!(text.contains("Rickx\x08 \x08y"), "the typing was not echoed and erased: {text:?}");
+    assert!(text.contains("got [Ricky]\r\n"), "the add-on did not get the edited line as CRLF: {text:?}");
+    assert!(text.contains("Probe ended."), "{text:?}");
+    peer.write_all(b" ").await.unwrap();
+    run.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Two quick ESCs leave, and take the add-on's own children with it.**
+#[cfg(unix)]
+#[tokio::test]
+async fn test_leaving_an_add_on_ends_it_and_its_children() {
+    use tokio::io::AsyncWriteExt;
+    let (dir, a) = scratch_addon(
+        "leave",
+        "#!/bin/sh\nsleep 300 &\necho $! > child.pid\necho ready\nwait\n",
+    );
+    let pidfile = dir.join("child.pid");
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
+    let mut seen = Vec::new();
+    assert!(read_addon_until(&mut peer, &mut seen, b"ready").await, "{}", String::from_utf8_lossy(&seen));
+    let child: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+    peer.write_all(b"\x1b\x1b").await.unwrap();
+    assert!(read_addon_until(&mut peer, &mut seen, b"Left Probe.").await, "{}", String::from_utf8_lossy(&seen));
+    peer.write_all(b" ").await.unwrap();
+    run.await.unwrap().unwrap();
+    let mut gone = false;
+    for _ in 0..100 {
+        // SAFETY: signal 0 only asks whether the process exists.
+        if unsafe { libc::kill(child, 0) } != 0 {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(gone, "the add-on's child outlived the caller leaving");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A non-zero exit is said, so a crashing add-on does not look like nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_an_add_ons_error_exit_is_said() {
+    use tokio::io::AsyncWriteExt;
+    let (dir, a) = scratch_addon("fail", "#!/bin/sh\necho oops\nexit 3\n");
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
+    let mut seen = Vec::new();
+    assert!(
+        read_addon_until(&mut peer, &mut seen, b"Probe ended with error 3.").await,
+        "{}",
+        String::from_utf8_lossy(&seen)
+    );
+    peer.write_all(b" ").await.unwrap();
+    run.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Line mode takes keys, not their codes**: an arrow key's escape sequence
+/// is not text, Backspace takes a whole UTF-8 character, and a bare LF is
+/// Enter as it is at every gateway prompt.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_line_mode_drops_arrow_keys_and_erases_characters() {
+    use tokio::io::AsyncWriteExt;
+    let (dir, a) = scratch_addon("keys", "#!/bin/sh\nprintf 'go? '\nread -r n\necho \"got [$n]\"\n");
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
+    let mut seen = Vec::new();
+    assert!(read_addon_until(&mut peer, &mut seen, b"go? ").await, "{}", String::from_utf8_lossy(&seen));
+    // `ab`, Up, `c\xc3\xa9`, Backspace, `e`, a lone ESC then `h`, then LF alone.
+    peer.write_all(b"ab\x1b[Ac\xc3\xa9\x7fe\x1bh\n").await.unwrap();
+    assert!(read_addon_until(&mut peer, &mut seen, b"Press any key").await, "{}", String::from_utf8_lossy(&seen));
+    let text = String::from_utf8_lossy(&seen).into_owned();
+    assert!(text.contains("got [abceh]"), "the line was not the keys typed: {text:?}");
+    assert!(!text.contains("[A"), "the arrow key's code was echoed: {text:?}");
+    peer.write_all(b" ").await.unwrap();
+    run.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **An add-on that stops reading cannot trap the caller.**  The keys used
+/// to be written inside the loop, so a full pipe blocked it -- and with it
+/// the ESC ESC that should have got the caller out.
+///
+/// The add-on first shrinks its input pipe to the kernel's minimum (one page,
+/// `F_SETPIPE_SZ`): a Raspberry Pi 5's 16 KB pages make a default pipe hold
+/// 256 KB, and a paste smaller than that never filled it -- the test passed
+/// with the bug put back.  Linux only, for `F_SETPIPE_SZ`.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_an_add_on_that_never_reads_cannot_trap_the_caller() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (dir, a) = scratch_addon(
+        "stall",
+        // Fails loudly without python3, rather than passing with a pipe too
+        // big to fill.
+        "#!/bin/sh\npython3 -c 'import fcntl; fcntl.fcntl(0, 1031, 4096)' || { echo nopy; exit 1; }\necho ready\nexec sleep 300\n",
+    );
+    let (mut session, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
+    let (mut rd, mut wr) = tokio::io::split(peer);
+    // The caller's screen, read all the while: the session echoes every key.
+    let screen = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !seen.windows(11).any(|w| w == b"Left Probe.") {
+            match rd.read(&mut buf).await {
+                Ok(n) if n > 0 => seen.extend_from_slice(&buf[..n]),
+                _ => break,
+            }
+        }
+        (rd, seen)
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Far more than a pipe holds, a line at a time, then the way out.
+    let paste = [b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r".as_slice(); 1600].concat();
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        wr.write_all(&paste).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        wr.write_all(b"\x1b\x1b").await.unwrap();
+    })
+    .await
+    .expect("the session stopped reading the caller");
+    let (_rd, seen) = tokio::time::timeout(std::time::Duration::from_secs(20), screen)
+        .await
+        .expect("ESC ESC did not get out")
+        .unwrap();
+    assert!(seen.windows(11).any(|w| w == b"Left Probe."), "ESC ESC did not get out");
+    wr.write_all(b" ").await.unwrap();
+    run.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The Second Menu's help explains exactly the keys the page draws**, in
+/// all four shapes.  One fixed text explained R and S on a page that offered
+/// only Add-Ons (power blocked by `NoNewPrivileges`), and A on one with none.
+#[test]
+fn test_second_menu_help_matches_the_page_in_every_shape() {
+    let mut session = make_test_session(TerminalType::Ansi);
+    session.color_enabled = false;
+    for powered in [false, true] {
+        for addons in [false, true] {
+            let page = session.more_menu_rows(powered, addons).join("\n");
+            let help = TelnetSession::more_help_lines(powered, addons);
+            assert!(help.len() <= HELP_MAX_CONTENT_LINES, "{powered}/{addons}: {} lines", help.len());
+            for (key, label) in [("A", "Add-Ons"), ("R", "Restart the computer"), ("S", "Shut down the computer")] {
+                let drawn = page.contains(label);
+                let explained = help.iter().any(|l| l.starts_with(&format!("  {key}  ")));
+                assert_eq!(explained, drawn, "powered={powered} addons={addons}: {key} drawn={drawn}");
+            }
+        }
+    }
+}
+
+/// **A fast paste reaches a raw-mode add-on whole.**  Each key is one message
+/// in Raw mode, and a paste read in one pass filled the 64-message queue
+/// before the task feeding the add-on had run: the rest were dropped.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_a_paste_reaches_a_raw_add_on_whole() {
+    use tokio::io::AsyncWriteExt;
+    let (dir, a) = scratch_addon_with(
+        "paste",
+        "#!/bin/sh\necho ready\nhead -c 300 | wc -c | tr -d ' '\n",
+        "input = raw\n",
+    );
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
+    let mut seen = Vec::new();
+    assert!(read_addon_until(&mut peer, &mut seen, b"ready").await, "{}", String::from_utf8_lossy(&seen));
+    peer.write_all(&[b'z'; 300]).await.unwrap();
+    assert!(
+        read_addon_until(&mut peer, &mut seen, b"300\r\n").await,
+        "keys were lost on the way: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    assert!(read_addon_until(&mut peer, &mut seen, b"Press any key").await);
+    peer.write_all(b" ").await.unwrap();
+    run.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Held-back keys arrive even when the caller stops typing.**  The backlog
+/// was first sent only from the next key's pass, so a paste into an add-on
+/// that was busy for a moment (its pipe full, the queue behind it full) left
+/// the tail waiting for a key that never came.  The add-on shrinks its pipe
+/// and reads nothing for a second; then it wants every byte.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_held_back_keys_reach_the_add_on_without_more_typing() {
+    use tokio::io::AsyncWriteExt;
+    let (dir, a) = scratch_addon_with(
+        "backlog",
+        "#!/bin/sh\npython3 -c 'import fcntl; fcntl.fcntl(0, 1031, 4096)' || { echo nopy; exit 1; }\n\
+         echo ready\nsleep 1\nhead -c 40000 | wc -c | tr -d ' '\n",
+        "input = raw\n",
+    );
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
+    let mut seen = Vec::new();
+    assert!(read_addon_until(&mut peer, &mut seen, b"ready").await, "{}", String::from_utf8_lossy(&seen));
+    peer.write_all(&vec![b'z'; 40000]).await.unwrap();
+    assert!(
+        read_addon_until(&mut peer, &mut seen, b"40000\r\n").await,
+        "the held-back keys never arrived: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    assert!(read_addon_until(&mut peer, &mut seen, b"Press any key").await);
+    peer.write_all(b" ").await.unwrap();
+    run.await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

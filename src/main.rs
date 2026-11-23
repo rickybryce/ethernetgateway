@@ -40,6 +40,7 @@
 // there is no need for a sweep.
 #![allow(clippy::collapsible_if)]
 
+mod addons;
 mod aichat;
 mod bindwatch;
 mod config;
@@ -343,6 +344,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // The add-ons folder and its README, only once this copy holds the
+    // directory: a second copy that backs off writes nothing.
+    addons::ensure_folder();
 
     // Now that we own the directory, stand down for a later copy that asks.
     instance::spawn_handover_watcher(shutdown.clone(), stop.clone());

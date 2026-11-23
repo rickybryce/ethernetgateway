@@ -147,6 +147,9 @@ pub(super) struct Wizard {
     /// open.  The editor reads it through [`Wizard::wants_sample_disks`] on
     /// Finish and starts the same download its own button starts.
     cpm_fetch_disks: bool,
+    /// Download the Ethernet Gateway add-ons once the answers are saved
+    /// (`crate::addons::fetch`).  Not a config key, like `cpm_fetch_disks`.
+    fetch_addons: bool,
 
     /// "standalone" | "master" | "slave" — same values as `gateway_role`.
     role: String,
@@ -227,6 +230,7 @@ impl Wizard {
             // the box, so accepting it is informed rather than silent.
             // Untick it and nothing is fetched.
             cpm_fetch_disks: true,
+            fetch_addons: true,
             role: cfg.gateway_role.clone(),
             master_host: cfg.slave_master_host.clone(),
             master_port: cfg.slave_master_port.to_string(),
@@ -525,6 +529,11 @@ impl Wizard {
     /// on this window or on a device name staying put.
     fn no_network_config(&self) -> bool {
         !self.telnet_enabled && !self.ssh_enabled && !self.web_enabled
+    }
+
+    /// Read by the editor on Finish: download the add-ons after the save.
+    pub(super) fn wants_addons(&self) -> bool {
+        self.fetch_addons
     }
 
     /// Read by the editor on Finish: open the CP/M setup wizard next.
@@ -1382,6 +1391,9 @@ impl Wizard {
         if self.cpm_enabled && self.cpm_fetch_disks {
             summary(ui, "Sample disks", "download when this finishes");
         }
+        if self.fetch_addons {
+            summary(ui, "Add-ons", "download when this finishes");
+        }
         for (d, name) in self.serial.iter().zip(["Serial Port A", "Serial Port B"]) {
             if d.enabled {
                 summary(ui, name, &format!("{} at {} baud", d.port, d.baud.trim()));
@@ -1509,6 +1521,18 @@ impl Wizard {
             "A new serial port starts as a Hayes modem emulator. Its mode, flow control and \
              the rest are in the Serial Port frames of this window, or over telnet in the \
              Serial Configuration menu.",
+        );
+        ui.add_space(8.0);
+        ui.checkbox(&mut self.fetch_addons, "Download the Ethernet Gateway add-ons");
+        indent(
+            ui,
+            &format!(
+                "Programs your callers can run from the Second Menu (2, then A): {}. From \
+                 github.com/{}, the exact versions this gateway was built with, each file \
+                 checked. An add-on already installed is left alone.",
+                crate::addons::fetch::folders(&crate::addons::fetch::catalogue()).join(", "),
+                crate::addons::fetch::REPO,
+            ),
         );
         if self.cpm_enabled {
             ui.add_space(8.0);

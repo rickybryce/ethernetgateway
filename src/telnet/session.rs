@@ -268,15 +268,8 @@ pub(in crate::telnet) fn detected_line(terminal: TerminalType) -> String {
 pub(in crate::telnet) struct MenuItems {
     /// The CP/M emulator item, from `cpm_emu_enabled`.
     pub cpm: bool,
-    /// The second page, when it has anything on it.
-    ///
-    /// Read only under `#[cfg(unix)]`, because the page and every item on it
-    /// are Unix-only -- so on Windows this field has no reader and `-D
-    /// warnings` calls it dead.  Kept rather than cfg'd away so the struct has
-    /// one shape everywhere and the construction sites, including the tests',
-    /// do not each need their own `cfg`.  Same treatment as `router.rs`'s
-    /// Linux-only parsers.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// The second page, when it has anything on it (power items or
+    /// add-ons -- `second_menu::second_page_has_items`).
     pub second_page: bool,
 }
 
@@ -285,10 +278,7 @@ impl MenuItems {
     pub(in crate::telnet) fn live(cpm: bool) -> Self {
         MenuItems {
             cpm,
-            #[cfg(unix)]
-            second_page: crate::telnet::power::second_page_has_items(),
-            #[cfg(not(unix))]
-            second_page: false,
+            second_page: crate::telnet::second_menu::second_page_has_items(),
         }
     }
 }
@@ -301,7 +291,6 @@ pub(in crate::telnet) fn main_menu_key_hint(items: MenuItems) -> String {
     keys.extend(["R-T", "W", "X"]);
     // After the letters, because that is where the row is -- and only when
     // the page it reaches has something on it.
-    #[cfg(unix)]
     if items.second_page {
         keys.push("2");
     }
@@ -1438,8 +1427,8 @@ impl TelnetSession {
         rows.push(format!("  {}  Telnet Gateway", self.cyan("T")));
         rows.push(format!("  {}  Weather", self.cyan("W")));
         rows.push(format!("  {}  Exit", self.cyan("X")));
-        // The second page (restart / shut down the computer -- see
-        // `telnet/power.rs`).
+        // The second page (Add-Ons; restart / shut down the computer -- see
+        // `telnet/second_menu.rs`).
         //
         // **Page navigation, not a feature, so it sits below the features.**
         // As `M` it sat between `K` and `R` in the alphabetical list and read
@@ -1447,12 +1436,9 @@ impl TelnetSession {
         // feature letter, and it says which page it goes to, so a third page
         // would be `3` and need no new vocabulary.
         //
-        // Unix only, like the page: on Windows it has no items at all, so the
-        // entry is compiled out rather than shown and then refused.  (This
-        // paragraph described the entry from four rows higher up, where `M`
-        // used to sit, and stayed there when the entry moved -- so it read as
-        // a note about Troubleshooting.)
-        #[cfg(unix)]
+        // Every platform since Add-Ons: shown only while the page has
+        // something on it (power items on Unix, add-ons anywhere), never
+        // shown and then refused.
         if items.second_page {
             rows.push(format!("  {}  Second Menu", self.cyan("2")));
         }
@@ -1524,10 +1510,9 @@ impl TelnetSession {
             "k" if config::get_config().cpm_emu_enabled => {
                 self.cpmemu_shell().await?;
             }
-            // Gated with the menu entry and the hint — Unix only, and only
-            // while the second page has something to show.
-            #[cfg(unix)]
-            "2" if crate::telnet::power::second_page_has_items() => {
+            // Gated with the menu entry and the hint: only while the second
+            // page has something to show.
+            "2" if crate::telnet::second_menu::second_page_has_items() => {
                 if !self.more_menu().await? {
                     return Ok(false);
                 }

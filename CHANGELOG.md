@@ -7,8 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Add-Ons**: programs the operator installs for callers to run, the way a
+  BBS offered doors.  Each lives in its own folder under
+  `ethernetgateway-data/AddOns/` with an `addon.conf` manifest, and appears
+  on the Second Menu (`2`, then `A`) the next time the list is opened; no
+  restart.  A terminal add-on is bridged to the caller like the SSH and Telnet
+  gateways: ESC twice (back-arrow on a C64) to leave, its ANSI translated for
+  Commodores unless it speaks PETSCII itself (`petscii = native`), and line
+  input edited by the gateway (`input = line`) or passed key by key
+  (`input = raw`).  It is told the caller's terminal and size through `EG_*`
+  variables and gets nothing else of the gateway's environment; its program
+  must stay inside its own folder, no shell runs it, and leaving ends it and
+  everything it started.  Idle and time limits, one-copy-only, and a line
+  saying how it ended.
+- **The setup wizard can download the Ethernet Gateway add-ons** from
+  github.com/rickybryce/ethernetgateway-addons: the exact versions this
+  release was built with, every file checked against its SHA-256; an add-on
+  already installed is left alone.
+
 ### Changed
 
+- **The Second Menu is on every platform.**  It carried only restart and
+  shutdown, so Windows had none; it now holds Add-Ons too, with the power
+  items still Unix-only.  Its help explains exactly what the page shows.
 - **The setup wizard asks about every server on one screen**: a table of
   Telnet, SSH, Web, Kermit and FTP, each with Enable and its port (the saved
   port, with the factory default beside it), and FTP's passive range.  With

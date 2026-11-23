@@ -1,9 +1,10 @@
-//! The main menu's second page — restarting and shutting down the computer
-//! the gateway runs on.
+//! The power items of the main menu's second page — restarting and shutting
+//! down the computer the gateway runs on.  The page itself is
+//! `second_menu.rs`, on every platform since Add-Ons (2026-11-22).
 //!
-//! **Unix only.** The whole module is `#[cfg(unix)]`, along with the `2` entry
-//! on the main menu, its key handler, its half of the valid-key hint and its
-//! lines in the main help. There
+//! **Unix only.** The whole module is `#[cfg(unix)]`, along with the `R` and
+//! `S` rows, their key arms, their half of the page's hint and their lines in
+//! its help. There
 //! is no Windows equivalent of "run one command as another user with a
 //! password typed down a telnet session": `shutdown /r` needs the *process* to
 //! hold the privilege already, and the gateway deliberately does not run
@@ -11,8 +12,9 @@
 //! under `sudo` leaves root-owned files across the data directory, which this
 //! project treats as a defect to warn about rather than a mode to support).
 //! So the entries are compiled out there rather than shown and then refused.
-//! When an item that *does* work on Windows lands on this page, the gate moves
-//! from the module to the power items.
+//! (The gate used to sit on the whole page; it moved to these items when
+//! Add-Ons, which work on Windows, joined the page -- as this comment said it
+//! would.)
 //!
 //! **And on Unix the same items are hidden at run time** where the kernel's
 //! `no_new_privs` forbids elevation -- see [`available`].  **Every surface
@@ -282,20 +284,6 @@ pub(in crate::telnet) fn power_is_possible(is_root: bool, no_new_privs: bool) ->
     is_root || !no_new_privs
 }
 
-
-/// Whether the second page has anything on it.
-///
-/// **The page outlives its current contents.**  Restart and shutdown are all
-/// it carries today, so this is `available()` — but the page is where the next
-/// thing that does not fit the main menu will go, and when that lands this
-/// becomes `available() || that_thing`, one line, rather than a rediscovery of
-/// why the `2` entry is gated on a power setting at all.
-///
-/// Offering `2` to an empty page is worse than not offering it: the operator
-/// spends a keypress to learn there was nothing there.
-pub(in crate::telnet) fn second_page_has_items() -> bool {
-    available()
-}
 
 /// What the page says when nothing here can elevate.
 ///
@@ -683,31 +671,6 @@ pub(in crate::telnet) async fn run_elevated_within(
     }
 }
 
-/// The MORE page's valid-key hint.
-///
-/// A const rather than a literal at the `_` arm, so the test that checks it
-/// fits and names every key reads the string the operator is shown.  A test
-/// holding its own copy of a screen's text is a guard comparing the source
-/// with a copy of itself -- `session.rs`'s `main_menu_key_hint` exists for the
-/// same reason.
-///
-/// Budgeted against `PETSCII_WIDTH - 2`: `show_error` prints a two-space
-/// indent in front of whatever it is given.
-///
-/// **The flag is a parameter for the reason `more_menu_rows` takes one.**  It
-/// comes from the kernel, so a version reading `available()` itself could only
-/// ever be exercised in whichever state the machine running the suite happens
-/// to be in -- and the text for the other state, which is the one a packaged
-/// installation shows, would be checked nowhere.  The first version of this
-/// did exactly that, under a test comment claiming both were covered.
-pub(in crate::telnet) fn more_menu_hint(powered: bool) -> &'static str {
-    if powered {
-        "Press R, S, H, or Q."
-    } else {
-        "Press H or Q."
-    }
-}
-
 /// `  Password for <user>: `, fitted to the narrowest screen.
 ///
 /// **`$USER` is an environment variable, so it can be anything.**  A service
@@ -760,7 +723,7 @@ impl TelnetSession {
     /// Both screens that name the computer render it through here.  They are
     /// two sentences about one fact, and a width rule written twice is a width
     /// rule that holds once.
-    fn computer_row(&self) -> Option<String> {
+    pub(in crate::telnet) fn computer_row(&self) -> Option<String> {
         self.computer_row_for(&crate::relay::hostname_label())
     }
 
@@ -865,118 +828,6 @@ impl TelnetSession {
         }
     }
 
-    /// The main menu's second page.
-    ///
-    /// Returns `false` when the session must end — the same convention as
-    /// [`TelnetSession::handle_main_command`], and the only way out of here
-    /// that isn't `Q`: once the machine has accepted a restart or a shutdown
-    /// there is nothing left to return to.
-    pub(in crate::telnet) async fn more_menu(&mut self) -> Result<bool, std::io::Error> {
-        loop {
-            self.render_more_menu().await?;
-            // The breadcrumb prompt every nested screen uses; `Menu::path()`
-            // covers the three top-level menus only, so this page spells its
-            // own the way `configuration()` does.
-            // Named for the page, like every other prompt in the product
-            // (`gateway/config`, `gateway/serial`): "more" was the old
-            // item's word and stopped naming anything when it became
-            // "Second Menu".  Found by reading the live screen, not the code.
-            let prompt = format!("{}> ", self.cyan("gateway/second"));
-            self.send(&prompt).await?;
-            self.flush().await?;
-
-            // ESC and a dropped session both arrive as `None`, and both mean
-            // the same thing here: go back.  `get_menu_input` has already
-            // lowercased whatever was typed.
-            let input = match self.get_menu_input(false).await? {
-                Some(s) if !s.is_empty() => s,
-                _ => return Ok(true),
-            };
-
-            match input.as_str() {
-                "q" => return Ok(true),
-                "h" => {
-                    // ASCII only: `to_latin1_bytes` turns anything above
-                    // U+00FF into `?`, and a PETSCII screen has no dash of
-                    // its own to spare.
-                    self.show_help_page("SECOND MENU HELP", Self::more_help_lines())
-                        .await?;
-                }
-                // Gated with the rows and the hint, so a key that is not on
-                // the screen is not accepted either -- the same three layers
-                // the Windows build uses.  `power_action` keeps its own
-                // `Elevate::Blocked` arm behind these: a UI that hides an
-                // action and a routine that refuses to perform one are
-                // different jobs, and the safety one should not depend on the
-                // cosmetic one being right.
-                "r" if available() => {
-                    if !self.power_action(PowerAction::Restart).await? {
-                        return Ok(false);
-                    }
-                }
-                "s" if available() => {
-                    if !self.power_action(PowerAction::Shutdown).await? {
-                        return Ok(false);
-                    }
-                }
-                _ => {
-                    self.show_error(more_menu_hint(available())).await?;
-                }
-            }
-        }
-    }
-
-    /// Every row the MORE page draws, in order.
-    ///
-    /// Split out of the renderer so `test_more_menu_rows_fit_the_screen` can
-    /// count and measure the **real** page.  The row-count guard it replaced
-    /// was arithmetic over literals -- `3 + 1 + 2 + 2 + 1 + 1 <= 22` -- which
-    /// reads nothing from this function and so could never have noticed a row
-    /// being added.  This file is full of screens whose budget was found the
-    /// hard way; a guard that cannot go red is worse than no guard.
-    pub(in crate::telnet) fn more_menu_rows(&self, powered: bool) -> Vec<String> {
-        let sep = self.separator();
-        let mut rows = vec![
-            sep.clone(),
-            // Named for the menu item that reaches it: an operator who chose
-            // "2  Second Menu" must not land on a page calling itself
-            // something else.
-            format!("  {}", self.yellow("SECOND MENU")),
-            sep,
-            String::new(),
-        ];
-        // Which computer these two keys act on.  A telnet user is by
-        // definition somewhere else, and the name is the only thing on this
-        // page that says where "the computer" is.
-        if let Some(row) = self.computer_row() {
-            rows.push(row);
-            rows.push(String::new());
-        }
-        // Hidden, not shown-and-refused, exactly as they are on Windows: an
-        // item an operator cannot use teaches them to distrust the menu.  The
-        // `2` entry that reaches this page is gated on the same answer, so an
-        // empty page is not reachable from the menu either.
-        if powered {
-            rows.push(format!("  {}  Restart the computer", self.cyan("R")));
-            rows.push(format!("  {}  Shut down the computer", self.cyan("S")));
-            rows.push(String::new());
-        }
-        rows.push(format!(
-            "  {}  {}",
-            self.action_prompt("Q", "Back"),
-            self.action_prompt("H", "Help")
-        ));
-        rows
-    }
-
-    async fn render_more_menu(&mut self) -> Result<(), std::io::Error> {
-        self.clear_screen().await?;
-        for row in self.more_menu_rows(available()) {
-            self.send_line(&row).await?;
-        }
-        Ok(())
-    }
-
     /// Confirm, authenticate, say goodbye, then take the machine down — in
     /// that order.
     ///
@@ -992,7 +843,7 @@ impl TelnetSession {
     /// first and then trying to say goodbye loses the race — systemd starts
     /// stopping units immediately and the socket dies mid-verse, which is the
     /// "looks like a crash" a retro terminal cannot tell from a fault.
-    async fn power_action(&mut self, action: PowerAction) -> Result<bool, std::io::Error> {
+    pub(in crate::telnet) async fn power_action(&mut self, action: PowerAction) -> Result<bool, std::io::Error> {
         if !self.power_confirm(action).await? {
             self.send_line("").await?;
             self.send_line(&format!("  {}", self.dim(action.cancelled())))

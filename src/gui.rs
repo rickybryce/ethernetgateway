@@ -1180,6 +1180,9 @@ struct App {
     /// `server_restart_prompt` asks: started on Save and restart, dropped on
     /// Cancel.
     wizard_fetch_pending: bool,
+    /// The wizard's "download the Ethernet Gateway add-ons", held the same
+    /// way as `wizard_fetch_pending`.
+    wizard_addons_pending: bool,
     /// The wizard's "run the CP/M setup wizard next", held the same way as
     /// `wizard_fetch_pending`: opened when the save goes ahead, dropped on
     /// Cancel.
@@ -1464,6 +1467,7 @@ impl App {
             serial_restart_prompt: None,
             server_restart_prompt: false,
             wizard_fetch_pending: false,
+            wizard_addons_pending: false,
             wizard_cpm_pending: false,
             pending_dir_pick: None,
             pending_boot_pick: None,
@@ -4818,6 +4822,7 @@ impl App {
                     self.refresh_from_global();
                     let fetch_disks = w.wants_sample_disks();
                     let cpm_next = w.wants_cpm_wizard();
+                    let fetch_addons = w.wants_addons();
                     w.apply_to(&mut self.cfg);
                     // The numeric text buffers back-feed into cfg on save
                     // (sync_numeric_fields), so they must be refreshed from the
@@ -4835,11 +4840,13 @@ impl App {
                     // disk download waits for the answer too: on Cancel the
                     // transfer directory it would land in was never saved.
                     self.wizard_fetch_pending = fetch_disks;
+                    self.wizard_addons_pending = fetch_addons;
                     self.wizard_cpm_pending = cpm_next;
                     if !self.request_save_and_restart() {
                         // Refused: the answers stay as unsaved edits, and no
                         // disks go to a transfer directory that was not saved.
                         self.wizard_fetch_pending = false;
+                        self.wizard_addons_pending = false;
                         self.wizard_cpm_pending = false;
                         self.dirty = true;
                     } else if !self.server_restart_prompt {
@@ -4905,6 +4912,19 @@ impl App {
             } else {
                 logger::log("CP/M sample disks: another CP/M download is running, so none was started.".into());
             }
+        }
+        // The add-ons: their own thread, writing only to `AddOns/` (which
+        // the restart does not touch), so nothing has to be handed to the
+        // window the restart builds.  Each step is logged, as the disks are.
+        if std::mem::take(&mut self.wizard_addons_pending) {
+            logger::log("Add-ons: downloading…".into());
+            std::thread::spawn(|| {
+                let report = crate::addons::fetch::download_missing(
+                    &crate::addons::addons_root(),
+                    |name, at, total| logger::log(format!("Add-ons: fetching {at}/{total} {name}")),
+                );
+                logger::log(format!("Add-ons: {}", report.summary()));
+            });
         }
         // `wizard_cpm_pending` is left set: the CP/M wizard is opened by
         // `open_pending_cpm_wizard`, once no sample-disk download is running.
@@ -7987,11 +8007,13 @@ impl eframe::App for App {
                     self.start_wizard_fetch_if_pending(&ctx);
                 } else {
                     self.wizard_fetch_pending = false;
+                    self.wizard_addons_pending = false;
                     self.wizard_cpm_pending = false;
                 }
             } else if cancel || !open {
                 self.server_restart_prompt = false;
                 self.wizard_fetch_pending = false;
+                self.wizard_addons_pending = false;
                 self.wizard_cpm_pending = false;
             }
         }

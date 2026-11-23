@@ -111,7 +111,7 @@ gethostname = "1.1"
 # button to nothing, so without this the process was simply terminated.
 # 0.61 is already in the tree (via tokio, mio, socket2 and others), so this
 # adds **no new crate**; only the two feature modules are new.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_JobObjects", "Win32_Security", "Win32_System_Threading"] }
 
 [dev-dependencies]
 proptest = "1"

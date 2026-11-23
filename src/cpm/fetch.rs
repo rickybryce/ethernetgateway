@@ -421,7 +421,7 @@ pub(crate) fn hex_of(bytes: &[u8]) -> String {
 /// holds it.  `sha2` does reach this crate now, through `pbkdf2` for the
 /// password hash, so this is no longer the only SHA-256 in the build -- only
 /// the one the downloads depend on.
-pub(in crate::cpm) fn sha256(data: &[u8]) -> String {
+pub(crate) fn sha256(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -506,11 +506,11 @@ pub(in crate::cpm) fn transfer_timeout(bytes: u64) -> std::time::Duration {
 
 /// GET a pinned URL and return its body.
 ///
-/// One copy, because the sample disks and the monitor ROMs
-/// ([`super::rom`]) fetch from the same place on the same terms and a second
-/// agent would be a second set of timeouts to keep in step. The caller owns
-/// verification: this says only what arrived.
-pub(in crate::cpm) fn get(url: &str, user_agent: &str, limit: u64, expected: u64) -> Result<Vec<u8>, String> {
+/// One copy, because the sample disks, the monitor ROMs ([`super::rom`])
+/// and the add-ons (`crate::addons::fetch`) fetch on the same terms, and a
+/// second agent would be a second set of timeouts to keep in step. The
+/// caller owns verification: this says only what arrived.
+pub(crate) fn get(url: &str, user_agent: &str, limit: u64, expected: u64) -> Result<Vec<u8>, String> {
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
             .timeout_global(Some(transfer_timeout(expected)))
@@ -1051,7 +1051,7 @@ mod tests {
         assert!(transfer_timeout(0).as_secs() >= 120, "a small file keeps the old budget");
         // And the download path uses it, not a constant of its own.
         let src = include_str!("fetch.rs").replace("\r\n", "\n");
-        let get = &src[src.find("pub(in crate::cpm) fn get(").expect("get")..];
+        let get = &src[src.find("pub(crate) fn get(").expect("get")..];
         let get = &get[..get.find("\n}\n").expect("its end")];
         assert!(get.contains(".timeout_global(Some(transfer_timeout(expected)))"), "get has its own budget again");
     }
