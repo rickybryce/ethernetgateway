@@ -125,7 +125,7 @@ mod serial_ui;
 pub(in crate::telnet) use serial_ui::{serial_menu_key_hint, serial_menu_keys, SERIAL_MENU_SECOND_COL};
 mod web;
 mod aichat_ui;
-mod weather;
+pub(crate) mod weather;
 mod kernel;
 mod cpm_emu;
 mod cpm_boot_ui;

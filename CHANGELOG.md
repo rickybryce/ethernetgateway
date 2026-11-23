@@ -9,8 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The setup wizard's welcome screen lists the FTP server** among what the
-  gateway offers, and says it stays off until turned on in Server -> More...
+- **The setup wizard asks about every server on one screen**: a table of
+  Telnet, SSH, Web, Kermit and FTP, each with Enable and its port (the saved
+  port, with the factory default beside it), and FTP's passive range.  With
+  Telnet, SSH and Web all off it warns that the desktop window would be the
+  only way back into the settings, since serial device names can change.  New
+  screens set up Port A and Port B (enable, device, baud, with Refresh), the
+  weather location and the Groq API key (optional, with how to get one); and
+  with CP/M on, the last screen offers to run the CP/M setup wizard next (it
+  opens after the restart, once the sample disks have downloaded).
+- **Display scale moved to General -> More** in the desktop window and on the
+  web page; in the Server popup it read as an FTP option.
 
 ### Fixed
 

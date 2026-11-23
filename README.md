@@ -76,8 +76,9 @@ directory it was launched from, and everything it writes lives there — the
 configuration, the log, the SSH host key and the transfer directory. A default
 `egateway.conf` is created inside it, and
 the desktop GUI opens into a short **setup wizard**. It asks for a login, which
-servers to start, where transferred files go, and whether the machine is
-standalone or part of a master/slave pair. It ends with the commands to connect
+servers to start (telnet, SSH, web, Kermit, FTP), any serial ports, where
+transferred files go, whether the machine is standalone or part of a
+master/slave pair, and optionally a weather location and a Groq AI key. It ends with the commands to connect
 with and the inbound ports to open on your firewall. Skip it and the defaults
 below apply. It can be re-run later from the GUI's *Server → More…* window.
 

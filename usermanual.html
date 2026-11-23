@@ -693,19 +693,36 @@ The screens, in order:
     advance until they match, and a checkbox reveals what you are typing. It
     states plainly that the password is hashed and so cannot be read back out of
     <code>egateway.conf</code>. These are the unified credentials used by
-    telnet, SSH, and the web UI.</li>
-    <li><strong>Telnet server</strong> — enable/disable and port (default
-    <code>2323</code>), with the cleartext warning.</li>
-    <li><strong>SSH server</strong> — enable/disable and port (default
-    <code>2222</code>). SSH uses the credentials from screen 1 and always
-    authenticates, whether or not you require a login for telnet.</li>
+    telnet, SSH, the web UI and FTP.</li>
+    <li><strong>Servers and ports</strong> — one table of every server the
+    gateway runs, each with an <em>Enable</em> box and its port: Telnet
+    (default <code>2323</code>), SSH (<code>2222</code>), Web configuration
+    (<code>8080</code>), the Kermit server (<code>2424</code>) and FTP
+    (<code>2121</code>), plus FTP&rsquo;s passive port range. Each box starts
+    with the port already saved, and the factory default is shown beside it.
+    Lines under the table say what each server is for. Telnet and FTP carry
+    the cleartext warning, and SSH always asks for the credentials from screen
+    1. If <strong>Telnet, SSH and Web are all left off</strong>, the screen
+    warns that this window would be the only way to change settings: if it is
+    ever turned off (<em>Show GUI on Startup</em>), there is no reliable way
+    back in, because serial port assignments can change &mdash; a USB adapter
+    can come back as a different device after a reboot or on another socket.
+    <figure class="shot"><img src="manual-images/gui-wizard-servers.png" alt="The Servers and ports screen"><figcaption>The Servers and ports screen: each server&rsquo;s Enable box and port, with its factory default beside it.</figcaption></figure></li>
     <li><strong>Access control</strong> — the three checkboxes
     (<code>security_enabled</code>, <code>disable_ip_safety</code>,
     <code>disable_gateway_connections</code>), each with a paragraph explaining
     what it actually changes. The router checkbox names the address this
     machine actually routes through, read from its own routing table.</li>
-    <li><strong>Web configuration server</strong> — enable/disable and port
-    (default <code>8080</code>), plus the URL you'll use.</li>
+    <li><strong>Serial ports</strong> (optional) — Port A and Port B, each
+    with an <em>Enable</em> box, the device (named the way the main window
+    names it, <code>/dev/ttyUSB0 &mdash; FTDI</code> for example) and its baud
+    rate. <em>Refresh</em> looks again after you plug an adapter in, and
+    choosing a device ticks <em>Enable</em> for you. An enabled port needs a
+    device and a baud rate, and the two ports cannot share a device. A new
+    port starts as a Hayes modem emulator; its mode, flow control and the rest are
+    in the Serial Port frames afterwards (§4.1) or the telnet Serial
+    Configuration menu.
+    <figure class="shot"><img src="manual-images/gui-wizard-serial.png" alt="The Serial ports screen"><figcaption>The Serial ports screen, with Port A set to a USB adapter.</figcaption></figure></li>
     <li><strong>File transfer directory</strong> — typed or chosen with a folder
     browser. The CP/M emulator's drives live in a <code>CPM</code> subdirectory
     of it, and the Gateway Shell treats it as drive A:.</li>
@@ -726,10 +743,20 @@ The screens, in order:
     previous screen, and leaves any file already in the images folder alone. It
     runs in the background, so the window stays usable, and the console line
     tells you how it went.</li>
+    <li><strong>Weather location</strong> (optional) — a city or postal code,
+    anywhere in the world (<code>weather_location</code>), checked as the
+    telnet Weather screen checks it. Left empty, Weather asks each time.</li>
+    <li><strong>AI chat key</strong> (optional) — the Groq API key AI Chat
+    needs (<code>groq_api_key</code>). The screen says how to get one, free: go
+    to <code>console.groq.com</code> and sign in, open <em>API Keys</em>, press
+    <em>Create API Key</em>, and paste the key (it starts with
+    <code>gsk_</code>). Everything else works without it. A stored key is never
+    shown; leaving the box empty keeps it.
+    <figure class="shot"><img src="manual-images/gui-wizard-ai-key.png" alt="The AI chat key screen"><figcaption>The optional AI chat key screen, with how to get a key.</figcaption></figure></li>
     <li><strong>Gateway role</strong> — Standalone, Master, or Slave, with a
     description of each. Choosing Master arms
     <code>master_accept_relays</code>. It does <em>not</em> silently switch the
-    SSH server on: if you turned SSH off on step 3, the screen explains that a
+    SSH server on: if you turned SSH off on the Servers screen, the screen explains that a
     slave links to its master by logging into the master's SSH server &mdash; so
     with SSH off no slave can ever connect &mdash; and offers a button to enable
     it. Decline and the role is still saved; the review screen and every startup
@@ -749,10 +776,10 @@ values.
 
 <p>
 <em>Next</em> also validates. It refuses an empty username or password,
-mismatched passwords, a port that isn't a number from 1 to 65535, and a port
-already claimed by another listener &mdash; including the standalone Kermit
-server, which the wizard doesn't ask about but which this process will still
-bind.
+mismatched passwords, a port that isn't a number from 1 to 65535, a port
+already claimed by another server on the Servers screen or inside FTP&rsquo;s
+passive range, a malformed passive range, an enabled serial port without a
+device or baud rate, and a weather location the Weather screen would refuse.
 </p>
 
 <p>
@@ -765,11 +792,21 @@ TCP ports to allow on your firewall</strong>, one line per listener with what
 each is for. (All are TCP; the gateway binds no UDP ports, and the serial
 features use no network ports at all. A slave needs no inbound rule of its own
 &mdash; it dials out to its master.) It also warns, without blocking, about
-choices worth a second look: both telnet and SSH left off, IP safety off with no
-login required, or a port below 1024 that will need root. Finally it points out
-that serial ports are <em>not</em> configured here &mdash; enable and configure
-Port A / Port B afterwards in the GUI's Serial Port frames or over telnet.
+choices worth a second look: Telnet, SSH and Web all off (the warning from the
+Servers screen), both telnet and SSH left off, IP safety off with no login
+required, or a port below 1024 that will need root. The summary includes any
+serial port you enabled, the weather location and whether an AI key is set.
 </p>
+
+<p>
+With the CP/M emulator on, the final screen also offers <strong>Run the CP/M
+setup wizard next</strong>, ticked to begin with: once <em>Save and Restart
+Server</em> goes ahead, the <a href="#cpm-wizard">CP/M setup wizard</a> (§8.11)
+opens to choose what CP/M runs and the disks to go with it. If the sample disks
+are downloading, it opens once they have all arrived, so it offers every one of
+them and never a second download.
+</p>
+<figure class="shot"><img src="manual-images/gui-wizard-review.png" alt="The setup wizard's review screen"><figcaption>The review screen: what will be saved, how to connect, the firewall ports, and the CP/M wizard offer.</figcaption></figure>
 
 <table class="keytable">
     <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
@@ -785,8 +822,9 @@ To run the wizard again later, open the GUI's <em>Server &mdash; More&#8230;</em
 window and click <em>Run setup wizard&#8230;</em> (§4.2.1); setting
 <code>setup_wizard_completed&nbsp;=&nbsp;false</code> by hand does the same thing
 on the next launch. A re-run pre-fills every answer from your current
-configuration except the password, which is never echoed back and must be
-retyped.
+configuration except the passwords and the AI key, which are never echoed back:
+the login password must be retyped, and an empty AI key or master password box
+keeps the one stored.
 </p>
 
 <h2>3.2 File Format</h2>
@@ -855,7 +893,7 @@ second listener cannot bind, and the startup warning says
         <tr><td><code>relay_transport</code></td><td>string</td><td><code>ssh</code></td><td>Relay transport; only <code>ssh</code> is implemented.</td></tr>
         <tr><td><code>transfer_dir</code></td><td>string</td><td><code>ethernetgateway-data/transfer</code></td><td>Base directory for file transfers. A relative value is taken from the launch directory; an absolute one is used as written.</td></tr>
         <tr><td><code>place_bundled_terminals</code></td><td>bool</td><td><code>true</code></td><td>Write <code>EGT8080.COM</code> and <code>EGT80.COM</code> when they are missing. They are this gateway&rsquo;s own CP/M terminal in period assembly, compiled into the binary, and each is placed in <em>two</em> places: CP/M drive A:, where the emulator runs it, and loose in <code>transfer_dir</code>, where the file-transfer menus can send it to real hardware without starting the emulator at all. Nothing else puts them there on a fresh install. A file already present is <strong>never</strong> overwritten whatever this says &mdash; each terminal saves its settings inside its own <code>.COM</code>, so refreshing a copy would discard your configuration &mdash; so this only decides whether a <em>missing</em> one is written. Turn it off if you keep your own build, or your own <code>EGT80.COM</code> from before 0.9.2, and would rather a file you deleted stayed deleted instead of reappearing on the next restart.</td></tr>
-        <tr><td><code>gui_zoom</code></td><td>string</td><td><code>auto</code></td><td>Desktop GUI display scale. <code>auto</code> follows the monitor's scale factor; a number (e.g. <code>1.0</code>, <code>1.25</code>) pins the console window's pixels-per-point so an over-reported DPI doesn't render it oversized. Clamped to 0.5&ndash;3.0.</td></tr>
+        <tr><td><code>gui_zoom</code></td><td>string</td><td><code>auto</code></td><td>Desktop GUI display scale. <code>auto</code> follows the monitor's scale factor; a number (e.g. <code>1.0</code>, <code>1.25</code>) pins the console window's pixels-per-point so an over-reported DPI doesn't render it oversized. Clamped to 0.5&ndash;3.0. Set under <em>General &mdash; More&hellip;</em> in the desktop window and on the web page; the telnet menu does not offer it, since it is the desktop window&rsquo;s own scale.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>Concurrent telnet session cap. FTP sessions are capped at the same number, counted separately.</td></tr>
         <tr><td><code>conn_rate_max</code></td><td>u32</td><td><code>20</code></td><td>Per-IP connection rate limit for telnet, SSH and FTP: the most connections one address may open inside <code>conn_rate_window_secs</code>. <code>0</code> disables it. Separate from the login lockout &mdash; a credential scanner that opens one connection per guess and hangs up never submits a credential for the lockout to count. Not applied to the web server, whose own pages poll several times a second.</td></tr>
         <tr><td><code>conn_rate_window_secs</code></td><td>u64</td><td><code>60</code></td><td>The window <code>conn_rate_max</code> is counted over, in seconds. Minimum 1.</td></tr>

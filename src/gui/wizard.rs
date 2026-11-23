@@ -38,12 +38,20 @@ pub(super) enum Outcome {
 enum Step {
     Welcome,
     Credentials,
-    Telnet,
-    Ssh,
+    /// Every listener on one screen: Telnet, SSH, Web, Kermit and FTP, each
+    /// with its own Enable box and port (Ricky, 2026-11-22: one table instead
+    /// of a screen per server, and the Kermit and FTP servers asked about at
+    /// all).
+    Servers,
     Security,
-    Web,
+    /// The two serial ports: enable, device, baud, with a Refresh.
+    Serial,
     TransferDir,
     Cpm,
+    /// Optional: where the Weather menu item looks.
+    Weather,
+    /// Optional: the Groq API key AI Chat needs.
+    AiKey,
     Role,
     /// Slave-only: where the master is and how to log into it.
     SlaveMaster,
@@ -57,12 +65,13 @@ enum Step {
 const ORDER: &[Step] = &[
     Step::Welcome,
     Step::Credentials,
-    Step::Telnet,
-    Step::Ssh,
+    Step::Servers,
     Step::Security,
-    Step::Web,
+    Step::Serial,
     Step::TransferDir,
     Step::Cpm,
+    Step::Weather,
+    Step::AiKey,
     Step::Role,
     Step::SlaveMaster,
     Step::Finish,
@@ -99,6 +108,29 @@ pub(super) struct Wizard {
 
     web_enabled: bool,
     web_port: String,
+
+    kermit_enabled: bool,
+    kermit_port: String,
+    ftp_enabled: bool,
+    ftp_port: String,
+    /// `ftp_passive_ports` as typed: `low-high`, one port, or blank.
+    ftp_passive: String,
+
+    /// Port A and Port B.
+    serial: [SerialDraft; 2],
+    /// What the Serial screen's pickers offer; refreshed by its button.
+    serial_ports: Vec<crate::serial::DetectedPort>,
+
+    weather_location: String,
+    /// A newly typed Groq key.  Blank means keep the stored one -- a stored
+    /// secret is never echoed into a field (the master password's rule).
+    groq_key: String,
+    /// Whether a key is already stored, so the screen can say blank keeps it.
+    groq_key_stored: bool,
+    show_groq_key: bool,
+    /// On the final screen when CP/M is on: open the CP/M setup wizard once
+    /// these answers are saved.
+    run_cpm_wizard: bool,
 
     transfer_dir: String,
     /// Folder picker runs on a background thread (same pattern as the main
@@ -173,6 +205,18 @@ impl Wizard {
             disable_gateway_connections: cfg.disable_gateway_connections,
             web_enabled: cfg.web_enabled,
             web_port: cfg.web_port.to_string(),
+            kermit_enabled: cfg.kermit_server_enabled,
+            kermit_port: cfg.kermit_server_port.to_string(),
+            ftp_enabled: cfg.ftp_enabled,
+            ftp_port: cfg.ftp_port.to_string(),
+            ftp_passive: cfg.ftp_passive_ports.clone(),
+            serial: [SerialDraft::from(&cfg.serial_a), SerialDraft::from(&cfg.serial_b)],
+            serial_ports: super::detect_serial_ports(),
+            weather_location: cfg.weather_location.clone(),
+            groq_key: String::new(),
+            groq_key_stored: !cfg.groq_api_key.trim().is_empty(),
+            show_groq_key: false,
+            run_cpm_wizard: true,
             transfer_dir: cfg.transfer_dir.clone(),
             pending_dir_pick: None,
             cpm_enabled: cfg.cpm_emu_enabled,
@@ -220,6 +264,40 @@ impl Wizard {
         cfg.web_enabled = self.web_enabled;
         if let Some(p) = parse_port(&self.web_port) {
             cfg.web_port = p;
+        }
+        cfg.kermit_server_enabled = self.kermit_enabled;
+        if let Some(p) = parse_port(&self.kermit_port) {
+            cfg.kermit_server_port = p;
+        }
+        cfg.ftp_enabled = self.ftp_enabled;
+        if let Some(p) = parse_port(&self.ftp_port) {
+            cfg.ftp_port = p;
+        }
+        if crate::config::parse_passive_ports(&self.ftp_passive).is_some() {
+            cfg.ftp_passive_ports = self.ftp_passive.trim().to_string();
+        }
+
+        for (draft, port) in self.serial.iter().zip([&mut cfg.serial_a, &mut cfg.serial_b]) {
+            port.enabled = draft.enabled;
+            port.port = draft.port.clone();
+            if let Ok(b) = draft.baud.trim().parse::<u32>()
+                && b > 0
+            {
+                port.baud = b;
+            }
+        }
+
+        // The cleaned form the Weather screen's check returns (control
+        // characters gone), as the telnet Weather screen saves it.
+        let loc = self.weather_location.trim();
+        cfg.weather_location = if loc.is_empty() {
+            String::new()
+        } else {
+            crate::telnet::weather::validate_weather_location(loc).unwrap_or_else(|_| loc.to_string())
+        };
+        let key = self.groq_key.trim();
+        if !key.is_empty() {
+            cfg.groq_api_key = key.to_string();
         }
 
         cfg.security_enabled = self.security_enabled;
@@ -298,9 +376,9 @@ impl Wizard {
         }
     }
 
-    /// Validate the screen we're leaving.  `cfg` supplies the settings the
-    /// wizard doesn't edit but still has to reason about (the standalone
-    /// Kermit-server listener, whose port must not collide).
+    /// Validate the screen we're leaving.  Every listener is now one of the
+    /// wizard's own answers (the Servers screen), so `cfg` is no longer read
+    /// for them.
     fn validate(&self, cfg: &Config) -> Result<(), String> {
         match self.step {
             Step::Credentials => {
@@ -315,9 +393,20 @@ impl Wizard {
                 }
                 Ok(())
             }
-            Step::Telnet => self.check_port(Listener::Telnet, cfg),
-            Step::Ssh => self.check_port(Listener::Ssh, cfg),
-            Step::Web => self.check_port(Listener::Web, cfg),
+            Step::Servers => {
+                if self.ftp_enabled && crate::config::parse_passive_ports(&self.ftp_passive).is_none() {
+                    return Err("FTP passive ports: use low-high, both 1024-65535, one port, or leave it empty.".into());
+                }
+                self.check_all_ports(cfg)
+            }
+            Step::Serial => self.check_serial(),
+            Step::Weather => {
+                let loc = self.weather_location.trim();
+                if !loc.is_empty() {
+                    crate::telnet::weather::validate_weather_location(loc)?;
+                }
+                Ok(())
+            }
             Step::TransferDir => {
                 if self.transfer_dir.trim().is_empty() {
                     return Err("The transfer directory cannot be empty.".into());
@@ -344,7 +433,7 @@ impl Wizard {
     /// and no other listener this gateway will bring up already claims it.  A
     /// disabled listener isn't checked at all (its port is inert), which also
     /// lets the operator leave a stale value in a box they've just unticked.
-    fn check_port(&self, which: Listener, cfg: &Config) -> Result<(), String> {
+    fn check_port(&self, which: Listener, _cfg: &Config) -> Result<(), String> {
         let (enabled, value) = self.listener_field(which);
         if !enabled {
             return Ok(());
@@ -355,7 +444,7 @@ impl Wizard {
                 which.subject()
             ));
         };
-        for other in [Listener::Telnet, Listener::Ssh, Listener::Web] {
+        for other in Listener::ALL {
             if other == which {
                 continue;
             }
@@ -364,20 +453,10 @@ impl Wizard {
                 return Err(collision_msg(port, other.label()));
             }
         }
-        // The standalone Kermit listener isn't part of this wizard, but it is a
-        // port this process will bind — so a clash with it has to be caught here
-        // or the operator only finds out from a bind error in the log.
-        if cfg.kermit_server_enabled && cfg.kermit_server_port == port {
-            return Err(collision_msg(port, "the Kermit server"));
-        }
-        // The FTP server likewise: not set here, but bound by this process.
-        if cfg.ftp_enabled && cfg.ftp_port == port {
-            return Err(collision_msg(port, "the FTP server"));
-        }
-        // And its passive data ports: a listener inside that range would make
+        // And FTP's passive data ports: a listener inside that range would make
         // the save at Finish refuse, with the answers left unsaved.
-        if cfg.ftp_enabled
-            && let Some(Some(range)) = crate::config::parse_passive_ports(&cfg.ftp_passive_ports)
+        if self.ftp_enabled
+            && let Some(Some(range)) = crate::config::parse_passive_ports(&self.ftp_passive)
             && range.contains(&port)
         {
             return Err(collision_msg(port, "the FTP passive port range"));
@@ -391,7 +470,7 @@ impl Wizard {
     /// "Enable SSH" button, and an SSH port left in an unticked box was never
     /// checked against the web port chosen after it.
     fn check_all_ports(&self, cfg: &Config) -> Result<(), String> {
-        for which in [Listener::Telnet, Listener::Ssh, Listener::Web] {
+        for which in Listener::ALL {
             self.check_port(which, cfg)?;
         }
         Ok(())
@@ -404,7 +483,7 @@ impl Wizard {
         self.ssh_enabled = true;
         if let Err(e) = self.check_port(Listener::Ssh, cfg) {
             self.ssh_enabled = false;
-            return Err(format!("{e} Change the SSH port on the SSH step."));
+            return Err(format!("{e} Change the SSH port on the Servers step."));
         }
         Ok(())
     }
@@ -417,16 +496,48 @@ impl Wizard {
             Listener::Telnet => (self.telnet_enabled, &self.telnet_port),
             Listener::Ssh => (self.ssh_enabled, &self.ssh_port),
             Listener::Web => (self.web_enabled, &self.web_port),
+            Listener::Kermit => (self.kermit_enabled, &self.kermit_port),
+            Listener::Ftp => (self.ftp_enabled, &self.ftp_port),
         }
     }
 
+    /// The Serial screen's Next: an enabled port needs a device and a baud
+    /// rate, and the two ports cannot share one device.
+    fn check_serial(&self) -> Result<(), String> {
+        for (d, name) in self.serial.iter().zip(["Port A", "Port B"]) {
+            if !d.enabled {
+                continue;
+            }
+            if d.port.is_empty() {
+                return Err(format!("{name} is enabled: choose its device, or untick it."));
+            }
+            if !d.baud.trim().parse::<u32>().is_ok_and(|b| b > 0) {
+                return Err(format!("{name}'s baud rate must be a number, such as 9600."));
+            }
+        }
+        if self.serial.iter().all(|d| d.enabled) && self.serial[0].port == self.serial[1].port {
+            return Err("Port A and Port B cannot use the same device.".into());
+        }
+        Ok(())
+    }
+
+    /// Telnet, SSH and the web page are the three ways in that do not depend
+    /// on this window or on a device name staying put.
+    fn no_network_config(&self) -> bool {
+        !self.telnet_enabled && !self.ssh_enabled && !self.web_enabled
+    }
+
+    /// Read by the editor on Finish: open the CP/M setup wizard next.
+    pub(super) fn wants_cpm_wizard(&self) -> bool {
+        self.cpm_enabled && self.run_cpm_wizard
+    }
+
     /// The inbound TCP ports this configuration will listen on, with what each
-    /// one is for — the firewall list on the final screen.  Includes listeners
-    /// the wizard doesn't ask about (the standalone Kermit server) so the
-    /// operator isn't left guessing.  The SSH port is listed only when the SSH
+    /// one is for — the firewall list on the final screen, from the Servers
+    /// screen's answers.  The SSH port is listed only when the SSH
     /// checkbox is ticked, master or not: `apply_to` deliberately never turns
     /// SSH on for a master, and `warnings` says so instead.
-    fn inbound_ports(&self, cfg: &Config) -> Vec<(u16, &'static str)> {
+    fn inbound_ports(&self, _cfg: &Config) -> Vec<(u16, &'static str)> {
         let mut out = Vec::new();
         if self.telnet_enabled {
             if let Some(p) = parse_port(&self.telnet_port) {
@@ -450,11 +561,15 @@ impl Wizard {
                 out.push((p, "web configuration page"));
             }
         }
-        if cfg.kermit_server_enabled {
-            out.push((cfg.kermit_server_port, "standalone Kermit server"));
+        if self.kermit_enabled {
+            if let Some(p) = parse_port(&self.kermit_port) {
+                out.push((p, "standalone Kermit server"));
+            }
         }
-        if cfg.ftp_enabled {
-            out.push((cfg.ftp_port, "FTP server"));
+        if self.ftp_enabled {
+            if let Some(p) = parse_port(&self.ftp_port) {
+                out.push((p, "FTP server"));
+            }
         }
         out
     }
@@ -463,7 +578,10 @@ impl Wizard {
     /// never worth blocking Save over.
     fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
-        if !self.telnet_enabled && !self.ssh_enabled {
+        if self.no_network_config() {
+            out.push(NO_NETWORK_CONFIG_WARNING.into());
+        }
+        if !self.telnet_enabled && !self.ssh_enabled && !self.no_network_config() {
             out.push(
                 "Telnet and SSH are both off — no network logins will be possible. \
                  (Serial ports, if you enable them, still work.)"
@@ -481,6 +599,8 @@ impl Wizard {
             (self.telnet_enabled, &self.telnet_port, "Telnet"),
             (self.ssh_enabled, &self.ssh_port, "SSH"),
             (self.web_enabled, &self.web_port, "The web server"),
+            (self.kermit_enabled, &self.kermit_port, "The Kermit server"),
+            (self.ftp_enabled, &self.ftp_port, "The FTP server"),
         ] {
             if enabled && parse_port(port).is_some_and(|p| p < 1024) {
                 out.push(format!(
@@ -544,12 +664,13 @@ impl Wizard {
                 match self.step {
                     Step::Welcome => self.draw_welcome(ui),
                     Step::Credentials => self.draw_credentials(ui),
-                    Step::Telnet => self.draw_telnet(ui),
-                    Step::Ssh => self.draw_ssh(ui),
+                    Step::Servers => self.draw_servers(ui, local_ip),
                     Step::Security => self.draw_security(ui),
-                    Step::Web => self.draw_web(ui, local_ip),
+                    Step::Serial => self.draw_serial(ui),
                     Step::TransferDir => self.draw_transfer_dir(ui),
                     Step::Cpm => self.draw_cpm(ui),
+                    Step::Weather => self.draw_weather(ui),
+                    Step::AiKey => self.draw_ai_key(ui),
                     Step::Role => self.draw_role(ui, cfg),
                     Step::SlaveMaster => self.draw_slave_master(ui, cfg),
                     Step::Finish => self.draw_finish(ui, cfg, local_ip),
@@ -653,10 +774,11 @@ impl Wizard {
             Step::Welcome => return "Welcome".to_string(),
             Step::Finish => return "Review and finish".to_string(),
             Step::Credentials => "Username and password",
-            Step::Telnet => "Telnet server",
-            Step::Ssh => "SSH server",
+            Step::Servers => "Servers and ports",
             Step::Security => "Access control",
-            Step::Web => "Web configuration server",
+            Step::Serial => "Serial ports",
+            Step::Weather => "Weather location (optional)",
+            Step::AiKey => "AI chat key (optional)",
             Step::TransferDir => "File transfer directory",
             Step::Cpm => "CP/M emulator",
             Step::Role => "Gateway role",
@@ -682,8 +804,9 @@ impl Wizard {
         body(
             ui,
             "This looks like the first time this gateway has run, so let's set up the \
-             essentials: a login, which servers to start, where transferred files go, and \
-             whether this machine stands alone or is part of a master/slave pair.",
+             essentials: a login, which servers to start, any serial ports, where transferred \
+             files go, and whether this machine stands alone or is part of a master/slave \
+             pair — and, if you like, the weather location and an AI chat key.",
         );
         ui.add_space(6.0);
         note(ui, "What's inside, once you're set up:");
@@ -696,8 +819,8 @@ impl Wizard {
             "CP/M emulator — runs real Z80 or 8080 .COM software, and ships with our \
              own EGT8080 terminal program, which runs on either.",
             "Gateway Shell — a CP/M-style file manager over the transfer directory.",
-            "FTP server — the same transfer directory for any FTP client; off until you \
-             turn it on in the Server \"More...\" window.",
+            "FTP server — the same transfer directory for any FTP client; this wizard \
+             asks whether to turn it on.",
             "Extras — a text-mode web browser, a weather service and an AI chat client.",
         ] {
             bullet(ui, line);
@@ -738,60 +861,6 @@ impl Wizard {
              read back out of the file — note it down if you are also configuring a slave, \
              which needs the password itself. The Groq API key in that file is not hashed, \
              so keep it readable only by you.",
-        );
-    }
-
-    fn draw_telnet(&mut self, ui: &mut egui::Ui) {
-        body(
-            ui,
-            "Telnet is how vintage hardware and most retro terminal software reach the \
-             gateway. It auto-detects PETSCII, ANSI and ASCII terminals.",
-        );
-        ui.add_space(6.0);
-        ui.checkbox(&mut self.telnet_enabled, "Enable the telnet server");
-        ui.add_enabled_ui(self.telnet_enabled, |ui| {
-            ui.horizontal(|ui| {
-                labeled_field(ui, "Port:", &mut self.telnet_port, 70.0);
-                ui.label(
-                    egui::RichText::new(format!("(default {})", crate::config::DEFAULT_TELNET_PORT))
-                        .italics()
-                        .color(AMBER_DIM),
-                );
-            });
-        });
-        ui.add_space(6.0);
-        warn(
-            ui,
-            "Telnet is unencrypted: the login and everything typed during the session cross \
-             the network as plain text. That's fine on a trusted LAN — which is what this \
-             gateway is built for — but don't expose the port to the internet. Use the SSH \
-             server on the next screen for anything else.",
-        );
-    }
-
-    fn draw_ssh(&mut self, ui: &mut egui::Ui) {
-        body(
-            ui,
-            "The SSH server offers the same menu as telnet, encrypted, for modern clients. \
-             An Ed25519 host key is generated automatically on first use.",
-        );
-        ui.add_space(6.0);
-        ui.checkbox(&mut self.ssh_enabled, "Enable the SSH server");
-        ui.add_enabled_ui(self.ssh_enabled, |ui| {
-            ui.horizontal(|ui| {
-                labeled_field(ui, "Port:", &mut self.ssh_port, 70.0);
-                ui.label(
-                    egui::RichText::new(format!("(default {})", crate::config::DEFAULT_SSH_PORT))
-                        .italics()
-                        .color(AMBER_DIM),
-                );
-            });
-        });
-        ui.add_space(6.0);
-        note(
-            ui,
-            "Log in with the username and password you entered on the first screen. SSH \
-             always authenticates, whether or not you require a login for telnet.",
         );
     }
 
@@ -844,37 +913,192 @@ impl Wizard {
         );
     }
 
-    fn draw_web(&mut self, ui: &mut egui::Ui, local_ip: &str) {
+    fn draw_servers(&mut self, ui: &mut egui::Ui, local_ip: &str) {
         body(
             ui,
-            "The web server lets you change every gateway setting from a browser, so you \
-             don't need this console window to reconfigure the machine.",
+            "The servers this gateway runs, and the port each one listens on. Every \
+             server needs its own port.",
         );
         ui.add_space(6.0);
-        ui.checkbox(&mut self.web_enabled, "Enable the web configuration server");
-        ui.add_enabled_ui(self.web_enabled, |ui| {
+        egui::Grid::new("wizard_servers").num_columns(3).spacing([18.0, 6.0]).show(ui, |ui| {
+            for h in ["Server", "Enable", "Port"] {
+                ui.label(egui::RichText::new(h).color(AMBER));
+            }
+            ui.end_row();
+            let rows: [(&str, &mut bool, &mut String, u16); 5] = [
+                ("Telnet", &mut self.telnet_enabled, &mut self.telnet_port, crate::config::DEFAULT_TELNET_PORT),
+                ("SSH", &mut self.ssh_enabled, &mut self.ssh_port, crate::config::DEFAULT_SSH_PORT),
+                ("Web configuration", &mut self.web_enabled, &mut self.web_port, crate::config::DEFAULT_WEB_PORT),
+                ("Kermit server", &mut self.kermit_enabled, &mut self.kermit_port, crate::config::DEFAULT_KERMIT_SERVER_PORT),
+                ("FTP", &mut self.ftp_enabled, &mut self.ftp_port, crate::config::DEFAULT_FTP_PORT),
+            ];
+            for (name, enabled, port, default) in rows {
+                ui.label(name);
+                ui.checkbox(enabled, "");
+                ui.add_enabled_ui(*enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(port).desired_width(70.0));
+                        ui.label(egui::RichText::new(format!("(default {default})")).italics().color(AMBER_DIM));
+                    });
+                });
+                ui.end_row();
+            }
+        });
+        ui.add_enabled_ui(self.ftp_enabled, |ui| {
             ui.horizontal(|ui| {
-                labeled_field(ui, "Port:", &mut self.web_port, 70.0);
-                ui.label(
-                    egui::RichText::new(format!("(default {})", crate::config::DEFAULT_WEB_PORT))
-                        .italics()
-                        .color(AMBER_DIM),
-                );
+                labeled_field(ui, "FTP passive ports:", &mut self.ftp_passive, 110.0);
+                ui.label(egui::RichText::new("(low-high, or empty for any)").italics().color(AMBER_DIM));
             });
         });
         ui.add_space(6.0);
-        if self.web_enabled {
-            if let Some(port) = parse_port(&self.web_port) {
-                note(ui, &format!("You'll reach it at http://{}:{}/", local_ip, port));
-            }
-        }
-        warn(
+        indent(
             ui,
-            "It is served over plain HTTP. Because the page shows secrets (the password, \
-             the API key), it always asks for the username and password — even with \
-             \"Require login\" off — and it keeps the private-address restriction whether or \
-             not login is required. Only \"Disable IP safety\" lifts that restriction.",
+            "Telnet — how vintage hardware and retro terminal software reach the gateway; \
+             it detects PETSCII, ANSI and ASCII terminals.\n\
+             SSH — the same menu, encrypted, always behind the username and password.\n\
+             Web configuration — every setting from a browser.\n\
+             Kermit server — a Kermit file server on its own port, with no menu.\n\
+             FTP — the transfer folder for any FTP client.",
         );
+        if self.web_enabled
+            && let Some(port) = parse_port(&self.web_port)
+        {
+            note(ui, &format!("The web page will be at http://{}:{}/", local_ip, port));
+        }
+        if self.telnet_enabled || self.ftp_enabled {
+            warn(
+                ui,
+                "Telnet and FTP are unencrypted: logins and everything sent cross the network \
+                 as plain text. Fine on a trusted LAN, which is what this gateway is built \
+                 for; don't expose them to the internet. Use SSH for anything else.",
+            );
+        }
+        if self.no_network_config() {
+            ui.add_space(4.0);
+            warn(ui, NO_NETWORK_CONFIG_WARNING);
+        }
+    }
+
+    fn draw_serial(&mut self, ui: &mut egui::Ui) {
+        body(
+            ui,
+            "Optional: a serial port lets a vintage computer or terminal dial into the \
+             gateway through its Hayes modem emulator. Leave both off if you have none.",
+        );
+        ui.add_space(6.0);
+        if ui.button("Refresh").on_hover_text("Look again for serial devices — after plugging one in.").clicked() {
+            self.serial_ports = super::detect_serial_ports();
+        }
+        ui.add_space(4.0);
+        let ports = self.serial_ports.clone();
+        egui::Grid::new("wizard_serial").num_columns(4).spacing([14.0, 6.0]).show(ui, |ui| {
+            for h in ["Port", "Enable", "Device", "Baud"] {
+                ui.label(egui::RichText::new(h).color(AMBER));
+            }
+            ui.end_row();
+            for (i, name) in ["Port A", "Port B"].into_iter().enumerate() {
+                let d = &mut self.serial[i];
+                ui.label(name);
+                ui.checkbox(&mut d.enabled, "");
+                let shown = if d.port.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    match ports.iter().find(|p| p.name == d.port && !p.summary.is_empty()) {
+                        Some(p) => format!("{}  \u{2014} {}", p.name, p.summary),
+                        None => d.port.clone(),
+                    }
+                };
+                let before = d.port.clone();
+                egui::ComboBox::from_id_salt(format!("wizard_serial_{i}"))
+                    .width(240.0)
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d.port, String::new(), "(none)");
+                        for p in &ports {
+                            let label = if p.summary.is_empty() {
+                                p.name.clone()
+                            } else {
+                                format!("{}  \u{2014} {}", p.name, p.summary)
+                            };
+                            ui.selectable_value(&mut d.port, p.name.clone(), label).on_hover_text(&p.detail);
+                        }
+                    });
+                // Choosing a device is wanting the port, as in the main window.
+                if d.port != before && !d.port.is_empty() {
+                    d.enabled = true;
+                }
+                ui.add(egui::TextEdit::singleline(&mut d.baud).desired_width(70.0));
+                ui.end_row();
+            }
+        });
+        if ports.is_empty() {
+            ui.add_space(4.0);
+            note(ui, "No serial devices were found. Plug one in and press Refresh.");
+        }
+        ui.add_space(6.0);
+        indent(
+            ui,
+            "A device's name can change — a USB adapter on another socket, or after a \
+             reboot — so a serial port is not a dependable way to reach the settings.",
+        );
+    }
+
+    fn draw_weather(&mut self, ui: &mut egui::Ui) {
+        body(
+            ui,
+            "Optional: the place the Weather menu item reports on. A city or a postal code, \
+             anywhere in the world.",
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            labeled_field(ui, "Location:", &mut self.weather_location, 260.0);
+        });
+        ui.add_space(4.0);
+        indent(
+            ui,
+            "For example: Dallas · London, GB · 75201 · Paris, FR. Leave it empty to be \
+             asked each time. Forecasts come from Open-Meteo, which needs no account.",
+        );
+    }
+
+    fn draw_ai_key(&mut self, ui: &mut egui::Ui) {
+        body(
+            ui,
+            "Optional: AI Chat answers questions through Groq, which needs an API key. \
+             Everything else works without one — skip this if you don't want AI Chat.",
+        );
+        ui.add_space(6.0);
+        note(ui, "To get a key (free):");
+        // One row each, the same indent, so the link in the first does not
+        // leave a gap before the other two.
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            ui.label("1. Go to");
+            ui.hyperlink_to("console.groq.com", "https://console.groq.com");
+            ui.label("and sign in (or sign up).");
+        });
+        for step in [
+            "2. Open API Keys and press Create API Key.",
+            "3. Copy the key — it starts with gsk_ — and paste it below.",
+        ] {
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                ui.label(step);
+            });
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label("Groq API key:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.groq_key)
+                    .password(!self.show_groq_key)
+                    .desired_width(300.0),
+            );
+            ui.checkbox(&mut self.show_groq_key, "show");
+        });
+        if self.groq_key_stored {
+            indent(ui, "A key is already set. Leave this empty to keep it.");
+        }
     }
 
     fn draw_transfer_dir(&mut self, ui: &mut egui::Ui) {
@@ -1002,7 +1226,7 @@ impl Wizard {
             ui.add_space(2.0);
             warn(
                 ui,
-                "The SSH server is off (the SSH step), but a master needs it: a slave \
+                "The SSH server is off (the Servers step), but a master needs it: a slave \
                  links to its master by logging into the master's SSH server, so with SSH \
                  off no slave can ever connect. Nothing else about the master role uses \
                  that port — it is not a second way into the menus beyond the SSH access \
@@ -1158,6 +1382,24 @@ impl Wizard {
         if self.cpm_enabled && self.cpm_fetch_disks {
             summary(ui, "Sample disks", "download when this finishes");
         }
+        for (d, name) in self.serial.iter().zip(["Serial Port A", "Serial Port B"]) {
+            if d.enabled {
+                summary(ui, name, &format!("{} at {} baud", d.port, d.baud.trim()));
+            }
+        }
+        let loc = self.weather_location.trim();
+        summary(ui, "Weather location", if loc.is_empty() { "ask each time" } else { loc });
+        summary(
+            ui,
+            "AI chat key",
+            if !self.groq_key.trim().is_empty() {
+                "entered"
+            } else if self.groq_key_stored {
+                "kept"
+            } else {
+                "none"
+            },
+        );
         if self.role == "slave" {
             summary(
                 ui,
@@ -1198,18 +1440,18 @@ impl Wizard {
                 any = true;
             }
         }
-        if cfg.kermit_server_enabled {
-            connect_line(
-                ui,
-                &format!(
-                    "Kermit server on port {} (already enabled)",
-                    cfg.kermit_server_port
-                ),
-            );
+        // From the Servers screen's answers, as the lines above are, not the
+        // stored config: a port changed on that screen is the one to dial.
+        if self.kermit_enabled
+            && let Some(p) = parse_port(&self.kermit_port)
+        {
+            connect_line(ui, &format!("Kermit server on port {p}"));
             any = true;
         }
-        if cfg.ftp_enabled {
-            connect_line(ui, &format!("FTP server on port {} (already enabled)", cfg.ftp_port));
+        if self.ftp_enabled
+            && let Some(p) = parse_port(&self.ftp_port)
+        {
+            connect_line(ui, &format!("ftp {} {}", local_ip, p));
             any = true;
         }
         if !any {
@@ -1242,7 +1484,9 @@ impl Wizard {
             }
             // The passive data ports are inbound too; a client's PASV
             // connection fails without them.
-            if let Some(line) = passive_firewall_line(cfg) {
+            let mut answers = cfg.clone();
+            self.apply_to(&mut answers);
+            if let Some(line) = passive_firewall_line(&answers) {
                 connect_line(ui, &line);
             }
             indent(
@@ -1262,11 +1506,20 @@ impl Wizard {
         ui.add_space(8.0);
         note(
             ui,
-            "Serial ports are not set up here. If you want to use Port A or Port B — as a \
-             Hayes modem emulator, a console bridge, or a Kermit server on the wire — enable \
-             and configure them in the Serial Port frames of this window, or over telnet in \
-             the Serial Configuration menu.",
+            "A new serial port starts as a Hayes modem emulator. Its mode, flow control and \
+             the rest are in the Serial Port frames of this window, or over telnet in the \
+             Serial Configuration menu.",
         );
+        if self.cpm_enabled {
+            ui.add_space(8.0);
+            ui.checkbox(&mut self.run_cpm_wizard, "Run the CP/M setup wizard next");
+            indent(
+                ui,
+                "It asks what CP/M runs, the disk to boot and the machine to boot it on, \
+                 and mounts the disks to go with it. You can run it later from the CP/M \
+                 panel of this window.",
+            );
+        }
 
         let warnings = self.warnings();
         if !warnings.is_empty() {
@@ -1308,15 +1561,22 @@ enum Listener {
     Telnet,
     Ssh,
     Web,
+    Kermit,
+    Ftp,
 }
 
 impl Listener {
+    /// Every listener the Servers screen sets -- the five `config::listeners`.
+    const ALL: [Listener; 5] = [Listener::Telnet, Listener::Ssh, Listener::Web, Listener::Kermit, Listener::Ftp];
+
     /// Reads as the subject of "The ___ port must be a number...".
     fn subject(self) -> &'static str {
         match self {
             Listener::Telnet => "Telnet",
             Listener::Ssh => "SSH",
             Listener::Web => "web server",
+            Listener::Kermit => "Kermit server",
+            Listener::Ftp => "FTP",
         }
     }
 
@@ -1326,7 +1586,33 @@ impl Listener {
             Listener::Telnet => "Telnet",
             Listener::Ssh => "SSH",
             Listener::Web => "the web server",
+            Listener::Kermit => "the Kermit server",
+            Listener::Ftp => "the FTP server",
         }
+    }
+}
+
+/// The Servers screen's warning, and the review screen's, when Telnet, SSH and
+/// the web page are all off (Ricky, 2026-11-22).
+const NO_NETWORK_CONFIG_WARNING: &str =
+    "Telnet, SSH and the web page are all off. This window would then be the only way to \
+     change settings: if it is ever turned off (Show GUI on Startup), there is no reliable \
+     way back in, because serial port assignments can change — a USB adapter can come back \
+     as a different device after a reboot or on another socket.";
+
+/// One serial port's answers, as the Serial screen holds them.
+#[derive(Clone)]
+struct SerialDraft {
+    enabled: bool,
+    /// Device path; empty is "(none)".
+    port: String,
+    /// Typed, like every number in this GUI.
+    baud: String,
+}
+
+impl From<&crate::config::SerialPortConfig> for SerialDraft {
+    fn from(c: &crate::config::SerialPortConfig) -> Self {
+        SerialDraft { enabled: c.enabled, port: c.port.clone(), baud: c.baud.to_string() }
     }
 }
 
@@ -1552,10 +1838,10 @@ mod tests {
     fn test_port_collision_is_rejected_only_when_enabled() {
         let cfg = Config::default();
         let mut w = wiz();
-        w.step = Step::Ssh;
+        w.step = Step::Servers;
         w.ssh_enabled = true;
         w.ssh_port = w.telnet_port.clone(); // both 2323
-        assert!(w.validate(&cfg).unwrap_err().contains("already used by Telnet"));
+        assert!(w.validate(&cfg).unwrap_err().contains("already used by SSH"));
 
         // Same clash, but telnet is off, so its port is inert.
         w.telnet_enabled = false;
@@ -1631,17 +1917,131 @@ mod tests {
 
     #[test]
     fn test_kermit_server_port_participates_in_collision_check() {
-        let mut cfg = Config { kermit_server_enabled: true, ..Config::default() };
+        let cfg = Config::default();
         let mut w = wiz();
-        w.step = Step::Telnet;
-        w.telnet_port = cfg.kermit_server_port.to_string();
+        w.step = Step::Servers;
+        w.kermit_enabled = true;
+        w.telnet_port = w.kermit_port.clone();
         assert!(w
             .validate(&cfg)
             .unwrap_err()
             .contains("already used by the Kermit server"));
 
-        cfg.kermit_server_enabled = false;
+        w.kermit_enabled = false;
         assert!(w.validate(&cfg).is_ok());
+    }
+
+    /// **The Servers screen asks about all five listeners** -- Telnet, SSH,
+    /// Web, Kermit and FTP, the set `config::listeners` names -- and checks
+    /// each port against the other four and FTP's passive range.
+    #[test]
+    fn test_the_servers_screen_covers_every_listener() {
+        let cfg = Config::default();
+        assert_eq!(
+            Listener::ALL.len(),
+            crate::config::listeners(&cfg).len(),
+            "a listener the Servers screen does not ask about"
+        );
+        let mut w = wiz();
+        w.step = Step::Servers;
+        w.ftp_enabled = true;
+        w.web_enabled = true;
+        w.ftp_port = w.web_port.clone();
+        assert!(w.validate(&cfg).unwrap_err().contains("already used by"), "FTP and Web on one port");
+        w.ftp_port = "2121".into();
+        w.ftp_passive = "2300-2400".into(); // takes in telnet's 2323
+        assert!(w.validate(&cfg).unwrap_err().contains("FTP passive"), "a listener in the passive range");
+        w.ftp_passive = "oops".into();
+        assert!(w.validate(&cfg).unwrap_err().contains("passive ports"), "a bad range passed");
+        w.ftp_passive = "50000-50100".into();
+        assert!(w.validate(&cfg).is_ok(), "{:?}", w.validate(&cfg));
+        // And they are written.
+        w.kermit_enabled = true;
+        w.kermit_port = "2525".into();
+        let mut out = Config::default();
+        w.apply_to(&mut out);
+        assert!(out.ftp_enabled && out.kermit_server_enabled);
+        assert_eq!((out.ftp_port, out.kermit_server_port), (2121, 2525));
+        assert_eq!(out.ftp_passive_ports, "50000-50100");
+    }
+
+    /// **All three ways in over the network off is warned about**, on the
+    /// Servers screen and the review: with the window ever turned off, a
+    /// serial device's name is not a dependable way back in.
+    #[test]
+    fn test_no_network_configuration_is_warned_about() {
+        let mut w = wiz();
+        w.telnet_enabled = true;
+        w.ssh_enabled = false;
+        w.web_enabled = false;
+        assert!(!w.no_network_config());
+        assert!(!w.warnings().iter().any(|m| m == NO_NETWORK_CONFIG_WARNING));
+        w.telnet_enabled = false;
+        assert!(w.no_network_config());
+        assert!(w.warnings().iter().any(|m| m == NO_NETWORK_CONFIG_WARNING), "not on the review screen");
+        w.web_enabled = true;
+        assert!(!w.no_network_config(), "the web page alone is a way in");
+    }
+
+    /// The Serial screen: an enabled port needs a device and a baud rate, the
+    /// two cannot share a device, and the answers are written.
+    #[test]
+    fn test_the_serial_screen_checks_and_writes_its_ports() {
+        let cfg = Config::default();
+        let mut w = wiz();
+        w.step = Step::Serial;
+        w.serial[0] = SerialDraft { enabled: true, port: String::new(), baud: "9600".into() };
+        assert!(w.validate(&cfg).unwrap_err().contains("choose its device"));
+        w.serial[0].port = "/dev/ttyUSB0".into();
+        w.serial[0].baud = "fast".into();
+        assert!(w.validate(&cfg).unwrap_err().contains("baud"));
+        w.serial[0].baud = "2400".into();
+        w.serial[1] = SerialDraft { enabled: true, port: "/dev/ttyUSB0".into(), baud: "9600".into() };
+        assert!(w.validate(&cfg).unwrap_err().contains("same device"));
+        w.serial[1].port = "/dev/ttyUSB1".into();
+        assert!(w.validate(&cfg).is_ok());
+        let mut out = Config::default();
+        w.apply_to(&mut out);
+        assert!(out.serial_a.enabled && out.serial_b.enabled);
+        assert_eq!((out.serial_a.port.as_str(), out.serial_a.baud), ("/dev/ttyUSB0", 2400));
+        assert_eq!(out.serial_b.port, "/dev/ttyUSB1");
+    }
+
+    /// Weather and the Groq key are optional: blank passes, a stored key is
+    /// kept when the box is left empty, a typed one is written, and a bad
+    /// location is refused as the telnet Weather screen refuses it.
+    #[test]
+    fn test_weather_and_ai_key_are_optional_and_written() {
+        let cfg = Config { groq_api_key: "gsk_stored".into(), ..Config::default() };
+        let mut w = Wizard::new(&cfg);
+        assert!(w.groq_key.is_empty(), "a stored key was echoed into the box");
+        w.step = Step::Weather;
+        w.weather_location = String::new();
+        assert!(w.validate(&cfg).is_ok(), "an empty location is allowed");
+        w.weather_location = "x".repeat(500);
+        assert!(w.validate(&cfg).is_err(), "an impossible location passed");
+        w.weather_location = "Dallas".into();
+        assert!(w.validate(&cfg).is_ok());
+        let mut out = cfg.clone();
+        w.apply_to(&mut out);
+        assert_eq!(out.groq_api_key, "gsk_stored", "an empty box replaced the stored key");
+        assert_eq!(out.weather_location, "Dallas");
+        w.groq_key = "  gsk_new  ".into();
+        w.apply_to(&mut out);
+        assert_eq!(out.groq_api_key, "gsk_new");
+    }
+
+    /// The review screen's CP/M offer: only with CP/M on, ticked by default.
+    #[test]
+    fn test_the_cpm_wizard_is_offered_only_with_cpm_on() {
+        let mut w = wiz();
+        w.cpm_enabled = true;
+        assert!(w.wants_cpm_wizard(), "not offered by default");
+        w.run_cpm_wizard = false;
+        assert!(!w.wants_cpm_wizard());
+        w.run_cpm_wizard = true;
+        w.cpm_enabled = false;
+        assert!(!w.wants_cpm_wizard(), "offered with CP/M off");
     }
 
     #[test]
@@ -1665,17 +2065,17 @@ mod tests {
         let mut w = wiz();
         w.role = "standalone".into();
         w.step = Step::Credentials;
-        assert_eq!(w.step_title(), "Step 1 of 8 — Username and password");
+        assert_eq!(w.step_title(), "Step 1 of 9 — Username and password");
         w.step = Step::Role;
-        assert_eq!(w.step_title(), "Step 8 of 8 — Gateway role");
+        assert_eq!(w.step_title(), "Step 9 of 9 — Gateway role");
 
         // The slave path has one screen more, and both it and Role must carry
         // distinct numbers out of the larger total.
         w.role = "slave".into();
         w.step = Step::Role;
-        assert_eq!(w.step_title(), "Step 8 of 9 — Gateway role");
+        assert_eq!(w.step_title(), "Step 9 of 10 — Gateway role");
         w.step = Step::SlaveMaster;
-        assert_eq!(w.step_title(), "Step 9 of 9 — Master connection (slave)");
+        assert_eq!(w.step_title(), "Step 10 of 10 — Master connection (slave)");
 
         // The bookend screens aren't numbered.
         w.step = Step::Welcome;
@@ -1691,30 +2091,21 @@ mod tests {
     #[test]
     fn test_each_listener_validates_against_its_own_default_port() {
         let cfg = Config::default();
-        for (step, label) in [
-            (Step::Telnet, "telnet"),
-            (Step::Ssh, "ssh"),
-            (Step::Web, "web"),
-        ] {
-            let mut w = wiz();
-            w.telnet_enabled = true;
-            w.ssh_enabled = true;
-            w.web_enabled = true;
-            w.step = step;
-            assert!(
-                w.validate(&cfg).is_ok(),
-                "{} rejected its own default port: {:?}",
-                label,
-                w.validate(&cfg)
-            );
-        }
+        let mut w = wiz();
+        w.telnet_enabled = true;
+        w.ssh_enabled = true;
+        w.web_enabled = true;
+        w.kermit_enabled = true;
+        w.ftp_enabled = true;
+        w.step = Step::Servers;
+        assert!(w.validate(&cfg).is_ok(), "a listener rejected its own default port: {:?}", w.validate(&cfg));
     }
 
     #[test]
     fn test_unparseable_port_is_reported_for_the_right_listener() {
         let cfg = Config::default();
         let mut w = wiz();
-        w.step = Step::Web;
+        w.step = Step::Servers;
         w.web_enabled = true;
         w.web_port = "eighty".into();
         assert_eq!(
@@ -1825,10 +2216,17 @@ mod tests {
 
     #[test]
     fn test_warnings_fire_on_the_risky_combinations() {
+        // Telnet and SSH off with the web page on: no logins, but a way in.
         let mut w = wiz();
         w.telnet_enabled = false;
         w.ssh_enabled = false;
+        w.web_enabled = true;
         assert!(w.warnings().iter().any(|s| s.contains("no network logins")));
+        // All three off: the stronger warning instead, not both.
+        w.web_enabled = false;
+        let warnings = w.warnings();
+        assert!(warnings.iter().any(|s| s == NO_NETWORK_CONFIG_WARNING), "{warnings:?}");
+        assert!(!warnings.iter().any(|s| s.contains("no network logins")), "{warnings:?}");
 
         let mut w = wiz();
         w.disable_ip_safety = true;
@@ -1874,6 +2272,8 @@ mod tests {
     fn test_the_ftp_passive_range_is_checked_and_listed() {
         let mut cfg = Config { ftp_enabled: true, ftp_passive_ports: "50000-50100".into(), ..Config::default() };
         let mut w = wiz();
+        w.ftp_enabled = true;
+        w.ftp_passive = "50000-50100".into();
         w.telnet_enabled = true;
         w.telnet_port = "50050".into();
         let err = w.check_port(Listener::Telnet, &cfg).expect_err("a port inside the passive range passed");
@@ -1885,6 +2285,7 @@ mod tests {
         assert_eq!(passive_firewall_line(&cfg).as_deref(), Some("TCP 50000-50100   — FTP passive data ports"));
 
         cfg.ftp_enabled = false;
+        w.ftp_enabled = false;
         assert!(w.check_port(Listener::Telnet, &cfg).is_ok(), "FTP off: no range to clash with");
         assert_eq!(passive_firewall_line(&cfg), None);
         cfg.ftp_enabled = true;
@@ -1894,7 +2295,7 @@ mod tests {
 
     #[test]
     fn test_inbound_firewall_ports_track_the_answers() {
-        let mut cfg = Config::default();
+        let cfg = Config::default();
         let mut w = wiz();
         w.telnet_enabled = true;
         w.telnet_port = "2323".into();
@@ -1906,9 +2307,9 @@ mod tests {
         w.telnet_enabled = false;
         assert!(w.inbound_ports(&cfg).is_empty());
 
-        // ...the Kermit server does, even though the wizard never asks about it.
-        cfg.kermit_server_enabled = true;
-        cfg.kermit_server_port = 2424;
+        // ...the Kermit server does, now asked about on the Servers screen.
+        w.kermit_enabled = true;
+        w.kermit_port = "2424".into();
         assert_eq!(
             w.inbound_ports(&cfg),
             vec![(2424, "standalone Kermit server")]
@@ -1987,8 +2388,9 @@ mod tests {
             "the review screen must say no slave can connect: {:?}",
             warnings
         );
-        // With no listener at all, the both-off warning is also correct now.
-        assert!(warnings.iter().any(|s| s.contains("no network logins")));
+        // With no listener at all (the web page is off by default), the
+        // no-network warning is also correct now.
+        assert!(warnings.iter().any(|s| s == NO_NETWORK_CONFIG_WARNING), "{warnings:?}");
         // An SSH port nobody will bind is not advertised to the firewall.
         assert!(w.inbound_ports(&Config::default()).is_empty());
 

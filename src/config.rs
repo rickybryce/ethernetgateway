@@ -518,7 +518,7 @@ const DEFAULT_ALLOW_RELAY_KERMIT: bool = false;
 /// to avoid the `<1024 needs root` trap, while still being mnemonic
 /// (24 ≈ "kermit").
 const DEFAULT_KERMIT_SERVER_ENABLED: bool = false;
-const DEFAULT_KERMIT_SERVER_PORT: u16 = 2424;
+pub(crate) const DEFAULT_KERMIT_SERVER_PORT: u16 = 2424;
 /// FTP server listener.  Off by default, like SSH and the web server.  Unlike
 /// the Kermit listener it keeps every security check: with `security_enabled`
 /// it asks for the gateway's username and password (with the shared lockout);
@@ -528,7 +528,7 @@ const DEFAULT_KERMIT_SERVER_PORT: u16 = 2424;
 const DEFAULT_FTP_ENABLED: bool = false;
 /// 2121: the conventional unprivileged stand-in for FTP's 21 (no root needed),
 /// and what most FTP clients' documentation uses for a non-standard port.
-const DEFAULT_FTP_PORT: u16 = 2121;
+pub(crate) const DEFAULT_FTP_PORT: u16 = 2121;
 /// Ports a passive (PASV/EPSV) data connection may use, as `low-high`; empty
 /// lets the OS choose.  A firewall or NAT can only be opened for a known
 /// range, which is why it exists.

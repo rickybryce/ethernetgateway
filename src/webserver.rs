@@ -7506,12 +7506,6 @@ mod tests {
         assert_eq!(lookup("transfer_dir"), Some("/var/files"));
     }
 
-    /// The four on-disk-log keys must be rendered AND saved.  Rendering a field
-    /// the save path doesn't collect is the bug class that hit
-    /// `allow_relay_kermit`: the box appears, the operator ticks it, and the
-    /// save silently drops it.  So this asserts both halves together — the
-    /// input exists in the Server "More" popup, and a submitted value comes back
-    /// out of `collect_form_updates`.
     /// **The display scale is a General setting**, under its own heading.  In
     /// the Server popup it sat straight after the FTP block and read as an FTP
     /// option.  Sliced per popup, so it cannot pass by being in some other.
@@ -7528,6 +7522,12 @@ mod tests {
         assert!(!popup("more-server").contains("name=\"gui_zoom\""), "still in the Server popup");
     }
 
+    /// The four on-disk-log keys must be rendered AND saved.  Rendering a field
+    /// the save path doesn't collect is the bug class that hit
+    /// `allow_relay_kermit`: the box appears, the operator ticks it, and the
+    /// save silently drops it.  So this asserts both halves together — the
+    /// input exists in the General "More" popup, and a submitted value comes back
+    /// out of `collect_form_updates`.
     #[test]
     fn test_log_keys_are_rendered_and_saved() {
         let cfg = Config::default();

@@ -171,7 +171,14 @@ pub fn run(
                 if cfg.open_screen_after_restart {
                     config::update_config_value("open_screen_after_restart", "false");
                 }
-                Ok(Box::new(App::new(cfg, shutdown, restart, handover)))
+                let mut app = App::new(cfg, shutdown, restart, handover);
+                // What the window before a restart was still in the middle
+                // of: here rather than in `App::new`, which a unit test
+                // constructing an `App` must be able to call without taking it.
+                if let Some(after) = take_after_restart() {
+                    app.adopt_after_restart(after);
+                }
+                Ok(Box::new(app))
             }),
         )
     }));
@@ -826,6 +833,25 @@ pub(crate) fn serial_ports_tooltip(ports: &[crate::serial::DetectedPort]) -> Str
     out
 }
 
+/// What a window that closes for a restart hands to the one the restart
+/// builds.  In-process, not in the config file: the download's channel cannot
+/// be written down, and the next window is built by this same process (see
+/// `open_screen_after_restart` for the one thing that has to survive more).
+struct AfterRestart {
+    cpm_wizard_next: bool,
+    fetch: Option<std::sync::mpsc::Receiver<String>>,
+}
+
+static AFTER_RESTART: std::sync::Mutex<Option<AfterRestart>> = std::sync::Mutex::new(None);
+
+fn stash_after_restart(after: AfterRestart) {
+    *AFTER_RESTART.lock().unwrap_or_else(|e| e.into_inner()) = Some(after);
+}
+
+fn take_after_restart() -> Option<AfterRestart> {
+    AFTER_RESTART.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
 struct App {
     cfg: Config,
     /// Snapshot of the global config at last sync.  When the global singleton
@@ -1154,6 +1180,10 @@ struct App {
     /// `server_restart_prompt` asks: started on Save and restart, dropped on
     /// Cancel.
     wizard_fetch_pending: bool,
+    /// The wizard's "run the CP/M setup wizard next", held the same way as
+    /// `wizard_fetch_pending`: opened when the save goes ahead, dropped on
+    /// Cancel.
+    wizard_cpm_pending: bool,
     /// When the user clicks the folder-browse button, the native dialog
     /// runs on a background OS thread so it can't block the egui event
     /// loop.  This channel carries back the chosen path (or None if
@@ -1434,6 +1464,7 @@ impl App {
             serial_restart_prompt: None,
             server_restart_prompt: false,
             wizard_fetch_pending: false,
+            wizard_cpm_pending: false,
             pending_dir_pick: None,
             pending_boot_pick: None,
             wizard,
@@ -4786,6 +4817,7 @@ impl App {
                     // the config as it stands now, not the copy we opened with.
                     self.refresh_from_global();
                     let fetch_disks = w.wants_sample_disks();
+                    let cpm_next = w.wants_cpm_wizard();
                     w.apply_to(&mut self.cfg);
                     // The numeric text buffers back-feed into cfg on save
                     // (sync_numeric_fields), so they must be refreshed from the
@@ -4803,16 +4835,64 @@ impl App {
                     // disk download waits for the answer too: on Cancel the
                     // transfer directory it would land in was never saved.
                     self.wizard_fetch_pending = fetch_disks;
+                    self.wizard_cpm_pending = cpm_next;
                     if !self.request_save_and_restart() {
                         // Refused: the answers stay as unsaved edits, and no
                         // disks go to a transfer directory that was not saved.
                         self.wizard_fetch_pending = false;
+                        self.wizard_cpm_pending = false;
                         self.dirty = true;
                     } else if !self.server_restart_prompt {
                         self.start_wizard_fetch_if_pending(&ctx);
                     }
                 }
             }
+        }
+    }
+
+    /// Leave what this window is still waiting on for the window the restart
+    /// builds (see `AfterRestart`).
+    ///
+    /// Not the CP/M wizard while the restart question is still open: a
+    /// restart from elsewhere (a SIGHUP reload) then closed a window whose
+    /// setup-wizard answers were never saved, and the CP/M wizard would have
+    /// opened after a setup nobody had finished.
+    fn hand_over_for_restart(&mut self) {
+        let cpm_wizard_next = std::mem::take(&mut self.wizard_cpm_pending) && !self.server_restart_prompt;
+        stash_after_restart(AfterRestart {
+            cpm_wizard_next,
+            fetch: self.cpm_fetch.take(),
+        });
+    }
+
+    /// Take up what the window before the restart left (see `AfterRestart`).
+    fn adopt_after_restart(&mut self, after: AfterRestart) {
+        self.wizard_cpm_pending = after.cpm_wizard_next;
+        if self.cpm_fetch.is_none() {
+            self.cpm_fetch = after.fetch;
+        }
+    }
+
+    /// The setup wizard's "run the CP/M setup wizard next": opened once its
+    /// save has gone ahead (no restart question still asking) and no
+    /// sample-disk download is running -- the CP/M wizard reads the disks as it
+    /// opens, so it waits for the download the setup wizard started.  Polled
+    /// every frame while pending, since the panel that usually collects a
+    /// finished download may not be on screen.
+    fn open_pending_cpm_wizard(&mut self, ctx: &egui::Context) {
+        // Not in a window that is about to close for the restart: the flag
+        // goes across to the next one (`stash_after_restart`).
+        if !self.wizard_cpm_pending || self.server_restart_prompt || self.restart.load(Ordering::SeqCst) {
+            return;
+        }
+        self.poll_cpm_fetch();
+        if self.cpm_fetch.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            return;
+        }
+        self.wizard_cpm_pending = false;
+        if self.cpm_wizard.is_none() {
+            self.cpm_wizard = Some(cpm_wizard::CpmWizard::new(&self.cfg.transfer_dir));
         }
     }
 
@@ -4826,6 +4906,10 @@ impl App {
                 logger::log("CP/M sample disks: another CP/M download is running, so none was started.".into());
             }
         }
+        // `wizard_cpm_pending` is left set: the CP/M wizard is opened by
+        // `open_pending_cpm_wizard`, once no sample-disk download is running.
+        // It reads the disks as it opens, and opened now it read a download
+        // half done and offered the rest as a second one.
     }
 
     /// Refresh the numeric text buffers the wizard can change from `self.cfg`.
@@ -4836,6 +4920,15 @@ impl App {
         self.ssh_port_buf = self.cfg.ssh_port.to_string();
         self.web_port_buf = self.cfg.web_port.to_string();
         self.slave_master_port_buf = self.cfg.slave_master_port.to_string();
+        // Everything else the setup wizard writes: missing here, the save's
+        // `sync_numeric_fields` put the pre-wizard values back over its
+        // answers -- an FTP port moved in the wizard came back as the old one,
+        // and could even make the save refuse a clash nobody had typed.
+        self.kermit_server_port_buf = self.cfg.kermit_server_port.to_string();
+        self.ftp_port_buf = self.cfg.ftp_port.to_string();
+        for id in [crate::config::SerialPortId::A, crate::config::SerialPortId::B] {
+            self.serial_baud_buf[id.index()] = self.cfg.port(id).baud.to_string();
+        }
     }
 
     /// Render the console panel as a single read-only multiline `TextEdit`.
@@ -5864,6 +5957,20 @@ fn attach_text_edit_menu(
 }
 
 impl eframe::App for App {
+    /// **Every close passes here, whoever asked for it.**  A restart builds a
+    /// fresh `App` in a fresh window, so what this one was still waiting on
+    /// goes across in-process: the setup wizard's "run the CP/M setup wizard
+    /// next", and the sample-disk download it started (whose thread outlives
+    /// this window).  It used to be handed over in `ui` on seeing `shutdown`,
+    /// but `main`'s shutdown watcher closes the window from another thread,
+    /// usually before that frame came: measured live, the CP/M wizard never
+    /// opened after the setup wizard's Save.
+    fn on_exit(&mut self) {
+        if self.restart.load(Ordering::SeqCst) {
+            self.hand_over_for_restart();
+        }
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         BG_DARKEST.to_normalized_gamma_f32()
     }
@@ -5889,6 +5996,9 @@ impl eframe::App for App {
 
         // Close the GUI window when the server shuts down
         if self.shutdown.load(Ordering::SeqCst) {
+            // What a restart hands to the next window is left in `on_exit`,
+            // not here: `main`'s shutdown watcher closes the window from its
+            // own thread, often before this frame ever runs.
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
@@ -6961,6 +7071,7 @@ impl eframe::App for App {
         });
         self.cpm_mount_popup_open = cpm_mount_open;
 
+        self.open_pending_cpm_wizard(&ctx);
         // The CP/M setup wizard.  Saving writes the global config itself, so
         // the CP/M keys are taken from there into this window's copy: left
         // alone, the next Save of anything else here would write the old
@@ -7876,10 +7987,12 @@ impl eframe::App for App {
                     self.start_wizard_fetch_if_pending(&ctx);
                 } else {
                     self.wizard_fetch_pending = false;
+                    self.wizard_cpm_pending = false;
                 }
             } else if cancel || !open {
                 self.server_restart_prompt = false;
                 self.wizard_fetch_pending = false;
+                self.wizard_cpm_pending = false;
             }
         }
 
@@ -8728,6 +8841,91 @@ mod tests {
         assert!(general.contains("gui_zoom_combo"), "not in the General popup");
         assert!(general.contains("\"Desktop Window\""), "no heading of its own");
         assert!(!server.contains("gui_zoom_combo"), "still in the Server popup");
+    }
+
+    /// **The CP/M setup wizard opens after the sample-disk download, not
+    /// during it.**  It reads the disks as it opens; opened alongside the
+    /// download the setup wizard had just started, it read a half-finished
+    /// folder and offered the rest as a second download.  And not while the
+    /// restart question is still asking.
+    #[test]
+    fn test_the_cpm_wizard_waits_for_the_sample_disks() {
+        let ctx = egui::Context::default();
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        app.cpm_fetch = Some(rx);
+        app.wizard_cpm_pending = true;
+        app.open_pending_cpm_wizard(&ctx);
+        assert!(app.cpm_wizard.is_none(), "opened while the download ran");
+        assert!(app.wizard_cpm_pending, "the offer was dropped");
+        tx.send("done".into()).unwrap();
+        app.server_restart_prompt = true;
+        app.open_pending_cpm_wizard(&ctx);
+        assert!(app.cpm_wizard.is_none(), "opened while the restart question was asking");
+        app.server_restart_prompt = false;
+        app.open_pending_cpm_wizard(&ctx);
+        assert!(app.cpm_wizard.is_some(), "never opened once the download finished");
+        assert!(!app.wizard_cpm_pending);
+    }
+
+    /// **"Run the CP/M setup wizard next" survives the restart Finish does.**
+    /// Save and Restart closes this window and builds a fresh `App`, so the
+    /// flag and the sample-disk download went with the old window: the CP/M
+    /// wizard never opened, and the new window offered a second download
+    /// over the first.  The old window must not open it itself either.
+    #[test]
+    fn test_the_cpm_wizard_offer_survives_the_restart() {
+        let ctx = egui::Context::default();
+        let mut old = test_app();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        old.cpm_fetch = Some(rx);
+        old.wizard_cpm_pending = true;
+        old.restart.store(true, Ordering::SeqCst);
+        tx.send("done".into()).unwrap();
+        old.open_pending_cpm_wizard(&ctx);
+        assert!(old.cpm_wizard.is_none(), "opened in the window the restart is closing");
+        // The hook every close runs, not the helper: the window can be closed
+        // from `main`'s thread without another frame.
+        eframe::App::on_exit(&mut old);
+        let after = AFTER_RESTART.lock().unwrap().take().expect("nothing handed over");
+        assert!(after.cpm_wizard_next && after.fetch.is_some(), "the flag or the download was dropped");
+        let mut new = test_app();
+        new.adopt_after_restart(after);
+        assert!(new.cpm_fetch.is_some(), "the new window does not know the download is running");
+        new.open_pending_cpm_wizard(&ctx);
+        assert!(new.cpm_wizard.is_some(), "the CP/M wizard never opened after the restart");
+
+        // A restart from elsewhere while the restart question is still open:
+        // the setup wizard's answers were never saved, so no CP/M wizard.
+        let mut asking = test_app();
+        asking.wizard_cpm_pending = true;
+        asking.server_restart_prompt = true;
+        asking.restart.store(true, Ordering::SeqCst);
+        eframe::App::on_exit(&mut asking);
+        let after = AFTER_RESTART.lock().unwrap().take().expect("nothing handed over");
+        assert!(!after.cpm_wizard_next, "handed on a CP/M wizard for a setup that was never saved");
+    }
+
+    /// **What the setup wizard writes survives the save.**  Finish writes the
+    /// answers into `cfg` and refreshes the edit boxes, and the save then
+    /// reads the boxes back into `cfg` (`sync_numeric_fields`): a box the
+    /// refresh missed put the old value back -- the Kermit and FTP ports and
+    /// both baud rates were.
+    #[test]
+    fn test_the_wizards_answers_survive_the_save() {
+        let mut app = test_app();
+        app.cfg.kermit_server_port = 2525;
+        app.cfg.ftp_port = 2200;
+        app.cfg.serial_a.baud = 115_200;
+        app.cfg.serial_b.baud = 300;
+        app.cfg.telnet_port = 2424;
+        app.sync_buffers_from_cfg();
+        app.sync_numeric_fields();
+        assert_eq!(
+            (app.cfg.kermit_server_port, app.cfg.ftp_port, app.cfg.serial_a.baud, app.cfg.serial_b.baud, app.cfg.telnet_port),
+            (2525, 2200, 115_200, 300, 2424),
+            "a box the refresh missed put the old value back"
+        );
     }
 
     /// **A transfer limit above its range is clamped in the window too**, and
