@@ -3302,16 +3302,12 @@ fn test_main_menu_row_count() {
         // sentence above (and CLAUDE.md, and the changelog) is wrong rather
         // than merely conservative — which is the failure this project keeps
         // finding.  If an entry is deliberately removed, correct all three.
-        // **The budget is 22 on every platform; what fills it is not.**  `M`
-        // is `#[cfg(unix)]`, so a Windows build draws one row fewer -- and
-        // pinning that number too, rather than skipping the assertion off
-        // Unix, keeps the Windows menu budgeted as well: a *second* entry
-        // compiled out would otherwise pass unnoticed there.  This asserted a
-        // flat 22 from `85193af` until now and was red on the windows job the
-        // whole time.
-        let full = if cfg!(unix) { 22 } else { 21 };
+        // **22 on every platform.**  The second page (`2`) was Unix only
+        // while restart and shutdown were all it held, and this pinned 21 on
+        // Windows; Add-Ons put the page on every platform, so the worst case
+        // is the same menu everywhere.
         assert_eq!(
-            drawn, full,
+            drawn, 22,
             "the worst-case main menu is no longer exactly full on {:?}",
             term,
         );
@@ -3342,8 +3338,8 @@ fn test_main_menu_row_count() {
 }
 
 /// Main menu base items are A, B, C, F, G, R, S, T, W, X (10); the CP/M
-/// emulator adds an optional `K`, gated on `cpm_emu_enabled`, and Unix builds
-/// add `M` (More) — 12 at most.
+/// emulator adds an optional `K`, gated on `cpm_emu_enabled`, and the second
+/// page adds `2` — 12 at most.
 #[test]
 fn test_main_menu_item_count() {
     let items = ["A", "B", "C", "F", "G", "R", "S", "T", "W", "X"];
@@ -3351,16 +3347,13 @@ fn test_main_menu_item_count() {
     // With the CP/M emulator enabled, `K` is the optional 11th item.
     let items_with_cpm = ["A", "B", "C", "F", "G", "K", "R", "S", "T", "W", "X"];
     assert_eq!(items_with_cpm.len(), 11, "with CP/M enabled there are 11 items");
-    // `M` is compiled out on Windows, where the page it opens has no items.
-    #[cfg(unix)]
-    {
-        let all = ["A", "B", "C", "F", "G", "K", "M", "R", "S", "T", "W", "X"];
-        assert_eq!(all.len(), 12, "a Unix build with CP/M on has 12 items");
-    }
+    // The second page (`2`, once `M`) is on every platform since Add-Ons.
+    let all = ["A", "B", "C", "F", "G", "K", "R", "S", "T", "W", "X", "2"];
+    assert_eq!(all.len(), 12, "with CP/M on and the second page there are 12 items");
 }
 
 /// Error hint must list exactly the valid main menu keys, in every variant it
-/// has — `K` appears only when the CP/M emulator is enabled, `M` only on Unix.
+/// has — `K` appears only when the CP/M emulator is enabled.
 ///
 /// It reads the **real** `main_menu_key_hint`, not a copy of its output: the
 /// previous version of this test held two literals beside two literals in
@@ -3397,13 +3390,9 @@ fn test_main_menu_error_hint() {
         );
         // The second page moved from `M` in the middle of the letters to `2`
         // at the bottom, so the hint names it after `X` -- and `M` must not
-        // come back, like the `D` and `E` below it.
-        assert_eq!(
-            hint.contains(" 2,"),
-            cfg!(unix),
-            "2 belongs in the hint exactly where the item is compiled in: {:?}",
-            hint,
-        );
+        // come back, like the `D` and `E` below it.  Every platform since
+        // Add-Ons: the page is no longer compiled out of Windows.
+        assert!(hint.contains(" 2,"), "2 belongs in the hint: {:?}", hint);
         assert!(!hint.contains(" M,"), "error hint must not mention M");
         // Keys the menu removed long ago must not come back.
         assert!(!hint.contains(" D,"), "error hint must not mention D");
