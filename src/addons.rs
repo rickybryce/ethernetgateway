@@ -17,6 +17,7 @@
 //! seen -- not on every menu draw, which would bury the log.
 
 pub(crate) mod fetch;
+pub(crate) mod gui;
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -412,14 +413,46 @@ pub(crate) fn discover_in(root: &Path) -> Vec<AddOn> {
     found
 }
 
-/// The add-ons in `ethernetgateway-data/AddOns`.
+/// Every add-on installed in `ethernetgateway-data/AddOns`, offered or not:
+/// what the settings screens list.  Callers are shown [`offered`].
 pub(crate) fn discover() -> Vec<AddOn> {
     discover_in(&addons_root())
 }
 
+/// The folder names in an `addons_disabled` value.
+pub(crate) fn disabled_ids(list: &str) -> Vec<&str> {
+    list.split(',').map(str::trim).filter(|n| !n.is_empty()).collect()
+}
+
+/// `installed` less what the settings switch off: everything, when add-ons
+/// are off as a whole, and each one named in `addons_disabled`.  A function
+/// of its inputs so the filter is tested without a config file.
+pub(crate) fn offered_from(installed: Vec<AddOn>, enabled: bool, disabled: &str) -> Vec<AddOn> {
+    if !enabled {
+        return Vec::new();
+    }
+    let off = disabled_ids(disabled);
+    installed.into_iter().filter(|a| !off.contains(&a.manifest.id.as_str())).collect()
+}
+
+/// The add-ons a caller is offered.
+pub(crate) fn offered() -> Vec<AddOn> {
+    let cfg = crate::config::get_config();
+    offered_from(discover(), cfg.addons_enabled, &cfg.addons_disabled)
+}
+
 /// Whether there is any add-on to offer.
 pub(crate) fn any() -> bool {
-    !discover().is_empty()
+    !offered().is_empty()
+}
+
+/// `disabled` with `id` switched on or off: the new `addons_disabled`.
+pub(crate) fn with_switched(disabled: &str, id: &str, on: bool) -> String {
+    let mut ids: Vec<&str> = disabled_ids(disabled).into_iter().filter(|n| *n != id).collect();
+    if !on {
+        ids.push(id);
+    }
+    crate::config::normalize_addon_list(&ids.join(","))
 }
 
 /// Log why an add-on was skipped -- once per folder and reason.
@@ -531,20 +564,34 @@ pub(crate) fn command(
     args: &[String],
     env: &[(String, String)],
 ) -> Result<tokio::process::Command, String> {
-    let program = resolve_program(dir, cmd)?;
-    let mut c = tokio::process::Command::new(program);
-    c.args(args)
-        .current_dir(dir)
-        .env_clear()
-        .envs(env.iter().map(|(k, v)| (k, v)))
-        .stdin(std::process::Stdio::piped())
+    let mut c = tokio::process::Command::from(std_command(dir, cmd, args, env)?);
+    c.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    Ok(c)
+}
+
+/// [`command`]'s common part, as a `std` command: the GUI side starts from
+/// it too, from the desktop window's thread as well as from a session, and
+/// so cannot need a runtime.  Stdio is left to the caller.
+pub(crate) fn std_command(
+    dir: &Path,
+    cmd: &str,
+    args: &[String],
+    env: &[(String, String)],
+) -> Result<std::process::Command, String> {
+    let program = resolve_program(dir, cmd)?;
+    let mut c = std::process::Command::new(program);
+    c.args(args).current_dir(dir).env_clear().envs(env.iter().map(|(k, v)| (k, v)));
     #[cfg(unix)]
-    c.process_group(0);
+    {
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+    }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         // No console window flashing up on the gateway's screen.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         c.creation_flags(CREATE_NO_WINDOW);
@@ -585,19 +632,36 @@ impl Tree {
         #[cfg(unix)]
         let tree = Tree { pgid: child.id().map(|p| p as i32) };
         #[cfg(windows)]
-        let tree = Tree { job: windows_job(&child) };
+        let tree = Tree { job: child.raw_handle().and_then(|h| windows_job(h as isize)) };
         #[cfg(not(any(unix, windows)))]
         let tree = Tree {};
         Ok((child, tree))
     }
 
-    /// End the add-on and everything it started.  Once: a second call does
-    /// nothing, so a recycled id is never signalled.
-    pub(crate) fn kill(&mut self, child: &mut tokio::process::Child) {
+    /// The tree of a `std` child (the GUI side), taken at once after spawn.
+    pub(crate) fn of_std(child: &std::process::Child) -> Tree {
+        #[cfg(unix)]
+        {
+            Tree { pgid: Some(child.id() as i32) }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            Tree { job: windows_job(child.as_raw_handle() as isize) }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = child;
+            Tree {}
+        }
+    }
+
+    /// End everything in the tree, the add-on included, without its `Child`
+    /// (which the GUI side's waiting thread owns).  Once, as `kill`.
+    pub(crate) fn kill_all(&mut self) {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid.take() {
-            // SAFETY: `killpg` takes no pointers; a group that has already
-            // gone is an ESRCH, which is the outcome wanted.
+            // SAFETY: as in `kill`.
             unsafe {
                 libc::killpg(pgid, libc::SIGKILL);
             }
@@ -606,13 +670,18 @@ impl Tree {
         if let Some(job) = self.job.take() {
             use windows_sys::Win32::Foundation::CloseHandle;
             use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-            // SAFETY: `job` is the handle `windows_job` created and nothing
-            // else closes it (`take` above).
+            // SAFETY: as in `kill`.
             unsafe {
                 TerminateJobObject(job as _, 1);
                 CloseHandle(job as _);
             }
         }
+    }
+
+    /// End the add-on and everything it started.  Once: a second call does
+    /// nothing, so a recycled id is never signalled.
+    pub(crate) fn kill(&mut self, child: &mut tokio::process::Child) {
+        self.kill_all();
         let _ = child.start_kill();
     }
 }
@@ -639,15 +708,15 @@ impl Drop for Tree {
     }
 }
 
-/// A job object that ends its processes when closed, with `child` in it.
+/// A job object that ends its processes when closed, with the process whose
+/// handle is `process` in it.
 #[cfg(windows)]
-fn windows_job(child: &tokio::process::Child) -> Option<isize> {
+fn windows_job(process: isize) -> Option<isize> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
         SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
-    let process = child.raw_handle()?;
     // SAFETY: plain Win32 calls on a handle we own; every failure path closes
     // the job it created.
     unsafe {
@@ -984,4 +1053,26 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("README.txt")).unwrap(), "my notes");
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
+
+    #[test]
+    fn test_offered_leaves_out_what_the_settings_switch_off() {
+        let mk = |id: &str| AddOn {
+            dir: PathBuf::from("/nonexistent"),
+            manifest: parse_manifest(id, "command = x.sh\n").unwrap(),
+        };
+        let all = || vec![mk("hello"), mk("guess"), mk("chess")];
+        let ids = |v: Vec<AddOn>| v.into_iter().map(|a| a.manifest.id).collect::<Vec<_>>();
+        assert_eq!(ids(offered_from(all(), true, "")), ["hello", "guess", "chess"]);
+        assert_eq!(ids(offered_from(all(), true, "guess, chess")), ["hello"]);
+        assert!(offered_from(all(), false, "").is_empty(), "off as a whole offers nothing");
+    }
+
+    #[test]
+    fn test_switching_an_add_on_edits_only_its_own_name() {
+        assert_eq!(with_switched("", "hello", false), "hello");
+        assert_eq!(with_switched("hello", "hello", false), "hello", "no repeat");
+        assert_eq!(with_switched("guess,hello", "hello", true), "guess");
+        assert_eq!(with_switched("guess", "hello", true), "guess");
+    }
+
 }

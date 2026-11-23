@@ -533,6 +533,17 @@ pub(crate) const DEFAULT_FTP_PORT: u16 = 2121;
 /// lets the OS choose.  A firewall or NAT can only be opened for a known
 /// range, which is why it exists.
 const DEFAULT_FTP_PASSIVE_PORTS: &str = "";
+/// Offer the Add-Ons (`ethernetgateway-data/AddOns/`) to callers.  On by
+/// default: an add-on only exists because the operator put it there, and with
+/// none installed the Second Menu has no `A` row anyway.  See `src/addons.rs`.
+pub(crate) const DEFAULT_ADDONS_ENABLED: bool = true;
+/// The X display a GUI add-on opens on when the gateway has no graphical
+/// session of its own (Linux only; a headless Pi started from a service or
+/// over SSH).  Empty: such a gateway refuses GUI add-ons with a clear line.
+pub(crate) const DEFAULT_ADDON_DISPLAY: &str = "";
+/// Add-ons (folder names, comma separated) the operator has switched off:
+/// installed, but not offered.  Empty: every installed add-on is offered.
+pub(crate) const DEFAULT_ADDONS_DISABLED: &str = "";
 /// Punter (C1) total block size in bytes (8..=255).  255 is the native C1
 /// maximum and the right choice for virtually every connection; lowering it
 /// (40 is the recommended floor) cuts the resend cost on a noisy line at the
@@ -1215,6 +1226,14 @@ pub struct Config {
     /// Parsed by [`parse_passive_ports`]; read on every PASV, so a change
     /// applies without a restart.
     pub ftp_passive_ports: String,
+    /// Offer add-ons at all.  See [`DEFAULT_ADDONS_ENABLED`].
+    pub addons_enabled: bool,
+    /// X display for GUI add-ons on a gateway with none.  Validated by
+    /// [`valid_addon_display`].  See [`DEFAULT_ADDON_DISPLAY`].
+    pub addon_display: String,
+    /// Switched-off add-ons, comma separated folder names, kept normalized by
+    /// [`normalize_addon_list`].  See [`DEFAULT_ADDONS_DISABLED`].
+    pub addons_disabled: String,
     /// Punter (C1) total block size in bytes (8..=255, header included).
     pub punter_block_size: u16,
     /// Punter negotiation timeout (seconds): wait for the peer's first
@@ -1554,6 +1573,9 @@ impl std::fmt::Debug for Config {
             .field("ftp_enabled", &self.ftp_enabled)
             .field("ftp_port", &self.ftp_port)
             .field("ftp_passive_ports", &self.ftp_passive_ports)
+            .field("addons_enabled", &self.addons_enabled)
+            .field("addon_display", &self.addon_display)
+            .field("addons_disabled", &self.addons_disabled)
             .field("punter_block_size", &self.punter_block_size)
             .field("punter_negotiation_timeout", &self.punter_negotiation_timeout)
             .field("punter_block_timeout", &self.punter_block_timeout)
@@ -1667,6 +1689,9 @@ impl Default for Config {
             ftp_enabled: DEFAULT_FTP_ENABLED,
             ftp_port: DEFAULT_FTP_PORT,
             ftp_passive_ports: DEFAULT_FTP_PASSIVE_PORTS.into(),
+            addons_enabled: DEFAULT_ADDONS_ENABLED,
+            addon_display: DEFAULT_ADDON_DISPLAY.into(),
+            addons_disabled: DEFAULT_ADDONS_DISABLED.into(),
             punter_block_size: DEFAULT_PUNTER_BLOCK_SIZE,
             punter_negotiation_timeout: DEFAULT_PUNTER_NEGOTIATION_TIMEOUT,
             punter_block_timeout: DEFAULT_PUNTER_BLOCK_TIMEOUT,
@@ -2733,6 +2758,19 @@ fn read_config_file_checked(path: &str) -> std::io::Result<Config> {
             .map(|v| v.trim().to_string())
             .filter(|v| parse_passive_ports(v).is_some())
             .unwrap_or_else(|| DEFAULT_FTP_PASSIVE_PORTS.into()),
+        addons_enabled: map
+            .get("addons_enabled")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_ADDONS_ENABLED),
+        addon_display: map
+            .get("addon_display")
+            .map(|v| v.trim().to_string())
+            .filter(|v| valid_addon_display(v))
+            .unwrap_or_else(|| DEFAULT_ADDON_DISPLAY.into()),
+        addons_disabled: map
+            .get("addons_disabled")
+            .map(|v| normalize_addon_list(v))
+            .unwrap_or_else(|| DEFAULT_ADDONS_DISABLED.into()),
         punter_block_size: map
             .get("punter_block_size")
             .and_then(|v| v.parse().ok())
@@ -3768,6 +3806,21 @@ fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     content.push('\n');
 
     content.push_str("\
+# Add-Ons: programs in ethernetgateway-data/AddOns/ that callers start from the
+# Second Menu (see the manual's Add-Ons section).
+# addons_enabled:     offer the add-ons at all (true/false).
+# addon_display:      Linux only: the X display a GUI add-on opens on when the
+#                     gateway has no desktop of its own, e.g. :0.  Empty: such
+#                     a gateway refuses GUI add-ons.
+# addons_disabled:    add-ons that are installed but not offered, as their
+#                     folder names separated by commas.
+");
+    write_kv(&mut content, "addons_enabled", cfg.addons_enabled);
+    write_kv_str(&mut content, "addon_display", &cfg.addon_display);
+    write_kv_str(&mut content, "addons_disabled", &cfg.addons_disabled);
+    content.push('\n');
+
+    content.push_str("\
 # Punter (C1) protocol tunables.  C1 is the file-transfer protocol CCGMS /
 # Novaterm / StrikeTerm speak natively on Commodore BBSes.
 # punter_block_size:                 total block size in bytes (8..=255, the
@@ -4284,6 +4337,30 @@ pub fn listeners(cfg: &Config) -> [(&'static str, bool, u16); 5] {
 /// listener of its own, but it binds ports, and a range that takes in a
 /// listener's port fails one of them at random.
 pub const FTP_PASSIVE_RANGE: &str = "FTP passive range";
+
+/// Whether `v` can be an `addon_display`: empty, or an X display name such
+/// as `:0`, `:1.0` or `host:0` -- letters, digits and `.:_-` only, with a
+/// colon.  It is put in a child's `DISPLAY` and nowhere else, so this is
+/// about catching a typo, not about safety.
+pub(crate) fn valid_addon_display(v: &str) -> bool {
+    v.is_empty()
+        || (v.len() <= 64
+            && v.contains(':')
+            && v.chars().all(|c| c.is_ascii_alphanumeric() || ".:_-".contains(c)))
+}
+
+/// `addons_disabled` as stored: names trimmed, empties and repeats dropped,
+/// joined by `,`.  Names keep their case -- they are folder names, and a
+/// Linux folder `Hello` is not `hello`.
+pub(crate) fn normalize_addon_list(v: &str) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for name in v.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if !seen.contains(&name) {
+            seen.push(name);
+        }
+    }
+    seen.join(",")
+}
 
 /// Parse `ftp_passive_ports`: `Some(None)` for empty (the OS chooses),
 /// `Some(Some(range))` for `low-high` or a single port, `None` for anything
@@ -4826,6 +4903,13 @@ pub(crate) fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
                 cfg.ftp_passive_ports = value.trim().to_string();
             }
         }
+        "addons_enabled" => cfg.addons_enabled = value.eq_ignore_ascii_case("true"),
+        "addon_display" => {
+            if valid_addon_display(value.trim()) {
+                cfg.addon_display = value.trim().to_string();
+            }
+        }
+        "addons_disabled" => cfg.addons_disabled = normalize_addon_list(value),
         "punter_block_size" => {
             if let Ok(v) = value.parse::<u16>() && (8..=255).contains(&v) {
                 cfg.punter_block_size = v;
@@ -6804,6 +6888,10 @@ mod tests {
             ftp_enabled: true,
             ftp_port: 2122,
             ftp_passive_ports: "50000-50010".into(),
+            // Not the defaults, so each is proved written and read back.
+            addons_enabled: false,
+            addon_display: ":1".into(),
+            addons_disabled: "guess,hello".into(),
             punter_block_size: 200,
             punter_negotiation_timeout: 50,
             punter_block_timeout: 25,
@@ -6994,6 +7082,9 @@ mod tests {
         assert_eq!(loaded.ftp_enabled, original.ftp_enabled);
         assert_eq!(loaded.ftp_port, original.ftp_port);
         assert_eq!(loaded.ftp_passive_ports, original.ftp_passive_ports);
+        assert_eq!(loaded.addons_enabled, original.addons_enabled);
+        assert_eq!(loaded.addon_display, original.addon_display);
+        assert_eq!(loaded.addons_disabled, original.addons_disabled);
         assert_eq!(loaded.punter_block_size, original.punter_block_size);
         assert_eq!(loaded.punter_negotiation_timeout, original.punter_negotiation_timeout);
         assert_eq!(loaded.punter_block_timeout, original.punter_block_timeout);
@@ -7642,7 +7733,8 @@ mod tests {
             lower
         }
 
-        let pages: [(&str, &str); 9] = [
+        let pages: [(&str, &str); 10] = [
+            ("web/addonreference.html", include_str!("../web/addonreference.html")),
             ("web/cpmreference.html", include_str!("../web/cpmreference.html")),
             ("web/ftpreference.html", include_str!("../web/ftpreference.html")),
             ("web/kermit.html", include_str!("../web/kermit.html")),
@@ -8359,6 +8451,30 @@ mod tests {
     /// Reading the source is the only way to ask this: `Debug` output alone
     /// cannot tell a field that was omitted from one whose value happens to
     /// match a neighbour's.
+    #[test]
+    fn test_an_addon_display_must_look_like_one() {
+        for ok in ["", ":0", ":1.0", "localhost:10.0", "pi-5:0"] {
+            assert!(valid_addon_display(ok), "{ok:?} refused");
+        }
+        for bad in ["0", "hello", ":0; rm", ":0 ", "a b:0", &":".repeat(65)] {
+            assert!(!valid_addon_display(bad), "{bad:?} accepted");
+        }
+        // Applied as the writer applies it: a bad value keeps the old one.
+        let mut cfg = Config { addon_display: ":0".into(), ..Config::default() };
+        apply_config_key(&mut cfg, "addon_display", "nonsense");
+        assert_eq!(cfg.addon_display, ":0");
+        apply_config_key(&mut cfg, "addon_display", "");
+        assert_eq!(cfg.addon_display, "", "empty must clear it");
+    }
+
+    #[test]
+    fn test_the_disabled_addons_list_is_stored_tidy() {
+        assert_eq!(normalize_addon_list(" hello, ,guess,hello ,"), "hello,guess");
+        // Folder names keep their case.
+        assert_eq!(normalize_addon_list("Hello,hello"), "Hello,hello");
+        assert_eq!(normalize_addon_list(""), "");
+    }
+
     #[test]
     fn test_the_redacting_debug_prints_every_field() {
         /// The fields that must appear inside `redact(...)` rather than raw.

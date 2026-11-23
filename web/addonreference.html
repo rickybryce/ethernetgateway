@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add-On Reference &mdash; Ethernet Gateway v1.1.0</title>
+    <meta name="description" content="Reference for Ethernet Gateway add-ons: programs callers run from the gateway like BBS doors -- installing them, the addon.conf manifest, the environment, input and output, windows on the gateway's screen, and the settings.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+            /* Let wide reference tables wrap rather than widening the page. */
+            overflow-wrap: break-word;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+            /* Long unbreakable tokens (config keys, command lines) otherwise set
+               the page's minimum width, and the WHOLE page scrolls sideways on a
+               narrow screen — which breaks reading the prose, not just the token.
+               Measured: every one of these 12 pages overflowed at 390px. */
+            overflow-wrap: break-word;
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            /* The two header images sit side by side in one bordered banner.  At
+               120px tall the pair is still ~420px wide, so on a phone it pushed
+               the page ~50px past the viewport.  `max-width` lets them scale down
+               together (the flex row needs `min-width: 0` to shrink an image below
+               its intrinsic width), and `height: auto` with a `max-height` cap
+               keeps the aspect ratio instead of squashing them. */
+            .header-photos { max-width: 100%; }
+            /* Prose can carry an unbreakable token too (a long URL, a wide
+               identifier).  Those live in bare text nodes, so no element's box
+               grows and the page just scrolls sideways with nothing to blame —
+               which is exactly how this one hid.  Tables shed some padding here
+               as well: three columns of 14px each is 84px of a phone's width. */
+            .body-content { overflow-wrap: anywhere; }
+            /* Under 900px only.  Wider, tables and code use `break-word` (split a
+               word only when it alone is too wide): `anywhere` let a long cell squeeze
+               its neighbours to a letter's width there ("RF|C", "seria|l_"). */
+            code, .data-table { overflow-wrap: anywhere; }
+            .data-table th,
+            .data-table td { padding: 6px 8px; }
+            .data-table { font-size: 0.8em; }
+            .logo-photo,
+            .sysop-photo {
+                height: auto;
+                max-height: 120px;
+                max-width: 100%;
+                min-width: 0;
+            }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">Add-On Reference</p>
+            <div class="hdr-version">v1.1.0</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">Add-Ons</span>
+                <span class="hdr-badge">Doors</span>
+                <span class="hdr-badge">addon.conf</span>
+                <span class="hdr-badge">Terminal</span>
+                <span class="hdr-badge">GUI</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#installing">Installing</a>
+            <a href="#manifest">Manifest</a>
+            <a href="#environment">Environment</a>
+            <a href="#io">Input &amp; Output</a>
+            <a href="#ending">Ending</a>
+            <a href="#windows">Windows</a>
+            <a href="#example">Example</a>
+            <a href="#config">Config</a>
+            <a href="#references">References</a>
+        </nav>
+
+        <div class="body-content">
+
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">An add-on is a program the operator installs for callers to run from the gateway &mdash; what a bulletin board called a <em>door</em>: a game, a quiz, a little database, a front end to another service.</p>
+                <p>
+                    Callers find them on the Second Menu: <code>2</code> on the main menu,
+                    then <code>A&nbsp;&nbsp;Add-Ons</code>, a numbered list. A terminal
+                    add-on takes over the caller&rsquo;s screen the way the SSH and Telnet
+                    Gateways hand it to a remote host, and <strong>ESC twice quickly</strong>
+                    (the back-arrow twice on a Commodore&nbsp;64) leaves it. A GUI add-on
+                    opens a window on the gateway machine&rsquo;s own screen instead.
+                </p>
+                <p>
+                    Any language will do. The gateway talks to an add-on over its standard
+                    input and output &mdash; no library, no protocol &mdash; so a shell
+                    script, Python, BASIC under an interpreter, or a compiled program all
+                    work the same way. The code lives in <code>src/addons.rs</code>
+                    (discovery, the manifest, the process tree), <code>src/addons/gui.rs</code>
+                    (windows), <code>src/addons/fetch.rs</code> (the pinned download) and
+                    <code>src/telnet/addons_ui.rs</code> (the list and the bridge).
+                </p>
+                <div class="callout callout-warn">
+                    <strong>An add-on runs as the gateway&rsquo;s user, with its rights.</strong>
+                    Only the operator can install one (it is a folder on the gateway
+                    machine), and only programs you trust belong there. The gateway runs no
+                    shell to start one (except <code>cmd.exe</code> for a Windows batch
+                    file), refuses a program outside the add-on&rsquo;s folder, and passes
+                    on none of its own environment beyond a short list &mdash; the Groq key
+                    and every password stay with the gateway.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="installing">
+                <div class="section-title">Installing</div>
+                <p class="intro">One folder per add-on, inside <code>ethernetgateway-data/AddOns/</code>.</p>
+<pre>
+ethernetgateway-data/AddOns/
+  README.txt            written once, never overwritten
+  hello/
+    addon.conf          the manifest (required)
+    hello.sh            the program it names
+    hello.cmd           ... and its Windows twin
+</pre>
+                <p>
+                    A folder copied in shows in the list the next time it is opened; no
+                    restart. A folder that cannot be used &mdash; no <code>addon.conf</code>,
+                    a manifest that does not parse, a program that is missing, not
+                    executable, or outside the folder &mdash; is left out, and the reason is
+                    written once to the log. Hidden folders (a leading dot) are ignored.
+                    The list is sorted by name.
+                </p>
+                <p>
+                    <strong>Ready-made add-ons</strong> live at
+                    <a href="https://github.com/rickybryce/ethernetgateway-addons">github.com/rickybryce/ethernetgateway-addons</a>.
+                    The desktop setup wizard downloads them (ticked by default): the exact
+                    commit this release was built with, every file checked against a
+                    SHA-256 recorded in the gateway, and a folder already present is never
+                    touched. On Linux, macOS and the BSDs a program copied in by hand needs
+                    <code>chmod +x</code>.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="manifest">
+                <div class="section-title">The Manifest: <code>addon.conf</code></div>
+                <p class="intro"><code>key = value</code> lines, like <code>egateway.conf</code>. <code>#</code> starts a comment; a repeated key takes the last value; yes/no keys accept <code>yes</code>/<code>no</code>, <code>true</code>/<code>false</code>, <code>on</code>/<code>off</code>, <code>1</code>/<code>0</code>.</p>
+                <table class="data-table">
+                    <tr><th>Manifest key</th><th>Meaning</th><th>Default</th></tr>
+                    <tr><td><code>name</code></td><td>Shown in the list</td><td>the folder name</td></tr>
+                    <tr><td><code>description</code></td><td>One line, shown as it starts and in the settings</td><td>empty</td></tr>
+                    <tr><td><code>version</code>, <code>author</code></td><td>For your own records</td><td>empty</td></tr>
+                    <tr><td><code>mode</code></td><td><code>terminal</code>, <code>gui</code> (a window on the gateway&rsquo;s screen) or <code>both</code></td><td><code>terminal</code></td></tr>
+                    <tr><td><code>command</code>, <code>args</code></td><td>The terminal side&rsquo;s program, relative to the folder, and its arguments, split into words like a shell would but without one (quotes group words; no variables or wildcards)</td><td>required for terminal/both</td></tr>
+                    <tr><td><code>gui_command</code>, <code>gui_args</code></td><td>The window side&rsquo;s program and arguments</td><td>required for gui/both</td></tr>
+                    <tr><td><code>command_linux</code>, <code>command_macos</code>, <code>command_windows</code></td><td>This platform&rsquo;s program instead (and <code>args_*</code>, <code>gui_command_*</code>, <code>gui_args_*</code> the same way). <code>linux</code> covers the BSDs</td><td>&mdash;</td></tr>
+                    <tr><td><code>input</code></td><td><code>line</code>: the gateway echoes and edits, and sends the line on Enter. <code>raw</code>: each key as it is pressed</td><td><code>line</code></td></tr>
+                    <tr><td><code>terminals</code></td><td>Which it supports: any of <code>ansi</code>, <code>ascii</code>, <code>petscii</code></td><td>all three</td></tr>
+                    <tr><td><code>min_columns</code></td><td>Refused on a narrower screen</td><td><code>0</code></td></tr>
+                    <tr><td><code>petscii</code></td><td><code>translate</code>: write ANSI and the gateway converts it for a Commodore. <code>native</code>: write PETSCII yourself; the bytes pass untouched</td><td><code>translate</code></td></tr>
+                    <tr><td><code>idle_minutes</code></td><td>Ended after this long with nothing sent either way; <code>0</code> keeps the session&rsquo;s own idle timeout</td><td><code>0</code></td></tr>
+                    <tr><td><code>max_minutes</code></td><td>Ended after this long in all</td><td><code>0</code> (none)</td></tr>
+                    <tr><td><code>single_instance</code></td><td>Only one caller at a time on the terminal side</td><td><code>no</code></td></tr>
+                    <tr><td><code>gui_wait</code></td><td>A caller who opens the window waits for it to close (ESC twice closes it)</td><td><code>no</code></td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="environment">
+                <div class="section-title">Environment</div>
+                <p class="intro">A clean environment: of the gateway&rsquo;s own variables only <code>PATH</code>, <code>HOME</code>, <code>USER</code>, <code>LOGNAME</code>, <code>LANG</code>, <code>LC_ALL</code>, <code>LC_CTYPE</code>, <code>TZ</code>, <code>TMPDIR</code> (and on Windows <code>SYSTEMROOT</code>, <code>SYSTEMDRIVE</code>, <code>WINDIR</code>, <code>COMSPEC</code>, <code>PATHEXT</code>, <code>USERPROFILE</code>, <code>TEMP</code>, <code>TMP</code>) reach it. It runs in its own folder. The gateway adds:</p>
+                <table class="data-table">
+                    <tr><th>Variable</th><th>Value</th></tr>
+                    <tr><td><code>EG_TERMINAL</code></td><td><code>ansi</code>, <code>ascii</code> or <code>petscii</code></td></tr>
+                    <tr><td><code>EG_COLUMNS</code>, <code>EG_ROWS</code></td><td>The caller&rsquo;s screen size, as the gateways report it to a remote host</td></tr>
+                    <tr><td><code>EG_COLOR</code></td><td><code>1</code> or <code>0</code></td></tr>
+                    <tr><td><code>EG_PETSCII</code></td><td><code>native</code> for a Commodore caller with <code>petscii = native</code>, else <code>translate</code></td></tr>
+                    <tr><td><code>EG_INPUT</code></td><td><code>line</code> or <code>raw</code></td></tr>
+                    <tr><td><code>EG_USER</code></td><td>The gateway login name when login is on; never a password</td></tr>
+                    <tr><td><code>EG_REMOTE_ADDR</code></td><td>The caller&rsquo;s address; empty for a local session</td></tr>
+                    <tr><td><code>EG_CONNECTION</code></td><td><code>telnet</code>, <code>ssh</code>, <code>serial</code>, <code>relay</code>, or <code>desktop</code> for a window opened from the desktop window</td></tr>
+                    <tr><td><code>EG_ADDON_DIR</code>, <code>EG_DATA_DIR</code>, <code>EG_TRANSFER_DIR</code></td><td>Absolute paths: its folder, the data folder, the transfer directory</td></tr>
+                    <tr><td><code>EG_GATEWAY_VERSION</code></td><td>e.g. <code>1.1.0</code></td></tr>
+                    <tr><td><code>TERM</code></td><td><code>ansi</code> when the add-on should write ANSI, else <code>dumb</code></td></tr>
+                </table>
+                <p class="dim-text">A window also gets <code>DISPLAY</code>, <code>WAYLAND_DISPLAY</code>, <code>XAUTHORITY</code>, <code>XDG_RUNTIME_DIR</code>, <code>XDG_SESSION_TYPE</code>, <code>DBUS_SESSION_BUS_ADDRESS</code> and, on Windows, <code>APPDATA</code>, <code>LOCALAPPDATA</code>, <code>PROGRAMDATA</code>.</p>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="io">
+                <div class="section-title">Input &amp; Output</div>
+                <p class="intro">Write to standard output; read from standard input. Standard error goes to the gateway&rsquo;s log (200 lines, 200 characters each, at most).</p>
+                <ul>
+                    <li><strong>Newlines:</strong> write <code>\n</code>; the gateway sends CR&nbsp;LF. In <code>petscii = native</code> nothing is converted &mdash; end lines with <code>\r</code>.</li>
+                    <li><strong>Line input:</strong> the gateway echoes, handles Backspace, ignores arrow keys, and sends the line with <code>\n</code> (<code>\r</code> in native PETSCII) on Enter. A line is at most 1024 bytes.</li>
+                    <li><strong>Raw input:</strong> each key as pressed; Backspace arrives as <code>0x7F</code>, a Commodore&rsquo;s back-arrow as ESC. Draw your own echo. Keys typed faster than the add-on reads are kept, up to 64&nbsp;KB.</li>
+                    <li><strong>Colour and the cursor:</strong> write ANSI. For a Commodore with <code>translate</code>, colours, clear screen, home and relative cursor moves are converted; absolute positioning (<code>ESC[r;cH</code>) is dropped. An ASCII caller gets every escape sequence stripped, so check <code>EG_TERMINAL</code> or <code>EG_COLOR</code> before drawing.</li>
+                    <li><strong>Size:</strong> keep to <code>EG_COLUMNS</code> &times; <code>EG_ROWS</code> &mdash; 40 columns on a Commodore.</li>
+                    <li><strong>No terminal:</strong> stdin and stdout are pipes, not a tty, so a curses program will not work. Flush output after a prompt that does not end a line.</li>
+                </ul>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="ending">
+                <div class="section-title">Ending</div>
+                <p class="intro">Exit when done; a non-zero status is shown to the caller (&ldquo;Hello ended with error 2.&rdquo;).</p>
+                <p>
+                    The run ends when the add-on closes its standard output (normally by
+                    exiting); the gateway waits up to two seconds for its status. Whether it
+                    ended by itself, the caller left or hung up, or a time limit ran out,
+                    the gateway then ends <strong>the add-on and everything it
+                    started</strong>: its process group on Linux, macOS and the BSDs, its job
+                    object on Windows. A program left running in the background does not
+                    survive it. Do not rely on a signal to clean up &mdash; write what
+                    matters as you go.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="windows">
+                <div class="section-title">Windows on the Gateway&rsquo;s Screen</div>
+                <p class="intro">A <code>gui</code> add-on opens on the gateway machine&rsquo;s own desktop &mdash; the only screen the gateway has.</p>
+                <ul>
+                    <li>A caller is told where it went (&ldquo;Clock opened on the gateway&rsquo;s screen (pi5).&rdquo;) and goes back to the list, or with <code>gui_wait = yes</code> waits for it to close.</li>
+                    <li>One window per add-on: a second caller is told it is already open.</li>
+                    <li>The window belongs to the gateway: a caller hanging up leaves it open; it closes when the gateway stops, and what it started goes with it.</li>
+                    <li>A gateway with no desktop (a Pi started from a service or over SSH) refuses it, unless <code>addon_display</code> names an X display (Linux, e.g. <code>:0</code>) the gateway&rsquo;s user may draw on. Then <code>DISPLAY</code> is that and <code>WAYLAND_DISPLAY</code> is removed.</li>
+                    <li>The desktop window&rsquo;s <em>Add-Ons&hellip;</em> popup has <em>Open</em> and <em>Close</em> for every add-on with a window.</li>
+                    <li>It gets no input and its output is discarded; standard error goes to the log.</li>
+                    <li>A <code>both</code> add-on opens its window when it can, then runs its terminal side for the caller.</li>
+                    <li>macOS: a script in the folder can start an app bundle with <code>open -W -a</code>, so the gateway still sees when it closes.</li>
+                </ul>
+                <div class="callout callout-info">
+                    <strong>Windows (the platform):</strong> a <code>.cmd</code> or <code>.bat</code> runs through <code>cmd.exe</code>, so its <code>args</code> pass through it; an argument with <code>%</code> or <code>^</code> may arrive altered. Save batch files with CRLF line endings. No console window appears on the gateway&rsquo;s screen.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="example">
+                <div class="section-title">Example</div>
+                <p class="intro">A complete add-on: a folder <code>hello</code> holding these two files.</p>
+<pre>
+# addon.conf
+name = Hello
+description = Says hello and asks your name
+command = hello.sh
+command_windows = hello.cmd
+</pre>
+<pre>
+#!/bin/sh
+# hello.sh  (chmod +x hello.sh)
+echo "Hello from the gateway, $EG_TERMINAL terminal, $EG_COLUMNS columns."
+printf 'Your name? '
+read -r name
+echo "Nice to meet you, $name."
+</pre>
+                <p>The add-ons repository has this one with its Windows twin, and a number-guessing game.</p>
+            </div>
+
+            <hr class="divider">
+
+            <div class="section" id="config">
+                <div class="section-title">Configuration</div>
+                <p class="intro">Configuration &rarr; <code>A&nbsp;&nbsp;Add-Ons</code> on telnet; the <em>Add-Ons&hellip;</em> button in the General frame on the web page and in the desktop window. Changes apply at once.</p>
+                <table class="data-table">
+                    <tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+                    <tr><td><code>addons_enabled</code></td><td>true</td><td>Offer add-ons on the Second Menu. Off hides them.</td></tr>
+                    <tr><td><code>addon_display</code></td><td>empty</td><td>Linux: the X display GUI add-ons open on when the gateway has no desktop. Empty: they are refused.</td></tr>
+                    <tr><td><code>addons_disabled</code></td><td>empty</td><td>Installed add-ons not offered, as folder names separated by commas.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- REFERENCES                                     -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="references">
+                <div class="section-title">References</div>
+                <p class="intro">Deep-dive reference pages for every protocol and interface, plus the character-set tables and ANSI escape-sequence reference.</p>
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3><a href="cpmreference.html">CP/M Emulator</a></h3>
+                        <p>UART profiles, EGT8080, HBIOS calls, BDOS/BIOS coverage.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="xmodemreference.html">XMODEM</a></h3>
+                        <p>128-byte blocks; CRC-16 / checksum negotiation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="ymodemreference.html">YMODEM</a></h3>
+                        <p>Block-0 metadata, batch, exact size truncation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="zmodemreference.html">ZMODEM</a></h3>
+                        <p>Streaming; ZDLE, CRC-32, autostart, resume.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermitreference.html">Kermit</a></h3>
+                        <p>Send-Init negotiation; F / A / D / Z / B transfer.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="punterreference.html">Punter</a></h3>
+                        <p>C1 dual checksum, two-phase, GOO/BAD/ACK.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="atcommandreference.html">AT Commands</a></h3>
+                        <p>Hayes command set, S-registers, +++ escape.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="telnetreference.html">Telnet</a></h3>
+                        <p>IAC negotiation, every option, the NVT data phase.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="sshreference.html">SSH</a></h3>
+                        <p>Server, gateway, host keys, TOFU, auth modes.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="ftpreference.html">FTP</a></h3>
+                        <p>The FTP server: logins, files, passive ports, slaves.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3 style="color: var(--yellow);">Add-Ons <span class="dim-text" style="font-size:0.78em;">(this page)</span></h3>
+                        <p>Programs callers run like BBS doors: the manifest, environment, windows.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="gopherreference.html">Gopher</a></h3>
+                        <p>Menus, every item type, Gopher+ attributes and forms.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html">Character Code Tables</a></h3>
+                        <p>Hex tables for every encoding: ASCII, ANSI, PETSCII, ATASCII, Baudot/ITA2, ZX Spectrum, TRS-80.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html#ansi-table">ANSI Escape Sequences</a></h3>
+                        <p>Cursor, colour/SGR, erase, and screen-mode escape codes, with the raw hex bytes.</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v1.1.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>

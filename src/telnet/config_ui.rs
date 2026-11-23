@@ -187,6 +187,11 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
+                "  {}  Add-Ons",
+                self.cyan("A")
+            ))
+            .await?;
+            self.send_line(&format!(
                 "  {}  Other Settings",
                 self.cyan("O")
             ))
@@ -250,12 +255,15 @@ impl TelnetSession {
                 "c" => {
                     self.cpm_settings().await?;
                 }
+                "a" => {
+                    self.addons_settings().await?;
+                }
                 "q" => return Ok(()),
                 _ => {
-                    // No serial comma before "or": `show_error` indents by two,
-                    // and with it this line is exactly 40 columns — the width a
-                    // PETSCII screen wraps at.
-                    self.show_error("Press C, E, F, G, M, O, R, S, H or Q.").await?;
+                    // No serial comma before "or", and E-G as a range:
+                    // `show_error` indents by two, and spelled out with `A`
+                    // this would pass the 40 columns a PETSCII screen wraps at.
+                    self.show_error("Press A, C, E-G, M, O, R, S, H or Q.").await?;
                 }
             }
         }

@@ -960,6 +960,9 @@ second listener cannot bind, and the startup warning says
         <tr><td><code>ftp_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the FTP server at startup (see &sect;8.12).</td></tr>
         <tr><td><code>ftp_port</code></td><td>u16</td><td><code>2121</code></td><td>FTP control port.</td></tr>
         <tr><td><code>ftp_passive_ports</code></td><td>string</td><td>empty</td><td>Passive data ports as <code>low-high</code>; empty lets the operating system choose.</td></tr>
+        <tr><td><code>addons_enabled</code></td><td>bool</td><td><code>true</code></td><td>Offer add-ons to callers (see &sect;5.7).</td></tr>
+        <tr><td><code>addon_display</code></td><td>string</td><td>empty</td><td>Linux only: the X display, such as <code>:0</code>, that GUI add-ons open on when the gateway has no desktop of its own.</td></tr>
+        <tr><td><code>addons_disabled</code></td><td>string</td><td>empty</td><td>Add-ons installed but not offered, as folder names separated by commas.</td></tr>
         <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>Allow the serial-modem dial target <code>ATDT KERMIT</code> (or <code>kermit-server</code>) to drop into the Kermit server. Off by default — bypasses the telnet auth gate.</td></tr>
         <tr><td><code>allow_peer_dial</code></td><td>bool</td><td><code>false</code></td><td>Let a modem port dial another serial port directly (<code>ATD&nbsp;&lt;Port&gt;@&lt;IP&gt;</code>, or pick a modem port in the Serial Gateway) instead of always landing on the gateway menu. Off by default — it lets any modem caller ring any addressable port. Gates <em>dialing</em> only: a slave still announces its ports and CP/M endpoint to its own master without it (§9.14.3). See §9.2.3.</td></tr>
         <tr><td><code>allow_relay_kermit</code></td><td>bool</td><td><code>false</code></td><td><strong>Master only.</strong> Serve this master's Kermit server to a slave port that is in Kermit-server mode, so the device on the slave's wire lists, uploads to and downloads from <em>this</em> machine's transfer directory (§9.14.3). Off by default: Kermit's server mode has no authentication of its own, so this hands a remote wire unauthenticated read/write access to the transfer directory.</td></tr>
@@ -1810,6 +1813,41 @@ environment beyond <code>PATH</code>, <code>HOME</code> and a few like them
 (<a href="#appC">Appendix&nbsp;C.3</a>) &mdash; the Groq key and every password
 stay with the gateway.  Leaving an add-on ends it and everything it started.
 </aside>
+
+<h3>Add-ons that open a window</h3>
+
+<p>
+An add-on marked <code>[GUI]</code> opens a window on <strong>the gateway
+machine's own screen</strong>, not on yours: a caller is told where it went
+("Clock opened on the gateway's screen (pi5)."), and returns to the list.  One
+copy of each window is open at a time; a second caller is told it is already
+open.  The window belongs to the gateway, not to whoever opened it: hanging up
+leaves it open, and it closes when the gateway stops.  An add-on whose manifest
+says <code>gui_wait = yes</code> keeps the caller waiting until the window is
+closed instead, and ESC twice closes it.  A <code>[TERM+GUI]</code> add-on opens
+its window (when it can) and runs its terminal side for the caller.
+</p>
+
+<p>
+A gateway with no desktop &mdash; a Raspberry Pi started from a service or over
+SSH &mdash; has nowhere to open a window, and lists <code>[GUI]</code> add-ons
+dim.  On Linux, set <code>addon_display</code> to the display they should use
+(usually <code>:0</code>, the Pi's own screen); the gateway's user must be
+allowed to draw on it.
+</p>
+
+<h3>Settings</h3>
+
+<p>
+<strong>Configuration &rarr; A&nbsp;Add-Ons</strong> on telnet, the
+<em>Add-Ons&hellip;</em> button in the General frame on the web page and in the
+desktop window: <em>Offer add-ons</em> (<code>addons_enabled</code>), the
+<em>GUI display</em> (<code>addon_display</code>, Linux), and an On box for each
+installed add-on (<code>addons_disabled</code>).  An add-on switched off stays
+in its folder but is not offered.  Changes apply at once.  The desktop window's
+list also has <em>Open</em> and <em>Close</em> for each add-on with a window
+&mdash; the one place the operator is sitting at the screen it opens on.
+</p>
 
 <p>
 Writing your own: see <a href="#appC">Appendix&nbsp;C</a>.
@@ -6655,6 +6693,9 @@ numeric values fall back to the default.
         <tr><td><code>gateway_term_width</code></td><td>u16</td><td><code>0</code></td><td>0 = auto</td><td>Columns reported to the remote host by the SSH gateway (in its PTY request) and the Telnet Gateway (via NAWS). <code>0</code> = automatic: the size the local client negotiated by NAWS, else the terminal-type default (40&times;25 PETSCII, 80&times;24 ANSI/ASCII). Set it when the automatic answer is wrong, which it is for most retro clients: terminal <em>type</em> does not imply terminal <em>width</em>. A C64 running CCGMS in ASCII mode sends <code>0x08</code> for backspace, so it is detected as ANSI and would be told it has 80 columns for a physically 40-column screen; CCGMS&rsquo;s soft 80-column mode is the same mistake in reverse under PETSCII. WiFi modems and tcpser do not send NAWS on the C64&rsquo;s behalf, so only the operator can say. When the remote has the wrong width, everything past the real margin &mdash; line wrap, backspace, history recall, tab completion &mdash; is drawn in the wrong place. Set from the telnet Gateway Configuration menu (<code>W</code>/<code>R</code>), or Server &rarr; More in the GUI and web UI. Takes effect on the next gateway connection, no restart. See §16.14.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>
         <tr><td><code>ai_model</code></td><td>string</td><td><code>openai/gpt-oss-120b</code></td><td>a model Groq serves</td><td>Which model AI chat asks. Blank means the shipped default. <strong>Not checked against a list</strong>, because the list is Groq&rsquo;s and changes without us: a wrong name comes back as Groq&rsquo;s own <code>model_not_found</code> on the chat screen, which is the honest answer. See console.groq.com/docs/models for what is served now. Models that reason are handled: a leading <code>&lt;think&gt;</code> block is stripped, and a reply that arrives only as <code>reasoning</code> is shown rather than left blank.</td></tr>
+        <tr><td><code>addon_display</code></td><td>string</td><td>empty</td><td>an X display name, or empty</td><td>Linux only. Where GUI add-ons open when the gateway has no desktop of its own (a headless Pi started from a service): an X display such as <code>:0</code>. The gateway's user needs access to it (<code>XAUTHORITY</code>). Empty: such a gateway refuses GUI add-ons. Applies at once.</td></tr>
+        <tr><td><code>addons_disabled</code></td><td>string</td><td>empty</td><td>folder names, comma-separated</td><td>Add-ons that stay installed but are not offered to callers. Set by the On boxes in the Add-Ons settings. Applies at once.</td></tr>
+        <tr><td><code>addons_enabled</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Offer the add-ons in <code>ethernetgateway-data/AddOns</code> on the Second Menu. Off hides them; the desktop window can still open a GUI add-on. Applies at once.</td></tr>
         <tr><td><code>ftp_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Run the FTP server. It serves the transfer directory (on a slave, the master&rsquo;s) with the same login, lockout and private-address rules as telnet. Takes effect on restart.</td></tr>
         <tr><td><code>ftp_passive_ports</code></td><td>string</td><td>empty</td><td><code>low-high</code>, low &ge; 1024, or empty</td><td>Ports a passive (PASV/EPSV) data connection may use, so a firewall or router can be opened for them. Empty lets the operating system choose. Read on every PASV; no restart needed.</td></tr>
         <tr><td><code>ftp_port</code></td><td>u16</td><td><code>2121</code></td><td>&ge; 1</td><td>FTP control port. Takes effect on restart.</td></tr>
@@ -6933,7 +6974,9 @@ command_windows = hello.cmd</code></pre>
 <tr><td><code>idle_minutes</code></td><td>Ended after this long with nothing sent either way. <code>0</code> keeps the gateway's own session idle timeout</td><td><code>0</code></td></tr>
 <tr><td><code>max_minutes</code></td><td>Ended after this long in all</td><td><code>0</code> (no limit)</td></tr>
 <tr><td><code>single_instance</code></td><td><code>yes</code>: only one caller at a time; a second is told it is in use</td><td><code>no</code></td></tr>
-<tr><td><code>mode</code></td><td>Leave it out (<code>terminal</code>).  <code>gui</code> and <code>both</code> are for add-ons that open a window on the gateway's screen, which is not finished: they need a <code>gui_command</code> or the folder is skipped, a <code>gui</code> add-on is listed dim with a <code>[GUI]</code> mark and refused, and a <code>both</code> add-on runs only its terminal side</td><td><code>terminal</code></td></tr>
+<tr><td><code>mode</code></td><td><code>terminal</code>: bridged to the caller. <code>gui</code>: a window on the gateway's screen, needs <code>gui_command</code>. <code>both</code>: the window and the terminal side, needs both commands (see C.8)</td><td><code>terminal</code></td></tr>
+<tr><td><code>gui_command</code>, <code>gui_args</code></td><td>The window side's program and arguments, as <code>command</code> and <code>args</code> (with <code>gui_command_linux</code> &hellip; overrides)</td><td>&mdash;</td></tr>
+<tr><td><code>gui_wait</code></td><td><code>yes</code>: a caller who opens the window waits until it closes (ESC twice closes it). <code>no</code>: the caller returns to the list at once</td><td><code>no</code></td></tr>
 </table>
 
 <h2>C.3 What the add-on is told</h2>
@@ -7033,7 +7076,7 @@ Windows runs a <code>.cmd</code> or <code>.bat</code> file through
 the gateway's runtime escapes them and refuses any it cannot escape safely, but
 an argument containing <code>%</code> or <code>^</code> may arrive
 altered.  A batch file should be saved with Windows line endings (CRLF).
-The add-on's window is never shown on the gateway's screen.
+No console window is shown on the gateway's screen for a terminal add-on.
 </p>
 
 <h2>C.7 Sharing one</h2>
@@ -7043,6 +7086,30 @@ To have an add-on included in the downloadable set, offer it to
 <a href="https://github.com/rickybryce/ethernetgateway-addons">the add-ons
 repository</a>.  An add-on there reaches the setup wizard's download with the
 next release of the gateway, which records each of its files' SHA-256.
+</p>
+
+<h2>C.8 A window on the gateway's screen</h2>
+
+<p>
+The <code>gui_command</code> is started on the gateway's own desktop with the
+same clean environment as C.3, plus what a window needs to reach the desktop
+(<code>DISPLAY</code>, <code>WAYLAND_DISPLAY</code>, <code>XAUTHORITY</code>,
+<code>XDG_RUNTIME_DIR</code>, <code>XDG_SESSION_TYPE</code>,
+<code>DBUS_SESSION_BUS_ADDRESS</code>; on Windows <code>APPDATA</code>,
+<code>LOCALAPPDATA</code>, <code>PROGRAMDATA</code>).  When it opens on
+<code>addon_display</code>, <code>DISPLAY</code> is that and
+<code>WAYLAND_DISPLAY</code> is removed, so use a toolkit that can draw on X.
+Opened from the desktop window, <code>EG_CONNECTION</code> is
+<code>desktop</code> and there is no terminal, user or address.
+</p>
+
+<p>
+It gets no input and its output is discarded; what it writes to standard error
+goes to the gateway's log (200 lines at most).  One copy runs at a time.  When
+it exits &mdash; or is closed by a caller, from the desktop window, or because
+the gateway stopped &mdash; everything it started is ended with it, as in C.5.
+On macOS, a script in the folder can start an app bundle with
+<code>open -W -a</code>, so the gateway still sees when it closes.
 </p>
 
 <hr>

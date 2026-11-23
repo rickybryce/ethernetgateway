@@ -304,7 +304,7 @@ fn any_std_stream_is_terminal() -> bool {
 ///
 /// Windows and macOS therefore answer yes unconditionally, and the environment
 /// is consulted only where it is the actual mechanism.
-fn have_graphical_session() -> bool {
+pub(crate) fn have_graphical_session() -> bool {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
@@ -1023,6 +1023,12 @@ struct App {
     /// settings; the frame's own three toggles are re-shown there so the popup
     /// reads as the whole General group rather than a fragment of it.
     general_popup_open: bool,
+    /// The Add-Ons popup (General frame).  The list is read from the disk
+    /// when it opens and on Refresh, not every frame.
+    addons_popup_open: bool,
+    addons_installed: Vec<crate::addons::AddOn>,
+    /// The last Open's outcome, shown under the list.
+    addons_status: String,
     /// Whether the "Mount CP/M Drives" window is open.  A second popup off the
     /// CP/M group rather than more rows in it: sixteen drives do not fit
     /// beside the other settings, and mounting is an occasional operation.
@@ -1425,6 +1431,9 @@ impl App {
             serial_popup_open: [false, false],
             file_transfer_popup_open: false,
             general_popup_open: false,
+            addons_popup_open: false,
+            addons_installed: Vec::new(),
+            addons_status: String::new(),
             ai_browser_popup_open: false,
             cpm_mount_popup_open: false,
             cpm_wizard: None,
@@ -1972,6 +1981,93 @@ impl App {
         ui.separator();
         ui.add_space(2.0);
         self.draw_general_logging(ui);
+    }
+
+    /// Open the Add-Ons popup, reading the folder afresh.
+    fn open_addons_popup(&mut self) {
+        self.addons_installed = crate::addons::discover();
+        self.addons_status.clear();
+        self.addons_popup_open = true;
+    }
+
+    /// The Add-Ons popup's body.
+    fn draw_addons_popup(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.cfg.addons_enabled, "Offer add-ons to callers");
+        if cfg!(all(unix, not(target_os = "macos"))) {
+            ui.horizontal(|ui| {
+                ui.label("GUI display:");
+                singleline_with_menu(ui, &mut self.cfg.addon_display, false, None);
+            });
+            let hint = if config::valid_addon_display(self.cfg.addon_display.trim()) {
+                egui::RichText::new(
+                    "Where GUI add-ons open when the gateway has no desktop of its own (an X display such as :0).",
+                )
+                .small()
+            } else {
+                egui::RichText::new("Not a display name: use one such as :0, or leave it empty.").small().color(RED_ALERT)
+            };
+            ui.label(hint);
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Installed").strong().color(AMBER));
+            if right_aligned_small_button(ui, "Refresh") {
+                self.addons_installed = crate::addons::discover();
+            }
+        });
+        if self.addons_installed.is_empty() {
+            ui.label("No add-ons are installed.");
+        }
+        let mut launch: Option<usize> = None;
+        for (i, a) in self.addons_installed.iter().enumerate() {
+            let m = &a.manifest;
+            let off = crate::addons::disabled_ids(&self.cfg.addons_disabled).contains(&m.id.as_str());
+            let mut on = !off;
+            ui.horizontal(|ui| {
+                let kind = match m.mode {
+                    crate::addons::Mode::Terminal => "",
+                    crate::addons::Mode::Gui => " [GUI]",
+                    crate::addons::Mode::Both => " [TERM+GUI]",
+                };
+                if ui.checkbox(&mut on, format!("{}{kind}", m.name)).changed() {
+                    self.cfg.addons_disabled = crate::addons::with_switched(&self.cfg.addons_disabled, &m.id, on);
+                }
+                // Close as well as Open: a window opened for a caller may be
+                // on this screen with nobody at it who started it.
+                if m.mode.has_gui() {
+                    if crate::addons::gui::is_open(&m.id) {
+                        if right_aligned_small_button(ui, "Close") {
+                            crate::addons::gui::close(&m.id);
+                        }
+                    } else if right_aligned_small_button(ui, "Open") {
+                        launch = Some(i);
+                    }
+                }
+            });
+            if !m.description.is_empty() {
+                ui.label(egui::RichText::new(&m.description).small());
+            }
+        }
+        if let Some(i) = launch {
+            let a = self.addons_installed[i].clone();
+            self.addons_status = desktop_open_addon(&a);
+        }
+        if !self.addons_status.is_empty() {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(&self.addons_status).color(AMBER));
+        }
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Add-ons live in ethernetgateway-data/AddOns. One that is unticked stays installed but is \
+                 not offered. Changes apply once saved.",
+            )
+            .small(),
+        );
+        ui.separator();
+        if ui.add(egui::Button::new(egui::RichText::new("Save").strong().size(16.0).color(AMBER_BRIGHT))).clicked() {
+            self.save_config_now();
+        }
     }
 
     /// Render the on-disk log controls, shown in the General "More…" popup.
@@ -4411,6 +4507,16 @@ impl App {
             ));
             out.ftp_passive_ports = config::get_config().ftp_passive_ports;
         }
+        // Likewise a GUI display that is not one: the loader would drop it.
+        out.addon_display = out.addon_display.trim().to_string();
+        if !config::valid_addon_display(&out.addon_display) {
+            logger::log(format!(
+                "GUI display {:?} not saved: use an X display name such as :0, or leave it empty.",
+                out.addon_display
+            ));
+            out.addon_display = config::get_config().addon_display;
+        }
+        out.addons_disabled = config::normalize_addon_list(&out.addons_disabled);
         // A username no surface could log in with keeps the stored one, and
         // the box goes back to it below, or the editor would read as unsaved.
         let username_refused = crate::credential::username_problem(&out.username);
@@ -4442,6 +4548,8 @@ impl App {
         // save went through -- left as typed, the editor would read as unsaved
         // for ever and stop picking up changes made from the other surfaces.
         self.cfg.ftp_passive_ports = self.last_synced_cfg.ftp_passive_ports.clone();
+        self.cfg.addon_display = self.last_synced_cfg.addon_display.clone();
+        self.cfg.addons_disabled = self.last_synced_cfg.addons_disabled.clone();
         if username_refused.is_some() {
             self.cfg.username = self.last_synced_cfg.username.clone();
         }
@@ -6686,7 +6794,13 @@ impl eframe::App for App {
                                         self.save_config_now();
                                     }
                                 });
-                                ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
+                                    // On the row that had room, as on the web.
+                                    if right_aligned_small_button(ui, "Add-Ons...") {
+                                        self.open_addons_popup();
+                                    }
+                                });
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut self.cfg.gateway_debug, "Gateway Debug Trace");
                                     ui.add_space(40.0);
@@ -7288,6 +7402,23 @@ impl eframe::App for App {
             }
         });
         self.general_popup_open = general_open;
+
+        // Add-Ons popup: the three add-on settings, one box per installed
+        // add-on, and Open for those with a window -- the one place the
+        // operator is at the screen a window opens on.
+        let mut addons_open = self.addons_popup_open;
+        egui::Window::new(egui::RichText::new("Add-Ons").strong().color(AMBER_BRIGHT))
+            .open(&mut addons_open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(520.0)
+            .max_width(POPUP_CONTENT_W)
+            .frame(popup_frame)
+            .show(&ctx, |ui| {
+                ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+                self.draw_addons_popup(ui);
+            });
+        self.addons_popup_open = addons_open;
 
         // ATDT KERMIT enable-confirmation popup.  Shown when the
         // operator first ticks the checkbox in the Serial — More popup;
@@ -8028,6 +8159,24 @@ impl eframe::App for App {
 }
 
 // ─── Tests ─────────────────────────────────────────────────
+
+/// Open a GUI add-on from the desktop window, and say what happened.
+///
+/// Opened whether or not it is offered to callers: switching an add-on off
+/// keeps it from telnet, not from the operator at the machine.
+fn desktop_open_addon(a: &crate::addons::AddOn) -> String {
+    use crate::addons::gui::{self, Launch};
+    let name = &a.manifest.name;
+    match gui::launch(a, &gui::desktop_env(a), "the desktop window") {
+        Launch::Opened(_) => format!("{name} opened."),
+        Launch::AlreadyOpen => format!("{name} is already open."),
+        Launch::NoScreen => format!("There is no screen to open {name} on."),
+        Launch::Failed(e) => {
+            logger::log(format!("Add-on \"{}\" could not start: {e}", a.manifest.id));
+            format!("{name} could not start: {e}")
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

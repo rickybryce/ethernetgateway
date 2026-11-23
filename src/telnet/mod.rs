@@ -2320,8 +2320,34 @@ impl TelnetSession {
             "  A dim entry cannot run on this",
             "  terminal: choose it to see why.",
             "",
+            "  [GUI] opens a window on the",
+            "  gateway's own screen, not yours.",
+            "",
             "  N/P  Next or previous page.",
             "  Q    Back to the Second Menu.",
+        ]
+    }
+
+    /// Configuration > Add-Ons help.  Associated fn so the fit tests read
+    /// the real lines.
+    fn addons_settings_help_lines() -> &'static [&'static str] {
+        &[
+            "  E  Offer add-ons to callers at",
+            "     all. Off hides them from the",
+            "     Second Menu.",
+            "",
+            "  D  Linux: the X display, such as",
+            "     :0, that GUI add-ons open on",
+            "     when the gateway has no",
+            "     desktop of its own.",
+            "",
+            "  #  Switch one add-on on or off.",
+            "     An add-on that is off stays",
+            "     installed but is not offered.",
+            "",
+            "  Add-ons live in the folder",
+            "  ethernetgateway-data/AddOns.",
+            "  Changes apply at once.",
         ]
     }
 
@@ -2353,6 +2379,9 @@ impl TelnetSession {
                 "",
                 "  C  CP/M: emulator, disk images,",
                 "     booting, and the printer",
+                "",
+                "  A  Add-Ons: offer them, switch",
+                "     each on or off",
                 "",
                 "  O  Other: AI key, logging,",
                 "     and general settings",
@@ -2396,6 +2425,10 @@ impl TelnetSession {
                 "",
                 "  C  CP/M: the emulator, disk images,",
                 "     booting a disk, and the printer",
+                "",
+                "  A  Add-Ons: offer them, switch each",
+                "     one on or off, and the display",
+                "     GUI add-ons open on",
                 "",
                 "  O  Other: AI key, logging, and",
                 "     general settings",

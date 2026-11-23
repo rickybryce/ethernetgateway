@@ -815,6 +815,7 @@ fn main() {
         let _ = server_handle.join();
         if server_died {
             glog!("FATAL: the server stopped unexpectedly (see the PANIC line above); exiting.");
+            addons::gui::close_all();
             console_close::PROCESS_DONE.store(true, Ordering::SeqCst);
             std::process::exit(1);
         }
@@ -847,6 +848,10 @@ fn main() {
     // No second "Server stopped." here: the server thread has just said it,
     // and every quit printed the line twice.
     //
+    // A GUI add-on's window belongs to the gateway, so it goes when the
+    // gateway does -- not on a restart, which is the same gateway carrying on.
+    addons::gui::close_all();
+
     // Releases a console-close handler that is holding the process open for
     // this shutdown to finish (Windows only; nothing waits on it elsewhere).
     console_close::PROCESS_DONE.store(true, Ordering::SeqCst);

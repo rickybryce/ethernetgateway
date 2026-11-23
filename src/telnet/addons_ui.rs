@@ -70,11 +70,27 @@ impl TelnetSession {
     }
 
     /// Why this add-on cannot run for this caller, or `None` when it can.
+    ///
+    /// A window-only add-on is judged on the gateway's screen, not on this
+    /// terminal: it draws nothing here.  One with both sides is judged on the
+    /// terminal, since that side is what the caller came for; its window is
+    /// a bonus that opens when there is somewhere to open it.
     pub(in crate::telnet) fn addon_refusal(&self, m: &Manifest, cols: u16) -> Option<String> {
+        Self::addon_refusal_on(self.terminal_type, m, cols, crate::addons::gui::screen().is_some())
+    }
+
+    /// [`Self::addon_refusal`] with the gateway's screen as an input, so the
+    /// headless case is tested on a machine with a desktop.
+    pub(in crate::telnet) fn addon_refusal_on(
+        terminal: TerminalType,
+        m: &Manifest,
+        cols: u16,
+        has_screen: bool,
+    ) -> Option<String> {
         if !m.mode.has_terminal() {
-            return Some("It opens a window; not offered here yet.".into());
+            return (!has_screen).then(|| "No screen on the gateway for its window.".into());
         }
-        let (ok, kind) = match self.terminal_type {
+        let (ok, kind) = match terminal {
             TerminalType::Petscii => (m.terminals.petscii, "PETSCII"),
             TerminalType::Ascii => (m.terminals.ascii, "ASCII"),
             TerminalType::Ansi => (m.terminals.ansi, "ANSI"),
@@ -136,7 +152,7 @@ impl TelnetSession {
         let mut page = 0usize;
         loop {
             // Found again on every draw (see `crate::addons`).
-            let addons = crate::addons::discover();
+            let addons = crate::addons::offered();
             if addons.is_empty() {
                 self.show_error("No add-ons are installed.").await?;
                 return Ok(());
@@ -165,7 +181,7 @@ impl TelnetSession {
                         let a = addons[n - 1].clone();
                         match self.addon_refusal(&a.manifest, cols) {
                             Some(why) => self.show_error(&why).await?,
-                            None => self.run_terminal_addon(&a).await?,
+                            None => self.run_addon(&a).await?,
                         }
                     }
                     Ok(_) => self.show_error("Invalid number.").await?,
@@ -173,6 +189,259 @@ impl TelnetSession {
                 },
             }
         }
+    }
+
+    /// Start `a` as its mode says: its window, its terminal side, or both.
+    pub(in crate::telnet) async fn run_addon(&mut self, a: &AddOn) -> Result<(), std::io::Error> {
+        let m = &a.manifest;
+        match (m.mode.has_gui(), m.mode.has_terminal()) {
+            (true, false) => self.run_gui_addon(a).await,
+            (true, true) => {
+                // The window first, quietly: a caller who came for the
+                // terminal side is not stopped by its window being open
+                // already or having nowhere to go.
+                let env = self.addon_env(a, false);
+                if let crate::addons::gui::Launch::Failed(e) =
+                    crate::addons::gui::launch(a, &env, &self.addon_who())
+                {
+                    glog!("Add-on \"{}\" window could not open: {}", m.id, e);
+                }
+                self.run_terminal_addon(a).await
+            }
+            _ => self.run_terminal_addon(a).await,
+        }
+    }
+
+    /// Who started an add-on, for the log.
+    fn addon_who(&self) -> String {
+        self.peer_addr.map(|a| a.to_string()).unwrap_or_else(|| "a local session".into())
+    }
+
+    /// Open a window-only add-on on the gateway's screen and say where it
+    /// went: the caller is, by definition, not looking at that screen.
+    pub(in crate::telnet) async fn run_gui_addon(&mut self, a: &AddOn) -> Result<(), std::io::Error> {
+        use crate::addons::gui::{self, Launch};
+        let m = a.manifest.clone();
+        let name = self.remote_text(&m.name);
+        let env = self.addon_env(a, false);
+        let mut done = match gui::launch(a, &env, &self.addon_who()) {
+            Launch::Opened(done) => done,
+            Launch::AlreadyOpen => {
+                return self.show_error(&format!("{name} is already open on the gateway's screen.")).await;
+            }
+            Launch::NoScreen => {
+                return self.show_error(&format!("This gateway has no screen to open {name} on.")).await;
+            }
+            Launch::Failed(e) => {
+                glog!("Add-on \"{}\" could not start: {}", m.id, e);
+                return self.show_error(&format!("{name} could not start.")).await;
+            }
+        };
+        let host = crate::addons::gui::where_label(&crate::relay::hostname_label());
+        self.send_line("").await?;
+        // Wrapped: a 32-character host name and a long add-on name do not
+        // fit a C64 row together.
+        let width = if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH } else { 80 } - 3;
+        for row in crate::aichat::wrap_line(&format!("{name} opened on {host}."), width) {
+            self.send_line(&format!("  {}", self.green(&row))).await?;
+        }
+        if !m.gui_wait {
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            self.wait_for_key().await?;
+            return Ok(());
+        }
+        let esc_label = if self.terminal_type == TerminalType::Petscii { "<-" } else { "ESC" };
+        self.send_line("  Waiting for its window to close.").await?;
+        self.send_line(&format!("  Press {} twice to close it.", self.cyan(esc_label))).await?;
+        self.flush().await?;
+        let is_petscii = self.terminal_type == TerminalType::Petscii;
+        let local_telnet = self.speaks_telnet();
+        let mut inbound = InboundTelnet::default();
+        let mut esc = EscHold::new();
+        let closed_by_caller = loop {
+            tokio::select! {
+                changed = done.changed() => {
+                    // A dropped sender is a waiter thread that has gone,
+                    // which only happens once the window has.
+                    let _ = changed;
+                    if *done.borrow() || changed.is_err() { break false; }
+                }
+                event = read_gateway_event(&mut self.reader, local_telnet, &mut inbound) => {
+                    match event {
+                        Ok(GatewayInboundEvent::Data(b)) => {
+                            if is_gateway_leave_key(b, is_petscii) {
+                                if esc.press(tokio::time::Instant::now()) { break true; }
+                            } else {
+                                esc.other();
+                            }
+                        }
+                        Ok(GatewayInboundEvent::NawsResize(..)) => {}
+                        // The window is the gateway's, not the caller's: a
+                        // caller who hangs up leaves it open.
+                        Ok(GatewayInboundEvent::Eof) | Err(_) => return Ok(()),
+                    }
+                }
+            }
+        };
+        inbound.finish(&mut *self.reader).await;
+        if closed_by_caller {
+            gui::close(&m.id);
+        }
+        let said = if closed_by_caller { format!("Closed {name}.") } else { format!("{name} closed.") };
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.yellow(&said))).await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        Ok(())
+    }
+
+    /// Add-ons per page on the settings screen: header 3, blank, the two
+    /// setting rows, blank, these, the page line, blank, keys, prompt = 21.
+    pub(in crate::telnet) const ADDON_SETTINGS_SHOWN: usize = 10;
+
+    /// Every row of the settings screen, title to key line.  The setting
+    /// values are inputs, so the fit test draws the longest of each.
+    pub(in crate::telnet) fn addons_settings_rows(
+        &self,
+        installed: &[AddOn],
+        page: usize,
+        enabled: bool,
+        display: &str,
+        disabled: &str,
+    ) -> Vec<String> {
+        let sep = self.separator();
+        let mut rows = vec![sep.clone(), format!("  {}", self.yellow("ADD-ONS SETTINGS")), sep, String::new()];
+        let width = if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH } else { 80 } - 1;
+        rows.push(format!("  {}  Offer add-ons: {}", self.cyan("E"), self.amber(if enabled { "Yes" } else { "No" })));
+        if cfg!(all(unix, not(target_os = "macos"))) {
+            let shown = if display.is_empty() { "(none)".to_string() } else { display.to_string() };
+            let room = width.saturating_sub("  D  GUI display: ".len());
+            rows.push(format!(
+                "  {}  GUI display: {}",
+                self.cyan("D"),
+                self.amber(&crate::webbrowser::truncate_to_width(&shown, room))
+            ));
+        }
+        rows.push(String::new());
+        let off = crate::addons::disabled_ids(disabled);
+        let total = installed.len();
+        let pages = total.div_ceil(Self::ADDON_SETTINGS_SHOWN).max(1);
+        let page = page.min(pages - 1);
+        if total == 0 {
+            rows.push(format!("  {}", self.dim("No add-ons are installed.")));
+        }
+        for (i, a) in installed.iter().enumerate().skip(page * Self::ADDON_SETTINGS_SHOWN).take(Self::ADDON_SETTINGS_SHOWN) {
+            let on = !off.contains(&a.manifest.id.as_str());
+            let prefix = format!("  {:>2}. ", i + 1);
+            let state = if on { " On" } else { " Off" };
+            let room = width.saturating_sub(prefix.len() + 4);
+            let name = crate::webbrowser::truncate_to_width(&self.remote_text(&a.manifest.name), room);
+            let pad = room.saturating_sub(name.chars().count());
+            let state = if on { self.green(state) } else { self.dim(state) };
+            rows.push(format!("{prefix}{name}{}{state}", " ".repeat(pad)));
+        }
+        if pages > 1 {
+            rows.push(format!(
+                "  Page {}/{} {} {}",
+                page + 1,
+                pages,
+                self.action_prompt("N", "Next"),
+                self.action_prompt("P", "Prev"),
+            ));
+        }
+        rows.push(String::new());
+        rows.push(format!(
+            "  {} {} {}",
+            self.dim("#=On/Off"),
+            self.action_prompt("Q", "Back"),
+            self.action_prompt("H", "Help"),
+        ));
+        rows
+    }
+
+    /// Configuration > Add-Ons: offer them at all, the display for GUI
+    /// add-ons on a gateway with no screen, and each add-on on or off.
+    pub(in crate::telnet) async fn addons_settings(&mut self) -> Result<(), std::io::Error> {
+        let mut page = 0usize;
+        loop {
+            let cfg = config::get_config();
+            // Every installed add-on, offered or not: this is where one is
+            // switched back on.
+            let installed = crate::addons::discover();
+            let pages = installed.len().div_ceil(Self::ADDON_SETTINGS_SHOWN).max(1);
+            page = page.min(pages - 1);
+            self.clear_screen().await?;
+            let rows =
+                self.addons_settings_rows(&installed, page, cfg.addons_enabled, &cfg.addon_display, &cfg.addons_disabled);
+            for row in rows {
+                self.send_line(&row).await?;
+            }
+            self.send(&format!("{}> ", self.cyan("gateway/addons"))).await?;
+            self.flush().await?;
+            let input = match self.get_line_input().await? {
+                Some(s) if !s.trim().is_empty() => s.trim().to_ascii_lowercase(),
+                _ => return Ok(()),
+            };
+            match input.as_str() {
+                "q" => return Ok(()),
+                "h" => self.show_help_page("ADD-ONS SETTINGS HELP", Self::addons_settings_help_lines()).await?,
+                "n" if pages > 1 => page = (page + 1) % pages,
+                "p" if pages > 1 => page = (page + pages - 1) % pages,
+                "e" => {
+                    let v = if cfg.addons_enabled { "false" } else { "true" };
+                    save_addon_setting("addons_enabled", v).await;
+                }
+                "d" if cfg!(all(unix, not(target_os = "macos"))) => self.addon_display_prompt(&cfg.addon_display).await?,
+                _ => match input.parse::<usize>() {
+                    Ok(n) if (1..=installed.len()).contains(&n) => {
+                        let id = &installed[n - 1].manifest.id;
+                        let on = crate::addons::disabled_ids(&cfg.addons_disabled).contains(&id.as_str());
+                        let v = crate::addons::with_switched(&cfg.addons_disabled, id, on);
+                        save_addon_setting("addons_disabled", &v).await;
+                    }
+                    Ok(_) => self.show_error("Invalid number.").await?,
+                    Err(_) => self.show_error("Press E, D, a number, H, or Q.").await?,
+                },
+            }
+        }
+    }
+
+    /// Ask for `addon_display`.  Enter alone keeps it; `-` clears it.
+    async fn addon_display_prompt(&mut self, current: &str) -> Result<(), std::io::Error> {
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("GUI DISPLAY"))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        for row in [
+            "  Where GUI add-ons open when this",
+            "  gateway has no desktop of its own,",
+            "  as an X display such as :0.",
+            "",
+            "  Enter alone keeps it; - clears it.",
+        ] {
+            self.send_line(row).await?;
+        }
+        self.send_line("").await?;
+        let shown = if current.is_empty() { "(none)" } else { current };
+        self.send_line(&format!("  Current: {}", self.amber(shown))).await?;
+        self.send(&format!("  {}", self.cyan("New value: "))).await?;
+        self.flush().await?;
+        let Some(v) = self.get_line_input().await? else { return Ok(()) };
+        let v = v.trim();
+        if v.is_empty() {
+            return Ok(());
+        }
+        let v = if v == "-" { "" } else { v };
+        if !config::valid_addon_display(v) {
+            return self.show_error("Not a display: use a name like :0.").await;
+        }
+        save_addon_setting("addon_display", v).await;
+        self.other_saved_notice("GUI display updated.").await
     }
 
     /// The `EG_*` values an add-on is told about this caller, and `TERM`.
@@ -550,6 +819,16 @@ impl TelnetSession {
         self.wait_for_key().await?;
         Ok(())
     }
+}
+
+/// Save one add-on setting off the runtime, as every telnet settings
+/// screen does (it writes the config file).
+async fn save_addon_setting(key: &'static str, value: &str) {
+    let v = value.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        config::update_config_value(key, &v);
+    })
+    .await;
 }
 
 #[cfg(test)]

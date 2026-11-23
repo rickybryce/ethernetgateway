@@ -1665,6 +1665,7 @@ fn collect_form_updates(
     let plain_keys: &[&str] = &[
         "telnet_port", "ssh_port", "kermit_server_port", "web_port",
         "ftp_port", "ftp_passive_ports",
+        "addon_display",
         "username", "password",
         "transfer_dir", "max_sessions", "idle_timeout_secs", "gui_zoom",
         "conn_rate_max", "conn_rate_window_secs",
@@ -1773,6 +1774,10 @@ fn collect_form_updates(
     // It **overrides** the select rather than merging with it: both controls
     // are submitted on every save and the select always carries something, so
     // there is no merge to do -- and a person who typed a filename meant it.
+    if let Some(v) = addons_disabled_from_form(fields, &old_cfg.addons_disabled) {
+        updates.push(("addons_disabled".to_string(), v));
+    }
+
     if let Some(typed) = fields.get("cpm_boot_image_typed") {
         let typed = typed.trim();
         if !typed.is_empty() {
@@ -1789,6 +1794,7 @@ fn collect_form_updates(
     let bool_keys: &[&str] = &[
         "telnet_enabled", "ssh_enabled", "kermit_server_enabled", "web_enabled",
         "ftp_enabled",
+        "addons_enabled",
         "security_enabled", "disable_ip_safety", "disable_gateway_connections",
         "enable_console", "verbose", "log_to_file",
         "telnet_gateway_negotiate", "telnet_gateway_raw", "gateway_debug",
@@ -3408,7 +3414,8 @@ fn frame_general(cfg: &Config) -> String {
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">General</span>\
          <span class=\"head-right\">{save}</span></div>\
-         <div class=\"row\">{v}</div>\
+         <div class=\"row\">{v}<button type=\"button\" class=\"more row-right\" \
+         data-target=\"more-addons\">Add-Ons\u{2026}</button></div>\
          <div class=\"row\">{d}<span class=\"hspace\"></span>{g}\
          <button type=\"button\" class=\"more row-right\" \
          data-target=\"more-general\">More\u{2026}</button></div>\
@@ -4745,7 +4752,88 @@ fn render_more_popups(cfg: &Config) -> String {
     // Per-port serial popups.
     out.push_str(&serial_more_popup("serial_a", "Port A", &cfg.serial_a, cfg));
     out.push_str(&serial_more_popup("serial_b", "Port B", &cfg.serial_b, cfg));
+    out.push_str(&addons_popup(cfg, &crate::addons::discover()));
     out
+}
+
+/// The form field for one add-on's On box: `addon_on_` and its folder name.
+const ADDON_ON_PREFIX: &str = "addon_on_";
+
+/// The Add-Ons popup, opened from the General frame: the three add-on
+/// settings, with one box per installed add-on.
+///
+/// **Only the add-ons drawn are judged on save.**  The ids listed here go
+/// back in `addons_listed`, and a save switches exactly those: an add-on
+/// copied in after the page was drawn keeps whatever it had, rather than
+/// being read as unticked -- the absent-checkbox rule that made a greyed
+/// box clear a setting (see `bool_checkbox_gated_off`).
+fn addons_popup(cfg: &Config, installed: &[crate::addons::AddOn]) -> String {
+    let off = crate::addons::disabled_ids(&cfg.addons_disabled);
+    let mut list = String::new();
+    for a in installed {
+        let m = &a.manifest;
+        let kind = match m.mode {
+            crate::addons::Mode::Terminal => "",
+            crate::addons::Mode::Gui => " [GUI]",
+            crate::addons::Mode::Both => " [TERM+GUI]",
+        };
+        list.push_str(&format!(
+            "<div class=\"row\"><label class=\"chk\"><input type=\"checkbox\" name=\"{prefix}{id}\" \
+             value=\"true\" {chk}> {name}{kind}</label> <span class=\"hint\">{desc}</span></div>",
+            prefix = ADDON_ON_PREFIX,
+            id = html_escape(&m.id),
+            chk = if off.contains(&m.id.as_str()) { "" } else { "checked" },
+            name = html_escape(&m.name),
+            desc = html_escape(&m.description),
+        ));
+    }
+    if installed.is_empty() {
+        list.push_str("<div class=\"row\"><span class=\"hint\">No add-ons are installed.</span></div>");
+    }
+    let listed: Vec<&str> = installed.iter().map(|a| a.manifest.id.as_str()).collect();
+    // The display matters only to a Linux gateway, which is what decides,
+    // whatever the browser runs on.
+    let display = if cfg!(all(unix, not(target_os = "macos"))) {
+        format!(
+            "<div class=\"row\">{f}</div>\
+             <div class=\"row\"><span class=\"hint\">Where GUI add-ons open when the gateway has no \
+             desktop of its own (an X display such as :0). Empty: they are refused.</span></div>",
+            f = textfield("addon_display", "GUI display", &cfg.addon_display, false, 12),
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<div class=\"modal\" id=\"more-addons\"><div class=\"modal-body\">\
+         <div class=\"modal-head\"><span class=\"title\">Add-Ons</span>\
+         <button type=\"button\" class=\"close\" data-close=\"more-addons\">\u{00d7}</button></div>\
+         <div class=\"row\">{enabled}</div>\
+         {display}\
+         <h3>Installed</h3>\
+         <input type=\"hidden\" name=\"addons_listed\" value=\"{listed}\">\
+         {list}\
+         <div class=\"row\"><span class=\"hint\">Add-ons live in ethernetgateway-data/AddOns. \
+         One that is unticked stays installed but is not offered. Changes apply at once.</span></div>\
+         <div class=\"modal-foot\">{save}</div>\
+         </div></div>",
+        enabled = checkbox("addons_enabled", "Offer add-ons to callers", cfg.addons_enabled),
+        listed = html_escape(&listed.join("/")),
+        save = save_button("save", "Save", "primary"),
+    )
+}
+
+/// The `addons_disabled` a save makes: the stored list, with each add-on the
+/// page listed switched by its box.  `None` when the form held no add-on
+/// list (a form from before add-ons, or a test's partial one).  Separated by
+/// `/`, which no folder name can hold.
+fn addons_disabled_from_form(fields: &HashMap<String, String>, stored: &str) -> Option<String> {
+    let listed = fields.get("addons_listed")?;
+    let mut list = stored.to_string();
+    for id in listed.split('/').map(str::trim).filter(|s| !s.is_empty()) {
+        let on = fields.get(&format!("{ADDON_ON_PREFIX}{id}")).is_some_and(|v| is_truthy(v));
+        list = crate::addons::with_switched(&list, id, on);
+    }
+    Some(list)
 }
 
 /// One serial port's "More" popup.
@@ -9662,4 +9750,26 @@ mod usage_help_tests {
              shared list"
         );
     }
+
+    /// A save switches exactly the add-ons the page listed: ticked on,
+    /// unticked off, and one the page never drew left as it was.
+    #[test]
+    fn test_the_addons_popup_switches_only_what_it_listed() {
+        let mut form: HashMap<String, String> = HashMap::new();
+        assert_eq!(addons_disabled_from_form(&form, "x"), None, "no list, no change");
+        form.insert("addons_listed".into(), "hello/guess".into());
+        form.insert(format!("{ADDON_ON_PREFIX}hello"), "true".into());
+        // `chess` was off and not on the page; `hello` is ticked, `guess` not.
+        assert_eq!(addons_disabled_from_form(&form, "chess,hello").as_deref(), Some("chess,guess"));
+        let cfg = Config { addons_disabled: "guess".into(), ..Config::default() };
+        let a = |id: &str| crate::addons::AddOn {
+            dir: std::path::PathBuf::from("/nonexistent"),
+            manifest: crate::addons::parse_manifest(id, "command = x.sh\n").unwrap(),
+        };
+        let html = addons_popup(&cfg, &[a("hello"), a("guess")]);
+        assert!(html.contains("name=\"addon_on_hello\" value=\"true\" checked"));
+        assert!(html.contains("name=\"addon_on_guess\" value=\"true\" >"));
+        assert!(html.contains("value=\"hello/guess\""));
+    }
+
 }

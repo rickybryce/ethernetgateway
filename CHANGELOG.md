@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows batch file), and leaving ends it and
   everything it started.  Idle and time limits, one-copy-only, and a line
   saying how it ended.
+- **GUI add-ons** (`mode = gui` or `both`): a window opened on the gateway
+  machine's own screen, with the caller told where it went.  One copy of each
+  window at a time; it belongs to the gateway, so hanging up leaves it open
+  and stopping the gateway closes it, with everything it started.
+  `gui_wait = yes` keeps the caller until it closes (ESC twice closes it).  A
+  headless Linux gateway refuses them unless `addon_display` names an X
+  display (e.g. `:0`).  The desktop window opens and closes them directly.
+- **Add-on settings in all three interfaces** (telnet Configuration > A, the
+  web page's and desktop window's General > Add-Ons...): `addons_enabled`,
+  `addon_display`, and an On box per add-on (`addons_disabled`).  They apply
+  at once.
+- **Add-On Reference** web page (`web/addonreference.html`) for anyone
+  writing one, linked from the other reference pages.
 - **The setup wizard can download the Ethernet Gateway add-ons** from
   github.com/rickybryce/ethernetgateway-addons: the exact versions this
   release was built with, every file checked against its SHA-256; an add-on

@@ -4566,7 +4566,9 @@ fn test_config_menu_row_count() {
     // while carrying the entry that keeps growing.  This screen had the room:
     // 19 -> 20 in the worst case, and the worst case needs three detected
     // addresses.
-    let submenu_rows = 3 + (1 + SERVER_ADDR_DISPLAY_CAP + 1) + 1 + 8 + 1 + 1 + 1; // 20
+    // `A` (Add-Ons) made it 21, and the `X` row (only while something waits
+    // to be resolved) 22: exactly full in the very worst case.
+    let submenu_rows = 3 + (1 + SERVER_ADDR_DISPLAY_CAP + 1) + 1 + 1 + 9 + 1 + 1 + 1; // 22
     assert!(submenu_rows <= 22, "config submenu is {} rows, exceeds 22", submenu_rows);
     // SERVER CONFIGURATION is counted by `test_server_config_screen_row_count`
     // below, which reads the real rows.  The arithmetic that used to live here
@@ -5157,6 +5159,7 @@ fn test_every_help_screen_fits_its_terminal() {
     // The Second Menu and its Add-Ons list, on every platform.
     screens.push(("more", TelnetSession::more_help_lines(true, true), PETSCII_WIDTH));
     screens.push(("addons", TelnetSession::addons_help_lines(), PETSCII_WIDTH));
+    screens.push(("addons settings", TelnetSession::addons_settings_help_lines(), PETSCII_WIDTH));
 
     // Flagged: a narrow text and a wide one, each held to its own width.
     for (name, narrow, wide) in [
@@ -6294,6 +6297,7 @@ fn all_help_line_groups(petscii: bool) -> Vec<&'static [&'static str]> {
     // Unix and a Windows shape, and this checks whichever is compiled.
     groups.push(TelnetSession::more_help_lines(true, true));
     groups.push(TelnetSession::addons_help_lines());
+    groups.push(TelnetSession::addons_settings_help_lines());
     groups
 }
 
@@ -18585,4 +18589,43 @@ async fn test_held_back_keys_reach_the_add_on_without_more_typing() {
     peer.write_all(b" ").await.unwrap();
     run.await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The add-ons settings screen fits 22 rows and its width at the worst it
+/// can be: ten long names on a page, two pages, a long display.
+#[test]
+fn test_addons_settings_screen_fits() {
+    let long = "N".repeat(90);
+    let installed: Vec<crate::addons::AddOn> = (0..15)
+        .map(|i| crate::addons::AddOn {
+            dir: std::path::PathBuf::from("/nonexistent"),
+            manifest: crate::addons::parse_manifest(&format!("a{i}"), &format!("name = {long}\ncommand = x.sh\n")).unwrap(),
+        })
+        .collect();
+    for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+        let mut s = make_test_session(term);
+        s.color_enabled = false;
+        let rows = s.addons_settings_rows(&installed, 0, true, &":".repeat(64), "a1,a3");
+        let with_prompt = rows.len() + 1;
+        assert!(with_prompt <= 22, "{with_prompt} rows on {term:?}");
+        let width = if term == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 80 };
+        for r in &rows {
+            assert!(r.chars().count() <= width, "{r:?} is {} on {term:?}", r.chars().count());
+        }
+        let on_off: Vec<bool> = rows.iter().filter(|r| r.contains(". N")).map(|r| r.ends_with(" On")).collect();
+        assert_eq!(on_off.len(), TelnetSession::ADDON_SETTINGS_SHOWN);
+        assert_eq!(&on_off[..4], &[true, false, true, false], "a1 and a3 are off");
+    }
+}
+
+/// A window-only add-on is judged on the gateway's screen, not the caller's
+/// terminal; one with a terminal side is judged on the terminal.
+#[test]
+fn test_a_window_add_on_is_refused_only_without_a_screen() {
+    let gui = crate::addons::parse_manifest("w", "mode = gui\ngui_command = w.sh\nterminals = ansi\nmin_columns = 80\n").unwrap();
+    assert_eq!(TelnetSession::addon_refusal_on(TerminalType::Petscii, &gui, 40, true), None);
+    assert!(TelnetSession::addon_refusal_on(TerminalType::Ansi, &gui, 80, false).unwrap().contains("No screen"));
+    let both = crate::addons::parse_manifest("b", "mode = both\ncommand = t.sh\ngui_command = w.sh\nterminals = ansi\n").unwrap();
+    assert_eq!(TelnetSession::addon_refusal_on(TerminalType::Ansi, &both, 80, false), None);
+    assert!(TelnetSession::addon_refusal_on(TerminalType::Petscii, &both, 40, true).is_some());
 }
