@@ -6944,7 +6944,8 @@ the caller's keys to it and its output to the caller, and ends it when the
 caller leaves.  This appendix is everything an add-on can rely on.  The two in
 <a href="https://github.com/rickybryce/ethernetgateway-addons">the add-ons
 repository</a> are complete working examples: <code>hello</code> shows every
-value the gateway passes, and <code>guess</code> is a small game.
+value the gateway passes, and <code>guess</code> is a small game.  A short one
+to start from is in <a href="#appC9">C.9</a>.
 </p>
 
 <h2>C.1 The folder</h2>
@@ -7141,6 +7142,56 @@ it exits &mdash; or is closed by a caller, from the desktop window, or because
 the gateway stopped &mdash; everything it started is ended with it, as in C.5.
 On macOS, a script in the folder can start an app bundle with
 <code>open -W -a</code>, so the gateway still sees when it closes.
+</p>
+
+<h2 id="appC9">C.9 A short example</h2>
+
+<p>
+A complete add-on in two files.  Make a folder
+<code>ethernetgateway-data/AddOns/greet/</code> and put these in it.
+<code>addon.conf</code>:
+</p>
+
+<pre><code>name = Greet
+description = Says hello and asks your name
+version = 1.0
+command = greet.sh</code></pre>
+
+<p>
+<code>greet.sh</code>:
+</p>
+
+<pre><code>#!/bin/sh
+# Greet: says hello and asks the caller's name.
+if [ "$EG_COLOR" = 1 ]; then
+  YEL=$(printf '\033[33m'); OFF=$(printf '\033[0m')
+fi
+echo "${YEL}Hello from an add-on!${OFF}"
+echo "Your screen is $EG_COLUMNS x $EG_ROWS."
+printf 'Your name? '
+read -r name
+echo "Nice to meet you, ${name:-stranger}."</code></pre>
+
+<p>
+On Linux, macOS and the BSDs make it executable
+(<code>chmod +x greet.sh</code>).  The next time a caller opens Add-Ons it is in
+the list.  What it relies on:
+</p>
+
+<ul>
+  <li>Colour is used only when <code>EG_COLOR</code> is <code>1</code>
+  (C.3), and as ANSI, which the gateway translates for a Commodore (C.4).</li>
+  <li>The lines are under 39 characters, so they fit a 40-column screen.</li>
+  <li>The prompt has no newline; the shell writes it at once, but in Python or
+  C flush it (C.4).</li>
+  <li><code>read</code> gets the whole line the caller typed, already edited:
+  line input is the default.</li>
+  <li>It exits when done, and the caller returns to the list (C.5).</li>
+</ul>
+
+<p>
+For Windows, add a <code>greet.cmd</code> and a
+<code>command_windows = greet.cmd</code> line (C.6).
 </p>
 
 <hr>
