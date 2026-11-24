@@ -158,10 +158,18 @@ pub const BASIC_NOTE: &str = "Altair BASIC: the 8080 is advised.";
 /// What a disk screen says about a disk that wants the monitor ROM.
 pub const ROM_NOTE: &str = "Needs the CUTER monitor ROM.";
 
-/// The last screen's instruction, on every surface -- shown only once the
-/// settings are saved: after "Not saved" it would send the operator to boot
-/// the configuration they came to replace.
+/// The last screen's instruction -- shown only once the settings are saved:
+/// after "Not saved" it would send the operator to boot the configuration
+/// they came to replace.  This one is telnet's, read by someone already at
+/// the main menu it names; it fits a C64 row.
 pub const FINISH_LINE: &str = "Press K on the main menu to start.";
+
+/// The same instruction on the desktop window and the web page, whose
+/// reader is not at a terminal.  "The main menu" alone sent them looking for
+/// one in the window or the page they were in (Ricky, 2026-11-24): it is the
+/// menu a terminal gets on connecting to the gateway.
+pub const FINISH_LINE_AWAY: &str =
+    "Connect to the gateway from your terminal, then press K on the main menu to start.";
 
 /// The wizard's steps.
 ///
@@ -856,6 +864,24 @@ mod tests {
             }
         }
         assert!(FINISH_LINE.len() + 2 <= 40, "{FINISH_LINE:?}");
+    }
+
+    /// **Away from a terminal, the finish line says to connect first.**  The
+    /// desktop window and the web page are not a terminal, so "the main menu"
+    /// alone sent their readers looking for one in the window or page; telnet
+    /// keeps the short line, read at that menu.  Bounded to each surface's
+    /// use of the line.
+    #[test]
+    fn test_the_finish_line_away_from_a_terminal_says_to_connect_first() {
+        assert!(FINISH_LINE_AWAY.contains("from your terminal") && FINISH_LINE_AWAY.contains("press K"));
+        let gui = include_str!("../gui/cpm_wizard.rs").replace('\r', "");
+        let web = include_str!("../webserver/cpm_wizard.rs").replace('\r', "");
+        let telnet = include_str!("../telnet/cpm_wizard_ui.rs").replace('\r', "");
+        for (name, src) in [("desktop", &gui), ("web", &web)] {
+            assert!(src.contains("wizard::FINISH_LINE_AWAY"), "{name} lost the connect-first line");
+            assert!(!src.contains("wizard::FINISH_LINE)"), "{name} shows the terminal's short line");
+        }
+        assert!(telnet.contains("wizard::FINISH_LINE)") && !telnet.contains("FINISH_LINE_AWAY"));
     }
 
     fn disk(name: &str, basic: bool, rom: bool) -> DiskFacts {

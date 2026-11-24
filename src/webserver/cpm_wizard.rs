@@ -384,7 +384,7 @@ pub(super) fn render_modal() -> String {
         z80why = html_escape(wizard::Z80_WHY),
         emucpu = html_escape(wizard::EMULATOR_CPU),
         next = html_escape(&steps_json()),
-        finish = html_escape(wizard::FINISH_LINE),
+        finish = html_escape(wizard::FINISH_LINE_AWAY),
         emu = html_escape(wizard::EMULATOR_LABEL),
         boot = html_escape(wizard::BOOT_LABEL),
         fetch = html_escape(&para(wizard::FETCH_HELP)),

@@ -506,7 +506,7 @@ impl CpmWizard {
                 for n in notes {
                     ui.label(egui::RichText::new(n).color(AMBER_DIM));
                 }
-                ui.label(egui::RichText::new(wizard::FINISH_LINE).strong().color(AMBER_BRIGHT));
+                ui.label(egui::RichText::new(wizard::FINISH_LINE_AWAY).strong().color(AMBER_BRIGHT));
             }
             Some(Err(e)) => {
                 ui.label(egui::RichText::new(format!("Not saved: {e}")).color(WARN_BORDER));
