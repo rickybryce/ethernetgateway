@@ -961,7 +961,7 @@ second listener cannot bind, and the startup warning says
         <tr><td><code>ftp_port</code></td><td>u16</td><td><code>2121</code></td><td>FTP control port.</td></tr>
         <tr><td><code>ftp_passive_ports</code></td><td>string</td><td>empty</td><td>Passive data ports as <code>low-high</code>; empty lets the operating system choose.</td></tr>
         <tr><td><code>addons_enabled</code></td><td>bool</td><td><code>true</code></td><td>Offer add-ons to callers (see &sect;5.7).</td></tr>
-        <tr><td><code>addon_display</code></td><td>string</td><td>empty</td><td>Linux only: the X display, such as <code>:0</code>, that GUI add-ons open on when the gateway has no desktop of its own.</td></tr>
+        <tr><td><code>addon_display</code></td><td>string</td><td>empty</td><td>Linux only: the X display, such as <code>:0</code>, that GUI add-ons open on when the gateway has no desktop of its own, or another computer&rsquo;s, such as <code>192.168.1.50:0</code>.  Not used by a gateway that has a desktop.</td></tr>
         <tr><td><code>addons_disabled</code></td><td>string</td><td>empty</td><td>Add-ons installed but not offered, as folder names separated by commas.</td></tr>
         <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>Allow the serial-modem dial target <code>ATDT KERMIT</code> (or <code>kermit-server</code>) to drop into the Kermit server. Off by default — bypasses the telnet auth gate.</td></tr>
         <tr><td><code>allow_peer_dial</code></td><td>bool</td><td><code>false</code></td><td>Let a modem port dial another serial port directly (<code>ATD&nbsp;&lt;Port&gt;@&lt;IP&gt;</code>, or pick a modem port in the Serial Gateway) instead of always landing on the gateway menu. Off by default — it lets any modem caller ring any addressable port. Gates <em>dialing</em> only: a slave still announces its ports and CP/M endpoint to its own master without it (§9.14.3). See §9.2.3.</td></tr>
@@ -1856,9 +1856,30 @@ its window (when it can) and runs its terminal side for the caller.
 <p>
 A gateway with no desktop &mdash; a Raspberry Pi started from a service or over
 SSH &mdash; has nowhere to open a window, and lists <code>[GUI]</code> add-ons
-dim.  On Linux, set <code>addon_display</code> to the display they should use
-(usually <code>:0</code>, the Pi's own screen); the gateway's user must be
-allowed to draw on it.
+dim.  On Linux, set <code>addon_display</code> to the X display they should
+use.  It is used <em>only</em> by such a gateway: one started from its desktop
+always opens windows on that desktop, and its settings say the field is not
+used there.
+</p>
+
+<ul>
+<li><strong>The gateway computer's own screen:</strong> <code>:0</code>.  The
+gateway's user must be allowed to draw on it.</li>
+<li><strong>Another computer's screen:</strong> its address and display, such
+as <code>192.168.1.50:0</code>.  That computer's X server must accept network
+connections (an X server on Linux is started with <code>-listen tcp</code>; most
+desktops do not by default) and must allow the gateway, for example with
+<code>xhost +192.168.1.126</code> run on that computer, where
+<code>192.168.1.126</code> is the gateway's address.  A desktop that runs only
+Wayland has no X server to accept it.</li>
+</ul>
+
+<p>
+A caller is told where the window went: &ldquo;Clock opened on the gateway's
+screen (pi5)&rdquo; or &ldquo;Clock opened on display 192.168.1.50:0&rdquo;.  A
+window that fails at once &mdash; most often a display that refuses it &mdash;
+is reported as such, with the program's own reason (&ldquo;Clock could not
+open on display 192.168.1.50:0: Error: Can't open display&rdquo;).
 </p>
 
 <h3>Settings</h3>
@@ -6718,7 +6739,7 @@ numeric values fall back to the default.
         <tr><td><code>gateway_term_width</code></td><td>u16</td><td><code>0</code></td><td>0 = auto</td><td>Columns reported to the remote host by the SSH gateway (in its PTY request) and the Telnet Gateway (via NAWS). <code>0</code> = automatic: the size the local client negotiated by NAWS, else the terminal-type default (40&times;25 PETSCII, 80&times;24 ANSI/ASCII). Set it when the automatic answer is wrong, which it is for most retro clients: terminal <em>type</em> does not imply terminal <em>width</em>. A C64 running CCGMS in ASCII mode sends <code>0x08</code> for backspace, so it is detected as ANSI and would be told it has 80 columns for a physically 40-column screen; CCGMS&rsquo;s soft 80-column mode is the same mistake in reverse under PETSCII. WiFi modems and tcpser do not send NAWS on the C64&rsquo;s behalf, so only the operator can say. When the remote has the wrong width, everything past the real margin &mdash; line wrap, backspace, history recall, tab completion &mdash; is drawn in the wrong place. Set from the telnet Gateway Configuration menu (<code>W</code>/<code>R</code>), or Server &rarr; More in the GUI and web UI. Takes effect on the next gateway connection, no restart. See §16.14.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>
         <tr><td><code>ai_model</code></td><td>string</td><td><code>openai/gpt-oss-120b</code></td><td>a model Groq serves</td><td>Which model AI chat asks. Blank means the shipped default. <strong>Not checked against a list</strong>, because the list is Groq&rsquo;s and changes without us: a wrong name comes back as Groq&rsquo;s own <code>model_not_found</code> on the chat screen, which is the honest answer. See console.groq.com/docs/models for what is served now. Models that reason are handled: a leading <code>&lt;think&gt;</code> block is stripped, and a reply that arrives only as <code>reasoning</code> is shown rather than left blank.</td></tr>
-        <tr><td><code>addon_display</code></td><td>string</td><td>empty</td><td>an X display name, or empty</td><td>Linux only. Where GUI add-ons open when the gateway has no desktop of its own (a headless Pi started from a service): an X display such as <code>:0</code>. The gateway's user needs access to it (<code>XAUTHORITY</code>). Empty: such a gateway refuses GUI add-ons. Applies at once.</td></tr>
+        <tr><td><code>addon_display</code></td><td>string</td><td>empty</td><td>an X display name, or empty</td><td>Linux only. Where GUI add-ons open when the gateway has no desktop of its own (a headless Pi started from a service): an X display such as <code>:0</code>, or another computer&rsquo;s such as <code>192.168.1.50:0</code> (its X server must accept network connections and allow the gateway; see 5.7). The gateway's user needs access to it (<code>XAUTHORITY</code>, or <code>xhost</code> on the other computer). Empty: such a gateway refuses GUI add-ons. Not used by a gateway that has a desktop. Applies at once.</td></tr>
         <tr><td><code>addons_disabled</code></td><td>string</td><td>empty</td><td>folder names, comma-separated</td><td>Add-ons that stay installed but are not offered to callers. Set by the On boxes in the Add-Ons settings. Applies at once.</td></tr>
         <tr><td><code>addons_enabled</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Offer the add-ons in <code>ethernetgateway-data/AddOns</code> on the Second Menu. Off hides them; the desktop window can still open a GUI add-on. Applies at once.</td></tr>
         <tr><td><code>ftp_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Run the FTP server. It serves the transfer directory (on a slave, the master&rsquo;s) with the same login, lockout and private-address rules as telnet. Takes effect on restart.</td></tr>

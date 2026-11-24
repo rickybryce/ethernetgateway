@@ -779,6 +779,7 @@ async fn handle_connection(
             // mutates, and rewrites egateway.conf, which would otherwise
             // park a tokio worker on filesystem I/O for every save.
             let body = request.body;
+            let reopen = reopen_target(&parse_form(&String::from_utf8_lossy(&body)));
             // The config as stored before this save, so a serial save can
             // restart only the ports it changed (see the action match below).
             let result = tokio::task::spawn_blocking(move || {
@@ -802,11 +803,7 @@ async fn handle_connection(
             // is looking.  A query flag rather than server-side state: the
             // modal belongs to the page that was just loaded, not to the next
             // person who happens to open one.
-            let location = if action == SaveAction::PortCheck {
-                format!("/?portcheck=1&notice={}", encode_query(&notice))
-            } else {
-                format!("/?notice={}", encode_query(&notice))
-            };
+            let location = save_redirect(action, &notice, reopen.as_deref());
             write_redirect(&mut stream, &location).await?;
 
             // Response has been flushed and the connection shut down —
@@ -1317,6 +1314,36 @@ fn serial_live_json() -> String {
 /// caller can trigger the matching restart behavior after the
 /// response has flushed.  Synchronous because it does filesystem I/O
 /// — wrap in `spawn_blocking`.
+/// The popup a submit asked to come back to, if it names one.
+///
+/// **A popup's own buttons used to look broken.**  "Check for add-ons",
+/// "Download sample disks", "Fetch monitor ROM" and the like submit the whole
+/// form, so the page reloads and the popup closes; their result went only to
+/// the banner at the top of the page, behind where the popup had been, and
+/// read like an ordinary save.  The page's script now names the popup such a
+/// button sits in, and the page that comes back reopens it with the result
+/// inside.  Only a `more-` popup id is accepted: it is echoed into a URL and
+/// looked up by the page, and nothing else needs it.
+fn reopen_target(fields: &HashMap<String, String>) -> Option<String> {
+    let id = fields.get("reopen")?.trim();
+    let ok = id.len() > "more-".len()
+        && id.len() <= 40
+        && id.starts_with("more-")
+        && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then(|| id.to_string())
+}
+
+/// Where a save sends the browser.  The notice rides in the query string; a
+/// port check asks for its own result popup, and a popup's own button
+/// (`reopen`) for that popup back.
+fn save_redirect(action: SaveAction, notice: &str, reopen: Option<&str>) -> String {
+    match (action, reopen) {
+        (SaveAction::PortCheck, _) => format!("/?portcheck=1&notice={}", encode_query(notice)),
+        (_, Some(id)) => format!("/?notice={}&open={}", encode_query(notice), encode_query(id)),
+        (_, None) => format!("/?notice={}", encode_query(notice)),
+    }
+}
+
 fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // Guard against a malformed submission (non-UTF-8 body, or a
     // chunked/empty body that read_request surfaced as zero-length): with
@@ -2872,6 +2899,10 @@ fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool)
     // tab order.  Moved off-screen rather than `hidden`: some browsers will not
     // submit through a button that is not rendered.
     out.push_str(DEFAULT_SUBMIT);
+    // Which popup the page that comes back should reopen: set by the page's
+    // script when a button inside a popup does some work (see
+    // `reopen_target`).  Empty for every other submit.
+    out.push_str("<input type=\"hidden\" name=\"reopen\" value=\"\">");
     // Problems an operator can fix: first inside the form, and *inside* is the
     // point -- its buttons are `submit`s carrying the problem's id, so a panel
     // drawn before the form opens would render perfectly and do nothing.  Only
@@ -4774,7 +4805,7 @@ fn render_more_popups(cfg: &Config) -> String {
     // Per-port serial popups.
     out.push_str(&serial_more_popup("serial_a", "Port A", &cfg.serial_a, cfg));
     out.push_str(&serial_more_popup("serial_b", "Port B", &cfg.serial_b, cfg));
-    out.push_str(&addons_popup(cfg, &crate::addons::discover()));
+    out.push_str(&addons_popup(cfg, &crate::addons::discover(), crate::gui::have_graphical_session()));
     out
 }
 
@@ -4789,7 +4820,7 @@ const ADDON_ON_PREFIX: &str = "addon_on_";
 /// copied in after the page was drawn keeps whatever it had, rather than
 /// being read as unticked -- the absent-checkbox rule that made a greyed
 /// box clear a setting (see `bool_checkbox_gated_off`).
-fn addons_popup(cfg: &Config, installed: &[crate::addons::AddOn]) -> String {
+fn addons_popup(cfg: &Config, installed: &[crate::addons::AddOn], has_own_screen: bool) -> String {
     let off = crate::addons::disabled_ids(&cfg.addons_disabled);
     let mut list = String::new();
     for a in installed {
@@ -4814,13 +4845,16 @@ fn addons_popup(cfg: &Config, installed: &[crate::addons::AddOn]) -> String {
     }
     let listed: Vec<&str> = installed.iter().map(|a| a.manifest.id.as_str()).collect();
     // The display matters only to a Linux gateway, which is what decides,
-    // whatever the browser runs on.
+    // whatever the browser runs on -- and only to one with no desktop of its
+    // own, so the hint says which this is: on a gateway started from its
+    // desktop the field is not used at all, and an operator reading "GUI
+    // display" there could only guess that.
     let display = if cfg!(all(unix, not(target_os = "macos"))) {
         format!(
             "<div class=\"row\">{f}</div>\
-             <div class=\"row\"><span class=\"hint\">Where GUI add-ons open when the gateway has no \
-             desktop of its own (an X display such as :0). Empty: they are refused.</span></div>",
-            f = textfield("addon_display", "GUI display", &cfg.addon_display, false, 12),
+             <div class=\"row\"><span class=\"hint\">{hint}</span></div>",
+            f = textfield("addon_display", "GUI display", &cfg.addon_display, false, 16),
+            hint = html_escape(addon_display_hint(has_own_screen)),
         )
     } else {
         String::new()
@@ -4849,6 +4883,16 @@ fn addons_popup(cfg: &Config, installed: &[crate::addons::AddOn]) -> String {
         repo = crate::addons::fetch::REPO,
         save = save_button("save", "Save", "primary"),
     )
+}
+
+/// What the GUI display field is for, on this gateway.  Plain text: the
+/// same sentences as the desktop window's.
+fn addon_display_hint(has_own_screen: bool) -> &'static str {
+    if has_own_screen {
+        crate::addons::gui::DISPLAY_UNUSED_HINT
+    } else {
+        crate::addons::gui::DISPLAY_HINT
+    }
 }
 
 /// The banner after "Check for add-ons".
@@ -5416,6 +5460,8 @@ button.secondary {
   font-size: 13px;
   padding: 3px 10px;
 }
+/* A popup's button while the server does its work (see the reopen script). */
+button.busy { opacity: 0.6; cursor: progress; }
 button.more {
   margin-left: auto;
   font-size: 13px;
@@ -5987,11 +6033,52 @@ function refreshSerialPorts() {
 document.querySelectorAll('button[data-refresh-ports]').forEach(function(b) {
   b.addEventListener('click', refreshSerialPorts);
 });
+// A button inside a popup that is not one of its footer's -- Check for
+// add-ons, Download sample disks, Fetch monitor ROM, Create -- does its work
+// and reloads the page, and a reload closes every popup.  The result used to
+// land only in the banner behind it, so the button looked as if it had done
+// nothing.  So such a button names its popup (the hidden `reopen` field; the
+// server echoes it as ?open=), says it is working while the server does it,
+// and the page that comes back reopens that popup with the result inside.
+// Footer buttons close their popup as they always have, and the port check
+// has a result popup of its own.  The busy label waits a tick: a warning
+// handler that cancels this submit must leave the button as it was.
+(function() {
+  var form = document.getElementById('cfg-form');
+  if (!form) return;
+  var field = form.querySelector('input[name=reopen]');
+  form.addEventListener('submit', function(e) {
+    var btn = e.submitter;
+    var pop = btn ? btn.closest('.modal') : null;
+    var keep = !!pop && !btn.closest('.modal-foot') && btn.value !== 'portcheck';
+    if (field) field.value = keep ? pop.id : '';
+    if (!keep) return;
+    setTimeout(function() {
+      if (e.defaultPrevented) return;
+      btn.textContent = 'Working\u{2026}';
+      btn.classList.add('busy');
+    }, 0);
+  });
+  var q = new URLSearchParams(window.location.search);
+  var id = q.get('open'), note = q.get('notice');
+  if (!id || !/^more-[a-z0-9-]+$/.test(id)) return;
+  var pop = document.getElementById(id);
+  if (!pop || !pop.classList.contains('modal')) return;
+  var head = pop.querySelector('.modal-head');
+  if (note && head) {
+    var box = document.createElement('div');
+    box.className = 'notice';
+    box.setAttribute('role', 'status');
+    box.textContent = note;
+    head.parentNode.insertBefore(box, head.nextSibling);
+  }
+  openModal(id);
+})();
 // The save-success banner rides into the page via the ?notice=...
 // query string set by our 303 redirect.  Strip it from the URL bar
 // after render so a refresh (or a bookmark) doesn't keep showing the
 // banner forever — the banner is meant to confirm one save, not act
-// as a permanent header.
+// as a permanent header.  (?open= goes with it, for the same reason.)
 if (window.location.search.indexOf('notice=') !== -1) {
   window.history.replaceState({}, document.title, window.location.pathname);
 }
@@ -9807,10 +9894,92 @@ mod usage_help_tests {
             dir: std::path::PathBuf::from("/nonexistent"),
             manifest: crate::addons::parse_manifest(id, "command = x.sh\n").unwrap(),
         };
-        let html = addons_popup(&cfg, &[a("hello"), a("guess")]);
+        let html = addons_popup(&cfg, &[a("hello"), a("guess")], false);
         assert!(html.contains("name=\"addon_on_hello\" value=\"true\" checked"));
         assert!(html.contains("name=\"addon_on_guess\" value=\"true\" >"));
         assert!(html.contains("value=\"hello/guess\""));
+    }
+
+    /// **The GUI display field says whether it is used here.**  On a gateway
+    /// with a desktop it is not, and says so; on one without, it gives both
+    /// kinds of value, this computer's screen and another computer's X
+    /// server.  Escaped: the hint holds `<gateway address>`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn test_the_addons_popup_says_whether_the_display_is_used() {
+        let cfg = Config::default();
+        let own = addons_popup(&cfg, &[], true);
+        assert!(own.contains("Not used here"), "{own}");
+        let none = addons_popup(&cfg, &[], false);
+        assert!(!none.contains("Not used here"));
+        assert!(none.contains(":0 for this computer") && none.contains("192.168.1.50:0"), "{none}");
+        assert!(none.contains("xhost +&lt;gateway address&gt;") && !none.contains("<gateway address>"), "{none}");
+    }
+
+    /// Only a popup id comes back: `more-` and plain lowercase, digits and
+    /// hyphens, because it is echoed into a URL and looked up by the page.
+    #[test]
+    fn test_only_a_popup_is_reopened() {
+        let f = |v: &str| HashMap::from([("reopen".to_string(), v.to_string())]);
+        assert_eq!(reopen_target(&f("more-addons")).as_deref(), Some("more-addons"));
+        assert_eq!(reopen_target(&f(" more-cpm-disks ")).as_deref(), Some("more-cpm-disks"));
+        for bad in ["", "more-", "port-check", "warn-web-port", "more-Addons", "more-a\"b", "more-a&x=1", &format!("more-{}", "a".repeat(40))] {
+            assert_eq!(reopen_target(&f(bad)), None, "{bad:?}");
+        }
+        assert_eq!(reopen_target(&HashMap::new()), None);
+    }
+
+    /// A popup's own button comes back to its popup with the result; a port
+    /// check keeps its own result popup; anything else is a plain banner.
+    #[test]
+    fn test_a_popup_action_redirects_back_to_its_popup() {
+        assert_eq!(
+            save_redirect(SaveAction::Save, "Add-ons: done.", Some("more-addons")),
+            format!("/?notice={}&open=more-addons", encode_query("Add-ons: done."))
+        );
+        assert_eq!(save_redirect(SaveAction::Save, "x", None), "/?notice=x");
+        assert_eq!(save_redirect(SaveAction::PortCheck, "x", Some("more-server")), "/?portcheck=1&notice=x");
+    }
+
+    /// **Every popup that holds a working button can be reopened.**  The
+    /// page reopens a popup by id after one of its buttons (other than the
+    /// footer's) has done its work; an id the rule refuses would leave that
+    /// button closing its popup with the result out of sight, as before.  So
+    /// each popup on the page with an `action` button outside its footer must
+    /// have an id [`reopen_target`] accepts -- the port check excepted, which
+    /// has its own result popup.  And the page carries the field and the
+    /// script that use it.
+    #[test]
+    fn test_every_popup_with_a_working_button_can_be_reopened() {
+        let html = render_main_page(&Config::default(), None, false);
+        let form = &html[html.find("id=\"cfg-form\"").expect("form")..];
+        assert!(form.contains("<input type=\"hidden\" name=\"reopen\" value=\"\">"));
+        assert!(html.contains("q.get('open')") && html.contains("field.value = keep ? pop.id : ''"));
+        // A popup's own div: `class="modal"` or `class="modal warn"`, never
+        // its `modal-body` or `modal-head`.
+        let starts: Vec<usize> = html
+            .match_indices("<div class=\"modal")
+            .filter(|(i, m)| matches!(html.as_bytes().get(i + m.len()), Some(b'"') | Some(b' ')))
+            .map(|(i, _)| i)
+            .collect();
+        let mut checked = 0;
+        for (n, &start) in starts.iter().enumerate() {
+            let end = starts.get(n + 1).copied().unwrap_or(html.len());
+            let popup = &html[start..end];
+            let id_at = popup.find("id=\"").expect("a popup id") + 4;
+            let id = &popup[id_at..id_at + popup[id_at..].find('"').unwrap()];
+            let body = &popup[..popup.find("modal-foot").unwrap_or(popup.len())];
+            let working = body
+                .match_indices("name=\"action\" value=\"")
+                .map(|(i, m)| &body[i + m.len()..i + m.len() + body[i + m.len()..].find('"').unwrap()])
+                .any(|v| v != "portcheck");
+            if working {
+                let f = HashMap::from([("reopen".to_string(), id.to_string())]);
+                assert_eq!(reopen_target(&f).as_deref(), Some(id), "popup {id} has a working button but cannot be reopened");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 2, "only {checked} popups with a working button were found");
     }
 
 }

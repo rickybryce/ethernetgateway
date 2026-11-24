@@ -81,11 +81,30 @@ pub(crate) fn gui_env(extra: &[(String, String)], screen: &Screen) -> Vec<(Strin
     env
 }
 
+/// What the GUI display setting is for, said where it is set (web page and
+/// desktop window) on a gateway that has a desktop of its own: there it is
+/// not used at all, and nothing else would tell the operator so.
+pub(crate) const DISPLAY_UNUSED_HINT: &str = "Not used here: this gateway runs on a desktop, so GUI \
+     add-ons open on its screen. The setting matters only to a gateway with no desktop, such as \
+     one started as a service or over SSH.";
+
+/// The same, on a gateway with no desktop, where the setting decides.  The
+/// remote example is the one measured: a headless gateway's window drawn on
+/// another machine's X server that listened on TCP and allowed it by `xhost`.
+pub(crate) const DISPLAY_HINT: &str = "This gateway has no desktop, so GUI add-ons open on this X \
+     display: :0 for this computer's own screen, or another computer's, such as 192.168.1.50:0 \
+     (its X server must accept network connections and allow this gateway, e.g. \
+     xhost +<gateway address>). Empty: GUI add-ons are refused.";
+
 /// How the telnet side names where a window went: "the gateway's screen
 /// (pi5)", or just "the gateway's screen" when the machine has no name to
-/// give.  Callers are elsewhere by definition, and the name is how they know
-/// which machine's screen to walk over to.
-pub(crate) fn where_label(host: &str) -> String {
+/// give; or, for a display the operator named, "display 192.168.1.50:0" --
+/// which need not be on the gateway at all.  Callers are elsewhere by
+/// definition, and this is how they know which screen to walk over to.
+pub(crate) fn where_label(host: &str, screen: &Screen) -> String {
+    if let Screen::Display(d) = screen {
+        return format!("display {d}");
+    }
     let host = host.trim();
     if host.is_empty() {
         "the gateway's screen".into()
@@ -124,11 +143,53 @@ fn open_windows() -> std::sync::MutexGuard<'static, Option<HashMap<String, Runni
     OPEN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How a window ended: its exit code (`None` when a signal ended it) and the
+/// last line it wrote to stderr, which is usually the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Closed {
+    pub(crate) code: Option<i32>,
+    pub(crate) last_line: Option<String>,
+}
+
+impl Closed {
+    /// It ended with an error of its own (not by a signal, which is how
+    /// `close` ends one).
+    pub(crate) fn failed(&self) -> bool {
+        self.code.is_some_and(|c| c != 0)
+    }
+}
+
+/// A window that was started.
+#[derive(Debug)]
+pub(crate) struct Opened {
+    /// `None` while it is open, then how it closed.
+    pub(crate) done: tokio::sync::watch::Receiver<Option<Closed>>,
+    /// Where it was sent.
+    pub(crate) screen: Screen,
+}
+
+/// How long a just-started window is given to fail before the caller is
+/// told it opened.  **A start is not an open.**  A window sent to a display
+/// that refuses it ("Can't open display") exits within milliseconds, and the
+/// caller was told it had opened -- on the wrong machine's screen, too.  A
+/// second is long enough for that and short enough not to be noticed.
+pub(crate) const SETTLE: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// How the window ended, if it ended within `within`; `None` when it is
+/// still open.
+pub(crate) async fn closed_within(
+    done: &mut tokio::sync::watch::Receiver<Option<Closed>>,
+    within: std::time::Duration,
+) -> Option<Closed> {
+    let _ = tokio::time::timeout(within, done.wait_for(|d| d.is_some())).await;
+    done.borrow().clone()
+}
+
 /// What became of a launch.
 #[derive(Debug)]
 pub(crate) enum Launch {
-    /// It is open; `done` turns `true` when its window has closed.
-    Opened(tokio::sync::watch::Receiver<bool>),
+    /// It was started; see [`Opened`].
+    Opened(Opened),
     /// That add-on's window is open already (one per add-on).
     AlreadyOpen,
     /// There is no screen to open it on.
@@ -178,27 +239,44 @@ pub(crate) fn launch_on(a: &AddOn, extra: &[(String, String)], who: &str, screen
     open.insert(m.id.clone(), Running { tree, generation });
     crate::logger::log(format!("Add-on \"{}\" opened its window for {who}", m.id));
 
+    // The last thing it wrote, for the caller when it fails at once; and a
+    // line to say the reader has finished, so the waiter reads it after the
+    // last line and not before.
+    let last_line = std::sync::Arc::new(Mutex::new(None::<String>));
+    let (read_tx, read_rx) = std::sync::mpsc::channel::<()>();
     if let Some(err) = child.stderr.take() {
         let id = m.id.clone();
-        std::thread::spawn(move || log_stderr(&id, err));
+        let last = last_line.clone();
+        std::thread::spawn(move || {
+            log_stderr(&id, err, &last);
+            let _ = read_tx.send(());
+        });
     }
-    let (tx, rx) = tokio::sync::watch::channel(false);
+    let (tx, rx) = tokio::sync::watch::channel(None);
     let id = m.id.clone();
     std::thread::spawn(move || {
         let status = child.wait();
+        // Bounded: something it started can hold its stderr open after it
+        // has gone, and the reason is worth a moment, not a hang.  A second,
+        // not less: the reader is normally done the instant the program
+        // exits, but on a busy machine 300 ms lost the reason under load
+        // (a full test run on a Pi), and the reason is the whole point.
+        let _ = read_rx.recv_timeout(std::time::Duration::from_secs(1));
         // Ended as a tree: what it started goes with it, as on the
         // terminal side.
         if let Some(mut r) = take_if(&id, generation) {
             r.tree.kill_all();
         }
-        let how = match status.ok().and_then(|s| s.code()) {
+        let code = status.ok().and_then(|s| s.code());
+        let how = match code {
             Some(0) | None => "closed".to_string(),
             Some(code) => format!("closed with error {code}"),
         };
         crate::logger::log(format!("Add-on \"{id}\" window {how}"));
-        let _ = tx.send(true);
+        let last_line = last_line.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let _ = tx.send(Some(Closed { code, last_line }));
     });
-    Launch::Opened(rx)
+    Launch::Opened(Opened { done: rx, screen: screen.clone() })
 }
 
 /// Remove `id`'s entry if it is still the launch numbered `generation`.
@@ -214,11 +292,14 @@ fn take_if(id: &str, generation: u64) -> Option<Running> {
 
 /// What a window writes to stderr, to the log: capped as on the terminal
 /// side, so a chatty one cannot fill it.
-fn log_stderr(id: &str, err: impl std::io::Read) {
+fn log_stderr(id: &str, err: impl std::io::Read, last: &Mutex<Option<String>>) {
     use std::io::BufRead;
     let mut n = 0u32;
     for line in std::io::BufReader::new(err).lines() {
         let Ok(line) = line else { break };
+        if !line.trim().is_empty() {
+            *last.lock().unwrap_or_else(|e| e.into_inner()) = Some(line.trim().chars().take(200).collect());
+        }
         n += 1;
         if n <= 200 {
             let line: String = line.chars().take(200).collect();
@@ -259,6 +340,11 @@ pub(crate) fn close_all() {
 mod tests {
     use super::*;
 
+    /// The open windows are one table for the whole process, and
+    /// [`close_all`] empties it: a test that starts real windows holds this,
+    /// or another one's `close_all` ends its windows mid-test.
+    static WINDOWS: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_a_window_opens_on_the_gateways_own_screen_first() {
         assert_eq!(screen_for(true, ""), Some(Screen::Own));
@@ -277,6 +363,55 @@ mod tests {
             // Linux only: elsewhere a gateway always has its own screen.
             assert_eq!(named, None);
         }
+    }
+
+    /// Where a caller is told the window went: the gateway's own screen by
+    /// its machine's name, or the display named -- which may be another
+    /// computer's, so it is never called the gateway's.
+    #[test]
+    fn test_a_window_is_said_to_open_where_it_went() {
+        assert_eq!(where_label("pi5", &Screen::Own), "the gateway's screen (pi5)");
+        assert_eq!(where_label(" ", &Screen::Own), "the gateway's screen");
+        assert_eq!(where_label("pi5", &Screen::Display("192.168.1.50:0".into())), "display 192.168.1.50:0");
+    }
+
+    /// **A start is not an open.**  A window whose display refuses it exits
+    /// at once with an error; the caller must hear that, with the program's
+    /// own reason, not "opened".  One still running after the wait has opened.
+    /// No display is needed -- the programs are scripts.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_window_that_fails_at_once_is_reported_with_its_reason() {
+        let _one = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("egw-gui-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let make = |name: &str, body: &str| {
+            let d = dir.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("addon.conf"), format!("name = {name}\nmode = gui\ngui_command = w.sh\n")).unwrap();
+            std::fs::write(d.join("w.sh"), format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(d.join("w.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::addons::load(&d).unwrap()
+        };
+        let bad = make("bad", "echo starting >&2\necho \"Error: Can't open display: 10.0.0.9:0\" >&2\nexit 1");
+        let good = make("good", "exec sleep 300");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+        let screen = Screen::Display("10.0.0.9:0".into());
+        let Launch::Opened(Opened { mut done, screen: went }) = launch_on(&bad, &[], "a test", &screen) else { panic!("not started") };
+        assert_eq!(went, screen);
+        let closed = rt.block_on(closed_within(&mut done, std::time::Duration::from_secs(5))).expect("it failed at once");
+        assert!(closed.failed());
+        assert_eq!(closed.last_line.as_deref(), Some("Error: Can't open display: 10.0.0.9:0"));
+
+        let Launch::Opened(Opened { mut done, .. }) = launch_on(&good, &[], "a test", &Screen::Own) else { panic!("not started") };
+        assert_eq!(rt.block_on(closed_within(&mut done, std::time::Duration::from_millis(300))), None, "still open");
+        assert!(close(&good.manifest.id));
+        // Ended by `close` -- a signal, not an error of its own.
+        let closed = rt.block_on(closed_within(&mut done, std::time::Duration::from_secs(5))).expect("closed");
+        assert!(!closed.failed(), "{closed:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -310,6 +445,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_a_window_is_one_copy_and_closes_with_its_children() {
+        let _one = WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("egw-gui-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -325,7 +461,7 @@ mod tests {
         let a = crate::addons::load(&dir).unwrap();
         let id = a.manifest.id.clone();
 
-        let Launch::Opened(mut done) = launch_on(&a, &[], "a test", &Screen::Own) else { panic!("not opened") };
+        let Launch::Opened(Opened { mut done, .. }) = launch_on(&a, &[], "a test", &Screen::Own) else { panic!("not opened") };
         assert!(is_open(&id));
         assert!(matches!(launch_on(&a, &[], "a test", &Screen::Own), Launch::AlreadyOpen));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -341,7 +477,7 @@ mod tests {
         // The waiter sees it go and says so.
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(5), done.wait_for(|d| *d)).await.expect("never said closed").unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), done.wait_for(|d| d.is_some())).await.expect("never said closed").unwrap();
         });
         // Its background program went with it.
         let gone = (0..100).any(|_| {

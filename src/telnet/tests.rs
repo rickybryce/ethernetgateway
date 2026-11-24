@@ -18782,16 +18782,67 @@ fn test_addons_settings_screen_fits() {
     for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
         let mut s = make_test_session(term);
         s.color_enabled = false;
-        let rows = s.addons_settings_rows(&installed, 0, true, &":".repeat(64), "a1,a3");
-        let with_prompt = rows.len() + 1;
-        assert!(with_prompt <= 22, "{with_prompt} rows on {term:?}");
-        let width = if term == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 80 };
-        for r in &rows {
-            assert!(r.chars().count() <= width, "{r:?} is {} on {term:?}", r.chars().count());
+        for own in [false, true] {
+            let rows = s.addons_settings_rows(&installed, 0, true, &":".repeat(64), "a1,a3", own);
+            let with_prompt = rows.len() + 1;
+            assert!(with_prompt <= 22, "{with_prompt} rows on {term:?}");
+            let width = if term == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 80 };
+            for r in &rows {
+                assert!(r.chars().count() <= width, "{r:?} is {} on {term:?}", r.chars().count());
+            }
+            let on_off: Vec<bool> = rows.iter().filter(|r| r.contains(". N")).map(|r| r.ends_with(" On")).collect();
+            assert_eq!(on_off.len(), TelnetSession::ADDON_SETTINGS_SHOWN);
+            assert_eq!(&on_off[..4], &[true, false, true, false], "a1 and a3 are off");
+            if cfg!(all(unix, not(target_os = "macos"))) {
+                assert_eq!(rows.iter().any(|r| r.contains("(unused)")), own, "{term:?} own={own}");
+            }
         }
-        let on_off: Vec<bool> = rows.iter().filter(|r| r.contains(". N")).map(|r| r.ends_with(" On")).collect();
-        assert_eq!(on_off.len(), TelnetSession::ADDON_SETTINGS_SHOWN);
-        assert_eq!(&on_off[..4], &[true, false, true, false], "a1 and a3 are off");
+    }
+}
+
+/// **A caller is told a window opened only once it has.**  A display that
+/// refuses the window ends it within milliseconds, and the caller was told
+/// "opened" all the same.  `run_gui_addon` must wait out
+/// [`crate::addons::gui::SETTLE`] for an early close -- reporting a failure
+/// with its reason -- before it says "opened", and name the screen the
+/// launch went to, not the machine's own.  Read from its source, bounded to
+/// that function: the page needs a real window to run.
+#[test]
+fn test_a_window_is_called_open_only_after_it_settles() {
+    let src = include_str!("addons_ui.rs").replace('\r', "");
+    let body = fn_body(&src, "async fn run_gui_addon(", "    ");
+    let settle = body.find("gui::closed_within(&mut done, gui::SETTLE)").expect("it waits for an early close");
+    let opened = body.find("opened on {host}.").expect("the opened line");
+    assert!(settle < opened, "it says opened before the wait");
+    assert!(body.contains("could not open on {host}{why}"), "a failure is not reported with its reason");
+    assert!(body.contains("where_label(&crate::relay::hostname_label(), &screen)"), "it names the wrong screen");
+}
+
+/// **The GUI display screen says what the setting is for, and when it is
+/// not used.**  Both kinds of value -- this computer's own screen and another
+/// computer's X server, with what that one needs -- and on a gateway with a
+/// desktop, that the setting does nothing there.  Fits a C64 with its
+/// prompt row, at the longest value the setting allows.
+#[test]
+fn test_the_gui_display_screen_explains_and_fits() {
+    let longest = format!("{}:0", "h".repeat(62));
+    assert!(crate::config::valid_addon_display(&longest));
+    for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+        let mut s = make_test_session(term);
+        s.color_enabled = false;
+        for own in [false, true] {
+            let rows = s.addon_display_rows(&longest, own);
+            let with_prompt = rows.len() + 1;
+            assert!(with_prompt <= 22, "{with_prompt} rows on {term:?} own={own}");
+            let width = if term == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 80 };
+            for r in &rows {
+                assert!(r.chars().count() <= width, "{r:?} is {} on {term:?}", r.chars().count());
+            }
+            let text = rows.join("\n");
+            assert!(text.contains(":0  this computer's own screen"), "{text}");
+            assert!(text.contains("192.168.1.50:0") && text.contains("xhost"), "{text}");
+            assert_eq!(text.contains("not used here"), own, "{term:?} own={own}");
+        }
     }
 }
 

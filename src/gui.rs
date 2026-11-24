@@ -2002,10 +2002,15 @@ impl App {
                 ui.label("GUI display:");
                 singleline_with_menu(ui, &mut self.cfg.addon_display, false, None);
             });
+            // Which of the two this gateway is: started from a desktop, the
+            // field is not used at all, and saying only what it is *for*
+            // left the operator guessing why a value made no difference.
             let hint = if config::valid_addon_display(self.cfg.addon_display.trim()) {
-                egui::RichText::new(
-                    "Where GUI add-ons open when the gateway has no desktop of its own (an X display such as :0).",
-                )
+                egui::RichText::new(if have_graphical_session() {
+                    crate::addons::gui::DISPLAY_UNUSED_HINT
+                } else {
+                    crate::addons::gui::DISPLAY_HINT
+                })
                 .small()
             } else {
                 egui::RichText::new("Not a display name: use one such as :0, or leave it empty.").small().color(RED_ALERT)

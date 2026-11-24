@@ -741,10 +741,10 @@ ethernetgateway-data/AddOns/
                 <div class="section-title">Windows on the Gateway&rsquo;s Screen</div>
                 <p class="intro">A <code>gui</code> add-on opens on the gateway machine&rsquo;s own desktop &mdash; the only screen the gateway has.</p>
                 <ul>
-                    <li>A caller is told where it went (&ldquo;Clock opened on the gateway&rsquo;s screen (pi5).&rdquo;) and goes back to the list, or with <code>gui_wait = yes</code> waits for it to close.</li>
+                    <li>A caller is told where it went (&ldquo;Clock opened on the gateway&rsquo;s screen (pi5).&rdquo;, or &ldquo;on display 192.168.1.50:0&rdquo;) and goes back to the list, or with <code>gui_wait = yes</code> waits for it to close. A window that exits with an error within a second is reported as not opened, with the last line it wrote to standard error.</li>
                     <li>One window per add-on: a second caller is told it is already open.</li>
                     <li>The window belongs to the gateway: a caller hanging up leaves it open; it closes when the gateway stops, and what it started goes with it.</li>
-                    <li>A gateway with no desktop (a Pi started from a service or over SSH) refuses it, unless <code>addon_display</code> names an X display (Linux, e.g. <code>:0</code>) the gateway&rsquo;s user may draw on. Then <code>DISPLAY</code> is that and <code>WAYLAND_DISPLAY</code> is removed.</li>
+                    <li>A gateway with no desktop (a Pi started from a service or over SSH) refuses it, unless <code>addon_display</code> names an X display (Linux): <code>:0</code> for that computer&rsquo;s own screen, which the gateway&rsquo;s user must be allowed to draw on, or another computer&rsquo;s, such as <code>192.168.1.50:0</code>, whose X server accepts network connections and allows the gateway (<code>xhost +</code><em>gateway address</em>). Then <code>DISPLAY</code> is that and <code>WAYLAND_DISPLAY</code> is removed. A gateway with a desktop of its own never uses <code>addon_display</code>.</li>
                     <li>The desktop window&rsquo;s <em>Add-Ons&hellip;</em> popup has <em>Open</em> and <em>Close</em> for every add-on with a window.</li>
                     <li>It gets no input and its output is discarded; standard error goes to the log.</li>
                     <li>A <code>both</code> add-on opens its window when it can, then runs its terminal side for the caller.</li>
@@ -786,7 +786,7 @@ echo "Nice to meet you, $name."
                 <table class="data-table">
                     <tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
                     <tr><td><code>addons_enabled</code></td><td>true</td><td>Offer add-ons on the Second Menu. Off hides them.</td></tr>
-                    <tr><td><code>addon_display</code></td><td>empty</td><td>Linux: the X display GUI add-ons open on when the gateway has no desktop. Empty: they are refused.</td></tr>
+                    <tr><td><code>addon_display</code></td><td>empty</td><td>Linux: the X display GUI add-ons open on when the gateway has no desktop: <code>:0</code>, or another computer&rsquo;s such as <code>192.168.1.50:0</code>. Empty: they are refused. Not used by a gateway that has a desktop.</td></tr>
                     <tr><td><code>addons_disabled</code></td><td>empty</td><td>Installed add-ons not offered, as folder names separated by commas.</td></tr>
                 </table>
             </div>

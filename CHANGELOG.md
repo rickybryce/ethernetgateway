@@ -78,6 +78,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A web popup's own buttons say what they did.**  Check for add-ons,
+  Install new and updated, Download sample disks, Fetch monitor ROM, Default
+  port and Create submit the page, which closed the popup; the result went
+  only to the banner behind it, so the button looked as if it had done
+  nothing.  The button now says "Working..." while the gateway does it, and
+  the page comes back with the same popup open and the result inside it.
+  The Save buttons at the foot of a popup close it as before.
+- **A GUI add-on is reported as opened only once it has.**  One sent to a
+  display that refused it ended at once, and the caller was still told it
+  had opened -- "on the gateway's screen", even when the display was another
+  computer's.  The gateway now gives a window a second to fail; one that
+  does is reported with the program's own reason, and one that opens is
+  said to be on the gateway's screen or on the display named.
+- **The GUI display setting says when it is not used.**  It matters only to
+  a gateway with no desktop of its own; on one started from its desktop the
+  web page, desktop window and telnet settings now say it is not used there.
+  Where it is, they give both kinds of value: `:0` for that computer's own
+  screen, or another computer's X display such as `192.168.1.50:0`, whose X
+  server must accept network connections and allow the gateway (`xhost`).
 - **Add-Ons is on the Second Menu even before any add-on is installed.**
   It used to appear only once one was, so a telnet caller on a fresh gateway
   could never reach C (Check) to download the first.  The empty list now

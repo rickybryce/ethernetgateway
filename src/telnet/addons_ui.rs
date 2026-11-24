@@ -377,8 +377,8 @@ impl TelnetSession {
         let m = a.manifest.clone();
         let name = self.remote_text(&m.name);
         let env = self.addon_env(a, false);
-        let mut done = match gui::launch(a, &env, &self.addon_who()) {
-            Launch::Opened(done) => done,
+        let gui::Opened { mut done, screen } = match gui::launch(a, &env, &self.addon_who()) {
+            Launch::Opened(o) => o,
             Launch::AlreadyOpen => {
                 return self.show_error(&format!("{name} is already open on the gateway's screen.")).await;
             }
@@ -390,11 +390,36 @@ impl TelnetSession {
                 return self.show_error(&format!("{name} could not start.")).await;
             }
         };
-        let host = crate::addons::gui::where_label(&crate::relay::hostname_label());
+        let host = gui::where_label(&crate::relay::hostname_label(), &screen);
         self.clear_screen().await?;
         // Wrapped: a 32-character host name and a long add-on name do not
         // fit a C64 row together.
         let width = if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH } else { 80 } - 3;
+        // Started is not open: a display that refuses the window ends it
+        // within milliseconds, so the caller hears which before being told.
+        for row in crate::aichat::wrap_line(&format!("Opening {name}..."), width) {
+            self.send_line(&format!("  {row}")).await?;
+        }
+        self.flush().await?;
+        if let Some(closed) = gui::closed_within(&mut done, gui::SETTLE).await {
+            let said = if closed.failed() {
+                let why = closed.last_line.as_deref().map(|l| format!(": {}", self.remote_text(l))).unwrap_or_default();
+                format!("{name} could not open on {host}{why}")
+            } else {
+                format!("{name} ran on {host} and has closed.")
+            };
+            self.send_line("").await?;
+            for row in crate::aichat::wrap_line(&said, width) {
+                let row = if closed.failed() { self.red(&row) } else { self.yellow(&row) };
+                self.send_line(&format!("  {row}")).await?;
+            }
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            self.wait_for_key().await?;
+            return Ok(());
+        }
+        self.send_line("").await?;
         for row in crate::aichat::wrap_line(&format!("{name} opened on {host}."), width) {
             self.send_line(&format!("  {}", self.green(&row))).await?;
         }
@@ -419,7 +444,7 @@ impl TelnetSession {
                     // A dropped sender is a waiter thread that has gone,
                     // which only happens once the window has.
                     let _ = changed;
-                    if *done.borrow() || changed.is_err() { break false; }
+                    if done.borrow().is_some() || changed.is_err() { break false; }
                 }
                 event = read_gateway_event(&mut self.reader, local_telnet, &mut inbound) => {
                     match event {
@@ -464,6 +489,7 @@ impl TelnetSession {
         enabled: bool,
         display: &str,
         disabled: &str,
+        has_own_screen: bool,
     ) -> Vec<String> {
         let sep = self.separator();
         let mut rows = vec![sep.clone(), format!("  {}", self.yellow("ADD-ONS SETTINGS")), sep, String::new()];
@@ -471,11 +497,15 @@ impl TelnetSession {
         rows.push(format!("  {}  Offer add-ons: {}", self.cyan("E"), self.amber(if enabled { "Yes" } else { "No" })));
         if cfg!(all(unix, not(target_os = "macos"))) {
             let shown = if display.is_empty() { "(none)".to_string() } else { display.to_string() };
-            let room = width.saturating_sub("  D  GUI display: ".len());
+            // On a gateway with a desktop the setting is not used, and the
+            // row says so rather than leave a value that changes nothing.
+            let unused = if has_own_screen { " (unused)" } else { "" };
+            let room = width.saturating_sub("  D  GUI display: ".len() + unused.len());
             rows.push(format!(
-                "  {}  GUI display: {}",
+                "  {}  GUI display: {}{}",
                 self.cyan("D"),
-                self.amber(&crate::webbrowser::truncate_to_width(&shown, room))
+                self.amber(&crate::webbrowser::truncate_to_width(&shown, room)),
+                self.dim(unused)
             ));
         }
         rows.push(String::new());
@@ -529,7 +559,14 @@ impl TelnetSession {
             page = page.min(pages - 1);
             self.clear_screen().await?;
             let rows =
-                self.addons_settings_rows(&installed, page, cfg.addons_enabled, &cfg.addon_display, &cfg.addons_disabled);
+                self.addons_settings_rows(
+                    &installed,
+                    page,
+                    cfg.addons_enabled,
+                    &cfg.addon_display,
+                    &cfg.addons_disabled,
+                    crate::gui::have_graphical_session(),
+                );
             for row in rows {
                 self.send_line(&row).await?;
             }
@@ -678,26 +715,46 @@ impl TelnetSession {
         self.wait_for_key().await
     }
 
+    /// The GUI display screen above its prompt: what the setting is for,
+    /// both kinds of value -- this computer's screen and another computer's
+    /// X server -- and, on a gateway with a desktop, that it is not used
+    /// there at all.  Fits a C64 with the prompt row.
+    pub(in crate::telnet) fn addon_display_rows(&self, current: &str, has_own_screen: bool) -> Vec<String> {
+        let sep = self.separator();
+        let mut rows = vec![sep.clone(), format!("  {}", self.yellow("GUI DISPLAY")), sep, String::new()];
+        for row in [
+            "  Where GUI add-ons open when this",
+            "  gateway has no desktop of its own",
+            "  (a service, or started over SSH):",
+            "  an X display.",
+            "",
+            "  :0  this computer's own screen",
+            "  192.168.1.50:0  another computer's",
+            "      (its X server must accept",
+            "      network connections and allow",
+            "      this gateway: xhost +<address>)",
+        ] {
+            rows.push(row.to_string());
+        }
+        if has_own_screen {
+            rows.push(String::new());
+            rows.push(format!("  {}", self.dim("This gateway has a desktop, so")));
+            rows.push(format!("  {}", self.dim("this is not used here.")));
+        }
+        rows.push(String::new());
+        rows.push("  Enter alone keeps it; - clears it.".to_string());
+        let shown = if current.is_empty() { "(none)" } else { current };
+        let room = if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH } else { 80 } - 1 - "  Current: ".len();
+        rows.push(format!("  Current: {}", self.amber(&crate::webbrowser::truncate_to_width(shown, room))));
+        rows
+    }
+
     /// Ask for `addon_display`.  Enter alone keeps it; `-` clears it.
     async fn addon_display_prompt(&mut self, current: &str) -> Result<(), std::io::Error> {
         self.clear_screen().await?;
-        let sep = self.separator();
-        self.send_line(&sep).await?;
-        self.send_line(&format!("  {}", self.yellow("GUI DISPLAY"))).await?;
-        self.send_line(&sep).await?;
-        self.send_line("").await?;
-        for row in [
-            "  Where GUI add-ons open when this",
-            "  gateway has no desktop of its own,",
-            "  as an X display such as :0.",
-            "",
-            "  Enter alone keeps it; - clears it.",
-        ] {
-            self.send_line(row).await?;
+        for row in self.addon_display_rows(current, crate::gui::have_graphical_session()) {
+            self.send_line(&row).await?;
         }
-        self.send_line("").await?;
-        let shown = if current.is_empty() { "(none)" } else { current };
-        self.send_line(&format!("  Current: {}", self.amber(shown))).await?;
         self.send(&format!("  {}", self.cyan("New value: "))).await?;
         self.flush().await?;
         let Some(v) = self.get_line_input().await? else { return Ok(()) };
