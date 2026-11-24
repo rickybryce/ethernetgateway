@@ -64,3 +64,8 @@ tools/serial-transfer-smoke/work/
 # they match at any depth -- an anchored form is what let the two escape.
 dirtest_*/
 *.log.mark
+
+# A local safety-net copy of the disk collections the gateway catalogues and
+# downloads from, in case an upstream repository goes away.  Other people's
+# disks: kept on this machine only, never published.
+/repo-disks-backup/
