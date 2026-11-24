@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Add-On Reference &mdash; Ethernet Gateway v1.1.0</title>
+    <title>Add-On Reference &mdash; Ethernet Gateway v1.1.1</title>
     <meta name="description" content="Reference for Ethernet Gateway add-ons: programs callers run from the gateway like BBS doors -- installing them, the addon.conf manifest, the environment, input and output, windows on the gateway's screen, and the settings.">
     <style>
         :root {
@@ -551,7 +551,7 @@
             </div>
             <h1>Ethernet Gateway</h1>
             <p class="hdr-tagline">Add-On Reference</p>
-            <div class="hdr-version">v1.1.0</div>
+            <div class="hdr-version">v1.1.1</div>
             <div class="hdr-badges">
                 <span class="hdr-badge">Add-Ons</span>
                 <span class="hdr-badge">Doors</span>
@@ -698,7 +698,7 @@ ethernetgateway-data/AddOns/
                     <tr><td><code>EG_REMOTE_ADDR</code></td><td>The caller&rsquo;s address; empty for a local session</td></tr>
                     <tr><td><code>EG_CONNECTION</code></td><td><code>telnet</code>, <code>ssh</code>, <code>serial</code>, <code>relay</code>, or <code>desktop</code> for a window opened from the desktop window</td></tr>
                     <tr><td><code>EG_ADDON_DIR</code>, <code>EG_DATA_DIR</code>, <code>EG_TRANSFER_DIR</code></td><td>Absolute paths: its folder, the data folder, the transfer directory</td></tr>
-                    <tr><td><code>EG_GATEWAY_VERSION</code></td><td>e.g. <code>1.1.0</code></td></tr>
+                    <tr><td><code>EG_GATEWAY_VERSION</code></td><td>e.g. <code>1.1.1</code></td></tr>
                     <tr><td><code>TERM</code></td><td><code>ansi</code> when the add-on should write ANSI, else <code>dumb</code></td></tr>
                 </table>
                 <p class="dim-text">A window also gets <code>DISPLAY</code>, <code>WAYLAND_DISPLAY</code>, <code>XAUTHORITY</code>, <code>XDG_RUNTIME_DIR</code>, <code>XDG_SESSION_TYPE</code>, <code>DBUS_SESSION_BUS_ADDRESS</code> and, on Windows, <code>APPDATA</code>, <code>LOCALAPPDATA</code>, <code>PROGRAMDATA</code>.</p>
@@ -866,7 +866,7 @@ echo "Nice to meet you, $name."
         <!-- FOOTER                                            -->
         <!-- ══════════════════════════════════════════════════ -->
         <footer class="site-footer">
-            Ethernet Gateway v1.1.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Ethernet Gateway v1.1.1 &mdash; &copy; 2026 Ricky Bryce &mdash;
             Licensed under GPL-3.0-or-later &mdash;
             <a href="index.html">User Manual</a>
         </footer>

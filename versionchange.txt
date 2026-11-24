@@ -8,7 +8,7 @@
 # Cargo.toml updates them automatically — the doc files below must be matched
 # by hand.
 #
-# Current version: 1.1.0
+# Current version: 1.1.1
 #
 # ── Source of truth ─────────────────────────────────────────────
 Cargo.toml              # package version (line 3 only — NOT the russh/dep "0.60" specs); Cargo.lock follows on build
@@ -123,6 +123,8 @@ web/diskreference.html       # <title>, .hdr-version, footer
 #                              When you add a page, add it here in the same
 #                              commit; see FILES THAT ARE NOT VERSION STRINGS.
 web/gopherreference.html     # <title>, .hdr-version, footer
+web/ftpreference.html
+web/addonreference.html  # NOT its min_gateway / "versions it runs on" examples: add-ons began at 1.1.0
 #                              ADDED 2026-10-25, listed here in the same commit.
 #
 # ── FILES THAT ARE NOT VERSION STRINGS ──────────────────────────
