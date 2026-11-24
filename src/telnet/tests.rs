@@ -18760,7 +18760,7 @@ fn test_the_addon_check_screen_fits_and_guards_install() {
 /// its source, bounded to that one function.
 #[test]
 fn test_telnet_installs_only_for_a_logged_in_session() {
-    let src = include_str!("addons_ui.rs");
+    let src = include_str!("addons_ui.rs").replace('\r', "");
     let start = src.find("async fn addons_update_page(").expect("the page");
     let body = &src[start..];
     let body = &body[..body.find("\n    }\n").expect("its end")];
@@ -18792,6 +18792,41 @@ fn test_addons_settings_screen_fits() {
         let on_off: Vec<bool> = rows.iter().filter(|r| r.contains(". N")).map(|r| r.ends_with(" On")).collect();
         assert_eq!(on_off.len(), TelnetSession::ADDON_SETTINGS_SHOWN);
         assert_eq!(&on_off[..4], &[true, false, true, false], "a1 and a3 are off");
+    }
+}
+
+/// **The Add-Ons list fits at its fullest**: a whole page of long names, each
+/// carrying the widest mark (`[TERM+GUI]`), plus the page line -- on both
+/// pages and every terminal.  Only the empty page was measured before.
+#[test]
+fn test_a_full_add_ons_page_fits() {
+    let long = "N".repeat(90);
+    let installed: Vec<crate::addons::AddOn> = (0..TelnetSession::ADDONS_SHOWN + 3)
+        .map(|i| crate::addons::AddOn {
+            dir: std::path::PathBuf::from("/nonexistent"),
+            manifest: crate::addons::parse_manifest(
+                &format!("a{i}"),
+                &format!("name = {long}\ncommand = x.sh\nmode = both\ngui_command = y.sh\n"),
+            )
+            .unwrap(),
+        })
+        .collect();
+    for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+        let mut s = make_test_session(term);
+        s.color_enabled = false;
+        let (width, cols) = if term == TerminalType::Petscii { (PETSCII_WIDTH - 1, 40) } else { (79, 80) };
+        for page in [0, 1] {
+            let rows = s.addons_list_rows(&installed, page, cols);
+            let with_prompt = rows.len() + 1;
+            assert!(with_prompt <= 22, "{with_prompt} rows on {term:?} page {page}");
+            for r in &rows {
+                assert!(r.chars().count() <= width, "{r:?} is {} on {term:?}", r.chars().count());
+            }
+            let text = rows.join("\n");
+            assert!(text.contains("[TERM+GUI]") && text.contains("Page "), "{term:?}: {text}");
+        }
+        let first = s.addons_list_rows(&installed, 0, cols);
+        assert_eq!(first.iter().filter(|r| r.contains("[TERM+GUI]")).count(), TelnetSession::ADDONS_SHOWN);
     }
 }
 
