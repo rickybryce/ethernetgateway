@@ -343,6 +343,7 @@ mod tests {
     /// The open windows are one table for the whole process, and
     /// [`close_all`] empties it: a test that starts real windows holds this,
     /// or another one's `close_all` ends its windows mid-test.
+    #[cfg(unix)]
     static WINDOWS: Mutex<()> = Mutex::new(());
 
     #[test]
