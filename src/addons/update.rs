@@ -228,8 +228,17 @@ pub(crate) fn check(root: &Path) -> Result<Vec<Offer>, String> {
     Ok(offers(&fetch_list()?, root, &super::this_gateway()))
 }
 
-/// Install `offers`, one add-on at a time, and say what happened.  Shares
-/// the wizard download's one-at-a-time rule: both write in `AddOns/`.
+/// Check, then install everything offered: the setup wizard's download.
+/// The same signed list as every Check, so an add-on published after this
+/// gateway was built is fetched too -- and nothing unsigned ever is.
+pub(crate) fn check_and_install(root: &Path) -> Result<super::fetch::Report, String> {
+    let offers = check(root)?;
+    Ok(install(root, &offers))
+}
+
+/// Install `offers`, one add-on at a time, and say what happened.  One at a
+/// time across the gateway (`fetch::one_at_a_time`): every installer writes
+/// in `AddOns/`.
 pub(crate) fn install(root: &Path, offers: &[Offer]) -> super::fetch::Report {
     let Some(_running) = super::fetch::one_at_a_time() else {
         let mut busy = super::fetch::Report::default();
@@ -484,6 +493,60 @@ mod tests {
 
     /// **An update replaces the listed files, keeps the add-on's own, and a
     /// bad file changes nothing at all.**
+    /// **A new add-on arrives whole, marked as ours, and loads.**  What the
+    /// setup wizard does on a fresh gateway: nothing in `AddOns/` yet, every
+    /// add-on the list offers installed.  Its program is made executable,
+    /// and a folder of the operator's own with the same name is left alone.
+    #[test]
+    fn test_a_new_add_on_arrives_whole_and_marked() {
+        let root = tmp("new");
+        let conf = b"name = Hello\ncommand = h.sh\n".to_vec();
+        let prog = b"#!/bin/sh\necho hi\n".to_vec();
+        let list = format!(
+            "egw-addons 1\naddon\thello\t1.0\t-\t-\n{}{}addon\tmine\t1.0\t-\t-\n{}",
+            file_line("hello/addon.conf", &conf, false),
+            file_line("hello/h.sh", &prog, true),
+            file_line("mine/addon.conf", &conf, false),
+        );
+        std::fs::create_dir_all(root.join("mine")).unwrap();
+        std::fs::write(root.join("mine/addon.conf"), "my own\n").unwrap();
+        let entries = parse(&list).unwrap();
+        let o = offers(&entries, &root, &[1, 1, 0]);
+        let (c2, p2) = (conf.clone(), prog.clone());
+        let report = install_with(&root, &o, |f: &File| Ok(if f.path.ends_with("addon.conf") { c2.clone() } else { p2.clone() }));
+        assert_eq!(report.fetched, ["hello 1.0 (new)"], "{report:?}");
+        assert!(crate::addons::load(&root.join("hello")).is_ok(), "the new add-on does not load");
+        assert!(root.join("hello").join(super::super::fetch::MARKER).exists(), "not marked as ours");
+        assert_eq!(std::fs::read_to_string(root.join("mine/addon.conf")).unwrap(), "my own\n");
+        assert!(!root.join("mine").join(super::super::fetch::MARKER).exists(), "the operator's folder was marked");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(std::fs::metadata(root.join("hello/h.sh")).unwrap().permissions().mode() & 0o111, 0);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The setup wizard's download, against the real repository.**  The
+    /// signed list fetched and verified, and every add-on it offers this
+    /// gateway installed into an empty folder and loading.  Live: needs the
+    /// network, so run by hand before a release.
+    #[test]
+    #[ignore]
+    fn test_live_the_wizard_installs_every_published_add_on() {
+        let root = tmp("live");
+        let offered = check(&root).expect("the signed list");
+        assert!(!offered.is_empty(), "the list offers nothing");
+        let report = check_and_install(&root).expect("the signed list");
+        assert!(report.failed.is_empty(), "{}", report.summary());
+        assert_eq!(report.fetched.len(), offered.len(), "{}", report.summary());
+        for o in &offered {
+            assert!(crate::addons::load(&root.join(&o.entry.id)).is_ok(), "{} does not load", o.entry.id);
+        }
+        eprintln!("installed: {}", report.summary());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn test_an_update_is_whole_or_not_at_all() {
         let root = tmp("install");

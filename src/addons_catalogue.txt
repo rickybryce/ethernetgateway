@@ -1,8 +1,0 @@
-# Generated from github.com/rickybryce/ethernetgateway-addons at e353abb2c9fd49422a753751c9da4beb6051d4ad.
-# path<TAB>bytes<TAB>sha256<TAB>executable (1 = chmod +x after download)
-guess/addon.conf	328	9b68c1da363d6dc9c76a049a10e926ca7fe4e4e3d28cac5451ecbdbe9a100217	0
-guess/guess.cmd	696	226f91e0243b13a96fd0c06a5137123f5ff15b42de4af663d034fa5b254f596d	0
-guess/guess.sh	939	d6acba04f984e89f65155697157843f5e68fcb6b2022c07c1d2ff1fa1008ad6b	1
-hello/addon.conf	326	a8ca7fae2aa0ef143be43ba559e99757648c89f9f319ebcce6714c3ec8716483	0
-hello/hello.cmd	440	509acd3143c83ecec8ddab597e1178ae7704400ca4bdc0bb030349975b380c13	0
-hello/hello.sh	449	ed14159a8e785a0428286a9a94fc010725e0c25bebd17c2aa6af2a2d33984989	1

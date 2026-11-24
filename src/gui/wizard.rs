@@ -77,6 +77,10 @@ const ORDER: &[Step] = &[
     Step::Finish,
 ];
 
+/// The background answer to "which add-ons does the repository offer?":
+/// `None` until it arrives, then the offers' labels or why there are none.
+type AddonLookup = std::sync::Arc<std::sync::Mutex<Option<Result<Vec<String>, String>>>>;
+
 /// Draft state for the whole wizard.  Ports are held as text (like every other
 /// numeric field in this GUI) so a half-typed value never becomes a config
 /// value; they are parsed on the Next click that leaves their screen.
@@ -148,8 +152,14 @@ pub(super) struct Wizard {
     /// Finish and starts the same download its own button starts.
     cpm_fetch_disks: bool,
     /// Download the Ethernet Gateway add-ons once the answers are saved
-    /// (`crate::addons::fetch`).  Not a config key, like `cpm_fetch_disks`.
+    /// (`crate::addons::update::check_and_install`).  Not a config key, like
+    /// `cpm_fetch_disks`.
     fetch_addons: bool,
+    /// What the repository offers this gateway, looked up in the background
+    /// so the box can name it: `None` until [`Wizard::look_up_addons`] is
+    /// called, then empty until the answer arrives.  Never in `new`, so a
+    /// test that builds a wizard never reaches the network.
+    addons_offered: Option<AddonLookup>,
 
     /// "standalone" | "master" | "slave" — same values as `gateway_role`.
     role: String,
@@ -231,6 +241,7 @@ impl Wizard {
             // Untick it and nothing is fetched.
             cpm_fetch_disks: true,
             fetch_addons: true,
+            addons_offered: None,
             role: cfg.gateway_role.clone(),
             master_host: cfg.slave_master_host.clone(),
             master_port: cfg.slave_master_port.to_string(),
@@ -529,6 +540,58 @@ impl Wizard {
     /// on this window or on a device name staying put.
     fn no_network_config(&self) -> bool {
         !self.telnet_enabled && !self.ssh_enabled && !self.web_enabled
+    }
+
+    /// Ask the repository, in the background, which add-ons it offers this
+    /// gateway, so the box names them.  **The same signed list as every
+    /// Check**, read now rather than pinned into the build: an add-on Ricky
+    /// publishes after this release is offered here too (2026-11-24).
+    pub(super) fn look_up_addons(&mut self) {
+        let slot: AddonLookup = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let out = slot.clone();
+        std::thread::spawn(move || {
+            let found = crate::addons::update::check(&crate::addons::addons_root())
+                .map(|offers| offers.iter().map(crate::addons::update::Offer::label).collect());
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(found);
+        });
+        self.addons_offered = Some(slot);
+    }
+
+    /// The text under the add-ons box: what the list offers, that it is
+    /// still being looked up, or why it could not be.
+    fn addons_offer_text(&self) -> (String, bool) {
+        let from = crate::addons::fetch::REPO;
+        let found = self.addons_offered.as_ref().map(|s| s.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        match found {
+            Some(Some(Ok(names))) if names.is_empty() => {
+                (format!("Every add-on published at github.com/{from} is already here."), false)
+            }
+            Some(Some(Ok(names))) => (
+                format!(
+                    "Programs your callers can run from the Second Menu (2, then A): {}. From \
+                     github.com/{from}, in a list signed by the gateway's author, each file \
+                     checked. An add-on of your own is left alone.",
+                    names.join(", ")
+                ),
+                false,
+            ),
+            Some(Some(Err(e))) => (
+                format!(
+                    "Could not get the list of add-ons ({e}). Leave this ticked to try again when \
+                     you finish, or install them later from Add-Ons\u{2026} in the General frame."
+                ),
+                false,
+            ),
+            // Asked, no answer yet: the caller repaints until there is one.
+            Some(None) => (format!("Looking up the add-ons published at github.com/{from}\u{2026}"), true),
+            None => (
+                format!(
+                    "Programs your callers can run from the Second Menu (2, then A), from \
+                     github.com/{from}, in a list signed by the gateway's author."
+                ),
+                false,
+            ),
+        }
     }
 
     /// Read by the editor on Finish: download the add-ons after the save.
@@ -1524,16 +1587,11 @@ impl Wizard {
         );
         ui.add_space(8.0);
         ui.checkbox(&mut self.fetch_addons, "Download the Ethernet Gateway add-ons");
-        indent(
-            ui,
-            &format!(
-                "Programs your callers can run from the Second Menu (2, then A): {}. From \
-                 github.com/{}, the exact versions this gateway was built with, each file \
-                 checked. An add-on already installed is left alone.",
-                crate::addons::fetch::folders(&crate::addons::fetch::catalogue()).join(", "),
-                crate::addons::fetch::REPO,
-            ),
-        );
+        let (offer, waiting) = self.addons_offer_text();
+        indent(ui, &offer);
+        if waiting {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        }
         if self.cpm_enabled {
             ui.add_space(8.0);
             ui.checkbox(&mut self.run_cpm_wizard, "Run the CP/M setup wizard next");
@@ -2519,5 +2577,40 @@ mod tests {
         assert_eq!(w.telnet_port, "9999");
         assert!(!w.cpm_dialout);
         assert_eq!(w.role, "slave");
+    }
+
+    /// **The add-ons box names what the repository offers now.**  The
+    /// wizard reads the same signed list as every Check, so an add-on
+    /// published after this release is named and installed too.  Each state
+    /// of the background lookup says something true: looking, the offers by
+    /// name, nothing new, or why the list could not be had.  And building a
+    /// wizard never starts a lookup -- only the window does -- so no test
+    /// reaches the network.
+    #[test]
+    fn test_the_add_ons_box_names_what_is_published_now() {
+        let mut w = Wizard::new(&Config::default());
+        assert!(w.addons_offered.is_none(), "a lookup started in new()");
+        let set = |w: &mut Wizard, v: Option<Result<Vec<String>, String>>| {
+            w.addons_offered = Some(std::sync::Arc::new(std::sync::Mutex::new(v)));
+        };
+        set(&mut w, None);
+        let (text, waiting) = w.addons_offer_text();
+        assert!(waiting && text.contains("Looking up"), "{text}");
+        set(&mut w, Some(Ok(vec!["guess 1.0 (new)".into(), "mad 1.1 (new)".into()])));
+        let (text, waiting) = w.addons_offer_text();
+        assert!(!waiting && text.contains("guess 1.0 (new), mad 1.1 (new)") && text.contains("signed"), "{text}");
+        set(&mut w, Some(Ok(Vec::new())));
+        assert!(w.addons_offer_text().0.contains("already here"));
+        set(&mut w, Some(Err("no route to host".into())));
+        let (text, _) = w.addons_offer_text();
+        assert!(text.contains("no route to host") && text.contains("Add-Ons"), "{text}");
+
+        // Finish installs from the signed list, not a list built in.
+        let gui = include_str!("../gui.rs").replace('\r', "");
+        let at = gui.find("if std::mem::take(&mut self.wizard_addons_pending) {").expect("the finish step");
+        let step = &gui[at..at + gui[at..].find("\n        }\n").expect("its end")];
+        assert!(step.contains("crate::addons::update::check_and_install("), "{step}");
+        // The window asks for the list where a test's App cannot.
+        assert!(gui.contains("if let Some(w) = app.wizard.as_mut() {\n                    w.look_up_addons();"));
     }
 }

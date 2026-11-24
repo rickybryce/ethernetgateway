@@ -597,7 +597,7 @@
                     script, Python, BASIC under an interpreter, or a compiled program all
                     work the same way. The code lives in <code>src/addons.rs</code>
                     (discovery, the manifest, the process tree), <code>src/addons/gui.rs</code>
-                    (windows), <code>src/addons/fetch.rs</code> (the pinned download) and
+                    (windows), <code>src/addons/update.rs</code> (the signed list, Check and Install) and
                     <code>src/telnet/addons_ui.rs</code> (the list and the bridge).
                 </p>
                 <div class="callout callout-warn">
@@ -635,10 +635,11 @@ ethernetgateway-data/AddOns/
                 <p>
                     <strong>Ready-made add-ons</strong> live at
                     <a href="https://github.com/rickybryce/ethernetgateway-addons">github.com/rickybryce/ethernetgateway-addons</a>.
-                    The desktop setup wizard downloads them (ticked by default): the exact
-                    commit this release was built with, every file checked against a
-                    SHA-256 recorded in the gateway, and a folder already present is never
-                    touched. On Linux, macOS and the BSDs a program copied in by hand needs
+                    The desktop setup wizard downloads them (ticked by default), naming
+                    them first: whatever the signed list offers this gateway now, the same
+                    list as every Check, so an add-on published after a release is offered
+                    too. Every file is checked against the SHA-256 in that list, and a
+                    folder of the operator&rsquo;s own is never touched. On Linux, macOS and the BSDs a program copied in by hand needs
                     <code>chmod +x</code>.
                 </p>
                 <p>

@@ -55,9 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Add-On Reference** web page (`web/addonreference.html`) for anyone
   writing one, linked from the other reference pages.
 - **The setup wizard can download the Ethernet Gateway add-ons** from
-  github.com/rickybryce/ethernetgateway-addons: the exact versions this
-  release was built with, every file checked against its SHA-256; an add-on
-  already installed is left alone.
+  github.com/rickybryce/ethernetgateway-addons, naming them first.  It reads
+  the same signed list as Check for add-ons, so it offers whatever is
+  published now for this version of the gateway -- add-ons published after
+  this release included -- with every file checked against its SHA-256; an
+  add-on folder of your own is left alone.
 
 ### Changed
 

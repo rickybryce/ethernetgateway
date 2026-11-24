@@ -1784,10 +1784,13 @@ time it starts.
 <strong>Ready-made add-ons</strong> are kept at
 <a href="https://github.com/rickybryce/ethernetgateway-addons">github.com/rickybryce/ethernetgateway-addons</a>.
 The desktop setup wizard's last screen offers to download them
-(<em>Download the Ethernet Gateway add-ons</em>, ticked by default).  It fetches
-the exact versions this release of the gateway was built with and checks every
-file against the SHA-256 recorded in the gateway.  An add-on already in the
-folder &mdash; including one you edited &mdash; is left exactly as it is.  To
+(<em>Download the Ethernet Gateway add-ons</em>, ticked by default) and names
+the ones it will fetch.  It reads the same signed list as <em>Check for
+add-ons</em> (5.7), so it offers whatever the repository publishes now that
+suits this version of the gateway, including add-ons published after this
+release.  The list is signed by the gateway's author and checked against the
+key built into the gateway, and every file against the SHA-256 in that list.
+An add-on folder of your own is left exactly as it is.  To
 install one by hand, copy its folder in; on Linux, macOS and the BSDs make its
 program executable (<code>chmod +x</code>).
 </p>

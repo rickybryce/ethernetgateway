@@ -178,6 +178,12 @@ pub fn run(
                 if let Some(after) = take_after_restart() {
                     app.adopt_after_restart(after);
                 }
+                // The wizard names the add-ons the repository offers: asked
+                // here, for the same reason -- a test's `App` must not reach
+                // the network.
+                if let Some(w) = app.wizard.as_mut() {
+                    w.look_up_addons();
+                }
                 Ok(Box::new(app))
             }),
         )
@@ -5063,13 +5069,16 @@ impl App {
         // the restart does not touch), so nothing has to be handed to the
         // window the restart builds.  Each step is logged, as the disks are.
         if std::mem::take(&mut self.wizard_addons_pending) {
-            logger::log("Add-ons: downloading…".into());
+            logger::log("Add-ons: checking the published list…".into());
+            // The signed list as it is now (see `addons::fetch`), so the
+            // wizard installs what the repository offers this gateway today,
+            // not what was offered when it was built.
             std::thread::spawn(|| {
-                let report = crate::addons::fetch::download_missing(
-                    &crate::addons::addons_root(),
-                    |name, at, total| logger::log(format!("Add-ons: fetching {at}/{total} {name}")),
-                );
-                logger::log(format!("Add-ons: {}", report.summary()));
+                let line = match crate::addons::update::check_and_install(&crate::addons::addons_root()) {
+                    Ok(report) => report.summary(),
+                    Err(e) => format!("could not check ({e}); install them later from Add-Ons…"),
+                };
+                logger::log(format!("Add-ons: {line}"));
             });
         }
         // `wizard_cpm_pending` is left set: the CP/M wizard is opened by
@@ -7139,6 +7148,9 @@ impl eframe::App for App {
             // master password, which `self.cfg` holds blank -- and the wizard
             // needs to know whether one is stored to say so.
             self.wizard = Some(wizard::Wizard::new(&self.last_synced_cfg));
+            if let Some(w) = self.wizard.as_mut() {
+                w.look_up_addons();
+            }
             server_open = false;
             // The close question dies with the screen it was asked on.  Both
             // can be open at once -- the dialog does not block input to the
