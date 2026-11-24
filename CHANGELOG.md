@@ -76,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A serial caller who hangs up is let go at once.**  After NO CARRIER, or
+  `+++` then `ATH`, the menu session used to wait out the idle timeout (15
+  minutes by default) because it never learned the call had ended -- with
+  any add-on it was running still alive and counted as in use.  Now it
+  ends as soon as the modem drops the call.
 - **The x86_64 Linux tarball and AppImage start on Debian 13 and Ubuntu 24.04
   again.**  Since 1.0.7 they were built on a runner with glibc 2.43 and asked
   for it, so they would not start on Debian 13 (2.41), Ubuntu 24.04 (2.39) or

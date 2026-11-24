@@ -6261,6 +6261,36 @@ fn session_output_bufsize(baud: u32) -> usize {
     bytes_per_sec.clamp(64, 4096)
 }
 
+/// The two in-memory pipes between a dialled-in caller and its menu session.
+///
+/// **Two pipes, not one:** `duplex(n)` caps both directions at `n`, and these
+/// want opposite things -- caller to session (keys, a paste, an upload) wants
+/// headroom (`SESSION_INPUT_BUFSIZE`), session to caller is backlog the caller
+/// has not seen and is kept small (`session_output_bufsize`).  Each is a
+/// `duplex` used in one direction only.
+///
+/// **And `duplex`, not `simplex`.**  The halves of a `simplex` pipe share one
+/// buffer and dropping either closes nothing -- so when the modem hung up, the
+/// session never saw end-of-file or a broken pipe: it waited out the idle
+/// timeout (15 minutes by default), with any add-on it was running still
+/// alive and counted as in use.  A dropped `DuplexStream` closes its peer, so
+/// a hang-up now ends the session at once.  Measured on a C64 in VICE: after
+/// NO CARRIER, the flood add-on was still running minutes later.
+struct SessionPipes {
+    session_read: tokio::io::DuplexStream,
+    session_write: tokio::io::DuplexStream,
+    wire_read: tokio::io::DuplexStream,
+    wire_write: tokio::io::DuplexStream,
+}
+
+impl SessionPipes {
+    fn new(input: usize, output: usize) -> Self {
+        let (wire_write, session_read) = tokio::io::duplex(input);
+        let (session_write, wire_read) = tokio::io::duplex(output);
+        SessionPipes { session_read, session_write, wire_read, wire_write }
+    }
+}
+
 /// Dial into the local Ethernet Gateway menu via an in-memory duplex bridge.
 fn dial_ethernet_gateway(state: &mut ModemState) {
     send_result(state, "CONNECT");
@@ -6285,13 +6315,10 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
     // backlog, queued behind everything already committed to the wire.
     // Lowering the baud makes it worse, which is the opposite of the advice
     // that shape of bug attracts.
-    // Two simplex pipes, not one duplex: `duplex(n)` caps BOTH directions at
-    // `n`, and these two want opposite things -- see the two constants above.
-    //
-    // caller -> session: keystrokes, pasted commands, an upload.  Generous.
-    let (async_read, wire_write) = tokio::io::simplex(SESSION_INPUT_BUFSIZE);
-    // session -> caller: paced, because this is the backlog the caller reads.
-    let (wire_read, async_write) = tokio::io::simplex(session_output_bufsize(state.baud));
+    // Two pipes, one per direction, each sized for its own job: see
+    // `SessionPipes`.
+    let SessionPipes { session_read: async_read, session_write: async_write, wire_read, wire_write } =
+        SessionPipes::new(SESSION_INPUT_BUFSIZE, session_output_bufsize(state.baud));
 
     let writer_box: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = Box::new(async_write);
     let writer_arc: crate::telnet::SharedWriter =
@@ -7679,7 +7706,7 @@ mod tests {
     /// timeout.**
     ///
     /// `tokio::io::duplex(n)` caps *both* directions, which is why this bridge
-    /// is two `simplex` pipes instead. Output wants to be small — it is backlog
+    /// is two pipes instead (`SessionPipes`). Output wants to be small — it is backlog
     /// the caller has not read. Input wants headroom, because the serial thread
     /// writes into it under a **five-second timeout** and treats expiry as a
     /// dead call: carrier dropped, `NO CARRIER`, session gone. The session does
@@ -7712,6 +7739,50 @@ mod tests {
              {widest_output}: an upload or a pasted command must not be able to \
              fill the input pipe and trip the 5 s inbound write timeout",
         );
+    }
+
+    /// **A hang-up reaches the session.**  When the modem drops its ends of
+    /// the pipes, the session's read sees end-of-file and its write -- even
+    /// one already waiting on a full pipe -- fails, so the session ends now
+    /// instead of at the idle timeout.  And each pipe holds its own size.
+    #[test]
+    fn test_the_session_pipes_close_on_hang_up_and_keep_their_sizes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let short = Duration::from_millis(200);
+            let SessionPipes { mut session_read, mut session_write, wire_read, mut wire_write } =
+                SessionPipes::new(1000, 100);
+            // Each direction holds exactly its own size.
+            let fits = |r: Result<std::io::Result<()>, _>, what| assert!(matches!(r, Ok(Ok(()))), "{what} held less than its size");
+            fits(tokio::time::timeout(short, wire_write.write_all(&[b'k'; 1000])).await, "input");
+            assert!(tokio::time::timeout(short, wire_write.write_all(b"k")).await.is_err(), "input held more than its size");
+            fits(tokio::time::timeout(short, session_write.write_all(&[b'o'; 100])).await, "output");
+            // A write left waiting on the full output pipe, as a session's is.
+            let waiting = tokio::spawn(async move {
+                let r = session_write.write_all(b"more").await;
+                (session_write, r)
+            });
+            tokio::time::sleep(short).await;
+            assert!(!waiting.is_finished(), "output held more than its size");
+
+            // Hang up.
+            drop(wire_read);
+            drop(wire_write);
+            let (mut session_write, r) = tokio::time::timeout(Duration::from_secs(2), waiting)
+                .await
+                .expect("a waiting write never learned of the hang-up")
+                .unwrap();
+            assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+            assert!(session_write.write_all(b"x").await.is_err(), "a write after the hang-up succeeded");
+            // What was typed before the hang-up is still read, then end-of-file.
+            let mut got = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), session_read.read_to_end(&mut got))
+                .await
+                .expect("the session's read never saw end-of-file")
+                .unwrap();
+            assert_eq!(got.len(), 1000);
+        });
     }
 
     /// **The wire trace must never be able to quote a password.**
