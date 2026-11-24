@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-24
+
 ### Added
 
 - **Add-Ons**: programs the operator installs for callers to run, the way a
@@ -8840,7 +8842,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.8...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.1.0
 [1.0.8]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.8
 [1.0.7]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.7
 [1.0.6]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.6
