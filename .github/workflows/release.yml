@@ -43,6 +43,15 @@ jobs:
           # (glibc 2.35) matches the arm64 build below, and the "glibc floor"
           # step refuses a binary that needs more.  Both releases' x86_64
           # Linux assets were rebuilt this way and replaced (2026-11-22).
+          #
+          # **The policy: anything released in the last four years runs**
+          # (Ricky, 2026-11-24), so in 2030 today's distributions still do.
+          # The glibc floor must only ever move to the oldest mainstream
+          # release (Ubuntu LTS, Debian stable, Pi OS) less than four years
+          # old.  When GitHub retires `ubuntu-22.04`, do NOT follow it to a
+          # newer runner and let the floor drift up: build inside a container
+          # (or with a toolchain) that keeps the glibc the policy needs, and
+          # change the floor step below only when the policy allows it.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
@@ -160,39 +169,52 @@ jobs:
         run: |
           set -euo pipefail
           ARCH="${{ matrix.appimage_arch }}"
-          # appimagetool is a self-contained AppImage; GitHub runners
-          # lack FUSE, so extract it and invoke AppRun directly.  Each
-          # arch has its own appimagetool build with a matching runtime.
+          # **The runtime decides where the AppImage runs, so it is chosen,
+          # not inherited.**  Every AppImage up to 1.1.0's first cut was made
+          # with AppImageKit's `appimagetool`, whose runtime dlopen()s
+          # `libfuse.so.2` -- which stock Ubuntu 22.04+ and Debian 13 do not
+          # install.  On them the AppImage printed "AppImages require FUSE to
+          # run" and stopped before the gateway started; it only ever worked
+          # on machines that had libfuse2 for some other reason (the release
+          # desktop had it from cryfs).  Measured 2026-11-24 in clean
+          # containers: that runtime FAILED on Ubuntu 24.04 and Debian 13; the
+          # static type2 runtime below RAN on Ubuntu 22.04 (fuse3 or only the
+          # old fuse tools), 24.04, Debian 12 and 13, Fedora, openSUSE
+          # Tumbleweed and Arch.  The floor is now the binary's glibc (2.35,
+          # see the runner pin above): Linux from 2022 on.
           #
-          # **Verified by hash, because this URL is mutable and this binary
-          # packages our release.**  It is fetched and executed inside the job
-          # that builds the artifacts users download, so whatever sits behind
-          # the URL gets to touch them.  `continuous` is a rolling prerelease:
-          # it was published 2023-03-08 and its assets were last replaced
-          # 2025-07-26, so "the version we tested with" and "the version we
-          # get" are not the same statement.  Pinning to the last numbered
-          # release is not an option -- upstream renamed tag 13's copies
-          # `obsolete-appimagetool-*`, so there is no supported immutable URL.
+          # So: AppImage/appimagetool **1.9.1** (a numbered release, not a
+          # rolling `continuous`) and AppImage/type2-runtime **20251108**,
+          # handed over with --runtime-file so appimagetool never fetches a
+          # runtime of its own during a release.  Both are verified by hash:
+          # they are fetched and executed inside the job that builds what users
+          # download.  The runtimes' hashes were taken after checking upstream's
+          # GPG signatures (key BF96CCA56490F695, "AppImage type 2 runtime").
+          # A changed hash stops the cut here -- update it in its own commit,
+          # after verifying the new bytes are upstream's, never in a release.
           #
-          # The hashes below are the bytes that built v1.0.0-RC1, measured
-          # from the live URL.  **If upstream republishes `continuous`, a
-          # release cut will stop here with a checksum mismatch.**  That is the
-          # intended direction -- refusing to run unrecognised code beats
-          # silently packaging with it -- but it is a failure a release can
-          # hit, so: verify the new binary is genuinely upstream's, then
-          # update the hash here in its own commit, never as part of a release.
+          # appimagetool is itself an AppImage and GitHub runners lack FUSE,
+          # so it is extracted and its AppRun invoked directly.
           case "$ARCH" in
-            x86_64)  APPIMAGETOOL_SHA256=b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2 ;;
-            aarch64) APPIMAGETOOL_SHA256=a48972e5ae91c944c5a7c80214e7e0a42dd6aa3ae979d8756203512a74ff574d ;;
-            *) echo "no recorded appimagetool hash for arch ${ARCH}" >&2; exit 1 ;;
+            x86_64)
+              APPIMAGETOOL_SHA256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+              RUNTIME_SHA256=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d ;;
+            aarch64)
+              APPIMAGETOOL_SHA256=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
+              RUNTIME_SHA256=00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444 ;;
+            *) echo "no recorded appimagetool/runtime hash for arch ${ARCH}" >&2; exit 1 ;;
           esac
-          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${ARCH}.AppImage" -O appimagetool
-          echo "${APPIMAGETOOL_SHA256}  appimagetool" | sha256sum -c - || {
-              echo "FATAL: appimagetool for ${ARCH} does not match the recorded hash." >&2
-              echo "  expected ${APPIMAGETOOL_SHA256}" >&2
-              echo "  got      $(sha256sum appimagetool | cut -d' ' -f1)" >&2
-              exit 1
-          }
+          wget -q "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH}.AppImage" -O appimagetool
+          wget -q "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${ARCH}" -O runtime
+          for pair in "appimagetool ${APPIMAGETOOL_SHA256}" "runtime ${RUNTIME_SHA256}"; do
+            set -- $pair
+            echo "$2  $1" | sha256sum -c - || {
+                echo "FATAL: $1 for ${ARCH} does not match the recorded hash." >&2
+                echo "  expected $2" >&2
+                echo "  got      $(sha256sum "$1" | cut -d' ' -f1)" >&2
+                exit 1
+            }
+          done
           chmod +x appimagetool
           ./appimagetool --appimage-extract >/dev/null
           mkdir -p AppDir/usr/bin
@@ -237,7 +259,15 @@ jobs:
           exec "${HERE}/usr/bin/ethernetgateway" "$@"
           EOF
           chmod +x AppDir/AppRun
-          ARCH="${ARCH}" ./squashfs-root/AppRun AppDir "dist/Ethernet_Gateway-${ARCH}.AppImage"
+          ARCH="${ARCH}" ./squashfs-root/AppRun --runtime-file runtime AppDir "dist/Ethernet_Gateway-${ARCH}.AppImage"
+          # The failure this step was rewritten for, refused at the source: a
+          # runtime that needs libfuse2 does not start on a stock modern
+          # desktop.  The runtime is the AppImage's first part, before the
+          # squashfs it mounts.
+          if head -c 4000000 "dist/Ethernet_Gateway-${ARCH}.AppImage" | grep -aq 'libfuse\.so\.2'; then
+            echo "FATAL: the ${ARCH} AppImage's runtime needs libfuse.so.2, which stock Ubuntu 22.04+ and Debian 13 lack" >&2
+            exit 1
+          fi
           echo "APPIMAGE=dist/Ethernet_Gateway-${ARCH}.AppImage" >> "$GITHUB_ENV"
 
       - name: SHA-256 checksum

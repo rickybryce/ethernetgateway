@@ -80,6 +80,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The AppImages start on a stock modern Linux.**  Every AppImage so far
+  was built with a runtime that needs the old FUSE 2 library, which stock
+  Ubuntu 22.04 and later, Debian 13 and Raspberry Pi OS 13 do not install:
+  there it printed "AppImages require FUSE to run" and stopped.  They are
+  now built with appimagetool 1.9.1 and the static type 2 runtime, which
+  works with the FUSE the system has.  Tested on clean installs of Ubuntu
+  22.04 and 24.04, Debian 12 and 13, Fedora, openSUSE Tumbleweed and Arch
+  (x86_64), and stock Raspberry Pi OS 12 and 13 (aarch64).  The release
+  build now refuses an AppImage whose runtime needs FUSE 2.
 - **A web popup's own buttons say what they did.**  Check for add-ons,
   Install new and updated, Download sample disks, Fetch monitor ROM, Default
   port and Create submit the page, which closed the popup; the result went
