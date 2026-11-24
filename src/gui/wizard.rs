@@ -893,6 +893,8 @@ impl Wizard {
             "Gateway Shell — a CP/M-style file manager over the transfer directory.",
             "FTP server — the same transfer directory for any FTP client; this wizard \
              asks whether to turn it on.",
+            "Add-Ons — programs your callers run from the Second Menu, like BBS doors; \
+             this wizard can download ready-made ones.",
             "Extras — a text-mode web browser, a weather service and an AI chat client.",
         ] {
             bullet(ui, line);
