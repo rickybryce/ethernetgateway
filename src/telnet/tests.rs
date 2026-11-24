@@ -18375,6 +18375,12 @@ async fn test_a_line_mode_add_on_gets_the_edited_line() {
     assert!(text.contains("Rickx\x08 \x08y"), "the typing was not echoed and erased: {text:?}");
     assert!(text.contains("got [Ricky]\r\n"), "the add-on did not get the edited line as CRLF: {text:?}");
     assert!(text.contains("Probe ended."), "{text:?}");
+    assert!(
+        text.starts_with(&format!("{ANSI_CLEAR}  ")) && text.contains("Starting Probe."),
+        "the screen was not cleared before the add-on began: {text:?}"
+    );
+    let reset = text.find("\x1b[0m\x1b[?25h").expect("the terminal was not reset after the add-on");
+    assert!(reset < text.find("Probe ended.").unwrap(), "reset after the line that says it ended: {text:?}");
     peer.write_all(b" ").await.unwrap();
     run.await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
@@ -18455,6 +18461,79 @@ async fn test_line_mode_drops_arrow_keys_and_erases_characters() {
     assert!(!text.contains("[A"), "the arrow key's code was echoed: {text:?}");
     peer.write_all(b" ").await.unwrap();
     run.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **ESC twice leaves an add-on that prints without end, on a slow link.**
+/// The caller here drains about 320 bytes a second (a 2400-baud line) and
+/// presses ESC twice, 150 ms apart, as a person does.  The run used to read
+/// keys only between writes, and one 4 KB write at that speed takes over
+/// ten seconds, so the second ESC was read far outside the 500 ms that
+/// makes a pair and the caller could only hang up.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_esc_twice_leaves_a_flooding_add_on_on_a_slow_link() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (dir, a) = scratch_addon("flood", "#!/bin/sh\nwhile :; do echo flood flood flood flood flood; done\n");
+    let (mut session, peer) = make_test_session_with_peer(TerminalType::Ansi);
+    session.idle_timeout = std::time::Duration::from_secs(60);
+    let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
+    let (mut rd, mut wr) = tokio::io::split(peer);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let drain = {
+        let seen = seen.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            loop {
+                match rd.read(&mut buf).await {
+                    Ok(n) if n > 0 => seen.lock().unwrap().extend_from_slice(&buf[..n]),
+                    _ => return,
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        })
+    };
+    let has = |want: &[u8]| seen.lock().unwrap().windows(want.len()).any(|w| w == want);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !has(b"flood") {
+        assert!(tokio::time::Instant::now() < deadline, "the add-on never started");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // Let the flood fill every buffer between the add-on and the caller.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    wr.write_all(b"\x1b").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    wr.write_all(b"\x1b").await.unwrap();
+    let left_by = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    while !has(b"Left Probe.") {
+        assert!(tokio::time::Instant::now() < left_by, "ESC twice did not leave a flooding add-on on a slow link");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    wr.write_all(b" ").await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), run).await.expect("the run did not return").unwrap().unwrap();
+    drain.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A caller who stops taking output does not hold the run.**  A terminal
+/// that is paused, or crashed with its connection still open, used to leave
+/// the run inside a write for as long as TCP kept the connection, with no
+/// timer able to reach it.  Now a write that makes no progress for the
+/// session's idle timeout counts as the caller gone.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_a_caller_who_stops_reading_does_not_hold_the_run() {
+    let (dir, a) = scratch_addon("stopread", "#!/bin/sh\nwhile :; do echo stall stall stall stall stall; done\n");
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    session.idle_timeout = std::time::Duration::from_secs(2);
+    let run = tokio::spawn(async move { session.run_terminal_addon(&a).await });
+    let mut seen = Vec::new();
+    assert!(read_addon_until(&mut peer, &mut seen, b"stall").await, "{}", String::from_utf8_lossy(&seen));
+    // From here the caller reads nothing at all, but keeps the connection.
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), run).await;
+    assert!(ended.is_ok(), "a caller who stopped reading held the run");
+    ended.unwrap().unwrap().unwrap();
+    drop(peer);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -18589,6 +18668,58 @@ async fn test_held_back_keys_reach_the_add_on_without_more_typing() {
     peer.write_all(b" ").await.unwrap();
     run.await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The Check screen fits, and offers Install only to a session that may.**
+/// Worst case: more offers than are shown, long names and versions, and the
+/// wrapped refusal.
+#[test]
+fn test_the_addon_check_screen_fits_and_guards_install() {
+    use crate::addons::update::{Entry, Offer, State};
+    let long = "x".repeat(70);
+    let offers: Vec<Offer> = (0..15)
+        .map(|i| Offer {
+            entry: Entry {
+                id: format!("{long}{i}"),
+                version: "10.20.30".into(),
+                min_gateway: None,
+                max_gateway: None,
+                files: Vec::new(),
+            },
+            state: State::Update { installed: "9.99.99".into() },
+        })
+        .collect();
+    for term in [TerminalType::Petscii, TerminalType::Ansi, TerminalType::Ascii] {
+        let mut s = make_test_session(term);
+        s.color_enabled = false;
+        for can in [true, false] {
+            let rows = s.addons_offer_rows(&offers, can);
+            let with_prompt = rows.len() + 1;
+            assert!(with_prompt <= 22, "{with_prompt} rows on {term:?}");
+            let width = if term == TerminalType::Petscii { PETSCII_WIDTH - 1 } else { 80 };
+            for r in &rows {
+                assert!(r.chars().count() <= width, "{r:?} is {} on {term:?}", r.chars().count());
+            }
+            let text = rows.join("\n");
+            assert_eq!(text.contains("#=Install"), can, "{term:?} can={can}");
+            assert_eq!(text.contains("logged-in"), !can, "{term:?} can={can}");
+        }
+        let empty = s.addons_offer_rows(&[], false).join("\n");
+        assert!(empty.contains("up to date") && !empty.contains("#=Install"));
+    }
+}
+
+/// **Installing from telnet is decided by the session's login, nothing
+/// else.**  The page itself needs the network, so the decision is read from
+/// its source, bounded to that one function.
+#[test]
+fn test_telnet_installs_only_for_a_logged_in_session() {
+    let src = include_str!("addons_ui.rs");
+    let start = src.find("async fn addons_update_page(").expect("the page");
+    let body = &src[start..];
+    let body = &body[..body.find("\n    }\n").expect("its end")];
+    assert!(body.contains("let can_install = self.authenticated;"), "the install decision moved");
+    assert!(body.contains("if offers.is_empty() || !can_install {"), "a refused session can still pick");
 }
 
 /// The add-ons settings screen fits 22 rows and its width at the worst it

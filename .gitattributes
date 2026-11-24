@@ -43,3 +43,8 @@ src/cpm/nonbooting.txt     text eol=lf
 # but the file is generated and diffed like repodisks.txt, so pin it the same
 # way and keep the two consistent.
 src/cpm/altairduino.txt    text eol=lf
+
+# A real signed add-on list and its signature (src/addons/update.rs tests):
+# the signature covers the exact bytes, so a CRLF checkout on Windows would
+# fail `test_a_list_from_the_signing_script_verifies` -- binary, unchanged.
+src/addons/testdata/*      binary

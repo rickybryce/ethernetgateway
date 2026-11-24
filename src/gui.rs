@@ -1027,8 +1027,11 @@ struct App {
     /// when it opens and on Refresh, not every frame.
     addons_popup_open: bool,
     addons_installed: Vec<crate::addons::AddOn>,
-    /// The last Open's outcome, shown under the list.
+    /// The last Open's or Check's outcome, shown under the list.
     addons_status: String,
+    /// A check or install running on its own thread; its one message
+    /// replaces `addons_status` when it arrives.
+    addons_job: Option<std::sync::mpsc::Receiver<String>>,
     /// Whether the "Mount CP/M Drives" window is open.  A second popup off the
     /// CP/M group rather than more rows in it: sixteen drives do not fit
     /// beside the other settings, and mounting is an occasional operation.
@@ -1434,6 +1437,7 @@ impl App {
             addons_popup_open: false,
             addons_installed: Vec::new(),
             addons_status: String::new(),
+            addons_job: None,
             ai_browser_popup_open: false,
             cpm_mount_popup_open: false,
             cpm_wizard: None,
@@ -2052,6 +2056,35 @@ impl App {
             let a = self.addons_installed[i].clone();
             self.addons_status = desktop_open_addon(&a);
         }
+        ui.add_space(4.0);
+        // Check and install off this thread: the network can take a while,
+        // and the window must keep drawing.
+        if let Some(rx) = &self.addons_job {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    self.addons_status = msg;
+                    self.addons_job = None;
+                    self.addons_installed = crate::addons::discover();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.addons_job = None,
+            }
+        }
+        let busy = self.addons_job.is_some();
+        ui.horizontal(|ui| {
+            let check = ui.add_enabled(!busy, egui::Button::new("Check for add-ons")).clicked();
+            let install = ui.add_enabled(!busy, egui::Button::new("Install new and updated")).clicked();
+            if check || install {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.addons_job = Some(rx);
+                self.addons_status = "Checking...".into();
+                std::thread::spawn(move || {
+                    let _ = tx.send(desktop_addons_job(install));
+                });
+            }
+        });
         if !self.addons_status.is_empty() {
             ui.add_space(4.0);
             ui.label(egui::RichText::new(&self.addons_status).color(AMBER));
@@ -8159,6 +8192,28 @@ impl eframe::App for App {
 }
 
 // ─── Tests ─────────────────────────────────────────────────
+
+/// Check for add-ons, and with `install` install every one offered: the
+/// desktop popup's buttons.  One line for the status label.
+fn desktop_addons_job(install: bool) -> String {
+    let root = crate::addons::addons_root();
+    match crate::addons::update::check(&root) {
+        Err(e) => format!("Could not check: {e}"),
+        Ok(offers) if offers.is_empty() => "Everything is up to date.".into(),
+        Ok(offers) if !install => format!(
+            "Available: {}.",
+            offers.iter().map(crate::addons::update::Offer::label).collect::<Vec<_>>().join(", ")
+        ),
+        Ok(offers) => {
+            let r = crate::addons::update::install(&root, &offers);
+            let mut s = r.summary();
+            if let Some(c) = s.get_mut(..1) {
+                c.make_ascii_uppercase();
+            }
+            format!("{s}.")
+        }
+    }
+}
 
 /// Open a GUI add-on from the desktop window, and say what happened.
 ///

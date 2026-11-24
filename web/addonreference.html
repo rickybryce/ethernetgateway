@@ -641,6 +641,17 @@ ethernetgateway-data/AddOns/
                     touched. On Linux, macOS and the BSDs a program copied in by hand needs
                     <code>chmod +x</code>.
                 </p>
+                <p>
+                    <strong>New and updated add-ons</strong>: <em>Check for add-ons</em> (<code>C</code> on the
+                    telnet Add-Ons list and Configuration &gt; Add-Ons; a button in the web and desktop Add-Ons
+                    settings) reads a signed list from that repository and offers what is new, or newer than your
+                    copy, and suits this gateway&rsquo;s version. A list whose signature does not match the key
+                    built into the gateway is refused; every file is checked against its SHA-256; an update is
+                    swapped in whole and keeps files the list does not name. Only folders the gateway downloaded
+                    (marked by a hidden <code>.egw-installed</code> file) are updated, never your own folder of
+                    the same name, and never while someone is running it. Installing from telnet needs a
+                    logged-in session.
+                </p>
             </div>
 
             <hr class="divider">
@@ -652,7 +663,9 @@ ethernetgateway-data/AddOns/
                     <tr><th>Manifest key</th><th>Meaning</th><th>Default</th></tr>
                     <tr><td><code>name</code></td><td>Shown in the list</td><td>the folder name</td></tr>
                     <tr><td><code>description</code></td><td>One line, shown as it starts and in the settings</td><td>empty</td></tr>
-                    <tr><td><code>version</code>, <code>author</code></td><td>For your own records</td><td>empty</td></tr>
+                    <tr><td><code>version</code></td><td>The add-on&rsquo;s version: an update is offered when the repository&rsquo;s is newer (1.10 is after 1.9)</td><td>empty</td></tr>
+                    <tr><td><code>author</code></td><td>For your own records</td><td>empty</td></tr>
+                    <tr><td><code>min_gateway</code>, <code>max_gateway</code></td><td>The Ethernet Gateway versions it runs on, e.g. <code>1.1.0</code>. Each compares only the parts it gives: <code>max_gateway = 1.4</code> covers every 1.4.x. Outside the range the add-on is not listed, and the log says why. Set <code>max_gateway</code> only once a later gateway is known to break it</td><td>any</td></tr>
                     <tr><td><code>mode</code></td><td><code>terminal</code>, <code>gui</code> (a window on the gateway&rsquo;s screen) or <code>both</code></td><td><code>terminal</code></td></tr>
                     <tr><td><code>command</code>, <code>args</code></td><td>The terminal side&rsquo;s program, relative to the folder, and its arguments, split into words like a shell would but without one (quotes group words; no variables or wildcards)</td><td>required for terminal/both</td></tr>
                     <tr><td><code>gui_command</code>, <code>gui_args</code></td><td>The window side&rsquo;s program and arguments</td><td>required for gui/both</td></tr>
@@ -664,7 +677,7 @@ ethernetgateway-data/AddOns/
                     <tr><td><code>idle_minutes</code></td><td>Ended after this long with nothing sent either way; <code>0</code> keeps the session&rsquo;s own idle timeout</td><td><code>0</code></td></tr>
                     <tr><td><code>max_minutes</code></td><td>Ended after this long in all</td><td><code>0</code> (none)</td></tr>
                     <tr><td><code>single_instance</code></td><td>Only one caller at a time on the terminal side</td><td><code>no</code></td></tr>
-                    <tr><td><code>gui_wait</code></td><td>A caller who opens the window waits for it to close (ESC twice closes it)</td><td><code>no</code></td></tr>
+                    <tr><td><code>gui_wait</code></td><td>A caller who opens the window waits for it to close (ESC twice closes it). The program must be the window itself: a launcher that hands off and exits counts as closed at once</td><td><code>no</code></td></tr>
                 </table>
             </div>
 

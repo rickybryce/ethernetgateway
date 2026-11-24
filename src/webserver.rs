@@ -1390,6 +1390,28 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
         notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
     }
 
+    // Checking for and installing add-ons.  Actions for the same reasons as
+    // the sample disks: nothing is saved, and the banner says what happened.
+    // The list is signed and every file checked (`crate::addons::update`);
+    // the web page may install because it can already change every setting
+    // the gateway has.
+    match fields.get("action").map(String::as_str) {
+        Some("checkaddons") => {
+            let msg = addons_check_notice(crate::addons::update::check(&crate::addons::addons_root()));
+            notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
+        }
+        Some("updateaddons") => {
+            let root = crate::addons::addons_root();
+            let msg = match crate::addons::update::check(&root) {
+                Ok(offers) if offers.is_empty() => "Add-ons: everything is up to date.".to_string(),
+                Ok(offers) => format!("Add-ons: {}.", crate::addons::update::install(&root, &offers).summary()),
+                Err(e) => format!("Add-ons: could not check ({e})."),
+            };
+            notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
+        }
+        _ => {}
+    }
+
     // Fetching the monitor ROM the CP/M settings name.  An action rather than a
     // field for the same reason as the disks above: nothing is saved, a file
     // arrives in the ROMs folder, and the banner says what happened.  It takes
@@ -4814,12 +4836,31 @@ fn addons_popup(cfg: &Config, installed: &[crate::addons::AddOn]) -> String {
          {list}\
          <div class=\"row\"><span class=\"hint\">Add-ons live in ethernetgateway-data/AddOns. \
          One that is unticked stays installed but is not offered. Changes apply at once.</span></div>\
+         <div class=\"row\">{check} {update}</div>\
+         <div class=\"row\"><span class=\"hint\">New and updated add-ons come from \
+         github.com/{repo}, in a signed list; only those that suit this gateway's version are offered. \
+         An update keeps the add-on's own files, such as its scores.</span></div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         enabled = checkbox("addons_enabled", "Offer add-ons to callers", cfg.addons_enabled),
         listed = html_escape(&listed.join("/")),
+        check = save_button("checkaddons", "Check for add-ons", "secondary"),
+        update = save_button("updateaddons", "Install new and updated", "secondary"),
+        repo = crate::addons::fetch::REPO,
         save = save_button("save", "Save", "primary"),
     )
+}
+
+/// The banner after "Check for add-ons".
+fn addons_check_notice(result: Result<Vec<crate::addons::update::Offer>, String>) -> String {
+    match result {
+        Ok(offers) if offers.is_empty() => "Add-ons: everything is up to date.".into(),
+        Ok(offers) => format!(
+            "Add-ons available: {}. Install them with \"Install new and updated\" in General > Add-Ons.",
+            offers.iter().map(crate::addons::update::Offer::label).collect::<Vec<_>>().join(", ")
+        ),
+        Err(e) => format!("Add-ons: could not check ({e})."),
+    }
 }
 
 /// The `addons_disabled` a save makes: the stored list, with each add-on the

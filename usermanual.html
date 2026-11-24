@@ -1784,15 +1784,40 @@ time it starts.
 <strong>Ready-made add-ons</strong> are kept at
 <a href="https://github.com/rickybryce/ethernetgateway-addons">github.com/rickybryce/ethernetgateway-addons</a>.
 The desktop setup wizard's last screen offers to download them
-(<em>Download the Ethernet Gateway add-ons</em>, ticked by default); the telnet
-and web interfaces have no download, so on a headless gateway copy the folders
-in by hand.  It fetches the exact
-versions this release of the gateway was built with and checks every file
-against the SHA-256 recorded in the gateway, so a change to that repository
-reaches your gateway only through a gateway release.  An add-on already in the
+(<em>Download the Ethernet Gateway add-ons</em>, ticked by default).  It fetches
+the exact versions this release of the gateway was built with and checks every
+file against the SHA-256 recorded in the gateway.  An add-on already in the
 folder &mdash; including one you edited &mdash; is left exactly as it is.  To
 install one by hand, copy its folder in; on Linux, macOS and the BSDs make its
 program executable (<code>chmod +x</code>).
+</p>
+
+<p>
+<strong>New and updated add-ons.</strong>  <em>Check for add-ons</em> reads the
+list the add-ons repository publishes and shows the add-ons that are new, or
+newer than the copy you have, leaving out any that do not suit this version of
+the gateway (<code>min_gateway</code>/<code>max_gateway</code>, Appendix C).  It
+is <code>C</code> on the Add-Ons list and on Configuration &gt; Add-Ons, and a
+button in the Add-Ons settings of the web page and the desktop window.  The list
+is signed: the gateway carries the public key, and a list whose signature does
+not match is refused whole.  Each file is then checked against the size and
+SHA-256 the list gives before anything changes.  An update is assembled in a
+hidden folder and swapped in only when complete; files in the add-on's folder
+that the list does not name (its own data, such as a score table) are kept.
+Only folders the gateway downloaded itself are ever updated: they carry a
+hidden <code>.egw-installed</code> file.  A folder of your own that happens to
+share a name is never replaced (delete that file from one of ours to keep the
+gateway from updating it), and an add-on someone is running is left until
+nobody is.
+</p>
+
+<p>
+<strong>Who may install.</strong>  Anyone on telnet may check.  Installing from
+telnet needs a session that logged in, so with <code>security_enabled</code>
+off a caller sees the list but is told to ask the operator.  The web page and
+the desktop window may always install: they can already change every setting.
+On Windows an add-on that someone is running cannot be updated until they leave
+it.
 </p>
 
 <p>
@@ -6956,6 +6981,7 @@ written for a later gateway still loads.
 description = Shows what the gateway tells an add-on, then asks your name
 version = 1.0
 author = Your Name
+min_gateway = 1.1.0
 command = hello.sh
 command_windows = hello.cmd</code></pre>
 
@@ -6963,7 +6989,9 @@ command_windows = hello.cmd</code></pre>
 <tr><th><code>addon.conf</code> key</th><th>Meaning</th><th>Default</th></tr>
 <tr><td><code>name</code></td><td>Shown in the list (cut to fit the screen)</td><td>the folder's name</td></tr>
 <tr><td><code>description</code></td><td>One line about it, shown under "Starting &hellip;" when it begins</td><td>empty</td></tr>
-<tr><td><code>version</code>, <code>author</code></td><td>For your own records</td><td>empty</td></tr>
+<tr><td><code>version</code></td><td>The add-on's own version.  <em>Check for add-ons</em> offers an update when the repository's is newer (compared number by number, so 1.10 is after 1.9)</td><td>empty</td></tr>
+<tr><td><code>author</code></td><td>For your own records</td><td>empty</td></tr>
+<tr><td><code>min_gateway</code>, <code>max_gateway</code></td><td>The Ethernet Gateway versions it runs on, such as <code>1.1.0</code>.  Each compares only the parts it gives, so <code>max_gateway = 1.4</code> covers every 1.4.x.  Outside the range the add-on is left out of the list and the log says why.  Set <code>max_gateway</code> only once a later gateway is known to break it</td><td>any version</td></tr>
 <tr><td><code>command</code></td><td>The program, relative to the folder</td><td>required</td></tr>
 <tr><td><code>args</code></td><td>Arguments, split into words like a shell would but without one: <code>'single'</code> and <code>"double"</code> quotes group words; no variables, no wildcards</td><td>none</td></tr>
 <tr><td><code>command_linux</code>, <code>command_macos</code>, <code>command_windows</code></td><td>This platform's program, used instead of <code>command</code> (and <code>args_linux</code> &hellip; the same way).  <code>linux</code> covers the BSDs too</td><td>&mdash;</td></tr>
@@ -6976,7 +7004,7 @@ command_windows = hello.cmd</code></pre>
 <tr><td><code>single_instance</code></td><td><code>yes</code>: only one caller at a time; a second is told it is in use</td><td><code>no</code></td></tr>
 <tr><td><code>mode</code></td><td><code>terminal</code>: bridged to the caller. <code>gui</code>: a window on the gateway's screen, needs <code>gui_command</code>. <code>both</code>: the window and the terminal side, needs both commands (see C.8)</td><td><code>terminal</code></td></tr>
 <tr><td><code>gui_command</code>, <code>gui_args</code></td><td>The window side's program and arguments, as <code>command</code> and <code>args</code> (with <code>gui_command_linux</code> &hellip; overrides)</td><td>&mdash;</td></tr>
-<tr><td><code>gui_wait</code></td><td><code>yes</code>: a caller who opens the window waits until it closes (ESC twice closes it). <code>no</code>: the caller returns to the list at once</td><td><code>no</code></td></tr>
+<tr><td><code>gui_wait</code></td><td><code>yes</code>: a caller who opens the window waits until it closes (ESC twice closes it). <code>no</code>: the caller returns to the list at once.  The program named must be the window itself: one that hands the window to another process and exits (a launcher such as <code>xdg-open</code>) counts as closed at once</td><td><code>no</code></td></tr>
 </table>
 
 <h2>C.3 What the add-on is told</h2>
@@ -7084,8 +7112,11 @@ No console window is shown on the gateway's screen for a terminal add-on.
 <p>
 To have an add-on included in the downloadable set, offer it to
 <a href="https://github.com/rickybryce/ethernetgateway-addons">the add-ons
-repository</a>.  An add-on there reaches the setup wizard's download with the
-next release of the gateway, which records each of its files' SHA-256.
+repository</a>.  Once it is there and the repository's signed list has been
+regenerated, every gateway's <em>Check for add-ons</em> offers it (within its
+<code>min_gateway</code>/<code>max_gateway</code>); the setup wizard's download
+includes it from the next gateway release.  Raise <code>version</code> when you
+change an add-on: that is how a gateway knows its copy is older.
 </p>
 
 <h2>C.8 A window on the gateway's screen</h2>

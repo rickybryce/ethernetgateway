@@ -23,6 +23,155 @@ use super::gateway::{
 /// beyond it keys are dropped, since a program this far behind is stalled.
 const ADDON_BACKLOG_MAX: usize = 64 * 1024;
 
+/// Keys read from the caller and not yet taken by the run (see
+/// [`read_caller_keys`]).  The run is this far behind only during a long
+/// write to a slow caller with a large paste arriving; the reader then waits.
+const ADDON_KEYS_MAX: usize = 8 * 1024;
+
+/// The caller's side of a run, as the key reader last saw it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallerState {
+    Here,
+    /// ESC twice, timed as the keys arrived.
+    Left,
+    /// The connection closed.
+    Gone,
+}
+
+/// Read the caller's keys for an add-on's run, on a task of its own, and
+/// hand the reader back (with its telnet state) when told to stop.
+///
+/// **Why a task: ESC twice must work while the run is writing.**  The run
+/// used to read keys in the same loop that wrote the add-on's output, so an
+/// add-on printing without end to a slow caller (a C64 at 1200 baud) kept
+/// that loop inside one write for tens of seconds.  The two ESCs then were
+/// read far apart, never inside the 500 ms that makes them a pair, and the
+/// only way out was to hang up.  Here they are timed as they arrive, and
+/// `Left` is raised at once; the run gives up the write it is in.
+async fn read_caller_keys(
+    mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    telnet: bool,
+    is_petscii: bool,
+    keys: tokio::sync::mpsc::Sender<u8>,
+    state: tokio::sync::watch::Sender<CallerState>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) -> (Box<dyn tokio::io::AsyncRead + Unpin + Send>, InboundTelnet) {
+    let mut inbound = InboundTelnet::default();
+    let mut esc = EscHold::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut stop => break,
+            event = read_gateway_event(&mut *reader, telnet, &mut inbound) => match event {
+                Ok(GatewayInboundEvent::Data(b)) => {
+                    if is_gateway_leave_key(b, is_petscii) {
+                        if esc.press(tokio::time::Instant::now()) {
+                            let _ = state.send(CallerState::Left);
+                            break;
+                        }
+                    } else {
+                        esc.other();
+                    }
+                    // Straight in while there is room, which there is but
+                    // for a paste of thousands of keys during a long write.
+                    // Then this waits rather than drop keys -- a paste must
+                    // arrive whole -- and the ESCs go untimed only for that.
+                    match keys.try_send(b) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(b)) => tokio::select! {
+                            biased;
+                            _ = &mut stop => break,
+                            sent = keys.send(b) => if sent.is_err() { break },
+                        },
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                    }
+                }
+                // A pipe has no window to resize.
+                Ok(GatewayInboundEvent::NawsResize(..)) => {}
+                Ok(GatewayInboundEvent::Eof) | Err(_) => {
+                    let _ = state.send(CallerState::Gone);
+                    break;
+                }
+            },
+        }
+    }
+    (reader, inbound)
+}
+
+/// How a write to the caller during a run turned out.
+#[derive(Debug, PartialEq, Eq)]
+enum Sent {
+    Done,
+    /// The connection failed, or took nothing for the whole stall limit.
+    Gone,
+    /// The caller pressed ESC twice while it was under way: abandoned.
+    Left,
+}
+
+/// `fut`, or `None` once `limit` passes; a zero limit is no limit.
+async fn within<T>(limit: std::time::Duration, fut: impl std::future::Future<Output = T>) -> Option<T> {
+    if limit.is_zero() {
+        Some(fut.await)
+    } else {
+        tokio::time::timeout(limit, fut).await.ok()
+    }
+}
+
+/// Write `bytes` to the caller, IAC-escaped on a telnet link.
+///
+/// **A write cannot hold the run.**  With `leave` it is abandoned the moment
+/// the caller leaves.  And it fails as `Gone` when the caller has taken
+/// nothing for `stall` (the session's idle timeout): a terminal that stopped
+/// reading -- paused, or crashed with the connection still open -- otherwise
+/// left the run inside the write, where no timer could reach it.  The limit
+/// is on progress, not on the whole write, so a slow line that is still
+/// taking bytes is never cut off.
+async fn send_to_caller(
+    writer: &SharedWriter,
+    bytes: &[u8],
+    telnet: bool,
+    stall: std::time::Duration,
+    leave: Option<&mut tokio::sync::watch::Receiver<CallerState>>,
+) -> Sent {
+    let wire: std::borrow::Cow<[u8]> = if telnet && bytes.contains(&IAC) {
+        let mut v = Vec::with_capacity(bytes.len() + 8);
+        for &b in bytes {
+            v.push(b);
+            if b == IAC {
+                v.push(IAC);
+            }
+        }
+        v.into()
+    } else {
+        bytes.into()
+    };
+    let push = async {
+        let mut w = writer.lock().await;
+        let mut off = 0;
+        while off < wire.len() {
+            match within(stall, w.write(&wire[off..])).await {
+                Some(Ok(n)) if n > 0 => off += n,
+                _ => return Sent::Gone,
+            }
+        }
+        match within(stall, w.flush()).await {
+            Some(Ok(())) => Sent::Done,
+            _ => Sent::Gone,
+        }
+    };
+    match leave {
+        None => push.await,
+        Some(state) => tokio::select! {
+            biased;
+            s = async { state.wait_for(|s| *s != CallerState::Here).await.map(|s| *s) } => match s {
+                Ok(CallerState::Left) => Sent::Left,
+                _ => Sent::Gone,
+            },
+            sent = push => sent,
+        },
+    }
+}
+
 /// How a run of an add-on ended, for the line that says so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ended {
@@ -139,8 +288,9 @@ impl TelnetSession {
         }
         rows.push(String::new());
         rows.push(format!(
-            "  {} {} {}",
+            "  {} {} {} {}",
             self.dim("#=Start"),
+            self.action_prompt("C", "Check"),
             self.action_prompt("Q", "Back"),
             self.action_prompt("H", "Help"),
         ));
@@ -174,6 +324,7 @@ impl TelnetSession {
             match input.as_str() {
                 "q" => return Ok(()),
                 "h" => self.show_help_page("ADD-ONS HELP", Self::addons_help_lines()).await?,
+                "c" => self.addons_update_page().await?,
                 "n" if pages > 1 => page = (page + 1) % pages,
                 "p" if pages > 1 => page = (page + pages - 1) % pages,
                 _ => match input.parse::<usize>() {
@@ -185,7 +336,7 @@ impl TelnetSession {
                         }
                     }
                     Ok(_) => self.show_error("Invalid number.").await?,
-                    Err(_) => self.show_error("Enter a number, or Q.").await?,
+                    Err(_) => self.show_error("Enter a number, C, or Q.").await?,
                 },
             }
         }
@@ -238,7 +389,7 @@ impl TelnetSession {
             }
         };
         let host = crate::addons::gui::where_label(&crate::relay::hostname_label());
-        self.send_line("").await?;
+        self.clear_screen().await?;
         // Wrapped: a 32-character host name and a long add-on name do not
         // fit a C64 row together.
         let width = if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH } else { 80 } - 3;
@@ -354,8 +505,9 @@ impl TelnetSession {
         }
         rows.push(String::new());
         rows.push(format!(
-            "  {} {} {}",
+            "  {} {} {} {}",
             self.dim("#=On/Off"),
+            self.action_prompt("C", "Check"),
             self.action_prompt("Q", "Back"),
             self.action_prompt("H", "Help"),
         ));
@@ -388,6 +540,7 @@ impl TelnetSession {
             match input.as_str() {
                 "q" => return Ok(()),
                 "h" => self.show_help_page("ADD-ONS SETTINGS HELP", Self::addons_settings_help_lines()).await?,
+                "c" => self.addons_update_page().await?,
                 "n" if pages > 1 => page = (page + 1) % pages,
                 "p" if pages > 1 => page = (page + pages - 1) % pages,
                 "e" => {
@@ -403,10 +556,124 @@ impl TelnetSession {
                         save_addon_setting("addons_disabled", &v).await;
                     }
                     Ok(_) => self.show_error("Invalid number.").await?,
-                    Err(_) => self.show_error("Press E, D, a number, H, or Q.").await?,
+                    Err(_) => {
+                        // `D` only where the screen offers it.
+                        let keys = if cfg!(all(unix, not(target_os = "macos"))) { "E, D, C" } else { "E, C" };
+                        self.show_error(&format!("Press {keys}, a number, H, or Q.")).await?
+                    }
                 },
             }
         }
+    }
+
+    /// Offers listed on the Check screen; the rest are counted.
+    pub(in crate::telnet) const ADDON_OFFERS_SHOWN: usize = 10;
+
+    /// Every row of the Check screen once the list has arrived, title to
+    /// key line.  `can_install` is whether this session may install.
+    pub(in crate::telnet) fn addons_offer_rows(&self, offers: &[crate::addons::update::Offer], can_install: bool) -> Vec<String> {
+        let sep = self.separator();
+        let mut rows = vec![sep.clone(), format!("  {}", self.yellow("NEW AND UPDATED ADD-ONS")), sep, String::new()];
+        let width = if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH } else { 80 } - 3;
+        if offers.is_empty() {
+            rows.push(format!("  {}", self.green("Everything is up to date.")));
+            return rows;
+        }
+        for (i, o) in offers.iter().take(Self::ADDON_OFFERS_SHOWN).enumerate() {
+            let prefix = format!("{:>2}. ", i + 1);
+            let label = crate::webbrowser::truncate_to_width(&self.remote_text(&o.label()), width - prefix.len());
+            rows.push(format!("  {prefix}{label}"));
+        }
+        if offers.len() > Self::ADDON_OFFERS_SHOWN {
+            rows.push(format!("  {}", self.dim(&format!("and {} more (A installs all)", offers.len() - Self::ADDON_OFFERS_SHOWN))));
+        }
+        rows.push(String::new());
+        if can_install {
+            rows.push(format!(
+                "  {} {} {}",
+                self.dim("#=Install"),
+                self.action_prompt("A", "All"),
+                self.action_prompt("Q", "Back"),
+            ));
+        } else {
+            for row in crate::aichat::wrap_line(
+                "Installing needs a logged-in session: the operator can install them from the web or desktop settings.",
+                width,
+            ) {
+                rows.push(format!("  {}", self.dim(&row)));
+            }
+        }
+        rows
+    }
+
+    /// Check for new and updated add-ons, and install them when this session
+    /// may.  **Anyone may look; only a session that proved who it is may
+    /// install** -- an add-on is a program that runs on this machine, and a
+    /// gateway with security off would otherwise let any caller choose what
+    /// it runs (Ricky, 2026-11-23).
+    pub(in crate::telnet) async fn addons_update_page(&mut self) -> Result<(), std::io::Error> {
+        self.clear_screen().await?;
+        self.send_line(&format!("  {}", self.cyan("Checking for add-ons..."))).await?;
+        self.flush().await?;
+        let root = crate::addons::addons_root();
+        let checked = {
+            let root = root.clone();
+            tokio::task::spawn_blocking(move || crate::addons::update::check(&root))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+        };
+        let offers = match checked {
+            Ok(o) => o,
+            Err(e) => {
+                glog!("Add-on check failed: {}", e);
+                return self.show_error("Could not check for add-ons.").await;
+            }
+        };
+        let can_install = self.authenticated;
+        self.clear_screen().await?;
+        for row in self.addons_offer_rows(&offers, can_install) {
+            self.send_line(&row).await?;
+        }
+        if offers.is_empty() || !can_install {
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            return self.wait_for_key().await;
+        }
+        self.send(&format!("{}> ", self.cyan("gateway/addons"))).await?;
+        self.flush().await?;
+        let input = match self.get_line_input().await? {
+            Some(s) if !s.trim().is_empty() => s.trim().to_ascii_lowercase(),
+            _ => return Ok(()),
+        };
+        let chosen: Vec<crate::addons::update::Offer> = match input.as_str() {
+            "q" => return Ok(()),
+            "a" => offers.clone(),
+            other => match other.parse::<usize>() {
+                Ok(n) if (1..=offers.len().min(Self::ADDON_OFFERS_SHOWN)).contains(&n) => vec![offers[n - 1].clone()],
+                _ => return self.show_error("Not one of the numbers shown.").await,
+            },
+        };
+        self.send_line(&format!("  {}", self.cyan("Installing..."))).await?;
+        self.flush().await?;
+        glog!("Add-on install asked for by {}", self.addon_who());
+        let report = tokio::task::spawn_blocking(move || crate::addons::update::install(&root, &chosen))
+            .await
+            .unwrap_or_default();
+        self.send_line("").await?;
+        let width = if self.terminal_type == TerminalType::Petscii { PETSCII_WIDTH } else { 80 } - 3;
+        for o in &report.fetched {
+            self.send_line(&format!("  {}", self.green(&format!("Installed {}", self.remote_text(o))))).await?;
+        }
+        for (id, why) in &report.failed {
+            for row in crate::aichat::wrap_line(&format!("{id} failed: {why}"), width) {
+                self.send_line(&format!("  {}", self.red(&self.remote_text(&row)))).await?;
+            }
+        }
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await
     }
 
     /// Ask for `addon_display`.  Enter alone keeps it; `-` clears it.
@@ -510,6 +777,8 @@ impl TelnetSession {
         } else {
             None
         };
+        // Seen by the updater, which will not replace a folder in use.
+        let _in_use = crate::addons::InUse::enter(&m.id);
         let native = self.terminal_type == TerminalType::Petscii && m.petscii == Petscii::Native;
         let filter = match self.terminal_type {
             TerminalType::Petscii if native => GatewayFilter::Raw,
@@ -577,6 +846,8 @@ impl TelnetSession {
         }
 
         let esc_label = if self.terminal_type == TerminalType::Petscii { "<-" } else { "ESC" };
+        // A fresh screen: the add-on starts at the top, not under the menu.
+        self.clear_screen().await?;
         self.send_line(&format!("  {}", self.green(&format!("Starting {name}.")))).await?;
         // The manifest's one line about it, the only place a caller sees it:
         // two rows at most, wrapped to the screen.
@@ -605,10 +876,16 @@ impl TelnetSession {
         let local_telnet = self.speaks_telnet();
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         let erase_char = self.erase_char;
-        let reader = &mut self.reader;
+        let stall = self.idle_timeout;
+        // The caller's keys, read on a task of their own for the run (see
+        // `read_caller_keys`); the reader comes back when the run ends.
+        let caller = std::mem::replace(&mut self.reader, Box::new(tokio::io::empty()));
+        let (key_tx, mut key_rx) = tokio::sync::mpsc::channel::<u8>(ADDON_KEYS_MAX);
+        let (state_tx, mut state_rx) = tokio::sync::watch::channel(CallerState::Here);
+        let mut leave_w = state_rx.clone();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let keys = tokio::spawn(read_caller_keys(caller, local_telnet, is_petscii, key_tx, state_tx, stop_rx));
         let writer = &self.writer;
-        let mut inbound = InboundTelnet::default();
-        let mut esc = EscHold::new();
         let mut ansi_state = GatewayOutState::new(filter);
         let mut hold_deadline: Option<tokio::time::Instant> = None;
         let mut out_buf: Vec<u8> = Vec::new();
@@ -637,28 +914,35 @@ impl TelnetSession {
                         permit.send(std::mem::take(&mut backlog));
                     }
                 }
+                // The key reader saw ESC twice, or the connection close.
+                // Copied out inside the future: the guard `wait_for` returns
+                // is not `Send` and must not live in the select's state.
+                s = async { state_rx.wait_for(|s| *s != CallerState::Here).await.map(|s| *s) } => {
+                    break match s {
+                        Ok(CallerState::Left) => Ended::Left,
+                        _ => Ended::Disconnected,
+                    };
+                }
                 _ = tokio::time::sleep_until(flush_at), if hold_deadline.is_some() => {
                     hold_deadline = None;
                     out_buf.clear();
                     ansi_state.flush_pending(&mut out_buf);
                     if !out_buf.is_empty() {
-                        let mut w = writer.lock().await;
-                        if write_local_data(&mut **w, &out_buf, local_telnet).await.is_err() { break Ended::Disconnected; }
-                        if w.flush().await.is_err() { break Ended::Disconnected; }
+                        match send_to_caller(writer, &out_buf, local_telnet, stall, Some(&mut leave_w)).await {
+                            Sent::Done => {}
+                            Sent::Gone => break Ended::Disconnected,
+                            Sent::Left => break Ended::Left,
+                        }
                     }
                 }
-                event = read_gateway_event(reader, local_telnet, &mut inbound) => {
-                    let b = match event {
-                        Ok(GatewayInboundEvent::Data(b)) => b,
-                        // A pipe has no window to resize.
-                        Ok(GatewayInboundEvent::NawsResize(..)) => continue,
-                        Ok(GatewayInboundEvent::Eof) | Err(_) => break Ended::Disconnected,
+                key = key_rx.recv() => {
+                    // A closed queue is a reader that has finished: why is
+                    // in its state (the ESC pair that ended it, or a hang-up).
+                    let Some(b) = key else {
+                        // `leave_w`, not `state_rx`: the branch above still
+                        // holds that one.  Both see the same value.
+                        break if *leave_w.borrow() == CallerState::Left { Ended::Left } else { Ended::Disconnected };
                     };
-                    if is_gateway_leave_key(b, is_petscii) {
-                        if esc.press(tokio::time::Instant::now()) { break Ended::Left; }
-                    } else {
-                        esc.other();
-                    }
                     let mut to_addon: Vec<u8> = Vec::new();
                     let mut echo: Vec<u8> = Vec::new();
                     match m.input {
@@ -728,9 +1012,11 @@ impl TelnetSession {
                         }
                     }
                     if !echo.is_empty() {
-                        let mut w = writer.lock().await;
-                        if write_local_data(&mut **w, &echo, local_telnet).await.is_err() { break Ended::Disconnected; }
-                        if w.flush().await.is_err() { break Ended::Disconnected; }
+                        match send_to_caller(writer, &echo, local_telnet, stall, Some(&mut leave_w)).await {
+                            Sent::Done => {}
+                            Sent::Gone => break Ended::Disconnected,
+                            Sent::Left => break Ended::Left,
+                        }
                     }
                     // Never waited on: see `feeder`.  Kept in `backlog` when the
                     // queue is full rather than dropped -- in Raw mode each key
@@ -758,9 +1044,11 @@ impl TelnetSession {
                     out_buf.clear();
                     filter_gateway_output(data, &mut ansi_state, &mut out_buf);
                     if !out_buf.is_empty() {
-                        let mut w = writer.lock().await;
-                        if write_local_data(&mut **w, &out_buf, local_telnet).await.is_err() { break Ended::Disconnected; }
-                        if w.flush().await.is_err() { break Ended::Disconnected; }
+                        match send_to_caller(writer, &out_buf, local_telnet, stall, Some(&mut leave_w)).await {
+                            Sent::Done => {}
+                            Sent::Gone => break Ended::Disconnected,
+                            Sent::Left => break Ended::Left,
+                        }
                     }
                     hold_deadline = ansi_state
                         .has_pending()
@@ -774,15 +1062,32 @@ impl TelnetSession {
         if ended != Ended::Disconnected {
             out_buf.clear();
             ansi_state.flush_pending(&mut out_buf);
+            // Then the terminal put back as the gateway draws it: an add-on
+            // ended mid-colour (or one that hid the cursor) must not leave
+            // the menus in its colours.
+            match self.terminal_type {
+                TerminalType::Ansi => out_buf.extend_from_slice(b"\x1b[0m\x1b[?25h"),
+                TerminalType::Petscii if self.color_enabled => out_buf.extend_from_slice(&[0x92, PETSCII_DEFAULT]),
+                TerminalType::Petscii => out_buf.push(0x92),
+                TerminalType::Ascii => {}
+            }
             if !out_buf.is_empty() {
-                let mut w = self.writer.lock().await;
-                let _ = write_local_data(&mut **w, &out_buf, local_telnet).await;
-                let _ = w.flush().await;
+                let _ = send_to_caller(&self.writer, &out_buf, local_telnet, stall, None).await;
             }
         }
-        // A telnet command the caller was half-way through must not be read
-        // as the key that answers "Press any key" below.
-        inbound.finish(&mut *self.reader).await;
+        // The reader back from its task.  A task that failed has lost it:
+        // the session then reads end-of-file and closes, which is the honest
+        // outcome for a connection whose state is unknown.
+        let _ = stop_tx.send(());
+        match keys.await {
+            Ok((reader, mut inbound)) => {
+                self.reader = reader;
+                // A telnet command the caller was half-way through must not
+                // be read as the key that answers "Press any key" below.
+                inbound.finish(&mut *self.reader).await;
+            }
+            Err(e) => glog!("Add-on \"{}\": the key reader failed: {}", m.id, e),
+        }
 
         // An add-on that closed its output is given a moment to exit with its
         // own status; then it, and anything it started, is ended regardless

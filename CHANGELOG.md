@@ -34,6 +34,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   web page's and desktop window's General > Add-Ons...): `addons_enabled`,
   `addon_display`, and an On box per add-on (`addons_disabled`).  They apply
   at once.
+- **Add-on version range**: `min_gateway` and `max_gateway` in `addon.conf`
+  name the gateway versions an add-on runs on (`max_gateway = 1.4` covers
+  every 1.4.x).  One outside its range is not listed, and the log says why.
+- **Check for new and updated add-ons** (`C` on the telnet Add-Ons list and
+  Configuration > Add-Ons; buttons in the web and desktop Add-Ons settings).
+  The list comes from the add-ons repository, signed with ed25519 and checked
+  against a key built into the gateway; every file is checked against its
+  SHA-256; only add-ons that suit this gateway's version are offered; an update
+  is swapped in whole and keeps the add-on's own files.  Anyone may check;
+  installing from telnet needs a logged-in session.
+- **The screen is cleared** when a caller starts an add-on, and colours and
+  the cursor are put back when it ends.
+- **ESC twice always leaves an add-on**, even one printing without end to a
+  slow caller (keys are now timed as they arrive, and the write under way is
+  abandoned); and a caller whose terminal stops taking output no longer holds
+  the session: a write with no progress for the idle timeout ends it.
 - **Add-On Reference** web page (`web/addonreference.html`) for anyone
   writing one, linked from the other reference pages.
 - **The setup wizard can download the Ethernet Gateway add-ons** from

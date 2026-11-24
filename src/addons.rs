@@ -17,6 +17,7 @@
 //! seen -- not on every menu draw, which would bury the log.
 
 pub(crate) mod fetch;
+pub(crate) mod update;
 pub(crate) mod gui;
 
 use std::collections::HashSet;
@@ -126,6 +127,10 @@ pub(crate) struct Manifest {
     pub gui_wait: bool,
     /// Only one copy of the terminal side at a time.
     pub single_instance: bool,
+    /// The oldest gateway it runs on, as given (`1.1` is `[1, 1]`).
+    pub min_gateway: Option<Vec<u32>>,
+    /// The newest gateway it runs on, as given: `1.4` covers every 1.4.x.
+    pub max_gateway: Option<Vec<u32>>,
 }
 
 /// The suffix of the per-platform keys this build reads: `command_linux` and
@@ -202,6 +207,78 @@ fn parse_bool(key: &str, v: &str) -> Result<bool, String> {
         "no" | "false" | "off" | "0" => Ok(false),
         _ => Err(format!("{key} must be yes or no, not \"{v}\"")),
     }
+}
+
+/// A gateway version in a manifest: one to three dot-separated whole
+/// numbers, kept as written so `max_gateway = 1.4` can mean "any 1.4.x".
+pub(crate) fn parse_version(key: &str, v: &str) -> Result<Vec<u32>, String> {
+    let bad = || format!("{key} must be a version like 1.1.0, not \"{v}\"");
+    let parts = v
+        .split('.')
+        .map(|p| {
+            if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(bad());
+            }
+            p.parse::<u32>().map_err(|_| bad())
+        })
+        .collect::<Result<Vec<u32>, String>>()?;
+    if parts.len() > 3 {
+        return Err(bad());
+    }
+    Ok(parts)
+}
+
+pub(crate) fn show_version(v: &[u32]) -> String {
+    v.iter().map(u32::to_string).collect::<Vec<_>>().join(".")
+}
+
+/// This gateway's version, `[major, minor, patch]`.
+pub(crate) fn this_gateway() -> Vec<u32> {
+    crate_version(env!("CARGO_PKG_VERSION"))
+}
+
+/// A crate version as numbers; a pre-release (`1.0.0-rc2`) counts as its
+/// release, so an add-on for 1.0.0 runs on the candidate being tested.
+fn crate_version(v: &str) -> Vec<u32> {
+    let core = v.split(['-', '+']).next().unwrap_or(v);
+    parse_version("version", core).unwrap_or_default()
+}
+
+/// Whether gateway `ours` is inside the add-on's range.  Each bound is
+/// compared on the parts it gives: `min_gateway = 1.4` admits 1.4.0 and
+/// later, `max_gateway = 1.4` admits up to the last 1.4.x.
+pub(crate) fn gateway_fits(m: &Manifest, ours: &[u32]) -> Result<(), String> {
+    range_fits(m.min_gateway.as_deref(), m.max_gateway.as_deref(), ours)
+}
+
+/// [`gateway_fits`] on the bounds alone: the updater judges a catalogue
+/// entry the same way before anything is downloaded.
+pub(crate) fn range_fits(min: Option<&[u32]>, max: Option<&[u32]>, ours: &[u32]) -> Result<(), String> {
+    let cut = |n: usize| {
+        let mut v = ours.to_vec();
+        v.resize(3, 0);
+        v.truncate(n);
+        v
+    };
+    if let Some(min) = min {
+        if cut(min.len()).as_slice() < min {
+            return Err(format!(
+                "it needs Ethernet Gateway {} or later; this is {}",
+                show_version(min),
+                show_version(ours)
+            ));
+        }
+    }
+    if let Some(max) = max {
+        if cut(max.len()).as_slice() > max {
+            return Err(format!(
+                "it is for Ethernet Gateway up to {}; this is {}",
+                show_version(max),
+                show_version(ours)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_num<T: std::str::FromStr>(key: &str, v: &str) -> Result<T, String> {
@@ -309,6 +386,8 @@ pub(crate) fn parse_manifest(id: &str, text: &str) -> Result<Manifest, String> {
             .map(|v| parse_bool("single_instance", v))
             .transpose()?
             .unwrap_or(false),
+        min_gateway: get("min_gateway").map(|v| parse_version("min_gateway", v)).transpose()?,
+        max_gateway: get("max_gateway").map(|v| parse_version("max_gateway", v)).transpose()?,
     })
 }
 
@@ -373,6 +452,9 @@ pub(crate) fn load(dir: &Path) -> Result<AddOn, String> {
     let text = std::fs::read_to_string(dir.join(MANIFEST))
         .map_err(|_| format!("no {MANIFEST} in it"))?;
     let manifest = parse_manifest(&id, &text)?;
+    // Before the programs: one built for another gateway is not offered,
+    // whatever else is wrong with it.
+    gateway_fits(&manifest, &this_gateway())?;
     if let Some(cmd) = &manifest.command {
         resolve_program(dir, cmd)?;
     }
@@ -493,7 +575,8 @@ list and the reason is written to the gateway's log.
 Add-ons run as the same user as the gateway, with its rights.  Only put
 programs here that you trust.
 
-Ready-made add-ons: the setup wizard can download them, or copy them by
+Ready-made add-ons: the setup wizard can download them, C (Check for
+add-ons) on the Add-Ons list offers new and updated ones, or copy them by
 hand from https://github.com/rickybryce/ethernetgateway-addons
 The user manual's \"Writing an add-on\" section lists every manifest key.
 ";
@@ -766,6 +849,40 @@ impl Drop for SingleInstance {
     }
 }
 
+/// Runs of each add-on under way now, any caller.
+static IN_USE: Mutex<Option<std::collections::HashMap<String, usize>>> = Mutex::new(None);
+
+/// Held for a terminal run of an add-on: while any is held, the updater
+/// leaves that add-on's folder alone.
+pub(crate) struct InUse(String);
+
+impl InUse {
+    pub(crate) fn enter(id: &str) -> InUse {
+        let mut map = IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+        *map.get_or_insert_with(Default::default).entry(id.to_string()).or_insert(0) += 1;
+        InUse(id.to_string())
+    }
+}
+
+impl Drop for InUse {
+    fn drop(&mut self) {
+        let mut map = IN_USE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = map.as_mut()
+            && let Some(n) = m.get_mut(&self.0)
+        {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// Whether anyone is running `id` now.
+pub(crate) fn in_use(id: &str) -> bool {
+    IN_USE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|m| m.contains_key(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,7 +949,9 @@ mod tests {
              idle_minutes = 10\n\
              max_minutes = 60\n\
              gui_wait = yes\n\
-             single_instance = yes\n",
+             single_instance = yes\n\
+             min_gateway = 1.1\n\
+             max_gateway = 2.0.3\n",
         )
         .unwrap();
         assert_eq!((m.name.as_str(), m.description.as_str()), ("Chess", "Play the gateway"));
@@ -846,6 +965,7 @@ mod tests {
         assert_eq!(m.input, Input::Raw);
         assert_eq!((m.min_columns, m.idle_minutes, m.max_minutes), (80, 10, 60));
         assert!(m.gui_wait && m.single_instance);
+        assert_eq!((m.min_gateway, m.max_gateway), (Some(vec![1, 1]), Some(vec![2, 0, 3])));
     }
 
     /// This platform's `command_<os>` wins over the plain key; another
@@ -873,6 +993,10 @@ mod tests {
         assert!(err("command = a\ngui_wait = perhaps\n").contains("yes or no"));
         assert!(err("command = a\nargs = \"open\n").contains("not closed"));
         assert!(err("just words\n").contains("key = value"));
+        for bad in ["1.x", "1..2", "v1.1", "+1", "1.2.3.4", "1.1.0-beta"] {
+            assert!(err(&format!("command = a\nmin_gateway = {bad}\n")).contains("min_gateway must be a version"), "{bad}");
+        }
+        assert!(err("command = a\nmax_gateway = 2.\n").contains("max_gateway must be a version"));
         // Unknown keys are not an error: a later gateway's manifest loads.
         assert!(parse_manifest("x", "command = a\nfuture_key = 1\n").is_ok());
     }
@@ -927,6 +1051,48 @@ mod tests {
         let found: Vec<String> = discover_in(&root).into_iter().map(|a| a.manifest.id).collect();
         assert_eq!(found, vec!["zeta", "beta"], "sorted by name (alpha, Beta), bad and hidden left out");
         assert!(discover_in(&root.join("nowhere")).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Each bound is compared on the parts it gives**: `min_gateway = 1.4`
+    /// starts at 1.4.0, `max_gateway = 1.4` runs to the last 1.4.x, and no
+    /// bound at all fits every gateway.
+    #[test]
+    fn test_the_gateway_range_compares_the_parts_given() {
+        let fits = |conf: &str, ours: &[u32]| {
+            gateway_fits(&parse_manifest("x", &format!("command = a\n{conf}")).unwrap(), ours)
+        };
+        assert!(fits("", &[0, 1, 0]).is_ok() && fits("", &[99, 0, 0]).is_ok());
+        assert!(fits("min_gateway = 1.4\n", &[1, 4, 0]).is_ok());
+        assert!(fits("min_gateway = 1.4\n", &[1, 3, 9]).unwrap_err().contains("needs Ethernet Gateway 1.4 or later; this is 1.3.9"));
+        assert!(fits("min_gateway = 1.1.2\n", &[1, 1, 1]).is_err());
+        assert!(fits("min_gateway = 1.1.2\n", &[1, 1, 2]).is_ok());
+        assert!(fits("min_gateway = 2\n", &[1, 99, 99]).is_err());
+        assert!(fits("max_gateway = 1.4\n", &[1, 4, 99]).is_ok(), "1.4 covers every 1.4.x");
+        assert!(fits("max_gateway = 1.4\n", &[1, 5, 0]).unwrap_err().contains("up to 1.4; this is 1.5.0"));
+        assert!(fits("max_gateway = 1.4.2\n", &[1, 4, 3]).is_err());
+        assert!(fits("max_gateway = 1\n", &[1, 9, 9]).is_ok());
+        assert!(fits("min_gateway = 1.1\nmax_gateway = 1.4\n", &[1, 2, 0]).is_ok());
+        assert!(fits("min_gateway = 1.1\nmax_gateway = 1.4\n", &[1, 0, 9]).is_err());
+        assert_eq!(this_gateway().len(), 3, "the crate version parses");
+        assert_eq!(crate_version("1.0.0-rc2"), vec![1, 0, 0], "a candidate counts as its release");
+        assert_eq!(crate_version("1.2.3+build.7"), vec![1, 2, 3]);
+    }
+
+    /// **An add-on for another gateway is never offered**: `load` drops it
+    /// and says why, before it looks at the programs.
+    #[test]
+    fn test_an_add_on_for_another_gateway_is_left_out() {
+        let root = tmp("range");
+        let ours = show_version(&this_gateway());
+        let next = { let v = this_gateway(); show_version(&[v[0] + 1]) };
+        program(&addon(&root, "fits", &format!("command = f.sh\nmin_gateway = {ours}\nmax_gateway = {ours}\n")), "f.sh");
+        program(&addon(&root, "later", &format!("command = l.sh\nmin_gateway = {next}\n")), "l.sh");
+        program(&addon(&root, "older", "command = o.sh\nmax_gateway = 0.9\n"), "o.sh");
+        let found: Vec<String> = discover_in(&root).into_iter().map(|a| a.manifest.id).collect();
+        assert_eq!(found, vec!["fits"]);
+        assert!(load(&root.join("later")).unwrap_err().contains("or later"));
+        assert!(load(&root.join("older")).unwrap_err().contains("up to 0.9"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

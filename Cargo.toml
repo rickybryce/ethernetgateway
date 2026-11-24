@@ -69,6 +69,9 @@ pbkdf2 = { version = "0.13", features = ["phc", "getrandom", "sha2"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 russh = "0.65"
 ureq = "3"
+# Checks the add-on catalogue's ed25519 signature (src/addons/update.rs).  Already
+# built for every target through ureq -> rustls, so no new crate.
+ring = "0.17"
 serde_json = "1"
 html2text = "0.17"
 # Pinned to html2text 0.17's OWN html5ever, and it must stay that way.

@@ -44,13 +44,96 @@ impl File {
     }
 }
 
+/// Whether `p` is one plain, visible file or folder name.
+pub(crate) fn plain_name(p: &str) -> bool {
+    !p.is_empty() && p != "." && p != ".." && !p.starts_with('.') && !p.contains('\\') && !p.contains('/')
+}
+
 /// Whether a catalogue path is exactly `folder/name`, both plain names.
 fn plain_path(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
-    parts.len() == 2
-        && parts.iter().all(|p| {
-            !p.is_empty() && *p != "." && *p != ".." && !p.starts_with('.') && !p.contains('\\')
-        })
+    parts.len() == 2 && parts.iter().all(|p| plain_name(p))
+}
+
+/// A file from its four catalogue fields, or `None` when any is off.  The
+/// pinned catalogue and the updater's signed list read files the same way.
+pub(crate) fn parse_file_fields(path: &str, bytes: &str, sha256: &str, exec: &str) -> Option<File> {
+    let path = path.trim();
+    let sha256 = sha256.trim();
+    let ok = plain_path(path) && sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit());
+    if !ok {
+        return None;
+    }
+    Some(File {
+        path: path.to_string(),
+        bytes: bytes.trim().parse().ok()?,
+        sha256: sha256.to_ascii_lowercase(),
+        executable: match exec.trim() {
+            "1" => true,
+            "0" => false,
+            _ => return None,
+        },
+    })
+}
+
+/// Check `body` against `f` and write it into `dir` under its name,
+/// executable if the catalogue says so.
+pub(crate) fn write_checked(dir: &Path, f: &File, body: Vec<u8>) -> Result<(), String> {
+    if body.len() as u64 != f.bytes {
+        return Err(format!("{}: expected {} bytes, got {}", f.path, f.bytes, body.len()));
+    }
+    if crate::cpm::fetch::sha256(&body) != f.sha256 {
+        return Err(format!("{}: checksum mismatch", f.path));
+    }
+    let name = f.path.rsplit('/').next().unwrap_or_default();
+    let dest = dir.join(name);
+    std::fs::write(&dest, &body).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    if f.executable {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The file the gateway leaves in every add-on folder it downloaded.
+///
+/// **Only a folder carrying it is ever updated.**  An operator's own add-on
+/// that happens to share a name with one of ours (their own `hello`, with no
+/// version) would otherwise read as an older copy and be replaced by "install
+/// new and updated".  Hidden, so nothing lists it; deleting it keeps the
+/// gateway's hands off that folder.
+pub(crate) const MARKER: &str = ".egw-installed";
+
+/// Leave [`MARKER`] in `dir`.
+pub(crate) fn mark(dir: &Path) -> Result<(), String> {
+    std::fs::write(
+        dir.join(MARKER),
+        format!(
+            "Downloaded by Ethernet Gateway from github.com/{REPO}.\n\
+             Check for add-ons may update this folder: it replaces the files the\n\
+             add-on list names and keeps the rest.  Delete this file to stop that.\n"
+        ),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Held while something writes in `AddOns/`; dropped, the next may start.
+pub(crate) struct Running;
+
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// **One download or update at a time, process-wide**, or `None` when one
+/// is running.  Two runs shared each add-on's staging folder: one's
+/// `remove_dir_all` could empty the folder the other was filling.
+pub(crate) fn one_at_a_time() -> Option<Running> {
+    (!RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(Running)
 }
 
 /// Every file on offer.  A malformed line is dropped rather than guessed at;
@@ -65,11 +148,7 @@ fn parse_catalogue(text: &str) -> Vec<File> {
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
         .filter_map(|line| {
             let mut f = line.split('\t');
-            let path = f.next()?.trim().to_string();
-            let bytes = f.next()?.trim().parse().ok()?;
-            let sha256 = f.next()?.trim().to_string();
-            let executable = f.next()?.trim() == "1";
-            (plain_path(&path) && sha256.len() == 64).then_some(File { path, bytes, sha256, executable })
+            parse_file_fields(f.next()?, f.next()?, f.next()?, f.next()?)
         })
         .collect()
 }
@@ -123,20 +202,11 @@ impl Report {
 /// being written could be renamed into place unverified.  A second run is
 /// refused and says so; the first will have fetched whatever it lacked.
 pub(crate) fn download_missing(root: &Path, progress: impl FnMut(&str, usize, usize)) -> Report {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static RUNNING: AtomicBool = AtomicBool::new(false);
-    struct Running;
-    impl Drop for Running {
-        fn drop(&mut self) {
-            RUNNING.store(false, Ordering::SeqCst);
-        }
-    }
-    if RUNNING.swap(true, Ordering::SeqCst) {
+    let Some(_running) = one_at_a_time() else {
         let mut busy = Report::default();
         busy.failed.push(("add-ons".into(), "another download is already running".into()));
         return busy;
-    }
-    let _running = Running;
+    };
     download_with(root, &catalogue(), progress, |f| {
         crate::cpm::fetch::get(&f.url(), "EthernetGateway (add-ons)", 1 << 20, f.bytes)
     })
@@ -168,24 +238,9 @@ fn download_with(
         let _ = std::fs::remove_dir_all(&staging);
         let filled = std::fs::create_dir_all(&staging).map_err(|e| e.to_string()).and_then(|()| {
             for f in files.iter().filter(|f| f.folder() == folder) {
-                let body = get(f)?;
-                if body.len() as u64 != f.bytes {
-                    return Err(format!("{}: expected {} bytes, got {}", f.path, f.bytes, body.len()));
-                }
-                if crate::cpm::fetch::sha256(&body) != f.sha256 {
-                    return Err(format!("{}: checksum mismatch", f.path));
-                }
-                let name = f.path.rsplit('/').next().unwrap_or_default();
-                let dest = staging.join(name);
-                std::fs::write(&dest, &body).map_err(|e| e.to_string())?;
-                #[cfg(unix)]
-                if f.executable {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
-                        .map_err(|e| e.to_string())?;
-                }
+                write_checked(&staging, f, get(f)?)?;
             }
-            Ok(())
+            mark(&staging)
         });
         match filled {
             // Claimed only now, whole.  A folder that appeared meanwhile is
@@ -298,6 +353,8 @@ mod tests {
             assert!(mode & 0o111 != 0, "the program was not made executable");
         }
         assert!(crate::addons::load(&root.join("good")).is_ok(), "the downloaded add-on does not load");
+        assert!(root.join("good").join(MARKER).exists(), "a downloaded add-on is not marked as ours");
+        assert!(!root.join("mine").join(MARKER).exists(), "the operator's own folder was marked");
         let _ = std::fs::remove_dir_all(&root);
     }
 
