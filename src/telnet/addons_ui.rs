@@ -277,6 +277,10 @@ impl TelnetSession {
             let line = format!("{prefix}{name}{mark}");
             rows.push(if self.addon_refusal(m, cols).is_some() { self.dim(&line) } else { line });
         }
+        if addons.is_empty() {
+            rows.push(format!("  {}", self.dim("No add-ons are installed.")));
+            rows.push(format!("  {}", self.dim("C checks for new ones.")));
+        }
         if pages > 1 {
             rows.push(format!(
                 "  Page {}/{} {} {}",
@@ -302,12 +306,10 @@ impl TelnetSession {
         let mut page = 0usize;
         loop {
             // Found again on every draw (see `crate::addons`).
+            // An empty list is still a page: its C (Check) is how the first
+            // add-on arrives.
             let addons = crate::addons::offered();
-            if addons.is_empty() {
-                self.show_error("No add-ons are installed.").await?;
-                return Ok(());
-            }
-            let pages = addons.len().div_ceil(Self::ADDONS_SHOWN);
+            let pages = addons.len().div_ceil(Self::ADDONS_SHOWN).max(1);
             page = page.min(pages - 1);
             let (cols, _) = self.addon_window();
             self.clear_screen().await?;

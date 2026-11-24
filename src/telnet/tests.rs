@@ -18257,6 +18257,52 @@ fn fn_body<'a>(src: &'a str, sig: &str, indent: &str) -> &'a str {
     &rest[..end]
 }
 
+/// **A gateway with no add-ons still shows the Add-Ons page**, because its
+/// `C` (Check) is how the first one arrives.  The menu used to show
+/// Add-Ons only once one was installed, so a telnet caller on a fresh
+/// gateway could never fetch one.  The empty page says so, offers C, and
+/// fits a Commodore's screen; and the menu gates on `page_offered` (the
+/// setting), never on what is installed.  Bounded to each function.
+#[test]
+fn test_an_empty_add_ons_page_is_still_offered_with_check() {
+    let plain = |s: &str| {
+        let mut out = String::new();
+        let mut esc = false;
+        for c in s.chars() {
+            match (esc, c) {
+                (false, '\x1b') => esc = true,
+                (true, c) if c.is_ascii_alphabetic() => esc = false,
+                (true, _) => {}
+                // A PETSCII colour is a C1 control character.
+                (false, c) if c.is_control() => {}
+                (false, c) => out.push(c),
+            }
+        }
+        out
+    };
+    for (t, width) in [(TerminalType::Petscii, 39), (TerminalType::Ansi, 79)] {
+        let session = make_test_session(t);
+        let rows: Vec<String> = session.addons_list_rows(&[], 0, width as u16 + 1).iter().map(|r| plain(r)).collect();
+        let all = rows.join("\n");
+        assert!(all.contains("No add-ons are installed."), "{t:?}: {all}");
+        assert!(all.contains("C checks for new ones."), "{t:?}: the empty page must say what C does: {all}");
+        assert!(all.contains("C=Check"), "{t:?}: the empty page must offer Check: {all}");
+        assert!(rows.len() < 22, "{t:?}: too many rows");
+        for r in &rows {
+            assert!(r.chars().count() <= width, "{t:?}: {r:?} is too wide");
+        }
+    }
+    let menu = include_str!("second_menu.rs").replace('\r', "");
+    for (sig, indent) in [("fn second_page_has_items(", ""), ("async fn more_menu(", "    ")] {
+        let body = fn_body(&menu, sig, indent);
+        assert!(body.contains("addons::page_offered()"), "{sig} must offer Add-Ons from the setting");
+        assert!(!body.contains("addons::offered()") && !body.contains("addons::discover()"), "{sig} gates on what is installed");
+    }
+    let ui = include_str!("addons_ui.rs").replace('\r', "");
+    let page = fn_body(&ui, "async fn addons_page(", "    ");
+    assert!(!page.contains("No add-ons are installed"), "the list page turns a caller away when it is empty");
+}
+
 /// **Every way the telnet side deletes or renames a file asks the CP/M guard
 /// first.**  The File Transfer menu's Delete and the Kermit server's REMOTE
 /// DELETE / RENAME can all browse into the emulator's folders (`remote cd

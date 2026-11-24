@@ -523,9 +523,13 @@ pub(crate) fn offered() -> Vec<AddOn> {
     offered_from(discover(), cfg.addons_enabled, &cfg.addons_disabled)
 }
 
-/// Whether there is any add-on to offer.
-pub(crate) fn any() -> bool {
-    !offered().is_empty()
+/// Whether callers are shown the Add-Ons page at all: whenever add-ons are
+/// switched on, **installed or not**.  The page's `C` (Check) is how a
+/// gateway with none gets its first; hiding the page until one existed left
+/// a telnet caller no way to fetch one (found on a Pi with an empty AddOns
+/// folder).
+pub(crate) fn page_offered() -> bool {
+    crate::config::get_config().addons_enabled
 }
 
 /// `disabled` with `id` switched on or off: the new `addons_disabled`.

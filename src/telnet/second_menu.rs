@@ -31,7 +31,7 @@ pub(in crate::telnet) fn power_available() -> bool {
 /// Offering `2` to an empty page is worse than not offering it: the operator
 /// spends a keypress to learn there was nothing there.
 pub(in crate::telnet) fn second_page_has_items() -> bool {
-    power_available() || crate::addons::any()
+    power_available() || crate::addons::page_offered()
 }
 
 /// The page's valid-key hint, for what the page is showing.
@@ -67,7 +67,7 @@ impl TelnetSession {
             // Asked on every draw: an add-on copied in (or the last one
             // removed) shows here at the next look, as it does on the list.
             let powered = power_available();
-            let addons = crate::addons::any();
+            let addons = crate::addons::page_offered();
             self.clear_screen().await?;
             for row in self.more_menu_rows(powered, addons) {
                 self.send_line(&row).await?;

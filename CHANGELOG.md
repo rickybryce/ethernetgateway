@@ -76,6 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Add-Ons is on the Second Menu even before any add-on is installed.**
+  It used to appear only once one was, so a telnet caller on a fresh gateway
+  could never reach C (Check) to download the first.  The empty list now
+  says so and offers C.
 - **A serial caller who hangs up is let go at once.**  After NO CARRIER, or
   `+++` then `ATH`, the menu session used to wait out the idle timeout (15
   minutes by default) because it never learned the call had ended -- with
