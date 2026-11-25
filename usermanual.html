@@ -4311,6 +4311,17 @@ or off for a printing terminal.
 </p>
 
 <p>
+<strong>Settings&nbsp;&rarr;&nbsp;<code>D</code> sets what the backspace key
+sends</strong>, cycling through three choices: <em>as typed</em> (the default
+&mdash; the key goes out unchanged), <code>^H</code> (BS, what CP/M, WordStar and
+most BBSes expect), or <code>DEL</code> (7Fh, what Unix and VT100-style hosts
+expect). Either erase key, <code>^H</code> or <code>DEL</code>, is rewritten to the
+one chosen, because which one a keyboard produces and which one the far end wants
+are separate accidents. Only the byte sent to the port changes; local echo still
+shows the key you pressed.
+</p>
+
+<p>
 Unlike the period terminals, a wrong choice is <em>diagnosed</em> rather than
 silently hung: a port that never accepts a byte is named and explained, and
 HBIOS is refused outright on a machine whose <code>RST&nbsp;8</code> vector is

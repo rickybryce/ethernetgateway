@@ -43,6 +43,13 @@
 # stay sane, and every recipe converts it to CRLF when staging into
 # build/.  This is not cosmetic - M80 and ZMAC read an LF-only file as one
 # enormous line and silently assemble almost nothing.
+#
+# Every staged copy also ends in ^Z, CP/M's text end-of-file mark.  CP/M
+# files are whole 128-byte records, and the mark is how a reader knows
+# where the text stops inside the last one.  Without it, a source whose
+# CRLF copy happens to be an exact multiple of 128 bytes leaves ZMAC
+# reading past the end ("INPUT LINE TOO LONG") - which is how adding one
+# line of comment once broke `make check`.
 
 # --- Where the CP/M tools live -----------------------------------------
 # CPMBIN holds the period .COM tools.  RomWBW ships all of them; override
@@ -85,7 +92,7 @@ port:
 
 $(TARGET): $(SRC) $(ZXCC)
 	@mkdir -p $(BUILD)
-	sed 's/$$/\r/' $(SRC) > $(BUILD)/EGT80.Z80
+	{ sed 's/$$/\r/' $(SRC); printf '\032'; } > $(BUILD)/EGT80.Z80
 	cp $(CPMBIN)/Z80ASM.COM $(BUILD)/
 	cd $(BUILD) && ../$(ZXCC) ./Z80ASM.COM -EGT80/A | tee slr.log
 	@grep -q ' 0 Error(s) Detected' $(BUILD)/slr.log \
@@ -104,7 +111,7 @@ $(TARGET80): $(SRC80) tools/check8080.py $(ZXCC)
 	python3 tools/check8080.py --self-test
 	python3 tools/check8080.py $(SRC80)
 	@mkdir -p $(BUILD)
-	sed 's/$$/\r/' $(SRC80) > $(BUILD)/EGT8080.Z80
+	{ sed 's/$$/\r/' $(SRC80); printf '\032'; } > $(BUILD)/EGT8080.Z80
 	cp $(CPMBIN)/Z80ASM.COM $(BUILD)/
 	cd $(BUILD) && ../$(ZXCC) ./Z80ASM.COM -EGT8080/A | tee slr80.log
 	@grep -q ' 0 Error(s) Detected' $(BUILD)/slr80.log \
@@ -131,7 +138,7 @@ check: check-m80 check-zmac check-m80-80 check-zmac-80
 check-m80: $(ZXCC)
 	@mkdir -p $(BUILD)
 	@printf '\t.Z80\r\n' > $(BUILD)/m80pre.tmp
-	sed 's/$$/\r/' $(SRC) | cat $(BUILD)/m80pre.tmp - > $(BUILD)/EGT80M.MAC
+	{ sed 's/$$/\r/' $(SRC); printf '\032'; } | cat $(BUILD)/m80pre.tmp - > $(BUILD)/EGT80M.MAC
 	cp $(CPMBIN)/M80.COM $(CPMBIN)/L80.COM $(BUILD)/
 	@rm -f $(BUILD)/egt80m.rel $(BUILD)/egt80m.com
 	cd $(BUILD) && ../$(ZXCC) ./M80.COM -=EGT80M | tee m80.log
@@ -146,7 +153,7 @@ check-m80: $(ZXCC)
 
 check-zmac: $(ZXCC)
 	@mkdir -p $(BUILD)
-	sed 's/$$/\r/' $(SRC) > $(BUILD)/EGT80Z.Z80
+	{ sed 's/$$/\r/' $(SRC); printf '\032'; } > $(BUILD)/EGT80Z.Z80
 	cp $(CPMBIN)/ZMAC.COM $(BUILD)/
 	@rm -f $(BUILD)/egt80z.rel
 	-cd $(BUILD) && ../$(ZXCC) ./ZMAC.COM -EGT80Z > zmac.log 2>&1
@@ -163,7 +170,7 @@ check-zmac: $(ZXCC)
 check-m80-80: $(ZXCC)
 	@mkdir -p $(BUILD)
 	@printf '\t.Z80\r\n' > $(BUILD)/m80pre.tmp
-	sed 's/$$/\r/' $(SRC80) | cat $(BUILD)/m80pre.tmp - > $(BUILD)/EGT88M.MAC
+	{ sed 's/$$/\r/' $(SRC80); printf '\032'; } | cat $(BUILD)/m80pre.tmp - > $(BUILD)/EGT88M.MAC
 	cp $(CPMBIN)/M80.COM $(CPMBIN)/L80.COM $(BUILD)/
 	@rm -f $(BUILD)/egt88m.rel $(BUILD)/egt88m.com
 	cd $(BUILD) && ../$(ZXCC) ./M80.COM -=EGT88M | tee m80-80.log
@@ -178,7 +185,7 @@ check-m80-80: $(ZXCC)
 
 check-zmac-80: $(ZXCC)
 	@mkdir -p $(BUILD)
-	sed 's/$$/\r/' $(SRC80) > $(BUILD)/EGT88Z.Z80
+	{ sed 's/$$/\r/' $(SRC80); printf '\032'; } > $(BUILD)/EGT88Z.Z80
 	cp $(CPMBIN)/ZMAC.COM $(BUILD)/
 	@rm -f $(BUILD)/egt88z.rel
 	-cd $(BUILD) && ../$(ZXCC) ./ZMAC.COM -EGT88Z > zmac-80.log 2>&1

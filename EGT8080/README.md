@@ -414,6 +414,13 @@ the terminal is not the computer's and the BIOS offers nothing — so Settings �
 picks the dialect: the ADM-3A's `^Z` (**the default**), the ANSI `ESC [ 2 J`, or
 off for a printing terminal, where clearing the screen means feeding paper.
 
+**Settings → `D` sets what the backspace key sends**: *as typed* (the default, and
+what every earlier build did), `^H`, or DEL. Either erase key is rewritten to the
+one chosen, because which one a keyboard produces and which one the remote system
+expects are separate accidents. Only the byte sent to the port changes; local echo
+shows the key as typed. `test_egt8080_backspace_setting_rewrites_the_erase_key`
+checks the bytes that reach the port under all three choices, in both builds.
+
 This default has moved twice, which is worth recording because each move was
 right at the time. It began as `^Z`, on the reasoning that its failure mode is
 "nothing happens" rather than `[2J` printed as litter. It moved to ANSI because

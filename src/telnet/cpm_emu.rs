@@ -4243,8 +4243,8 @@ mod egt80_tests {
         // there were two, which is exactly the mistake that would otherwise
         // pin each binary against the other one's hash and pass.
         const PINNED: &[(&str, &str)] = &[
-            ("EGT8080.COM", "61563d7fc5c55b6c65a14cf29e61b6acef2f42aee4f898fb59f3fbdda8417cbd"),
-            ("EGT80.COM", "2e4031519467b5b761bca9eddedd732b046a49f694c2acf00916e6926e8ace5b"),
+            ("EGT8080.COM", "726230ebd35cce6bb69f72c2d4fdc4ffa1049e69e05a109912d968409bf000d6"),
+            ("EGT80.COM", "fe595e643218d14154089a577cf513c14802384fee43f69fb799318feded0795"),
         ];
 
         for ((name, bytes), (pin_name, pinned)) in BUNDLED_TERMINALS.iter().zip(PINNED) {

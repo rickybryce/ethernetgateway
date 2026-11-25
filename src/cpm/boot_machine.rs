@@ -3731,6 +3731,83 @@ pub(crate) mod tests {
         }
     }
 
+    /// **EGT8080's Backspace setting changes the byte that reaches the port.**
+    ///
+    /// Settings `D` cycles what an erase key sends: as typed, `^H`, DEL. Both
+    /// erase keys are typed under each choice and the modem's received bytes
+    /// are compared exactly, so a mapping that rewrote only one key, or that
+    /// rewrote the wrong way, fails here. "As typed" is checked first and
+    /// last: it is the default, and it is the control — if it came back
+    /// rewritten, the other two cases would prove nothing.
+    ///
+    /// Ignored: set `CPM_BOOT_IMAGE` to an Altair CP/M image carrying PCGET.COM.
+    #[test]
+    #[ignore]
+    fn test_egt8080_backspace_setting_rewrites_the_erase_key() {
+        // Both builds: BSMAP is hand-written in EGT80.Z80 and derived into the
+        // 8080 source, and the two .COMs are separate binaries.
+        const BUILDS: &[(&str, &[u8], &[u8])] = &[
+            ("EGT8080.COM", b"EGT8080\r", include_bytes!("../../EGT8080/EGT8080.COM")),
+            ("EGT80.COM", b"EGT80\r", include_bytes!("../../EGT8080/EGT80.COM")),
+        ];
+        let Ok(path) = std::env::var("CPM_BOOT_IMAGE") else {
+            eprintln!("set CPM_BOOT_IMAGE to an Altair CP/M image carrying PCGET.COM");
+            return;
+        };
+        for (name, run, com) in BUILDS {
+            let disk = image_with_terminal(&path, name, com);
+            let mut m = BootMachine::new();
+            m.insert(0, disk, true).unwrap();
+            assert!(matches!(
+                m.attach_modem(crate::cpm::resolve_access("altair_2sio2")),
+                ModemAttach::Ports(0x12, 0x13)
+            ));
+            m.modem().set_carrier(true);
+            let mut cpu = BootMachine::new_cpu();
+            m.boot(&mut cpu, 0).expect("boots");
+            run_until_quiet(&mut m, &mut cpu, 60_000_000);
+            let start = type_at(&mut m, &mut cpu, run, 400_000_000);
+            assert!(start.contains("Ethernet Gateway Terminal"), "{name} did not start: {start:?}");
+
+            // Settings -> 88-2SIO port 2, one key at a time.
+            let mut screen = String::new();
+            for k in b"SP32" {
+                screen = type_at(&mut m, &mut cpu, &[*k], 400_000_000);
+            }
+            assert!(screen.contains("6850 ACIA at 12"), "port not selected: {screen:?}");
+            assert!(screen.contains("Erase:    as typed"), "default is not as typed: {screen:?}");
+
+            // From the Settings screen: leave, open the terminal, type BS and DEL,
+            // collect what the port received, and come back out with ^Y E.
+            let erase_keys_sent = |m: &mut BootMachine, cpu: &mut Cpu| -> Vec<u8> {
+                type_at(m, cpu, b"Q", 100_000_000);
+                type_at(m, cpu, b"T", 100_000_000);
+                let _ = m.modem().drain_tx();
+                type_at(m, cpu, &[0x08], 100_000_000);
+                type_at(m, cpu, &[0x7F], 100_000_000);
+                let sent = m.modem().drain_tx();
+                type_at(m, cpu, &[0x19], 100_000_000);
+                type_at(m, cpu, b"E", 100_000_000);
+                type_at(m, cpu, b"S", 100_000_000);
+                sent
+            };
+            assert_eq!(erase_keys_sent(&mut m, &mut cpu), [0x08, 0x7F], "{name}: as typed");
+
+            let screen = type_at(&mut m, &mut cpu, b"D", 100_000_000);
+            assert!(screen.contains("Erase:    ^H"), "D did not step to ^H: {screen:?}");
+            assert_eq!(erase_keys_sent(&mut m, &mut cpu), [0x08, 0x08], "{name}: ^H");
+
+            let screen = type_at(&mut m, &mut cpu, b"D", 100_000_000);
+            assert!(screen.contains("Erase:    DEL"), "D did not step to DEL: {screen:?}");
+            assert_eq!(erase_keys_sent(&mut m, &mut cpu), [0x7F, 0x7F], "{name}: DEL");
+
+            let screen = type_at(&mut m, &mut cpu, b"D", 100_000_000);
+            assert!(screen.contains("Erase:    as typed"), "D did not wrap: {screen:?}");
+            assert_eq!(erase_keys_sent(&mut m, &mut cpu), [0x08, 0x7F], "{name}: as typed again");
+            println!("  {name}: as typed, ^H and DEL all reach the port as chosen.");
+        }
+    }
+
     /// **Every comms port EGT8080 offers, driven from inside a booted disk.**
     ///
     /// The question this answers is not "does the modem work" — `PCGET` already

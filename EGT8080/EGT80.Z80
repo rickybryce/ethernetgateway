@@ -240,6 +240,13 @@ CLSMOD: DB      0               ; how to clear the screen: 0 = ADM-3A ^Z,
                                 ; happens"; ANSI is one keystroke away in
                                 ; Settings, next to the ANSI display mode that
                                 ; wants it.
+BSMOD:  DB      0               ; what the backspace key sends: 0 = as typed,
+                                ; 1 = ^H, 2 = DEL.  Either erase key (^H or
+                                ; DEL) is rewritten to the chosen one, because
+                                ; which one a keyboard produces and which one
+                                ; the remote system expects are separate
+                                ; accidents.  As typed is the default: it is
+                                ; what every earlier build did.
 
 CFGADR  EQU     0180H           ; where the block lives
 CFGREC  EQU     1               ; ...which is file record 1
@@ -1316,6 +1323,7 @@ TSEND:  LD      (TYPECH),A
         LD      A,(TYPECH)
         CALL    FILTE           ; echo through its own filter state
 TSEND1: LD      A,(TYPECH)
+        CALL    BSMAP           ; the erase key the remote wants
         CALL    PSEND
         LD      A,(TYPECH)
         CP      CR
@@ -1330,6 +1338,28 @@ TSEND1: LD      A,(TYPECH)
         CALL    FILTE
 TSEND2: LD      A,LF
         JP      PSEND
+
+;-----------------------------------------------------------------------
+; BSMAP - rewrite a typed erase key (^H or DEL) to the one Settings names.
+; Byte in A, byte out in A, B destroyed; every other byte passes
+; untouched.  Only the port sees the result: local echo shows the key as
+; typed, as it always has, so this changes nothing on the local screen.
+;-----------------------------------------------------------------------
+BSMAP:  CP      BS
+        JR      Z,BSMAP1
+        CP      DEL
+        RET     NZ              ; not an erase key
+BSMAP1: LD      B,A
+        LD      A,(BSMOD)
+        OR      A
+        LD      A,B             ; (LD leaves the flags alone)
+        RET     Z               ; 0: as typed
+        LD      A,(BSMOD)
+        DEC     A
+        LD      A,BS
+        RET     Z               ; 1: ^H
+        LD      A,DEL           ; 2: DEL
+        RET
 
 ;-----------------------------------------------------------------------
 ; TESC - the escape key was pressed in terminal mode.
@@ -2499,6 +2529,9 @@ CFGCH1: LD      A,(DE)
         LD      A,(CLSMOD)      ; one of the three clear-screen dialects
         CP      3
         JR      NC,CFGBAD
+        LD      A,(BSMOD)       ; one of the three backspace choices
+        CP      3
+        JR      NC,CFGBAD
         LD      A,(LBAUD)       ; the line settings, each within its table
         CP      RATEN
         JR      NC,CFGBAD
@@ -2567,6 +2600,7 @@ DEFBLK: DB      PKNONE          ; PKIND  - nothing selected (see above)
         DB      1               ; LADIV  - /16
         DB      0               ; LSAPP  - never program the port
         DB      0               ; CLSMOD - the ADM-3A ^Z clear
+        DB      0               ; BSMOD  - the backspace key as typed
 DEFLEN  EQU     $-DEFBLK
 
 ;-----------------------------------------------------------------------
@@ -3416,6 +3450,9 @@ SCSETT: CALL    CLS
         LD      HL,MSCLS
         CALL    PSTR
         CALL    SHCLS
+        LD      HL,MSBS
+        CALL    PSTR
+        CALL    SHBS
         LD      HL,MSETT2
         CALL    PSTRK
 SCSET1: CALL    CIN
@@ -3434,6 +3471,8 @@ SCSET1: CALL    CIN
         JR      Z,DOSLIN
         CP      'C'
         JR      Z,CYCCLS
+        CP      'D'
+        JR      Z,CYCBS
         CP      'Q'
         RET     Z
         CP      03H             ; ^C backs out too
@@ -3442,9 +3481,9 @@ SCSET1: CALL    CIN
         CALL    COUT
         JR      SCSET1
 DOSPRT: CALL    SCPORT
-        JR      SCSETT          ; back to Settings, showing the new port
+        JP      SCSETT          ; back to Settings, showing the new port
 DOSLIN: CALL    SCLINE
-        JR      SCSETT
+        JP      SCSETT
 TOGANS: LD      HL,FLTMOD
         CALL    TOGGLE
         JP      SCSETT
@@ -3502,6 +3541,33 @@ CYCCLS: LD      A,(CLSMOD)
 CYCCL1: LD      (CLSMOD),A
         CALL    XDIRTS
         JP      SCSETT
+
+;-----------------------------------------------------------------------
+; CYCBS - step what the backspace key sends: as typed, ^H, DEL.  A cycle,
+; like the clear: three answers, and the redraw names the one in force.
+;-----------------------------------------------------------------------
+CYCBS:  LD      A,(BSMOD)
+        INC     A
+        CP      3
+        JR      C,CYCBS1
+        XOR     A
+CYCBS1: LD      (BSMOD),A
+        CALL    XDIRTS
+        JP      SCSETT
+
+;-----------------------------------------------------------------------
+; SHBS - name the backspace choice in force.
+;-----------------------------------------------------------------------
+SHBS:   LD      A,(BSMOD)
+        OR      A
+        LD      HL,MBSAS
+        JR      Z,SHBS1
+        DEC     A
+        LD      HL,MBSBS
+        JR      Z,SHBS1
+        LD      HL,MBSDEL
+SHBS1:  CALL    PSTR
+        JP      CRLF
 
 ;-----------------------------------------------------------------------
 ; SHCLS - name the clear-screen dialect in force.
@@ -4273,6 +4339,7 @@ MSETT:  DB      'Settings',CR,LF
 MSPORT: DB      'Port:     ',0
 MSKEY:  DB      'Menu key: ',0
 MSCLS:  DB      'Clear:    ',0
+MSBS:   DB      'Erase:    ',0
 MSETT2: DB      CR,LF
         DB      '  P  Serial port - which chip, which address',CR,LF
         DB      '  A  ANSI / ASCII output',CR,LF
@@ -4281,6 +4348,7 @@ MSETT2: DB      CR,LF
         DB      '  K  Change the menu key',CR,LF
         DB      '  B  Line settings - baud, bits, parity',CR,LF
         DB      '  C  Clear Screen',CR,LF
+        DB      '  D  Backspace key sends: as typed, ^H or DEL',CR,LF
         DB      '  Q  Back  (^C also backs out)',CR,LF
         DB      CR,LF,'Choice: ',0
 MESCAS: DB      'Press the control key you want as the menu key.',CR,LF
@@ -4380,6 +4448,9 @@ MR115K: DB      '115200',0
 MCLSZ:  DB      'ADM-3A ^Z  (works through the gateway)',0
 MCLSAN: DB      'ANSI ESC [ 2 J  (VT100 and modern terminals)',0
 MCLSOF: DB      'off  (printing terminal - do not clear)',0
+MBSAS:  DB      'as typed  (sent unchanged)',0
+MBSBS:  DB      '^H  (BS - CP/M, WordStar, most BBSes)',0
+MBSDEL: DB      'DEL  (7FH - Unix, Linux, VT100 hosts)',0
 MANSCL: DB      ESC,'[2J',ESC,'[H',0
 
 MTERM:  DB      'Terminal mode.  Press ',0
@@ -4491,8 +4562,8 @@ MHELP2: DB      'Help - using the terminal',CR,LF
         DB      'Settings holds the rest: the serial port, the line',CR,LF
         DB      'settings (speed and framing, where the hardware has',CR,LF
         DB      'any to set - a Z80 SIO/2 has none), the menu key',CR,LF
-        DB      '(any control key you press), and how to clear the',CR,LF
-        DB      'screen, which CP/M has no standard way to do.',CR,LF,CR,LF
+        DB      '(any control key you press), how to clear the',CR,LF
+        DB      'screen, and whether backspace sends ^H or DEL.',CR,LF,CR,LF
         DB      'ANSI mode passes escape sequences through to your',CR,LF
         DB      'terminal.  ASCII mode strips them, drops the high',CR,LF
         DB      'bit and discards control codes that are not CR, LF,',CR,LF
