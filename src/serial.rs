@@ -6656,7 +6656,7 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let mut serial_buf = [0u8; 256];
     let mut duplex_buf = [0u8; 4096];
@@ -6742,27 +6742,27 @@ where
         // screen.  A paced write is visible.  So this is a road already taken:
         // it lost on both counts, and the lying comment is what invited it to
         // be taken again.
-        let result = state.handle.block_on(async {
-            tokio::time::timeout(Duration::from_millis(10), duplex_read.read(&mut duplex_buf))
-                .await
-        });
-        match result {
-            Ok(Ok(0)) => return OnlineExit::Disconnected,
-            Ok(Ok(n)) => {
-                let translated;
-                let out: &[u8] = if dials_a_host && state.petscii_translate {
-                    translated = link.for_device(&duplex_buf[..n]);
-                    &translated
-                } else {
-                    &duplex_buf[..n]
-                };
-                if !out.is_empty() && state.port.write_all(out).is_err() {
-                    return OnlineExit::Disconnected;
-                }
-                let _ = state.port.flush();
+        let burst = state.handle.block_on(read_duplex_burst(
+            duplex_read,
+            &mut duplex_buf,
+            Duration::from_millis(10),
+        ));
+        if burst.len > 0 {
+            let n = burst.len;
+            let translated;
+            let out: &[u8] = if dials_a_host && state.petscii_translate {
+                translated = link.for_device(&duplex_buf[..n]);
+                &translated
+            } else {
+                &duplex_buf[..n]
+            };
+            if !out.is_empty() && state.port.write_all(out).is_err() {
+                return OnlineExit::Disconnected;
             }
-            Ok(Err(_)) => return OnlineExit::Disconnected,
-            Err(_) => {} // timeout — no data from duplex
+            let _ = state.port.flush();
+        }
+        if burst.closed {
+            return OnlineExit::Disconnected;
         }
 
         // Check trailing +++ guard time, and release a `+` or two that it
@@ -6786,6 +6786,54 @@ where
             }
         }
     }
+}
+
+/// What one pass of [`online_mode_duplex`] took from the duplex side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DuplexBurst {
+    /// Bytes now at the front of the buffer (0 = nothing arrived).
+    len: usize,
+    /// The far end closed or failed; write `len` bytes, then hang up.
+    closed: bool,
+}
+
+/// Take everything the duplex side already holds, up to `buf.len()`, waiting
+/// at most `first_wait` for the first of it.
+///
+/// **Why it drains instead of reading once.**  A slave's relay is a russh
+/// `ChannelStream`, and one read of that returns ONE SSH data message, not
+/// the backlog.  The master forwards each read from the far host as its own
+/// message, and a SIMH DZ11 line hands over its output a few bytes at a time
+/// (measured 2026-11-27 on the PiDP-11: 695 bytes of `HELP` in 101 segments,
+/// 7 bytes on average).  The online loop's other half blocks up to
+/// `SERIAL_READ_TIMEOUT` (100 ms) on the serial port while the device is only
+/// listening, so one message per pass capped a relayed call at about ten
+/// messages a second -- a 9600-baud Altair received the PDP-11 at roughly 300
+/// baud while the same host over plain telnet ran at full speed.  The direct
+/// TCP loop never had this: a socket read returns everything waiting.
+///
+/// The extra reads never wait (zero timeout): only bytes already delivered
+/// are taken, so this adds no delay and no pacing -- it is the same single
+/// write per pass the loop always made, just no longer one message long.
+/// The buffer bounds it, as it bounds the direct TCP loop's write.
+async fn read_duplex_burst<R>(reader: &mut R, buf: &mut [u8], first_wait: Duration) -> DuplexBurst
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut len = match tokio::time::timeout(first_wait, reader.read(buf)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => return DuplexBurst { len: 0, closed: true },
+        Ok(Ok(n)) => n,
+        Err(_) => return DuplexBurst { len: 0, closed: false },
+    };
+    while len < buf.len() {
+        match tokio::time::timeout(Duration::ZERO, reader.read(&mut buf[len..])).await {
+            Ok(Ok(0)) | Ok(Err(_)) => return DuplexBurst { len, closed: true },
+            Ok(Ok(n)) => len += n,
+            Err(_) => break, // nothing more delivered yet
+        }
+    }
+    DuplexBurst { len, closed: false }
 }
 
 /// The `AT+PETSCII=1` translation for one dialled call, both directions.
@@ -7661,6 +7709,85 @@ fn send_result(state: &mut ModemState, msg: &str) -> bool {
 mod tests {
     use super::*;
     use crate::petscii::{translate_ascii_to_petscii_byte, PetsciiPunctState};
+
+    /// Reads like russh's `ChannelStream`: one queued message per read,
+    /// `Pending` when none is queued, end-of-stream once closed and drained.
+    struct OneMessagePerRead {
+        queue: std::collections::VecDeque<Vec<u8>>,
+        closed: bool,
+    }
+
+    impl tokio::io::AsyncRead for OneMessagePerRead {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            match self.queue.pop_front() {
+                Some(mut msg) => {
+                    let take = msg.len().min(buf.remaining());
+                    buf.put_slice(&msg[..take]);
+                    if take < msg.len() {
+                        self.queue.push_front(msg.split_off(take));
+                    }
+                    std::task::Poll::Ready(Ok(()))
+                }
+                None if self.closed => std::task::Poll::Ready(Ok(())),
+                None => std::task::Poll::Pending,
+            }
+        }
+    }
+
+    fn one_message_reader(msgs: &[&[u8]], closed: bool) -> OneMessagePerRead {
+        OneMessagePerRead { queue: msgs.iter().map(|m| m.to_vec()).collect(), closed }
+    }
+
+    /// **A relayed call takes the whole backlog in one pass, not one message.**
+    /// One message per pass of `online_mode_duplex` (whose serial read waits
+    /// 100 ms) made a 9600-baud Altair behind a slave receive a PDP-11's
+    /// few-byte DZ11 segments at about 300 baud (2026-11-27).
+    #[tokio::test]
+    async fn duplex_burst_takes_every_delivered_message() {
+        let mut r = one_message_reader(&[b"RSX", b"-11", b"M-PLUS\r\n"], false);
+        let mut buf = [0u8; 64];
+        let got = read_duplex_burst(&mut r, &mut buf, Duration::from_millis(10)).await;
+        assert_eq!(got, DuplexBurst { len: 14, closed: false });
+        assert_eq!(&buf[..14], b"RSX-11M-PLUS\r\n");
+    }
+
+    #[tokio::test]
+    async fn duplex_burst_idle_is_not_a_hangup() {
+        let mut r = one_message_reader(&[], false);
+        let mut buf = [0u8; 64];
+        let got = read_duplex_burst(&mut r, &mut buf, Duration::from_millis(10)).await;
+        assert_eq!(got, DuplexBurst { len: 0, closed: false });
+    }
+
+    /// Bytes that arrived before the far end hung up still reach the device.
+    #[tokio::test]
+    async fn duplex_burst_delivers_the_tail_before_the_hangup() {
+        let mut r = one_message_reader(&[b"BYE", b"\r\n"], true);
+        let mut buf = [0u8; 64];
+        let got = read_duplex_burst(&mut r, &mut buf, Duration::from_millis(10)).await;
+        assert_eq!(got, DuplexBurst { len: 5, closed: true });
+        assert_eq!(&buf[..5], b"BYE\r\n");
+        let mut r = one_message_reader(&[], true);
+        let got = read_duplex_burst(&mut r, &mut buf, Duration::from_millis(10)).await;
+        assert_eq!(got, DuplexBurst { len: 0, closed: true });
+    }
+
+    /// The buffer bounds a burst; what does not fit waits for the next pass.
+    #[tokio::test]
+    async fn duplex_burst_stops_at_the_buffer() {
+        let mut r = one_message_reader(&[b"abcd", b"efgh", b"ijkl"], false);
+        let mut buf = [0u8; 6];
+        let got = read_duplex_burst(&mut r, &mut buf, Duration::from_millis(10)).await;
+        assert_eq!(got, DuplexBurst { len: 6, closed: false });
+        assert_eq!(&buf, b"abcdef");
+        let got = read_duplex_burst(&mut r, &mut buf, Duration::from_millis(10)).await;
+        assert_eq!(got, DuplexBurst { len: 6, closed: false });
+        assert_eq!(&buf, b"ghijkl");
+    }
 
     /// **A session backlog is measured in seconds, not bytes.**
     ///
